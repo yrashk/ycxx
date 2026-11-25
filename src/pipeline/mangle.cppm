@@ -425,9 +425,22 @@ class Mangler {
       // the <local-name> before the nested-name it begins.
       std::string r;
       if (n.closure_variable != ast::EntityId::none) {
-        auto owner = prefix(n.closure_variable);
-        if (!owner) return owner;
-        r = *owner + "M";  // <closure-prefix> ::= <name> M (§5.1.8)
+        // <closure-prefix> ::= [<prefix>] <variable name> [<template-args>] M (§5.1.8): no
+        // substitution candidate beyond the enclosing prefix, as Clang has it (GCC counts the
+        // variable's own name).
+        const ClassName owner = classes_(n.closure_variable);
+        if (owner.scope != ast::EntityId::none) {
+          auto p = prefix(owner.scope);
+          if (!p) return p;
+          r = *p;
+        }
+        r += source_name(owner.name);
+        if (owner.templ != ast::EntityId::none) {
+          auto args = template_args(owner.args);
+          if (!args) return args;
+          r += *args;
+        }
+        r += "M";
       }
       auto sig = closure_sig(n);
       if (!sig) return sig;
@@ -549,7 +562,7 @@ class Mangler {
     if (sc.closure && in_.types.is<ast::TFunction>(c)) {
       auto f = in_.types.get<ast::TFunction>(c);
       std::string local;
-      if (sc.closure) {
+      if (sc.closure_variable == ast::EntityId::none) {  // else the variable is its <closure-prefix>
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;

@@ -510,6 +510,14 @@ public:
       outer = p;
     return outer != items::none && d > outer && d <= last_member(outer);
   }
+  // Whether item `i` is in the outermost class that encloses item `k`, or is that class.
+  bool within_class_of(u32 i, u32 k) const {
+    u32 outer = items::none;
+    for (u32 p = items_->items[k].parent; p != items::none && items_->items[p].kind == ItemKind::class_def;
+         p = items_->items[p].parent)
+      outer = p;
+    return outer != items::none && i >= outer && i <= last_member(outer);
+  }
   // The last item nested in `k`, or `k` (items are in preorder).
   u32 last_member(u32 k) const {
     while (!items_->items[k].members.empty()) k = items_->items[k].members.back();
@@ -1277,6 +1285,28 @@ public:
     return classes_.publish(c, std::move(r));
   }
   interp::Callee closure_ir(EntityId f, u32 item);
+  // The closures of declaration parts (and of the generic lambdas instantiated in them) analysed
+  // here, by member: their definition and the item and offset it is relative to (#338).
+  struct DeclarationClosure {
+    ast::ClosureDef def;
+    u32 item;
+    u32 begin;
+  };
+  std::map<u32, DeclarationClosure> declaration_closures_;
+  // The used static data members of class template specializations whose initializers have lambdas
+  // (`member_value`): what their closures' members, when referenced, need.
+  struct MemberClosures {
+    u32 item;
+    ast::ItemSema value;
+    std::vector<sema::Demand> demands;
+  };
+  std::deque<MemberClosures> member_closures_;
+  const std::deque<MemberClosures>& member_closures() const { return member_closures_; }
+  void declaration_closures(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
+    for (const ast::ClosureDef& c : w_->ins.seqs.elements(closures))
+      for (EntityId f : {c.call, c.invoker})
+        if (f != EntityId::none) declaration_closures_.insert_or_assign(std::to_underlying(f), DeclarationClosure{c, item, begin});
+  }
   // A generic lambda's function call operator specialized ([temp.inst]): its body re-analysed
   // from the lambda's tokens with the arguments bound, an `Instance`; its type with the return
   // type deduced, none when it fails.
@@ -1285,6 +1315,7 @@ public:
     EntityId spec;
     QualType spec_type;
     std::vector<ast::TemplateArg> args;
+    u32 point;
   };
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, u32 point);
 
@@ -1465,6 +1496,11 @@ public:
     bool failed = false;
     // A generic lambda operator's: the instantiation of the function its lambda is in, if any.
     std::optional<Instantiation> enclosing{};
+    // A generic lambda operator's whose lambda is in a declaration part: that part's offset in the
+    // item, where otherwise the body part is meant (`GenericClosure::part`).
+    std::optional<u32> part{};
+    // Where the body's part begins in `it`, its item.
+    u32 body_offset(const items::Item& it) const { return part.value_or(it.body_begin - it.begin); }
   };
   // The instance of a specialization, instantiated on first request; none when its template has
   // no definition, or the instantiations nest too deeply ([temp.inst]/16).
@@ -3195,6 +3231,7 @@ public:
         s_(p.world(), b_, q_, out_.diags, p.id(item), 0),
         ps_(p.region(), it_->begin, it_->begin + it_->decl_length(), s_), inst_(std::move(inst)) {
     ps_.set_questions(q_);
+    s_.declaration_part = true;
     if (inst_) {
       q_.at_point = inst_->point;
       q_.instantiating = inst_->spec;
@@ -3323,6 +3360,7 @@ public:
     if (!s_.closures.empty()) s_.check_labels();
     for (const ast::ClosureDef& c : p_->world().ins.seqs.elements(out_.value.closures))
       s_.check_immediate_addresses(c.body, c.body_begin);
+    p_->declaration_closures(out_.value.closures, k_, 0);
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -4275,12 +4313,19 @@ private:
     p_->declared(sem, k_);
     return true;
   }
+  // A lambda in a constraint's definition belongs to no declaration; its closure type there is a
+  // pattern, and each satisfaction has its own (`AtomAnalysis`).
+  sema::Sema::ClosureOwner constraint_owner() {
+    const EntityId around = s_.current_class != EntityId::none ? s_.current_class : ns_entity();
+    return {around, ast::Linkage::internal, ast::mix(ast::seed("ycxx.parse.constraint-closure"), s_.world().ins.items.fp(p_->id(k_)))};
+  }
   // A template-head's requires-clause ([temp.pre]/9), after it: its normal form, and its tokens'
   // fingerprint for the declaration's identity.
   void head_requires_clause() {
     if (!ps_.is(Tk::kw_requires)) return;
     ps_.bump();
     u32 begin = ps_.pos();
+    const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
     head_requires_ = ps_.constraint_expression(true);
     constraints_fp_ = ast::mix(constraints_fp_, clause_fp(begin, ps_.pos()));
   }
@@ -4289,6 +4334,7 @@ private:
     if (!ps_.is(Tk::kw_requires)) return;
     ps_.bump();
     u32 begin = ps_.pos();
+    const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
     trailing_requires_ = ps_.constraint_expression(true);
     constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), clause_fp(begin, ps_.pos()));
   }
@@ -4355,7 +4401,11 @@ private:
       s_.diag(name_at, Diag::concept_constrained, name);
       return bad();
     }
-    ConstId nf = ps_.constraint_expression(false);
+    ConstId nf;
+    {
+      const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
+      nf = ps_.constraint_expression(false);
+    }
     if (!ps_.expect(Tk::semi)) return bad();
     for (DeclId p : q_.visible_decls(name))
       if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds)) {
@@ -7710,6 +7760,11 @@ private:
           !s_.templated() && owner.templ == EntityId::none ? c.entity : EntityId::none, d.name);
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
       const sema::Sema::StaticConstexprInitializerScope constexpr_initializer(s_, spec.is_constexpr);
+      // The member owns the closure types of its initializer's lambdas; its identity needs no type.
+      const sema::EntityRec member{sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+      const sema::Sema::ClosureOwnerScope closures(
+          s_, sema::Sema::ClosureOwner{s_.world().entities.identity(member),
+                                       owner.linkage == ast::Linkage::internal ? ast::Linkage::internal : ast::Linkage::external});
       // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
       // read here, before the member is declared.
       std::optional<Ex> early;
@@ -7805,7 +7860,7 @@ private:
         // Scalar lists and aggregate elements use the same constant initializer path ([dcl.init.list]).
         // The general evaluator needs class result storage to return a class value (#25).
         sema::Evaluator evaluator(s_, q_);
-        const bool aggregate = spec.is_constexpr && types.is_class(d.type) && s_.as<ast::InitList>(init);
+        const bool aggregate = spec.is_constexpr && types.is_class(d.type) && (s_.as<ast::InitList>(init) || s_.as<ast::Lambda>(init));
         sema::Evaluated v = list_initialization || aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
           s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
@@ -8034,6 +8089,36 @@ private:
     const bool effective_extern = spec.is_extern || single_linkage_spec_;
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
+    const bool fn = types.is_function(d.type);
+    // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
+    const auto has_internal_linkage = [&] {
+      return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
+             (!fn && sema::Types::is_const(d.type) && !effective_extern && !spec.is_inline && !template_ && !explicit_);
+    };
+    const auto declaration_entity = [&](sema::EntityKind kind, QualType type, ast::Linkage linkage, sema::Fp128 head) {
+      sema::EntityRec record{kind, d.name, type, lang, linkage,
+          {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)},
+          lang == LangLinkage::c ? EntityId::none : ns_entity()};
+      record.head = head;
+      record.constraints = constraints_fp_;
+      return record;
+    };
+    // What owns the closure types of the initializer's lambdas, where the initializer is read before
+    // the variable is declared: an identity needs no type (docs/design/closures.md, decision 3). A
+    // variable template's and a specialization's are theirs; others are known only later.
+    const auto initializer_owner = [&]() -> std::optional<sema::Sema::ClosureOwner> {
+      if (fn) return {};
+      if (var_) return variable_closures(var_->spec, true);
+      if (d.qualified || explicit_ || d.template_args || lang == LangLinkage::c || d.name == s_.no_name()) return {};
+      const bool internal = has_internal_linkage() || (spec.is_constexpr && !effective_extern && !spec.is_inline && !template_);
+      const auto linkage = internal ? ast::Linkage::internal : ast::Linkage::external;
+      const auto record = template_
+          ? declaration_entity(sema::EntityKind::variable_template, d.type, linkage, head_fp(s_.template_scopes.front()))
+          : declaration_entity(sema::EntityKind::variable, d.type, linkage, head_fp({}));
+      const bool shared = linkage == ast::Linkage::external && (spec.is_inline || template_);
+      return sema::Sema::ClosureOwner{s_.world().entities.identity(record),
+                                      shared ? ast::Linkage::external : ast::Linkage::internal};
+    };
     if (d.unknown_bound && ps_.is(Tk::equal) && ps_.kind(1) == Tk::string_lit) {
       // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1); the
       // initialization below checks the element type.
@@ -8051,6 +8136,7 @@ private:
                           types.is_scalar(d.type) && !types.is_dependent(d.type) && !types.has_placeholder(d.type) &&
                           fixed_scalar_array_initializer(name);
       const parse::Parser::VariableTemplateInitializerScope initializer(ps_, replay);
+      const sema::Sema::ClosureOwnerScope closures(s_, initializer_owner());
       early = ps_.braced_init_list();
       u64 n = s_.deduce_bound(d.type, *early);
       if (n == 0) {
@@ -8059,36 +8145,14 @@ private:
       }
       d.type = types.array(d.type, n);
     }
-    bool fn = types.is_function(d.type);
     if (!fn && spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
-    // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
-    const auto has_internal_linkage = [&] {
-      return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
-             (!fn && sema::Types::is_const(d.type) && !effective_extern && !spec.is_inline && !template_ && !explicit_);
-    };
-    const auto declaration_entity = [&](sema::EntityKind kind, QualType type, ast::Linkage linkage, sema::Fp128 head) {
-      sema::EntityRec record{kind, d.name, type, lang, linkage,
-          {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)},
-          lang == LangLinkage::c ? EntityId::none : ns_entity()};
-      record.head = head;
-      record.constraints = constraints_fp_;
-      return record;
-    };
-    // The first declaration-owned closure is the initializer of an ordinary internal variable.
-    // Its identity is the final variable's. Its EntityRec is published after deduction.
-    std::optional<Ex> closure_init;
-    EntityId closure_owner = EntityId::none;
+    // Use of a placeholder's own name in a lambda that begins its initializer ([dcl.spec.auto.general]).
     if (!fn && types.kind(d.type) == sema::TypeKind::placeholder && !template_ && !var_ && !explicit_ &&
-        !d.qualified && d.name != s_.no_name() && !spec.is_inline && !spec.is_extern &&
-        lang == LangLinkage::cxx && has_internal_linkage() && (ps_.is(Tk::equal) || ps_.is(Tk::l_brace))) {
+        !d.qualified && d.name != s_.no_name() && (ps_.is(Tk::equal) || ps_.is(Tk::l_brace))) {
       u32 start = 1;
       while (ps_.kind(start) == Tk::l_paren) ++start;
-      if (ps_.kind(start) == Tk::l_square && ps_.kind(start + 1) != Tk::l_square) {
-        const auto ns = ns_entity();
-        const auto record = declaration_entity(sema::EntityKind::variable, d.type, ast::Linkage::internal, head_fp({}));
-        closure_owner = s_.world().entities.identity(record);
-        s_.namespace_lambda = sema::Sema::NamespaceLambda{closure_owner, ns, d.name, ps_.pos() + start};
-      }
+      if (ps_.kind(start) == Tk::l_square && ps_.kind(start + 1) != Tk::l_square)
+        s_.namespace_lambda = sema::Sema::NamespaceLambda{ns_entity(), d.name};
     }
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
@@ -8098,17 +8162,8 @@ private:
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
     if (!fn && types.has_placeholder(d.type)) {
-      bool deduced = deduce_variable(d, early, early_expr, pattern);
-      if (s_.namespace_lambda && deduced) {
-        Ex e = early_expr ? *early_expr : early->clauses.front().expr;
-        closure_init = e;
-        while (auto p = s_.as<ast::Paren>(e))
-          e = s_.extended({p->operand.id, e.begin + p->operand.at, e.end});
-        if (!s_.as<ast::Lambda>(e)) {
-          s_.diag(e.begin, Diag::namespace_lambda_init);
-          deduced = false;
-        }
-      }
+      const sema::Sema::ClosureOwnerScope closures(s_, initializer_owner());
+      const bool deduced = deduce_variable(d, early, early_expr, pattern);
       s_.namespace_lambda.reset();
       if (!deduced) return false;
     }
@@ -8500,6 +8555,10 @@ private:
     }
     Ex init;
     sema::ConstId value = sema::ConstId::none;
+    // A variable owns the closure types of its initializer's lambdas (docs/design/closures.md).
+    std::optional<sema::Sema::ClosureOwner> owner;
+    if (!fn) owner = variable_closures(sem.entity, spec.is_inline || template_ || var_);
+    const sema::Sema::ClosureOwnerScope closures(s_, owner);
     // [dcl.constinit]: a reachable declaration's requirement applies to initialization.
     if (spec.is_constinit) {
       auto entry = p_->constinit_declarations_.try_emplace(sem.entity, k_).first;
@@ -8544,15 +8603,6 @@ private:
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
-    } else if (closure_init) {
-      contract_assert(sem.entity == closure_owner);
-      init = s_.convert(*closure_init, d.type, closure_init->begin);
-      if (init.ok()) {
-        // The captureless prvalue has no fields to initialize. Keep a constant of the complete
-        // closure type so the ordinary variable path allocates its addressable storage.
-        value = p_->world().values.aggregate(d.type, {});
-        if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
-      }
     } else if (!fn && (early || ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // List-initialization; constant initialization when every element is a constant
       // ([basic.start.static]).
@@ -8738,8 +8788,35 @@ private:
       s_.diag(d.name_at, Diag::void_variable, d.name);
       return false;
     }
-    if (!(pattern && types.is_dependent(*t))) d.type = *t;
+    // A closure type of a variable template's initializer is its definition's only: each
+    // specialization deduces its own.
+    const auto pattern_closure = [&](this auto&& self, QualType q) -> bool {
+      const sema::TypeRec rec = types.rec(q);
+      if (rec.kind == sema::TypeKind::pointer || rec.kind == sema::TypeKind::reference || rec.kind == sema::TypeKind::array)
+        return self(rec.inner);
+      if (rec.kind != sema::TypeKind::class_) return false;
+      const sema::ClassRec* c = s_.class_rec(rec.entity);
+      return (c && c->closure) || std::ranges::any_of(s_.world().entities.rec(rec.entity).args, [&](const ast::TemplateArg& a) {
+               return a.kind == ast::TemplateArgKind::type && self(a.type);
+             });
+    };
+    if (!pattern) {
+      d.type = *t;
+    } else if (pattern_closure(*t)) {
+      e = s_.dependent_node({}, e.begin, e.end);
+      if (expr) expr = e;
+      else list->clauses[0].expr = e;
+    } else if (!types.is_dependent(*t)) {
+      d.type = *t;
+    }
     return true;
+  }
+  // The owner of the closure types of the lambdas in namespace-scope variable `e`'s initializer:
+  // of vague linkage when `shared`, a definition that may appear in several units, and `e` has
+  // external linkage (docs/design/closures.md, decision 4).
+  sema::Sema::ClosureOwner variable_closures(EntityId e, bool shared) {
+    const bool external = shared && s_.world().entities.rec(e).linkage == ast::Linkage::external;
+    return {e, external ? ast::Linkage::external : ast::Linkage::internal};
   }
   // The declarator of an explicit specialization ([temp.expl.spec]): `sem` becomes the declaration
   // of the specialization of the function or variable template it names. A function template's
@@ -10397,6 +10474,15 @@ public:
   std::optional<bool> run(std::vector<engine::Diagnostic>& hard) {
     auto& ins = p_->world().ins;
     s_.current_class = atom_.lookup_class;
+    // A lambda in it belongs to no declaration: its closure type is this satisfaction's own.
+    s_.satisfying_atom = true;
+    s_.declaration_part = true;
+    sema::Fp128 closures = ast::mix(ast::seed("ycxx.parse.atom-closure"), ins.items.fp(atom_.item));
+    closures = ast::mix(ast::mix(closures, u64(atom_.begin)), u64(atom_.end));
+    for (ConstId e : ins.seqs.elements(atom_.mapping))
+      closures = e == ConstId::none ? ast::mix(closures, u64(0)) : ast::mix(closures, ins.values.fp(e));
+    const EntityId around = atom_.lookup_class != EntityId::none ? atom_.lookup_class : p_->namespace_entity(p_->ns_of(k_));
+    const sema::Sema::ClosureOwnerScope owner(s_, sema::Sema::ClosureOwner{around, ast::Linkage::internal, closures});
     for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
     const ast::ItemSema& is = p_->item_sema(k_).value;
     if (ins.seqs.size(is.decls) > 0) {
@@ -10518,6 +10604,8 @@ void Program::member_value(EntityId e) {
   ++members_running_;
   Result<ast::ItemSema> r = ItemAnalysis(*this, m.item, m.inst, m.ordinal).run();
   --members_running_;
+  if (r.diags.empty() && w_->ins.seqs.size(r.value.closures) != 0)
+    member_closures_.push_back({m.item, r.value, r.demands});
   // What the template's definition diagnosed it says once, there.
   if (item_sema(m.item).diags.empty())
     for (engine::Diagnostic& d : r.diags)
@@ -10562,9 +10650,9 @@ public:
                std::optional<Program::GenericInst> generic = std::nullopt)
       : generic_(std::move(generic)), p_(&p), k_(item), it_(&p.items().items[item]), b_(p.world().ins, &p.arena_),
         q_(inst ? std::unique_ptr<sema::Questions>(std::make_unique<AtInstantiation>(p, item))
-                : std::unique_ptr<sema::Questions>(std::make_unique<AtItem>(p, item, true))),
-        s_(p.world(), b_, *q_, out_.diags, p.id(item), it_->body_begin - it_->begin),
-        ps_(p.region(), it_->body_begin, it_->body_end, s_), inst_(std::move(inst)) {
+                : std::unique_ptr<sema::Questions>(std::make_unique<AtItem>(p, item, !generic_ || !generic_->g.part))),
+        s_(p.world(), b_, *q_, out_.diags, p.id(item), begin()),
+        ps_(p.region(), it_->begin + begin(), generic_ && generic_->g.part ? it_->end : it_->body_end, s_), inst_(std::move(inst)) {
     ps_.set_questions(*q_);
     ps_.body = true;
     at_ = inst_ ? &static_cast<AtInstantiation&>(*q_).pattern_context() : &static_cast<AtItem&>(*q_);
@@ -10586,6 +10674,18 @@ public:
   }
 
   Result<ast::BodySema> analyse() {
+    if (generic_ && generic_->g.part) {
+      // In a declaration part, which may still be being analysed: what surrounds the lambda is in
+      // its record.
+      const EntityId cls = generic_->g.part->lookup_class;
+      const bool specialization = cls != EntityId::none && p_->world().entities.rec(cls).templ != EntityId::none;
+      if (specialization && !p_->class_items_.contains(std::to_underlying(cls))) at_->instantiating = cls;
+      // At the point of the use, unless the class the lambda is in is still being defined there.
+      if (at_->instantiating != EntityId::none || !p_->within_class_of(generic_->point, k_)) at_->at_point = generic_->point;
+      s_.current_class = cls;
+      s_.declaration_part = true;
+      return generic_body();
+    }
     const ast::ItemSema& is = p_->item_sema(k_).value;
     std::optional<ast::DeclSema> f;
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->completed_declaration(p_->world().ins.seqs.at(is.decls, 0));
@@ -10776,9 +10876,9 @@ public:
       u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
       if (gi.g.const_values[i] != ast::ConstId::none) s_.set_local_value(l, gi.g.const_values[i]);
     }
-    if (!gi.g.expansions.empty()) s_.expansions_override = &gi.g.expansions;
+    if (!gi.g.expansions.empty() || gi.g.part) s_.expansions_override = &gi.g.expansions;
     s_.open_generic(gi.g, gi.spec, gi.spec_type, gi.args);
-    ps_.seek(it_->body_begin + gi.g.body_begin);
+    ps_.seek(it_->begin + begin() + gi.g.body_begin);
     Ex body = ps_.compound_statement();
     auto r = s_.close_generic(body, ps_.pos());
     s_.pop_scope();
@@ -11048,6 +11148,9 @@ private:
     s_.put_scopes(std::move(saved));
     return init;
   }
+
+  // Where the part analysed begins in the item: the body's, or a generic lambda's declaration part.
+  u32 begin() const { return generic_ && generic_->g.part ? generic_->g.part->begin : it_->body_begin - it_->begin; }
 
   std::optional<Program::GenericInst> generic_;
   Program* p_;
@@ -12666,6 +12769,7 @@ void Program::instantiate_all() {
       work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
       // A namespace-scope variable's initializer, and its destructor ([basic.start.term]), are code
       // of the unit's initialization function.
+      if (!templated_body(k) && in_class_[k]) required_part(NodeId::none, item_cells_[k]->value.closures, id(k));
       if (!templated_body(k) && !in_class_[k]) {
         const auto& part = item_cells_[k]->value;
         required_part(part.tree, part.closures, id(k));
@@ -12731,12 +12835,23 @@ void Program::instantiate_all() {
   const u32 limit = instantiation_limit;
   std::set<u32> seen;
   std::size_t walked_members = 0;
+  std::size_t walked_closures = 0;
   for (std::size_t i = 0; ; ++i) {
+    // A class template's static data members' closures, and other class members' in their items
+    // (#338): their bodies are code where something refers to them.
+    for (; walked_closures < member_closures_.size(); ++walked_closures) {
+      const MemberClosures m = member_closures_[walked_closures];
+      work.insert(work.end(), m.demands.begin(), m.demands.end());
+      required_part(NodeId::none, m.value.closures, id(m.item));
+      depth.resize(work.size(), 1);
+    }
     // Class-specialization replay can add member cells while processing this worklist.
     for (; walked_members < class_member_order_.size(); ++walked_members) {
       const auto& key = class_member_order_[walked_members];
       const auto& cell = class_member_cells_.at(key);
       if (!cell.diags.empty()) continue;
+      required_part(NodeId::none, cell.value.closures, id(key.first));
+      depth.resize(work.size(), 1);
       for (sema::Demand demand : cell.demands) {
         if (!demand.variable_type) continue;
         const auto point = class_points_.at(key.second);
@@ -12763,6 +12878,10 @@ void Program::instantiate_all() {
           work.push_back(d);
           depth.push_back(depth[i] + 1);
         }
+      if (v->cell.diags.empty()) {
+        required_part(NodeId::none, v->cell.value.closures, id(v->item));
+        depth.resize(work.size(), depth[i] + 1);
+      }
       continue;
     }
     const Instance* in = instance(work[i].spec, end());
@@ -12911,8 +13030,8 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
       return r;
     }
     const items::Item& itm = items_->items[in.item];
-    irgen::FunctionInput input{f, in.decl, in.body.value, id(in.item), itm.body_begin - itm.begin, false, {}, this_type(in.decl)};
-    AtItem q(*this, in.item, true);
+    irgen::FunctionInput input{f, in.decl, in.body.value, id(in.item), in.body_offset(itm), false, {}, this_type(in.decl)};
+    AtItem q(*this, in.item, !in.part);
     sema::EvalFacts facts(*w_, q);
     std::optional<irgen::FunctionIr> ir;
     if (auto x = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*x);
@@ -12921,9 +13040,36 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
     else r.body = &slot->body;
     return r;
   }
+  const auto define = [&](const ast::ClosureDef& c, u32 k, u32 begin, bool in_body) {
+    if (c.flags & sema::closure_flag::polymorphic_result) {
+      r.unsupported = true;
+      return r;
+    }
+    sema::Sema::ClosureMember m =
+        sema::Sema::closure_member_def(*w_, c, f, c.call == f ? c.body : c.invoker_body, w_->ins.seqs.elements(c.locals));
+    irgen::FunctionInput input{f, m.decl, m.body, id(k), begin + c.body_begin, false, {}, m.this_type};
+    AtItem q(*this, k, in_body);
+    sema::EvalFacts facts(*w_, q);
+    std::optional<irgen::FunctionIr> ir;
+    if (auto x = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*x);
+    auto& slot = closure_irs_[key] = std::move(ir);
+    if (!slot) r.unsupported = true;
+    else r.body = &slot->body;
+    return r;
+  };
+  // A lambda of a declaration part: the part's analysis kept it.
+  if (auto it = declaration_closures_.find(key); it != declaration_closures_.end()) {
+    const DeclarationClosure& c = it->second;
+    if (c.item >= item) return r;
+    return define(c.def, c.item, c.begin, false);
+  }
   // The function whose body has the lambda: past the operators of enclosing lambdas.
   EntityId fn = w_->entities.rec(w_->entities.rec(f).scope).scope;
   while (sema::Sema::closure_member(*w_, fn)) fn = w_->entities.rec(w_->entities.rec(fn).scope).scope;
+  if (fn == EntityId::none || w_->entities.rec(fn).kind != sema::EntityKind::function) {
+    r.unsupported = true;
+    return r;
+  }
   const ast::BodySema* body = nullptr;
   u32 k = 0;
   if (const sema::EntityRec& fr = w_->entities.rec(fn); (fr.templ != EntityId::none && !explicitly_specialized(fn, item)) ||
@@ -12941,22 +13087,8 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
   }
   for (const ast::ClosureDef& c : w_->ins.seqs.elements(body->closures)) {
     if (c.call != f && c.invoker != f) continue;
-    if (c.flags & sema::closure_flag::polymorphic_result) {
-      r.unsupported = true;
-      return r;
-    }
     const items::Item& it = items_->items[k];
-    sema::Sema::ClosureMember m =
-        sema::Sema::closure_member_def(*w_, c, f, c.call == f ? c.body : c.invoker_body, w_->ins.seqs.elements(c.locals));
-    irgen::FunctionInput input{f, m.decl, m.body, id(k), it.body_begin - it.begin + c.body_begin, false, {}, m.this_type};
-    AtItem q(*this, k, true);
-    sema::EvalFacts facts(*w_, q);
-    std::optional<irgen::FunctionIr> ir;
-    if (auto x = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*x);
-    auto& slot = closure_irs_[key] = std::move(ir);
-    if (!slot) r.unsupported = true;
-    else r.body = &slot->body;
-    return r;
+    return define(c, k, it.body_begin - it.begin, true);
   }
   r.unsupported = true;  // its lambda is not in that body: an evaluation cannot go on
   return r;
@@ -12982,7 +13114,10 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
   std::optional<sema::GenericClosure> g;
   if (!known)
     if (auto d = generic_defs_.find(std::to_underlying(sr.templ)); d != generic_defs_.end()) known = &d->second;
-  if (known) {
+  if (known && known->part) {  // in a declaration part, analysed or being analysed here
+    g = *known;
+    k = index(known->part->item);
+  } else if (known) {
     g = *known;
     // The body being analysed that has it: its function's, or an enclosing lambda's
     // specialization's, or, past enclosing lambdas' operators, the function's.
@@ -13054,12 +13189,16 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
     }
   }
   if (!k || !g) return {};
+  const items::Item& source = items_->items[*k];
   // Reported at the lambda's body, which nests ([temp.inst]/16).
-  if (too_deep(instantiating_.size(), *k, items_->items[*k].body_begin - items_->items[*k].begin + g->body_begin))
+  const u32 part_begin = g->part ? g->part->begin : source.body_begin - source.begin;
+  if (too_deep(instantiating_.size(), *k, part_begin + g->body_begin))
     return {std::nullopt, true};
   instantiating_.insert(key);
   Instance in{spec, *k, {}, {}, false, enclosing};
-  in.body = BodyAnalysis(*this, *k, enclosing, GenericInst{*g, spec, sr.type, sr.args}).run();
+  if (g->part) in.part = part_begin;
+  in.body = BodyAnalysis(*this, *k, enclosing, GenericInst{*g, spec, sr.type, sr.args, point}).run();
+  if (g->part) declaration_closures(in.body.value.closures, *k, part_begin);
   instantiating_.erase(key);
   in.failed = !in.body.diags.empty() || !in.body.value.deduced;
   // Its declaration, as the closure's other members': a member, inline and constexpr when it can be.
