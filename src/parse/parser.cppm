@@ -3076,14 +3076,14 @@ public:
           auto values = expandable([&] { return template_argument_expression(true); });
           for (Ex e : values) {
             if (!e.ok()) {
-              --angle_;
-              return std::nullopt;
+              ok = false;
+              break;
             }
             const QualType type = s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type()));
             auto value = template_value(e, type);
             if (!value) {
-              --angle_;
-              return std::nullopt;
+              ok = false;
+              break;
             }
             args.push_back({ast::TemplateArgKind::value, type, *value});
           }
