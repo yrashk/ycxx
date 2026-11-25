@@ -3,8 +3,7 @@
 template<class T> void probe() noexcept(
     __is_nothrow_constructible(int, int&&, int&&) && __is_nothrow_assignable(T&, T&&)); //! error
 
-template<class T> concept Conjunction = requires { requires false && noexcept(probe<T>()); };
+template<class T> concept Needed = requires { requires false || noexcept(probe<T>()); };
+template<class T> concept Conjunction = requires { requires false && Needed<T>; };
 static_assert(!Conjunction<void>);
-
-template<class T> concept Disjunction = requires { requires false || noexcept(probe<T>()); };
-static_assert(!Disjunction<void>);
+static_assert(!Needed<void>);

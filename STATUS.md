@@ -4103,8 +4103,10 @@ In a template's definition, `noexcept` on a call of such a function is value-dep
   and `__is_nothrow_assignable` with `&&`, as in libycxx's move-swap overload in
   `include/ycxx/core/concepts.hpp`. After overload selection, replay forms both written type-ids
   with the selected arguments and checks class completeness at the demand. A failing substitution
-  in that specification is a hard error. The trait evaluators cover the arithmetic cases and
-  the written exact move operations above. Broader class queries remain in
+  in that specification is a hard error. A nested requirement's replay skips semantic analysis of
+  discarded operands that were parsed successfully in the template definition
+  ([#1314](https://github.com/yrashk/ycxx/issues/1314)). The trait evaluators cover the arithmetic
+  cases and the written exact move operations above. Broader class queries remain in
   [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
   [#1303](https://github.com/yrashk/ycxx/issues/1303).
 - Tests: `tests/own/template-noexcept/`.

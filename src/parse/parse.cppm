@@ -1934,6 +1934,7 @@ private:
   std::map<EntityId, AliasCallPattern> alias_call_patterns_;
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
   std::set<EntityId> failed_type_trait_instantiations_;
+  std::map<u32, u32> nested_constraint_operand_ends_;  // offsets in this program's token region
   const std::vector<std::string>& ns_of_ = ix_->ns_of;
   const std::vector<std::string>& eff_ns_ = ix_->eff_ns;
   const std::map<u32, std::vector<std::pair<std::string, std::string>>>& name_scopes_ = ix_->name_scopes;
@@ -2461,6 +2462,13 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
+  void record_nested_constraint_operand(u32 begin, u32 end) override {
+    p_->nested_constraint_operand_ends_.try_emplace(begin, end);
+  }
+  std::optional<u32> nested_constraint_operand_end(u32 begin) override {
+    const auto end = p_->nested_constraint_operand_ends_.find(begin);
+    return end == p_->nested_constraint_operand_ends_.end() ? std::nullopt : std::optional(end->second);
+  }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
   std::optional<ast::DeclSema> template_decl(EntityId t) override;
@@ -3268,6 +3276,12 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
+  void record_nested_constraint_operand(u32 begin, u32 end) override {
+    at_.record_nested_constraint_operand(begin, end);
+  }
+  std::optional<u32> nested_constraint_operand_end(u32 begin) override {
+    return at_.nested_constraint_operand_end(begin);
+  }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
   std::optional<ast::DeclSema> template_decl(EntityId t) override { return at_.template_decl(t); }

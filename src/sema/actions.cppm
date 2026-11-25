@@ -260,6 +260,8 @@ public:
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
+  virtual void record_nested_constraint_operand(u32 /*begin*/, u32 /*end*/) {}
+  virtual std::optional<u32> nested_constraint_operand_end(u32 /*begin*/) { return std::nullopt; }
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
   // bool, not constant, or not supported): the expression that asked is then invalid.
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }

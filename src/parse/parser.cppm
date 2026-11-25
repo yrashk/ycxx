@@ -3337,10 +3337,24 @@ public:
     return l;
   }
   Truth nested_operand(bool templated) {
+    const u32 begin = index();
+    const bool pattern = s_->in_pattern();
+    // Use the pattern's grammar-correct boundary before performing any semantic checks.
+    // A discarded operand can otherwise start concept satisfaction in a fresh Sema.
+    if (!pattern && s_->in_discarded_constraint_operand)
+      if (auto end = questions().nested_constraint_operand_end(begin); end && *end < end_) {
+        seek(*end);
+        return Truth::invalid;
+      }
+    // First reads and operands that did not parse successfully in the pattern have no extent.
     std::size_t n = s_->diag_count();
     u32 at = pos();
     Ex e = binary_expression(3);
-    if (s_->has_error_since(n) || !e.ok()) {
+    const bool failed = s_->has_error_since(n) || !e.ok();
+    if (pattern && !s_->instantiating() && !s_->satisfying_atom && !failed &&
+        index() > begin && (is(Tk::ampamp) || is(Tk::pipepipe) || is(Tk::semi)))
+      questions().record_nested_constraint_operand(begin, index());
+    if (failed) {
       if (templated) s_->drop_failures(n);
       return Truth::invalid;
     }
