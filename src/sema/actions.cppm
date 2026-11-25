@@ -92,6 +92,12 @@ struct GenericResult {
 
 class Sema;
 struct Ex;
+
+struct ConstantCallEvaluation {
+  std::optional<ConstId> value;
+  u64 reason = reason_unsupported;
+  bool diagnosed = false;
+};
 // What naming an alias template's specialization reads again: immediate calls its type retains or
 // may erase, checks of a dependent array's rank, or a type with a dependent operand that has no
 // representation (`decltype(f<T>())` of a deduced return type), known only once the arguments are.
@@ -206,7 +212,7 @@ public:
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
-  virtual std::optional<ConstId> constant_call(Sema&, const Ex&) { return std::nullopt; }
+  virtual ConstantCallEvaluation constant_call(Sema&, const Ex&) { return {}; }
   virtual AliasCallPattern alias_call_pattern(EntityId) { return AliasCallPattern::none; }
   virtual std::optional<QualType> replay_alias_calls(Sema&, const ast::DeclSema&, const Bindings&) {
     return std::nullopt;
@@ -1333,8 +1339,12 @@ public:
       diag(at, Diag::template_args_mismatch, name);
       return std::nullopt;
     }
+    t.immediate_default_constant = [this, at](EntityId function, std::span<const TemplateArg> operands, QualType target) {
+      return evaluate_immediate_template_default(function, operands, target, at);
+    };
+    const auto before = diag_count();
     auto full = t.complete(tmpl, params, out);
-    if (!full) diag(at, Diag::template_args_mismatch, name);
+    if (!full && !has_error_since(before)) diag(at, Diag::template_args_mismatch, name);
     return full;
   }
 
@@ -4923,17 +4933,9 @@ public:
     return dependent_call_value(selected->entity, fn.inner, args, callee.begin, end);
   }
 
-  std::optional<Ex> dependent_immediate_call(Ex callee, std::span<const Ex> args, u32 end) {
-    auto function = as<ast::DeclRef>(callee);
-    if (!function || !unqualified_name(callee) || !types().is_function(callee.type()) ||
-        !is_consteval(function->entity) || deleted_.contains(std::to_underlying(function->entity)) || !any_dependent(args))
-      return std::nullopt;
-    const auto& entity = w_->entities.rec(function->entity);
-    if (entity.linkage != ast::Linkage::external || entity.lang != LangLinkage::cxx) return std::nullopt;
-    const auto fn = types().rec(callee.type());
-    if (fn.variadic || fn.params.size() != args.size() ||
-        !std::ranges::all_of(fn.params, [&](QualType parameter) { return types().is_integral(parameter); }))
-      return std::nullopt;
+  std::optional<Ex> dependent_immediate_call(Ex callee, std::span<const Ex> args, u32 end, bool template_default) {
+    auto reference = as<ast::DeclRef>(callee);
+    if (!reference || !any_dependent(args)) return std::nullopt;
     std::vector<TemplateArg> operands;
     operands.reserve(args.size());
     for (Ex arg : args) {
@@ -4947,7 +4949,44 @@ public:
         return std::nullopt;
       operands.push_back(TemplateArg{TemplateArgKind::value, types().canonical(Types::unqualified(arg.type())), value->value});
     }
-    return dependent_call_value(function->entity, fn.inner, operands, callee.begin, end);
+    EntityId function = reference->entity;
+    QualType type = callee.type();
+    if (template_default && types().is(type, Builtin::overload_set)) {
+      // The operands are value-dependent but have fixed integral types ([temp.dep.general]).
+      // Rank the ordinary candidates here and keep the selected declaration through substitution.
+      const auto& declarations = overloads_.at(std::to_underlying(callee.id));
+      if (std::ranges::any_of(declarations, [](const ast::DeclSema& d) { return d.flags & decl_flag::template_; }))
+        return std::nullopt;
+      std::vector<Candidate> candidates;
+      candidates.reserve(declarations.size());
+      for (const ast::DeclSema& declaration : declarations)
+        candidates.push_back(non_template_call_candidate(declaration, false));
+      auto selected = resolve(candidates, args, callee.begin, w_->entities.rec(function).name, std::nullopt);
+      if (!selected) return Ex{NodeId::none, callee.begin, end};
+      const auto& declaration = declarations[*selected];
+      if (!(declaration.flags & decl_flag::consteval_)) return std::nullopt;
+      function = declaration.entity;
+      type = declaration.type;
+    } else {
+      if (!types().is_function(type) || !is_consteval(function)) return std::nullopt;
+      if (deleted_.contains(std::to_underlying(function))) {
+        if (!template_default) return std::nullopt;
+        diag(callee.begin, Diag::deleted_function, w_->entities.rec(function).name);
+        return Ex{NodeId::none, callee.begin, end};
+      }
+    }
+    const auto& entity = w_->entities.rec(function);
+    if (template_default) {
+      if (!namespace_scoped(function)) return std::nullopt;
+      if (!types().is_integral(types().rec(type).inner)) return std::nullopt;
+    } else if (!unqualified_name(callee) || entity.linkage != ast::Linkage::external || entity.lang != LangLinkage::cxx) {
+      return std::nullopt;
+    }
+    const auto fn = types().rec(type);
+    if (fn.variadic || fn.params.size() != args.size() ||
+        !std::ranges::all_of(fn.params, [&](QualType parameter) { return types().is_integral(parameter); }))
+      return std::nullopt;
+    return dependent_call_value(function, fn.inner, operands, callee.begin, end);
   }
 
   std::optional<Ex> dependent_call_value(EntityId callee, QualType type, std::span<const TemplateArg> args, u32 begin, u32 end) {
@@ -4956,7 +4995,8 @@ public:
     return literal(type, value, ValueCategory::prvalue, begin, end);
   }
 
-  std::optional<TemplateArg> evaluate_dependent_call(EntityId function, std::span<const TemplateArg> args, u32 at) {
+  std::optional<TemplateArg> evaluate_dependent_call(EntityId function, std::span<const TemplateArg> args, u32 at,
+                                                      bool diagnose = false) {
     auto decl = q_->replay_function_decl(function);
     if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
     Ex callee = decls_expr({*decl}, false, w_->entities.rec(function).name, at, at);
@@ -4972,12 +5012,29 @@ public:
     Ex invocation = call(callee, std::move(operands), at, at);
     if (!invocation.ok()) {
       // The synthesized call is in the immediate context of template substitution.
-      drop_failures(before);
+      if (!diagnose) drop_failures(before);
       return std::nullopt;
     }
-    auto value = q_->constant_call(*this, invocation);
-    if (!value) return std::nullopt;
-    return TemplateArg{TemplateArgKind::value, invocation.type(), *value};
+    auto evaluation = q_->constant_call(*this, invocation);
+    if (!evaluation.value) {
+      if (diagnose && !evaluation.diagnosed) diag(at, Diag::not_constant, evaluation.reason);
+      return std::nullopt;
+    }
+    return TemplateArg{TemplateArgKind::value, invocation.type(), *evaluation.value};
+  }
+
+  std::optional<TemplateArg> evaluate_immediate_template_default(EntityId function, std::span<const TemplateArg> args,
+                                                                 QualType target, u32 at) {
+    auto result = evaluate_dependent_call(function, args, at, /*diagnose=*/true);
+    if (!result) return std::nullopt;
+    auto converted = templates().converted_value(*result, target);
+    if (!converted) {
+      if (types().is_integral(result->type) && types().is_integral(target))
+        diag(at, Diag::template_argument_narrowing, result->value, result->type, target);
+      else
+        diag(at, Diag::no_conversion, result->type, target);
+    }
+    return converted;
   }
 
 

@@ -2724,7 +2724,9 @@ public:
     p.kind = ast::TemplateArgKind::value;
     p.type = t;
     if (!p.pack && accept(Tk::equal)) {
+      const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
+      in_integral_template_default_ = saved_default;
       auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
       if (!v) v = template_value(e, t);
       if (!v) {
@@ -4094,7 +4096,8 @@ public:
           } while (accept(Tk::comma));
         }
         if (!expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
-        if (in_template_value_argument_ && !s_->unevaluated && std::ranges::all_of(args, [&](Ex argument) {
+        if ((in_template_value_argument_ || in_integral_template_default_) && !s_->unevaluated &&
+            std::ranges::all_of(args, [&](Ex argument) {
               if (!argument.ok()) return false;
               if (s_->dependent(argument)) return true;
               while (auto paren = s_->as<ast::Paren>(argument)) {
@@ -4107,7 +4110,7 @@ public:
               return argument.width() == 1 &&
                      (token == Tk::int_lit || token == Tk::char_lit || token == Tk::kw_true || token == Tk::kw_false);
             }))
-          if (auto call = s_->dependent_immediate_call(e, args, pos())) {
+          if (auto call = s_->dependent_immediate_call(e, args, pos(), in_integral_template_default_)) {
             e = *call;
             ++deferred_immediate_calls_;
             break;
@@ -4777,6 +4780,10 @@ public:
     bool operator_name = !suffix.empty() || literal_operator_ahead();
     auto name = expression_id(suffix);
     if (!name) return {NodeId::none, begin, pos()};
+    if (ambiguous_namespace && in_integral_template_default_ && is(Tk::l_paren)) {
+      s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+      return {NodeId::none, begin, pos()};
+    }
     NameId n = *name;
     auto scope_expr = [&](bool immediate_call = false) {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
@@ -6818,6 +6825,7 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   bool in_template_value_argument_ = false;
+  bool in_integral_template_default_ = false;
   bool in_type_requirement_ = false;
   bool variable_template_initializer_ = false;
   bool in_template_id_lookahead_ = false;

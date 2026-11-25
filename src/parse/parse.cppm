@@ -1808,10 +1808,15 @@ public:
   // The byte offset in its file of a diagnostic's location.
   u32 byte_offset(engine::Loc at) const { return site(at).offset; }
 
-  // Spells a diagnostic argument: a name, a type, a string literal or why an evaluation failed.
+  // Spells a diagnostic argument: a name, a type, an integer, a string literal or why evaluation failed.
   std::string spell(char how, u64 raw) const {
     if (how == 'n') return std::string(w_->ins.names.spelling(ast::NameId(u32(raw))));
     if (how == 'r') return sema::spell_reason(raw);
+    if (how == 'i') {
+      const auto& value = w_->ins.values.get<ast::VInt>(ConstId(u32(raw)));
+      const bool negative = ast::is_signed(w_->target, *w_->types.builtin_of(value.type)) && ast::is_negative(value.bits);
+      return negative ? "-" + ast::wide::decimal(ast::wide::neg(value.bits)) : ast::wide::decimal(value.bits);
+    }
     if (how == 'c') {
       std::string t = w_->values.narrow_string(ConstId(u32(raw))).value_or("");
       if (!t.empty() && t.back() == '\0') t.pop_back();  // the terminating null
@@ -2439,8 +2444,9 @@ public:
     return failed;
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
-  std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
-    return sema::Evaluator(s, *this).evaluate(call).value;
+  sema::ConstantCallEvaluation constant_call(sema::Sema& s, const sema::Ex& call) override {
+    auto result = sema::Evaluator(s, *this).evaluate(call);
+    return {result.value, result.reason, result.diagnosed_failure()};
   }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override {
     auto it = p_->alias_call_patterns_.find(e);
@@ -3224,8 +3230,9 @@ public:
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
   bool variable_instantiation_failed(EntityId v) override { return p_->variable_instantiation_failed(v, p_->end()); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
-  std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
-    return sema::Evaluator(s, *this).evaluate(call).value;
+  sema::ConstantCallEvaluation constant_call(sema::Sema& s, const sema::Ex& call) override {
+    auto result = sema::Evaluator(s, *this).evaluate(call);
+    return {result.value, result.reason, result.diagnosed_failure()};
   }
   // In a member's body instantiated while its class is, for a deduced return type: the members
   // declared so far.
