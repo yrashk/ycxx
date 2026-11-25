@@ -74,6 +74,66 @@ void golden(const std::string& path, bool update) {
   if (text != want) std::println(std::cerr, "--- got:\n{}", text);
 }
 
+// A workspace query can demand the compiler in the same request (#1256).
+struct WorkspaceBuildWitness {
+  using Key = pl::RequestId;
+  using Value = std::optional<ycxx::Fp128>;
+
+  static engine::query_task<Value> run(engine::Ctx& cx, Key request) {
+    const pl::Built& built = co_await cx.fetch<pl::Build>(request);
+    if (built.units.size() != 1 || !built.units.front().object) co_return std::nullopt;
+    co_return ycxx::fingerprint(*built.units.front().object);
+  }
+};
+
+void nested_compiler() {
+  constexpr std::string_view path = "trace-workspace.cpp";
+  const auto source = ycxx::pp::path_id(path);
+  engine::Pool pool(2);
+  pl::Session session(pool);
+  const auto request = session.request({.units = {tu}, .until = pl::Until::object});
+
+  const auto set_source = [&](const std::string& text) {
+    session.apply([&](engine::Db& db) {
+      session.set_source(tu, std::string(path), text, "trace-workspace.o");
+      db.set<ycxx::pp::FileContent>(source, text);
+    });
+  };
+  const auto run = [&] {
+    std::vector<Event> events;
+    trace::Collector collector([&](std::span<const Event> batch) { events.append_range(batch); });
+    const auto built = session.run<WorkspaceBuildWitness>(request, {}, nullptr, &collector);
+    collector.finish();
+    return std::pair{built.value_or(std::nullopt), std::move(events)};
+  };
+  const auto compiled_under_workspace = [](const std::vector<Event>& events) {
+    const auto root = std::ranges::find_if(events, [](const Event& e) {
+      return e.parent == 0 && e.kind == "WorkspaceBuildWitness" && e.outcome == Outcome::executed;
+    });
+    if (root == events.end()) return false;
+    const auto build = std::ranges::find_if(events, [&](const Event& e) {
+      return e.parent == root->id && e.kind == "Build" && e.outcome == Outcome::executed;
+    });
+    if (build == events.end()) return false;
+    return std::ranges::any_of(events, [&](const Event& e) {
+      return e.parent == build->id && e.kind == "Tu" && e.outcome == Outcome::executed;
+    });
+  };
+
+  set_source("int main() { return 7; }\n");
+  const auto [cold, cold_trace] = run();
+  check(cold.has_value() && compiled_under_workspace(cold_trace),
+        "the cold workspace trace contains the compiler's executed TU beneath the build");
+  const auto [warm, warm_trace] = run();
+  check(warm == cold && warm_trace.size() == 1 && warm_trace.front().kind == "WorkspaceBuildWitness" &&
+            warm_trace.front().parent == 0 && warm_trace.front().outcome == Outcome::reused,
+        "a warm workspace request traces the reused root without executing the compiler");
+  set_source("int main() { return 8; }\n");
+  const auto [edited, edited_trace] = run();
+  check(edited.has_value() && edited != cold && compiled_under_workspace(edited_trace),
+        "a changed source recompiles beneath the same workspace root");
+}
+
 Event ev(std::uint64_t id, std::uint64_t parent, std::string kind, std::string key, Outcome o, std::uint64_t start = 0,
          std::uint64_t end = 0, std::int32_t worker = 0) {
   Event e;
@@ -1750,6 +1810,7 @@ int main(int argc, char** argv) {
   }
   const bool update = argc > 2 && std::string_view(argv[2]) == "--update";
   golden(argv[1], update);
+  nested_compiler();
   input();
   browser(std::filesystem::path(argv[1]).parent_path() / "browser.golden", update);
   copying();

@@ -15,6 +15,7 @@ concept Readable = requires {
 };
 
 static_assert(!Readable<true>);
+static_assert(Readable<false>);
 
 void check() {
   static const int integral = 23;

@@ -2572,6 +2572,12 @@ session's.*
   argument. The result uses the target size type. An array of unknown bound is supported when
   its element type is complete. Pointer-only uses of the specialization leave evaluation deferred
   ([expr.alignof], [temp.inst], #1067).
+- `__array_rank(T)` returns the number of array dimensions as the target size type. Unknown bounds
+  count, incomplete element types need no layout, and nonarrays have rank zero. Dependent type
+  operands resolve through template argument substitution and variable-template initializer replay.
+  Namespace aliases replay rank arguments they discard and preserve conversions of forwarded rank
+  defaults. An omitted type default checks those arguments before looking up the specialization
+  ([meta.unary.prop.query], [temp.alias], [temp.arg], #1082).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
@@ -3166,6 +3172,31 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
   with Clang's sizes and member offsets).
+
+## Resident project builds (#1251, #1255)
+
+`ycxx build <target>` reads `build.ycxx` in the workspace and publishes a successful
+native executable under `.ycxx/out`. The first rules are `cpp.executable`,
+`cpp.library` (a source-backed object group), and `generate` (a declared host
+tool with staged inputs and named outputs). Explicit source globs are resolved on
+each request. Linux uses the native freestanding compiler and linker.
+
+A resident workspace query asks for generator receipts and fetches the native
+compiler under the same query context. The coordinator admits tool results between
+epochs. Each generated path is a separate input, so unchanged sibling bytes cut
+off compiler work. Ordinary include probes continue to use the daemon file table,
+including missing candidates. The existing trace carries the native query tree,
+and reports external tool execution between workspace query attempts.
+
+`ycxx build --watch` uses the compiler watch loop and live trace browser
+(#1263). The daemon watches native compiler inputs and reobserves the project
+plan between runs for changes to the definition, generator inputs, and glob
+matches. It continues after a failed run.
+
+The initial build accepts a fixed host toolchain and explicit generator inputs.
+It checks host tool identity before admitting a receipt, and compares the resolved
+plan again before publishing. Rule packages, richer project configurations and
+resolved plan inspection are tracked under #1256, #1257 and #1259.
 
 ## The engine trace (#245, 2026-11-19)
 

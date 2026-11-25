@@ -32,6 +32,13 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 
 ### What you can do today
 
+**Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
+The resident engine builds executable targets from C++ source groups and declared external
+generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
+or `--trace-engine=json` to inspect the tool steps and native compiler queries.
+Use `ycxx build app --watch` to rebuild after workspace edits.
+[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
 The unary `noexcept` operator checks whether calls and constructions can throw.
@@ -619,6 +626,8 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
   through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
+- `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
+  and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.
