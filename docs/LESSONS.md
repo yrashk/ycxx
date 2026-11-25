@@ -563,6 +563,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: stop the active build before changing module edges, let CMake regenerate, and use an
     implementation partition for a helper imported only by the primary module.
   - Learned on #1255.
+- **Include `<unistd.h>` for `mkdtemp` in host tests.** The new publication test found
+  the declaration through `<stdlib.h>` on Linux, and the macOS build required
+  `<unistd.h>`. The existing build-action test includes both.
+  - Learned on #1329.
 - **A watcher test that passes at once may not test the race.** The FSEvents test of "an edit
   between the read and the new stream" passed with the replay removed: a stream created "since
   now" still saw an event `fseventsd` had not journaled yet.

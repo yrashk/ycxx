@@ -184,6 +184,33 @@ names, and a separate runtime publication path as the seams for this slice.
 The same artifact edges feed the structured reflection witness in
 [#1258](https://github.com/yrashk/ycxx/issues/1258).
 
+### Runtime asset generations (#1329)
+
+The public path remains `.ycxx/assets/<target>/<filename>`. A changed asset
+set is staged as one sibling directory. Linux and macOS exchange the live
+directory with the finished candidate in a single filesystem operation.
+The first publication installs the candidate at the previously unused path.
+An unchanged set with identical bytes and modes keeps its published files.
+The directory switch is atomic for path resolution. A reader performing
+multiple independent opens can span a successful switch.
+
+The candidate carries the names that this target owns. The marker is linked
+to a private, uniquely named file under `.ycxx/asset-manifests` so an ordinary
+output or an unrelated file with similar contents remains distinguishable.
+Each successful plan replaces its owned names as a set, including a plan
+with no runtime asset references. Unrelated directory entries carry forward.
+A new declaration that collides with an unrelated entry fails once the target
+has an ownership record. On upgrading an older output directory, current
+declarations adopt their destinations and unclaimed names carry forward.
+
+The publisher stages the asset candidate and the executable before installing
+either. It retains the displaced executable until the final asset switch
+succeeds and restores it if the switch fails. A build that fails before the
+switch leaves the live asset directory available. Watch retries when its
+observed source or plan inputs change. The independent Astra review identified
+directory exchange, a per-generation ownership record, and a final fallible
+switch as the portable boundaries of the transaction.
+
 ## Resolved plan inspection (#1256)
 
 `ycxx show app` reports the targets and facts the planner reached. Each source,
