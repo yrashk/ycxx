@@ -92,6 +92,7 @@ struct ProjectBuildRequest {
   bool trace = false;
   bool trace_values = false;
   bool watch = false;
+  bool probe_toolchain = false;
   bool trace_live = false;
   // The invoking client's PATH. An empty value is one component relative to cwd.
   std::optional<std::string> tool_path = std::nullopt;

@@ -2526,6 +2526,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         } else {
           n.closure_variable = fe.id;
         }
+      } else if (w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
+        n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
       }
     }
     return n;

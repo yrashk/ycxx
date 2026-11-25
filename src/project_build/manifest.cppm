@@ -37,13 +37,18 @@ struct CxxTool {
   std::optional<std::string> compiler;
 };
 
+struct ProbeRef {
+  std::string package;
+  std::string probe;
+};
+
 struct Value;
 using List = std::vector<Value>;
 using Record = std::vector<std::pair<std::string, Value>>;
 
 struct Value {
   SourceLocation location;
-  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool> data;
+  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool, ProbeRef> data;
 };
 
 struct TargetDecl {
@@ -314,6 +319,18 @@ class Parser {
       if (compiler.empty()) fail(compiler_at, "empty compiler selector");
       expect(')');
       return {at, CxxTool{std::move(compiler)}};
+    }
+    if (name == "probe") {
+      expect('(');
+      const auto package_at = next_location();
+      auto package = string();
+      if (package.empty()) fail(package_at, "empty probe package target");
+      expect(',');
+      const auto probe_at = next_location();
+      auto probe = string();
+      if (probe.empty()) fail(probe_at, "empty probe id");
+      expect(')');
+      return {at, ProbeRef{std::move(package), std::move(probe)}};
     }
     if (name == "input" || name == "output") {
       expect('(');

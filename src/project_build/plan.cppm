@@ -43,12 +43,16 @@ struct RuleToolchain {
 struct RulePackageAction {
   Action action;
   std::string tool_fingerprint;
+  bool native = false;
+  bool cxx = false;
 };
 
 struct RulePackagePlan {
   std::vector<RulePackageAction> candidates;
   std::vector<ActionInput> inputs;
   std::vector<std::string> observed_paths;
+  std::vector<std::string> probe_flags;
+  std::vector<std::string> probe_inputs;
 };
 
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
@@ -61,6 +65,7 @@ std::expected<PlanInspection, std::string> inspect_project(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
+std::expected<RulePackageRef, std::string> capability_package(std::string_view package);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
     const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr);
@@ -79,6 +84,15 @@ constexpr char standard_source[] = {
 #embed "../../resources/rules/standard/rules.cc"
     , 0};
 const RulePackageRef standard_package{RulePackageRef::Kind::standard, "standard/rules"};
+constexpr std::string_view builtin_cpp = "builtin:cpp";
+
+constexpr char capabilities_manifest[] = {
+#embed "../../resources/rules/capabilities/build.ycxx"
+    , 0};
+constexpr char capabilities_source[] = {
+#embed "../../resources/rules/capabilities/rules.cc"
+    , 0};
+const RulePackageRef capabilities_package{RulePackageRef::Kind::capabilities, "builtin:capabilities"};
 
 struct EmbeddedInput {
   std::string_view path;
@@ -87,6 +101,9 @@ struct EmbeddedInput {
 
 constexpr EmbeddedInput standard_inputs[] = {
     {"rules.cc", {standard_source, sizeof(standard_source) - 1}},
+};
+constexpr EmbeddedInput capabilities_inputs[] = {
+    {"rules.cc", {capabilities_source, sizeof(capabilities_source) - 1}},
 };
 
 std::string path_text(const fs::path& path) {
@@ -114,10 +131,14 @@ const T& as(const Value& value, std::string_view what) {
   fail(value.location, std::format("expected {}", what));
 }
 
-const Value* field(const TargetDecl& decl, std::string_view name) {
-  for (const auto& [key, val] : decl.fields)
+const Value* field(const Record& fields, std::string_view name) {
+  for (const auto& [key, val] : fields)
     if (key == name) return &val;
   return nullptr;
+}
+
+const Value* field(const TargetDecl& decl, std::string_view name) {
+  return field(decl.fields, name);
 }
 
 const Value& require_field(const TargetDecl& decl, std::string_view name) {
@@ -144,6 +165,16 @@ fs::path relative_path(std::string_view text, SourceLocation at, bool allow_root
   if ((!allow_root && (normal == "." || normal.filename().empty())) || *normal.begin() == ".ycxx")
     fail(at, std::format("invalid workspace path '{}'", text));
   return normal;
+}
+
+RulePackageRef workspace_package(std::string_view text, SourceLocation at) {
+  return {RulePackageRef::Kind::workspace, path_text(relative_path(text, at))};
+}
+
+RulePackageRef resolve_capability_package(std::string_view text, SourceLocation at) {
+  if (text == builtin_cpp) return standard_package;
+  if (text.starts_with("builtin:")) fail(at, std::format("unknown built-in probe package '{}'", text));
+  return workspace_package(text, at);
 }
 
 std::string read_file(const fs::path& path, SourceLocation at) {
@@ -237,10 +268,11 @@ void quote(std::string& out, std::string_view text) {
 
 void append_value(std::string& out, const Value& value);
 
-void append_record(std::string& out, const Record& fields, bool omit_reads = false) {
+void append_record(std::string& out, const Record& fields,
+                   std::initializer_list<std::string_view> omitted = {}) {
   out += '{';
   for (const auto& [key, value] : fields) {
-    if (omit_reads && key == "reads") continue;
+    if (std::ranges::contains(omitted, key)) continue;
     out += ' ';
     quote(out, key);
     out += " = ";
@@ -284,6 +316,8 @@ void append_value(std::string& out, const Value& value) {
       out += "cxx(";
       if (data.compiler) quote(out, *data.compiler);
       out += ')';
+    } else if constexpr (std::same_as<T, ProbeRef>) {
+      fail(value.location, "probe() requires a named rule capability binding");
     } else {
       if constexpr (std::same_as<T, InputArg>) out += "input(";
       else out += "output(";
@@ -293,9 +327,22 @@ void append_value(std::string& out, const Value& value) {
   }, value.data);
 }
 
+bool has_probe_bindings(const Value& value) {
+  const auto* record = std::get_if<Record>(&value.data);
+  return record && std::ranges::any_of(*record, [](const auto& binding) {
+    return std::holds_alternative<ProbeRef>(binding.second.data);
+  });
+}
+
 RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const RulePackageRef& package) {
   RuleDemand demand{decl.name, std::string(rule), package, {}, {}, {}};
-  append_record(demand.definition, decl.fields, true);
+  const bool capability_header = package.kind == RulePackageRef::Kind::capabilities && rule == "header";
+  if (capability_header) {
+    for (const auto name : {"namespace", "filename"})
+      if (const auto* value = field(decl, name); value && !std::holds_alternative<std::string>(value->data))
+        fail(value->location, std::format("expected a string for capability header field '{}'", name));
+    (void)require_field(decl, "capabilities");
+  }
   for (const auto& [name, value] : decl.fields) {
     if (name == "reads") {
       std::set<std::string> paths;
@@ -305,11 +352,24 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
         if (!paths.insert(spelling).second) fail(entry.location, "duplicate rule read path");
         demand.reads.push_back(spelling);
       }
+    } else if (name == "capabilities" && (capability_header || has_probe_bindings(value))) {
+      const auto& bindings = as<Record>(value, "a record of named capability bindings");
+      if (bindings.empty()) fail(value.location, "rule capabilities record is empty");
+      for (const auto& [binding, entry] : bindings) {
+        if (binding.empty()) fail(entry.location, "rule capability name is empty");
+        const auto& ref = as<ProbeRef>(entry, "probe(package, id) for a rule capability binding");
+        auto provider = resolve_capability_package(ref.package, entry.location);
+        auto spelling = ref.package == builtin_cpp ? ref.package : std::move(provider.target);
+        demand.capabilities.push_back({binding, std::move(spelling), ref.probe});
+      }
     } else if (const auto* text = std::get_if<std::string>(&value.data)) {
       if (name.empty()) fail(value.location, "rule attribute name is empty");
       demand.attributes.push_back({name, *text});
     }
   }
+  std::ranges::sort(demand.capabilities, {}, &RuleCapabilityBinding::name);
+  if (demand.capabilities.empty()) append_record(demand.definition, decl.fields, {"reads"});
+  else append_record(demand.definition, decl.fields, {"reads", "capabilities"});
   return demand;
 }
 
@@ -376,8 +436,8 @@ class Planner {
       : cwd_(cwd), watch_(watch), inspection_(inspection), expansions_(expansions) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
     for (const auto& imported : manifest.plugins)
-      prefixes_.emplace(imported.alias, RulePackageRef{
-          RulePackageRef::Kind::workspace, path_text(relative_path(imported.package, imported.location))});
+      prefixes_.emplace(imported.alias, imported.package == capabilities_package.target
+          ? capabilities_package : workspace_package(imported.package, imported.location));
     prefixes_.try_emplace("cpp", standard_package);
   }
 
@@ -407,12 +467,34 @@ class Planner {
     const auto& tool = require_field(decl, "tool");
     const auto* selector = std::get_if<CxxTool>(&tool.data);
     const auto* native_args = field(decl, "native_args");
+    const auto* probe_flags = field(decl, "probe_flags");
+    const auto* probe_inputs = field(decl, "probe_inputs");
     if (!selector) {
       if (native_args) fail(native_args->location, "native_args requires a cxx() tool");
+      if (probe_flags) fail(probe_flags->location, "probe_flags requires a cxx() tool");
+      if (probe_inputs) fail(probe_inputs->location, "probe_inputs requires a cxx() tool");
       std::vector<RulePackageAction> candidates;
       candidates.push_back({std::move(plan.action), std::move(plan.tool_fingerprint)});
-      return {std::move(candidates), std::move(plan.inputs), {}};
+      return {std::move(candidates), std::move(plan.inputs), {}, {}, {}};
     }
+
+    std::vector<std::string> flags;
+    if (probe_flags)
+      for (const auto& value : as<List>(*probe_flags, "a list of compiler probe flags")) {
+        const auto& flag = as<std::string>(value, "a compiler probe flag");
+        if (flag.contains('\0')) fail(value.location, "invalid compiler probe flag");
+        flags.push_back(flag);
+      }
+    std::vector<std::string> resources;
+    if (probe_inputs)
+      for (const auto& value : as<List>(*probe_inputs, "a list of toolchain input paths")) {
+        const auto& text = as<std::string>(value, "a toolchain input path");
+        if (text.empty() || text.contains('\0')) fail(value.location, "invalid toolchain input path");
+        auto path = fs::path(text);
+        if (path.is_relative()) path = cwd_ / relative_path(text, value.location);
+        observe(path);
+        resources.push_back(path_text(path));
+      }
 
     using enum ActionArg::Kind;
     std::vector<ActionArg> prefix{{literal, "cxx"}, {literal, "--no-daemon"}, {literal, "-nostdlib"}};
@@ -444,9 +526,9 @@ class Planner {
           continue;
         }
       }
-      candidates.push_back({std::move(action), std::move(fingerprint)});
+      candidates.push_back({std::move(action), std::move(fingerprint), compiler.native, true});
     }
-    return {std::move(candidates), std::move(plan.inputs), {}};
+    return {std::move(candidates), std::move(plan.inputs), {}, std::move(flags), std::move(resources)};
   }
 
  private:
@@ -511,6 +593,9 @@ class Planner {
       if (package->kind == RulePackageRef::Kind::workspace)
         observe(cwd_ / fs::path(package->target).parent_path() / "build.ycxx");
       for (const auto& path : demand.reads) observe(cwd_ / path);
+      for (const auto& binding : demand.capabilities)
+        if (binding.package != builtin_cpp)
+          observe(cwd_ / fs::path(binding.package).parent_path() / "build.ycxx");
     }
     const auto expansion = std::ranges::find(expansions_, demand, &RuleExpansion::demand);
     if (expansion == expansions_.end()) {
@@ -520,12 +605,22 @@ class Planner {
       throw demand;
     }
     const auto& lowered = primitives_.emplace(decl.name, primitive(decl, *expansion)).first->second;
+    if (inspection_ && !expansion->capability_facts.empty()) {
+      const auto* value = field(decl, "capabilities");
+      const auto* bindings = value ? std::get_if<Record>(&value->data) : nullptr;
+      for (const auto& observation : expansion->capability_facts) {
+        const auto* binding = bindings ? field(*bindings, observation.name) : nullptr;
+        fact(observation.kind, decl, observation.name, observation.value, observation.origin,
+             binding ? binding->location : decl.location);
+      }
+    }
     return {lowered.declaration, lowered.kind};
   }
 
   GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt,
                           std::span<const EmbeddedInput> embedded = {}) {
-    if (sdk_header) check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args"});
+    if (sdk_header)
+      check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args", "probe_flags", "probe_inputs"});
     else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     GeneratorPlan plan;
@@ -825,6 +920,14 @@ std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rule
   }
 }
 
+std::expected<RulePackageRef, std::string> capability_package(std::string_view package) {
+  try {
+    return resolve_capability_package(package, {});
+  } catch (PlanningError& error) {
+    return std::unexpected(std::move(error.message));
+  }
+}
+
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const fs::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
     const RuleToolchain& toolchain, std::vector<std::string>* failed_paths) {
@@ -844,6 +947,10 @@ std::expected<RulePackagePlan, std::string> plan_rule_package(
     if (package.kind == RulePackageRef::Kind::standard) {
       if (package.target != standard_package.target) fail({}, "unknown standard rule package");
       return lower(root, "rules", {standard_manifest, sizeof(standard_manifest) - 1}, standard_inputs);
+    }
+    if (package.kind == RulePackageRef::Kind::capabilities) {
+      if (package.target != capabilities_package.target) fail({}, "unknown capabilities rule package");
+      return lower(root, "rules", {capabilities_manifest, sizeof(capabilities_manifest) - 1}, capabilities_inputs);
     }
     const auto target = relative_path(package.target, {});
     const auto directory = root / target.parent_path();

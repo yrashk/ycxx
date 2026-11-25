@@ -51,6 +51,8 @@ export int run(std::span<const std::string_view> argv)
     return 2;
   }
   if (args[0] == "--internal-rule-worker") return build::run_rule_worker(args.subspan(1));
+  if (args[0] == "--internal-probe-shared") return build::run_shared_probe(args.subspan(1));
+  if (args[0] == "--internal-probe-executable") return build::run_executable_probe(args.subspan(1));
   if (args[0] == "--version") {
     std::println("ycxx {}", version);
     return 0;

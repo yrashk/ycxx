@@ -447,10 +447,11 @@ private:
     if (!types.is_class(type) || Types::is_volatile(type)) return std::nullopt;
     const EntityId entity = types.class_of(type);
     const ClassRec* record = s_->class_rec(entity);
-    // An aggregate, or a class a constructor initializes ([class.ctor]): its fields are its
-    // value whatever their access.
+    // An aggregate, a closure type, whose captures its lambda-expression initializes
+    // ([expr.prim.lambda.capture]/15), or a class a constructor initializes ([class.ctor]): its
+    // fields are its value whatever their access.
     const bool aggregate = s_->is_aggregate(type);
-    if (!record || (!aggregate && (!record->user_ctors || record->polymorphic)) || record->union_ ||
+    if (!record || (!aggregate && !record->closure && (!record->user_ctors || record->polymorphic)) || record->union_ ||
         !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
         !record->destructor_usable || record->destructor != EntityId::none)
       return std::nullopt;
