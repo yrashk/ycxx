@@ -10,6 +10,10 @@ target_sources(ycxxc_project_build PUBLIC FILE_SET CXX_MODULES FILES
   rule_protocol.cppm
   rule_snapshot.cppm
   rule_worker.cppm
+  toolchain_probe.cppm
+  toolchain_adapter.cppm
+  toolchain_inputs.cppm
+  toolchain_matrix.cppm
   inspection_model.cppm
   inspection_html.cppm
   inspection.cppm

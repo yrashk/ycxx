@@ -3215,6 +3215,13 @@ build trace, and inspection uses tracked admitted expansions. [#1281](https://gi
 Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
 when inserting a prefix into a temporary string.
 
+`ycxx build app --probe-toolchain` measures the actual compiler selected for each
+demanded `cxx()` package. The named observations distinguish support, rejection and
+inconclusive evidence across target reporting, dialects, headers, language and
+library features, objects, executable links, and shared-library compile, link and
+load. The resident engine reuses typed receipts for unchanged inputs. Read-only
+inspection shows the admitted observations and their provenance. [#1289](https://github.com/yrashk/ycxx/issues/1289)
+
 ## The engine trace (#245, 2026-11-19)
 
 `ycxx cxx --trace-engine[=stream|interactive]` (or `YCXX_TRACE_ENGINE`) shows what a request
