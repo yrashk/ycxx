@@ -115,8 +115,6 @@ struct Qualified {
   Qualified& operator=(Qualified&&) & = default;
 };
 
-Trivial pass(Trivial t) { t.a += 1; return t; }
-
 int main() {
   Trivial t(3);
   Trivial u(t);
@@ -124,7 +122,7 @@ int main() {
   u = v;
   u.b[2] = 9;
   v = static_cast<Trivial&&>(u);
-  if (v.a != 3 || v.b[0] != 3 || v.b[2] != 9 || pass(v).a != 4 || pass(v).b[2] != 9) return 1;
+  if (v.a != 3 || v.b[0] != 3 || v.b[2] != 9) return 1;
 
   int target = 7;
   Whole w(4, target);

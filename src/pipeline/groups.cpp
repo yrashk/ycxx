@@ -398,8 +398,12 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
                                 t.move_constructor == eligible_nontrivial ||
                                 (t.copy_constructor == ineligible && t.move_constructor == ineligible);
-        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
-        shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial) &&
+        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown,
+        // and so does a nontrivial copy or move constructor defaulted in the class (#157).
+        const bool defaulted_nontrivial = std::ranges::any_of(record.members, [&](const sema::MemberDeclRec& m) {
+          return m.is_ctor && m.defaulted == sema::CopyState::nontrivial && m.entity != record.defaulted_default_ctor;
+        });
+        shape.calls_abi_uncertain = !shape.trivial_calls && !defaulted_nontrivial && (!known || !nontrivial) &&
                                     !(linux && nontrivial_destructor(c));
       }
       // Only a class outside the general dynamic layout lacks a native complete-object type.

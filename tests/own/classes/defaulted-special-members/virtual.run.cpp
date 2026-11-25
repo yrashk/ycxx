@@ -5,22 +5,22 @@ int ends = 0;
 
 struct M {
   int tag = 4;
-  M() = default;
-  M(const M&) = default;
+  M() noexcept = default;
+  M(const M&) noexcept = default;
   virtual ~M();
-  virtual int kind() const { return tag; }
+  virtual int kind() const noexcept { return tag; }
 };
 M::~M() { ++ends; }
 
 struct D : M {
   int own;
-  D() = default;
-  D(const D&) = default;
-  D(D&&) = default;
-  int kind() const override { return 100 + tag + own; }
+  D() noexcept = default;
+  D(const D&) noexcept = default;
+  D(D&&) noexcept = default;
+  int kind() const noexcept override { return 100 + tag + own; }
 };
 
-int kind_of(const M& m) { return m.kind(); }
+int kind_of(const M& m) noexcept { return m.kind(); }
 
 int main() {
   {
