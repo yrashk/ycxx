@@ -17,6 +17,10 @@ EXECUTABLE = '''cpp.executable "app" {
     sources = ["main.cc", artifact("wire", "source")]
 }
 '''
+REPLACEMENT_EXECUTABLE = '''cpp.executable "app" {
+    sources = ["replacement.cc"]
+}
+'''
 
 
 def generator_declaration(kind, target, source):
@@ -241,6 +245,35 @@ native.executable "app" {
         assert not event_keys(events, 'ExternalAction'), (kind, 'a direct primitive ran a tool')
 
 
+def daemon_pid(ycxx, scope, env):
+    status = run_client(ycxx, scope, env, 'ctl', 'status')
+    assert status.returncode == 0, status.stderr
+    pids = [line.removeprefix('pid: ') for line in status.stdout.splitlines() if line.startswith('pid: ')]
+    assert len(pids) == 1, status.stdout
+    return int(pids[0])
+
+
+def check_malformed_package(ycxx, scope, env, executable):
+    pid = daemon_pid(ycxx, scope, env)
+    manifest = scope / PACKAGE / 'build.ycxx'
+    valid = manifest.read_bytes()
+    previous = executable.read_bytes()
+    try:
+        manifest.write_text('cpp.executable "rules" { sources = ["rules.cc"] }\n', encoding='utf-8')
+        summary, events = traced_build(ycxx, scope, env, 'non-host plugin package target', succeeds=False)
+        check_actions(summary, events)
+        assert any('rule package target must be a host_action' in diagnostic
+                   for diagnostic in summary['diagnostics']), summary
+        assert executable.read_bytes() == previous, 'malformed package changed the existing executable'
+    finally:
+        manifest.write_bytes(valid)
+
+    summary, events = traced_build(ycxx, scope, env, 'restored package after malformed target')
+    check_actions(summary, events)
+    assert daemon_pid(ycxx, scope, env) == pid, 'malformed package restarted the daemon'
+    check_program(executable, 41)
+
+
 def check_package(ycxx, scope, env, compiler):
     manifest = prepare(scope, compiler)
     check_standard(ycxx, scope, env)
@@ -296,6 +329,7 @@ def check_package(ycxx, scope, env, compiler):
 
     summary, events = traced_build(ycxx, scope, env, 'warm explicit provider')
     check_actions(summary, events)
+    check_malformed_package(ycxx, scope, env, executable)
 
     (scope / PACKAGE / 'rules.cc').write_text(plugin_source('reject-executable'), encoding='utf-8')
     summary, events = traced_build(ycxx, scope, env, 'failing explicit provider', succeeds=False)
@@ -326,11 +360,7 @@ def check_fallback(ycxx, scope, env, compiler):
     package = scope / PACKAGE
     package_ref = f'{PACKAGE}/rules'
     (package / 'rules.cc').write_text(plugin_source('fallback-edition'), encoding='utf-8')
-    (scope / 'build.ycxx').write_text(PLUGIN_IMPORT + ' as cpp\n' + '''\
-cpp.executable "app" {
-    sources = ["replacement.cc"]
-}
-''', encoding='utf-8')
+    (scope / 'build.ycxx').write_text(PLUGIN_IMPORT + ' as cpp\n' + REPLACEMENT_EXECUTABLE, encoding='utf-8')
     write_package(package, 'cxx()', reject_native=True)
     executable = scope / '.ycxx' / 'out' / 'app'
     log = scope / 'compiler-attempts'
@@ -383,6 +413,40 @@ cpp.executable "app" {
         assert executable.read_bytes() == previous, 'failed pinned compiler changed the existing output'
 
 
+def check_superseded_compile(ycxx, scope, env, compiler):
+    (scope / 'build.ycxx').write_text(PLUGIN_IMPORT + ' as cpp\n' + REPLACEMENT_EXECUTABLE, encoding='utf-8')
+    package = scope / PACKAGE
+    source = package / 'rules.cc'
+    source.write_text(plugin_source('reject-executable'), encoding='utf-8')
+    replacement = package / 'next-rules.cc'
+    replacement.write_text(plugin_source('current-executable'), encoding='utf-8')
+    log = scope / 'superseded-compiler-attempts'
+    wrapper = scope / 'superseded-compiler'
+    incoming, original, attempts, real_compiler = (
+        shlex.quote(str(path)) for path in (replacement, source, log, compiler)
+    )
+    # The compiler starts after the old source was staged. Change the workspace
+    # source on the first attempt and still successfully compile that staged copy.
+    wrapper.write_text(f'''\
+#!/bin/sh
+if [ -f {incoming} ]; then
+    /bin/mv {incoming} {original} || exit 30
+    printf '%s\\n' superseded >> {attempts}
+else
+    printf '%s\\n' current >> {attempts}
+fi
+exec {real_compiler} "$@"
+''', encoding='utf-8')
+    wrapper.chmod(0o755)
+    write_package(package, json.dumps(str(wrapper)))
+
+    summary, events = traced_build(ycxx, scope, env, 'package changed during compilation')
+    check_actions(summary, events, 'RulePackage', 'RulePackage', 'RuleWorker')
+    check_compiler_attempts(events, f'{PACKAGE}/rules', (wrapper, 'executed'), (wrapper, 'executed'))
+    assert log.read_text(encoding='utf-8').splitlines() == ['superseded', 'current']
+    check_program(scope / '.ycxx' / 'out' / 'app', 41)
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     compiler = Path(sys.argv[2]).absolute()
@@ -395,6 +459,7 @@ def main():
         try:
             check_package(ycxx, scope, env, compiler)
             check_fallback(ycxx, scope, env, compiler)
+            check_superseded_compile(ycxx, scope, env, compiler)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
 

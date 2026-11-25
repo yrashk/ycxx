@@ -118,6 +118,7 @@ def check_watch(scope, watch):
     assert summary['actions_executed'] == 0, summary
     assert 'executed' in tu_outcomes(events, 'core.cc'), 'ordinary source was not recompiled'
     check_program(executable, 19)
+    watch.idle('ordinary source edit was observed once without an inspection cache')
 
     replace_source(scope, 'include/config.h', '#define CONFIG 13\n')
     summary, events, _ = watch.build('new earlier header')
@@ -167,6 +168,9 @@ def main():
     ):
         scope = Path(workspace).resolve()
         prepare(scope)
+        # A regular file blocks snapshot storage irrespective of test user permissions.
+        rules_cache = scope / '.ycxx' / 'rules'
+        rules_cache.write_text('inspection cache unavailable\n', encoding='utf-8')
         (scope / 'modules').mkdir()
         (scope / 'unrelated').mkdir()
         manifest = scope / 'build.ycxx'
@@ -178,6 +182,7 @@ def main():
         watch = Watch(ycxx, scope, env)
         try:
             check_watch(scope, watch)
+            assert rules_cache.read_text(encoding='utf-8') == 'inspection cache unavailable\n'
         finally:
             watch.close()
             subprocess.run([ycxx, 'ctl', 'shutdown'], cwd=scope, env=env, capture_output=True, timeout=10)
