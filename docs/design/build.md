@@ -228,6 +228,21 @@ once their rules resolve. A scan that consulted a generated file, including
 a negative include probe, is marked pending in the local plan. The build
 trace can show that unit once its actions provide the virtual inputs.
 
+Provider resolution connects written named imports to reachable interface
+units and named partitions for the selected target (#1353). A primary
+implementation unit does not declare a provider. Repeated registrations of
+one translation unit count as one provider. Imports with no matching
+declaration are external or unresolved. Provider conflicts are visible even
+without an import, and only unambiguous edges enter cycle analysis. The
+reported cycles list the members of each cyclic component.
+
+The resident resolver depends on the location-free module graph. A separate
+report pairs its edges with physical C++ source locations. Read-only plans
+use the same resolver. When a scan is pending, unique or missing matches
+remain provisional and cycles describe the known graph. The compiler work
+that uses these dependency facts for module semantics and BMIs is tracked in
+#319.
+
 Declared host and target toolchains and broader project layouts grow coverage
 in #1259. Package acquisition and version solving sit outside the build.
 

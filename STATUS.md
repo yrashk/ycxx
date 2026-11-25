@@ -3251,6 +3251,14 @@ locations and mark scans that need generated inputs as pending. Build
 traces include these units once the virtual inputs are available.
 Named-module semantics and BMI support are tracked in #319.
 
+`ModuleProviders` resolves written imports within the reachable module
+graph before native compilation (#1353). It reports missing, unique and
+ambiguous providers and finds cyclic components among unique edges.
+`ModuleProviderReport` and read-only inspection add physical import and
+provider locations. A location-only edit can update the report while
+reusing provider resolution. Incomplete read-only scans make missing or
+unique matches provisional.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe

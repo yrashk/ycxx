@@ -43,8 +43,9 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 inspect that variant.
 Use `target_triple()` in a declared action's `args` to pass the selected triple
 to a host tool that generates a target-specific input.
-The build trace and resolved plan show named C++ module declarations and
-imports for the selected target. Named-module compilation is tracked in
+The build trace and resolved plan show named C++ module imports, their
+project providers, ambiguity, and cycles for the selected target.
+Named-module compilation is tracked in
 [#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
