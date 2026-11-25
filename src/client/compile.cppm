@@ -147,7 +147,9 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
 namespace ycxx::compile {
 namespace {
 
-enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, count };
+// `pedantic` selects no warning: ycxx accepts the extensions it implements (docs/EXTENSIONS.md)
+// silently. Tests pass `-Wno-pedantic` so that the oracles accept them under `-pedantic-errors`.
+enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, pedantic, count };
 
 struct WarningSelection {
   WarningFlag flag;
@@ -161,7 +163,8 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
   if (!enabled) arg.remove_prefix(3);
   constexpr std::pair<std::string_view, WarningFlag> names[] = {
       {"all", WarningFlag::all}, {"extra", WarningFlag::extra}, {"multichar", WarningFlag::multichar},
-      {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation}};
+      {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation},
+      {"pedantic", WarningFlag::pedantic}};
   for (const auto& [name, flag] : names)
     if (arg == name) return WarningSelection{flag, enabled};
   return std::nullopt;

@@ -230,7 +230,8 @@ class GroupFacts {
     h.uint(std::to_underlying(tok.kind)).uint(tok.flags).uint(spelling.size()).bytes(spelling);
   }
   // What every group reads: the namespaces, the using-directives and aliases at namespace scope,
-  // the inline namespaces and the specialization items.
+  // the inline namespaces and the specialization items. Defaults can read presumed lines in
+  // other groups, so the line table is also a unit fact when present (#327).
   Fp128 unit_facts() {
     Hasher h;
     auto str = [&](std::string_view s) { h.uint(s.size()).bytes(s); };
@@ -252,6 +253,10 @@ class GroupFacts {
       }
     }
     for (std::uint32_t k : x_->specializations) h.fp(id(k));
+    if (!r_->presumed_lines.empty()) {
+      h.uint(r_->presumed_lines.size());
+      for (auto line : r_->presumed_lines) h.uint(line);
+    }
     return h.finish();
   }
 
@@ -334,7 +339,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     const sema::Classes& classes = program.classes();
     auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
       const auto* record = classes.find(cls);
-      if (!record || record->destructor == EntityId::none || record->layout_requires_virtual_support) return false;
+      if (!record || record->destructor == EntityId::none || record->virtual_layout_unsupported) return false;
       using enum sema::CopyOperation;
       if (record->trivial_copyability.destructor != unknown)
         return record->trivial_copyability.destructor == eligible_nontrivial;
@@ -397,7 +402,9 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial) &&
                                     !(linux && nontrivial_destructor(c));
       }
-      shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
+      // Only a class outside the general dynamic layout lacks a native complete-object type.
+      shape.layout_requires_virtual_support = record.virtual_layout_unsupported;
+      shape.dynamic_root = record.dynamic && !record.dynamic->primary_base;
       if (record.peer_virtual_layout != sema::PeerVirtualLayout::none ||
           record.peer_automatic_primary_base != EntityId::none) {
         const EntityId primary = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base

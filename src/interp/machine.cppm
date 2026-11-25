@@ -56,9 +56,23 @@ struct ConstantRecordField {
   bool mutable_;
 };
 
+struct ConstantRecordBase {
+  EntityId entity = EntityId::none;
+  QualType type;
+  u64 offset;
+  u64 size;
+};
+
 struct ConstantRecordLayout {
   u64 size;
-  std::vector<ConstantRecordField> fields;
+  std::vector<ConstantRecordField> fields{};
+  bool dynamic = false;
+  std::optional<ConstantRecordBase> primary_base{};
+};
+
+struct ImmediateVirtualTarget {
+  EntityId function = EntityId::none;
+  EntityId owner = EntityId::none;
 };
 
 struct Config {
@@ -68,6 +82,7 @@ struct Config {
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
+  std::function<std::optional<ImmediateVirtualTarget>(EntityId, EntityId, EntityId)> immediate_virtual_target{};
 };
 
 // An interpreter-only observation of a generated call in the constant-evaluation entry.
@@ -77,16 +92,19 @@ struct ByteCapture {
 };
 
 // An integer or enumeration is held normalized to its representation type: sign-extended from
-// its width when signed, zero-extended otherwise. A floating value is its encoding in its
-// type's format, binary32 in the low 32 bits.
+// its width when signed, zero-extended otherwise, to 64 bits; a 128-bit integer has its high half
+// in `hi`, which is 0 for every narrower type. A floating value is its encoding in its type's
+// format, binary32 in the low 32 bits.
 enum class VKind : u8 { none, integer, null, object, function, floating };
 struct Value {
   VKind kind = VKind::none;
   bool past = false;  // object: one past the end of a non-array object
   u32 ref = 0;        // object: the object's index; function: the EntityId
   u64 bits = 0;       // integer: the value; object: the access path's id
+  u64 hi = 0;         // integer of 128 bits: the high half
 
   static constexpr Value integer(u64 bits) { return {VKind::integer, false, 0, bits}; }
+  static constexpr Value wide(ast::Bits128 v) { return {VKind::integer, false, 0, v.lo, v.hi}; }
   static constexpr Value floating(u64 bits) { return {VKind::floating, false, 0, bits}; }
   static constexpr Value null() { return {VKind::null}; }
   static constexpr Value function(EntityId e) { return {VKind::function, false, std::to_underlying(e), 0}; }
@@ -107,6 +125,7 @@ struct Callee {
   const ir::Function* body = nullptr;  // none: not defined ([expr.const]: before the evaluation)
   bool is_constexpr = false;           // a constexpr or consteval function ([dcl.constexpr])
   bool unsupported = false;            // defined, but its body has no L1 yet
+  EntityId default_constructs = EntityId::none;  // owner of a supported implicit default constructor
 };
 
 // Where an evaluation was: the function and the node, innermost first. The caller maps each to a
@@ -121,6 +140,7 @@ struct Failure {
   Reason reason = Reason::ill_formed;
   u64 arg = 0;  // the message's `{0}`
   std::vector<Site> stack;
+  EntityId global = EntityId::none;  // the global whose missing value or declaration caused the failure
 };
 
 // A result, described without the machine's object numbers.
@@ -130,6 +150,7 @@ struct Result {
   Kind kind = Kind::integer;
   QualType type{};
   u64 bits = 0;              // integer, normalized to `type`; floating, its encoding
+  u64 hi = 0;                // integer of 128 bits: the high half
   Base base = Base::local;   // address
   EntityId entity{};         // address of a global; function
   ConstId literal{};         // address within a string literal object
@@ -175,7 +196,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, callee_read, write, lifetime };
+  enum class Use : u8 { read, callee_read, write, callee_write, lifetime };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -192,6 +213,8 @@ private:
     u64 size;
     u32 ncells;
     std::vector<Field> fields;
+    bool dynamic;
+    std::optional<ConstantRecordBase> primary_base;
   };
   struct Object {
     QualType type{};
@@ -204,7 +227,10 @@ private:
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
-    Life record_life = Life::before;        // distinct from the lifetimes of its fields
+    Life record_life = Life::before;        // distinct from the lifetimes of its subobjects
+    Life primary_base_life = Life::before;
+    bool dynamic_initialized = false;     // set only by a completed constructor
+    bool unknown_reference = false;       // an opaque referent can alias another outside object
   };
   struct PathNode {
     u32 parent = 0;
@@ -228,6 +254,7 @@ private:
     EntityId entity{};
     std::vector<Value> regs;
     u32 node = 0;
+    std::optional<Value> initializing_dynamic_subobject{};
   };
   // A designated subobject: its object, its cells and its type.
   struct Place {
@@ -235,6 +262,7 @@ private:
     u32 cell0 = 0, ncells = 0;
     QualType type{};
     bool mutable_field = false;
+    bool primary_base = false;
   };
   // An unsequenced group ([intro.execution]): the accesses its operands made so far.
   struct Access {
@@ -304,7 +332,7 @@ private:
 
   // ------------------------------------------------------------ execution
 
-  Flow fail(Reason r, u64 arg = 0);
+  Flow fail(Reason r, u64 arg = 0, EntityId global = EntityId::none);
   Flow unsupported(NodeId n) { return fail(Reason::unsupported, std::to_underlying(frames_.back().fn->node(n).op)); }
   Value& reg(Frame& f, ir::ValueId v) { return f.regs[ir::raw(v)]; }
   Value operand(Frame& f, NodeId n, u32 i) { return f.regs[ir::raw(f.fn->operands_of(n)[i])]; }
@@ -315,15 +343,26 @@ private:
     return Flow::next;
   }
   Flow jump(Frame& f, NodeId n, u32 succ);
-  Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args);
+  Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args,
+             std::optional<Value> adjusted_receiver = {});
 
   // Integer helpers: `x` normalized to an integer type of `width` bits.
   static u64 norm(u64 x, u32 width, bool is_signed);
   static bool fits(i64 x, u32 width) { return width >= 64 || (x >= -(i64{1} << (width - 1)) && x < (i64{1} << (width - 1))); }
   static bool fits_unsigned(u64 x, u32 width) { return width >= 64 || x < (u64{1} << width); }
+  // An integer of shape `s` as 128 bits, sign- or zero-extended, and back, reduced modulo 2^width.
+  static ast::Bits128 wide_of(const Value& v, const Shape& s) {
+    if (s.width == 128) return {v.bits, v.hi};
+    return {v.bits, s.is_signed && i64(v.bits) < 0 ? ~u64{0} : 0};
+  }
+  static Value of_wide(ast::Bits128 x, const Shape& s) {
+    return s.width == 128 ? Value::wide(x) : Value::integer(norm(x.lo, s.width, s.is_signed));
+  }
   Flow int_shape(Frame& f, QualType t, const Shape*& s);
   Flow arith(Frame& f, NodeId n);
+  Flow arith128(Frame& f, NodeId n, const Shape& s);
   Flow divide(Frame& f, NodeId n);
+  Flow divide128(Frame& f, NodeId n, const Shape& s);
   Flow shift(Frame& f, NodeId n);
   Flow compare_pointers(Frame& f, NodeId n, ir::Pred pred, const Value& a, const Value& b);
 
@@ -385,7 +424,7 @@ const Machine::Shape& Machine::shape(QualType q) {
     }
   }
   if (b) {
-    if (ast::is_integral(*b) && ast::width_of(*target_, *b) <= 64) {
+    if (ast::is_integral(*b) && ast::width_of(*target_, *b) <= 128) {
       s.kind = Kind::integer;
       s.integer_type = b;
       s.width = ast::width_of(*target_, *b);
@@ -443,8 +482,8 @@ bool Machine::accessible_as(QualType object, QualType glvalue) {
   auto a = ast::builtin_of(*in_, object), b = ast::builtin_of(*in_, glvalue);
   if (!a || !b || *a == ast::Builtin::bool_ || *b == ast::Builtin::bool_) return false;
   if (!ast::is_integral(*a) || !ast::is_integral(*b)) return false;
-  auto standard = [](ast::Builtin x) { return ast::is_standard_signed(x) || ast::is_standard_unsigned(x); };
-  if (!standard(*a) || !standard(*b)) return false;
+  auto integer = [](ast::Builtin x) { return ast::is_signed_integer(x) || ast::is_unsigned_integer(x); };
+  if (!integer(*a) || !integer(*b)) return false;
   return ast::unsigned_counterpart(*a) == ast::unsigned_counterpart(*b);
 }
 
@@ -488,7 +527,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
     if (layout) known = &*layout;
   }
   if (!known) return nullptr;
-  RecordStorage record{known->size, 0, {}};
+  RecordStorage record{known->size, 0, {}, known->dynamic, known->primary_base};
   record.fields.reserve(known->fields.size());
   for (const auto& field : known->fields) {
     const u64 leaves = shape(field.type).leaves;
@@ -595,6 +634,14 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
   for (u64 w : extra) path.push_back(ir::decode_step(w));
   for (std::size_t i = 0; i < path.size(); ++i) {
     if (past) return std::nullopt;  // a step below a past-the-end place
+    if (i == 0 && path[i].step == ir::Step::base && ob.record && ob.record->primary_base) {
+      const auto& base = *ob.record->primary_base;
+      if (path[i].index != std::to_underlying(base.entity) || path.size() != 1) return std::nullopt;
+      pl.type = base.type;
+      pl.ncells = 0;  // the supported primary base is fieldless
+      pl.primary_base = true;
+      continue;
+    }
     if (i == 0 && path[i].step == ir::Step::field && ob.record) {
       const auto index = path[i].index;
       if (index >= ob.record->fields.size()) return std::nullopt;
@@ -638,28 +685,42 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
   if (use == Use::lifetime) return Flow::next;
-  if (pl->ncells == 0 && (ob.record_life == Life::after || (use != Use::write && ob.record_life == Life::before)))
+  // Only an ordinary store can initialize storage before the lifetime begins.
+  const bool requires_live = use != Use::write;
+  const Life record_life = pl->primary_base ? ob.primary_base_life : ob.record_life;
+  if (pl->ncells == 0 && (record_life == Life::after || (requires_live && record_life == Life::before)))
     return fail(Reason::outside_lifetime);
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
-    if (life == Life::after || (use != Use::write && life == Life::before)) return fail(Reason::outside_lifetime);
+    if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
   }
-  if (use == Use::write) {
+  const bool writing = use == Use::write || use == Use::callee_write;
+  if (writing) {
     if (ob.read_only) return fail(Reason::modify_const);
     // The initializing store comes before `obj.begin`; a const object is not modified after it.
     const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
     if (shape(pl->type).is_const && life == Life::alive)
       return fail(Reason::modify_const);
+    if (use == Use::callee_write) {
+      // A cast can remove the destination's volatile qualification but does not change the
+      // object it designates, including a subobject of a volatile object ([dcl.type.cv]).
+      const auto cv = [&](QualType type) { return std::to_underlying(ast::cv_of(in_->canonical(type))); };
+      if ((cv(pl->type) | cv(ob.type)) & std::to_underlying(ast::Cv::volatile_))
+        return fail(Reason::volatile_object_access);
+    }
     if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
   } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
-    return fail(Reason::not_usable);
+    const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
+    return fail(Reason::not_usable, 0, global);
   }
-  return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
+  return use == Use::callee_read || use == Use::callee_write ? Flow::next : note_access(*pl, writing);
 }
 
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {
   Object& ob = objects_[p.obj];
   if (complete && ob.record) ob.record_life = life;
+  if (p.primary_base || (complete && life == Life::after)) ob.primary_base_life = life;
+  if ((complete || p.primary_base) && life == Life::after) ob.dynamic_initialized = false;
   for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
 }
 
@@ -752,7 +813,8 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   const Shape& s = shape(type);
   if (vs.is<ast::VInt>(c)) {
     if (s.kind != Kind::integer) return fail(Reason::ill_formed);
-    out = Value::integer(norm(vs.get<ast::VInt>(c).bits.lo, s.width, s.is_signed));
+    // A value of any integer type, as 128 bits, is congruent to itself in every narrower type.
+    out = of_wide(vs.get<ast::VInt>(c).bits, s);
     return Flow::next;
   }
   if (vs.is<ast::VFloat>(c)) {
@@ -856,7 +918,7 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
     pending_ = Event::need_global;
     return Flow::suspend;
   }
-  if (!info->second) return fail(Reason::ill_formed);
+  if (!info->second) return fail(Reason::ill_formed, 0, e);
   const GlobalVar& g = *info->second;
   const Shape s = shape(g.type);
   const RecordStorage* record = g.record ? record_storage(g.type, &*g.record) : nullptr;
@@ -908,19 +970,24 @@ Machine::Flow Machine::int_shape(Frame&, QualType t, const Shape*& s) {
 
 // add, sub, mul, neg, and, or, xor: computed modulo 2^64, then checked against the result type
 // under `nsw`/`nuw` ([expr.pre]/4: a signed result outside its type's range is undefined).
+// Checked addition and multiplication report signed overflow alongside the converted result.
 Machine::Flow Machine::arith(Frame& f, NodeId n) {
   const ir::Node& nd = f.fn->node(n);
+  const bool checked = nd.op == Op::sadd_overflow || nd.op == Op::smul_overflow;
+  if (checked && config_.mode != Mode::constant) return unsupported(n);
   const Shape* s;
   if (Flow fl = int_shape(f, result_type(f, n), s); fl != Flow::next) return fl;
   Value a = operand(f, n, 0), b = nd.op == Op::neg ? Value::integer(0) : operand(f, n, 1);
   if (nd.op == Op::neg) std::swap(a, b);  // 0 - x
   if (a.kind != VKind::integer || b.kind != VKind::integer) return fail(Reason::ill_formed);
+  if (s->width == 128) return arith128(f, n, *s);
   u64 x = a.bits, y = b.bits, r = 0;
   i64 sx = i64(x), sy = i64(y);
   bool sov = false, uov = false;  // signed and unsigned overflow of the exact result
   constexpr i64 max = std::numeric_limits<i64>::max(), min = std::numeric_limits<i64>::min();
   switch (nd.op) {
   case Op::add:
+  case Op::sadd_overflow:
     r = x + y;
     sov = (sy > 0 && sx > max - sy) || (sy < 0 && sx < min - sy) || !fits(i64(r), s->width);
     uov = r < x || !fits_unsigned(r, s->width);
@@ -932,7 +999,9 @@ Machine::Flow Machine::arith(Frame& f, NodeId n) {
     uov = y > x;
     break;
   case Op::mul:
+  case Op::smul_overflow:
     r = x * y;
+    // The quotient test uses the wrapped product. Avoid dividing the signed minimum by -1.
     sov = (sx != 0 && ((sx == -1 && sy == min) || i64(r) / sx != sy)) || !fits(i64(r), s->width);
     uov = (x != 0 && r / x != y) || !fits_unsigned(r, s->width);
     break;
@@ -943,7 +1012,49 @@ Machine::Flow Machine::arith(Frame& f, NodeId n) {
   }
   if ((nd.flags & ir::bit(ir::Flag::nsw)) && sov) return fail(Reason::signed_overflow);
   if ((nd.flags & ir::bit(ir::Flag::nuw)) && uov) return fail(Reason::unsigned_overflow);
+  if (checked) set(f, n, Value::integer(sov), 1);
   return set(f, n, Value::integer(norm(r, s->width, s->is_signed)));
+}
+
+// arith for the 128-bit types: computed modulo 2^128, with the same overflow checks.
+Machine::Flow Machine::arith128(Frame& f, NodeId n, const Shape& s) {
+  using namespace ast::wide;
+  const ir::Node& nd = f.fn->node(n);
+  ast::Bits128 x = wide_of(operand(f, n, 0), s), y = nd.op == Op::neg ? ast::Bits128{} : wide_of(operand(f, n, 1), s), r;
+  if (nd.op == Op::neg) std::swap(x, y);  // 0 - x
+  bool nx = ast::is_negative(x), ny = ast::is_negative(y);
+  bool sov = false, uov = false;  // signed and unsigned overflow of the exact result
+  switch (nd.op) {
+  case Op::add:
+    r = add(x, y);
+    sov = nx == ny && ast::is_negative(r) != nx;
+    uov = ult(r, x);
+    break;
+  case Op::sub:
+  case Op::neg:
+    r = sub(x, y);
+    sov = nx != ny && ast::is_negative(r) != nx;
+    uov = ult(x, y);
+    break;
+  case Op::mul: {
+    r = mul(x, y);
+    uov = !is_zero(x) && udivrem(r, x).quot != y;
+    // The product of the magnitudes, which must fit 2^127 - 1, or 2^127 when negative.
+    ast::Bits128 mx = nx ? neg(x) : x, my = ny ? neg(y) : y, m = mul(mx, my);
+    bool wraps = !is_zero(mx) && udivrem(m, mx).quot != my;
+    ast::Bits128 limit{~u64{0}, ~u64{0} >> 1};
+    if (nx != ny && !is_zero(m)) limit = add(limit, {1, 0});
+    sov = wraps || ult(limit, m);
+    break;
+  }
+  case Op::and_: r = bit_and(x, y); break;
+  case Op::or_: r = bit_or(x, y); break;
+  case Op::xor_: r = bit_xor(x, y); break;
+  default: return unsupported(n);
+  }
+  if ((nd.flags & ir::bit(ir::Flag::nsw)) && sov) return fail(Reason::signed_overflow);
+  if ((nd.flags & ir::bit(ir::Flag::nuw)) && uov) return fail(Reason::unsigned_overflow);
+  return set(f, n, of_wide(r, s));
 }
 
 // [expr.mul]/4: division by zero is undefined, and so is a quotient that is not representable
@@ -954,6 +1065,7 @@ Machine::Flow Machine::divide(Frame& f, NodeId n) {
   if (Flow fl = int_shape(f, result_type(f, n), s); fl != Flow::next) return fl;
   Value a = operand(f, n, 0), b = operand(f, n, 1);
   if (a.kind != VKind::integer || b.kind != VKind::integer) return fail(Reason::ill_formed);
+  if (s->width == 128) return divide128(f, n, *s);
   if (b.bits == 0) return fail(Reason::division_by_zero);
   u64 r = 0;
   bool is_signed = nd.op == Op::sdiv || nd.op == Op::srem;
@@ -971,6 +1083,20 @@ Machine::Flow Machine::divide(Frame& f, NodeId n) {
   return set(f, n, Value::integer(norm(r, s->width, s->is_signed)));
 }
 
+Machine::Flow Machine::divide128(Frame& f, NodeId n, const Shape& s) {
+  using namespace ast::wide;
+  const ir::Node& nd = f.fn->node(n);
+  ast::Bits128 x = wide_of(operand(f, n, 0), s), y = wide_of(operand(f, n, 1), s);
+  if (is_zero(y)) return fail(Reason::division_by_zero);
+  bool is_signed = nd.op == Op::sdiv || nd.op == Op::srem;
+  constexpr ast::Bits128 min{0, u64{1} << 63}, minus_one{~u64{0}, ~u64{0}};
+  if (is_signed && s.is_signed && x == min && y == minus_one) return fail(Reason::quotient_overflow);
+  QuotRem qr = is_signed ? sdivrem(x, y) : udivrem(x, y);
+  bool quotient = nd.op == Op::sdiv || nd.op == Op::udiv;
+  if (quotient && (nd.flags & ir::bit(ir::Flag::exact)) && !is_zero(qr.rem)) return fail(Reason::inexact);
+  return set(f, n, of_wide(quotient ? qr.quot : qr.rem, s));
+}
+
 // [expr.shift]: the count must be in [0, width of the promoted left operand); `<<` is defined
 // modulo 2^N, `>>` rounds toward negative infinity on a signed operand.
 Machine::Flow Machine::shift(Frame& f, NodeId n) {
@@ -981,8 +1107,26 @@ Machine::Flow Machine::shift(Frame& f, NodeId n) {
   if (Flow fl = int_shape(f, type_of(f, f.fn->operands_of(n)[1]), cs); fl != Flow::next) return fl;
   Value a = operand(f, n, 0), b = operand(f, n, 1);
   if (a.kind != VKind::integer || b.kind != VKind::integer) return fail(Reason::ill_formed);
-  if ((cs->is_signed && i64(b.bits) < 0) || b.bits >= s->width) return fail(Reason::shift_count, b.bits);
-  u32 k = u32(b.bits);
+  ast::Bits128 count = wide_of(b, *cs);
+  if ((cs->is_signed && ast::is_negative(count)) || count.hi != 0 || count.lo >= s->width)
+    return fail(Reason::shift_count, count.lo);
+  u32 k = u32(count.lo);
+  if (s->width == 128) {
+    using namespace ast::wide;
+    ast::Bits128 x = wide_of(a, *s), r;
+    switch (nd.op) {
+    case Op::shl:
+      r = shl(x, k);
+      if ((nd.flags & ir::bit(ir::Flag::nsw)) && ashr(r, k) != x) return fail(Reason::signed_overflow);
+      if ((nd.flags & ir::bit(ir::Flag::nuw)) && lshr(r, k) != x) return fail(Reason::unsigned_overflow);
+      break;
+    case Op::lshr: r = lshr(x, k); break;
+    case Op::ashr: r = ashr(x, k); break;
+    default: return unsupported(n);
+    }
+    if ((nd.flags & ir::bit(ir::Flag::exact)) && k && !is_zero(x) && countr_zero(x) < k) return fail(Reason::inexact);
+    return set(f, n, of_wide(r, *s));
+  }
   u64 r = 0;
   switch (nd.op) {
   case Op::shl:
@@ -1024,6 +1168,38 @@ std::optional<u64> truncate(T x, u32 width, bool is_signed) {
   T top = std::ldexp(T(1), int(is_signed ? width - 1 : width));
   if (is_signed ? (t < -top || t >= top) : (t <= T(-1) || t >= top)) return std::nullopt;
   return is_signed ? u64(std::int64_t(t)) : u64(t);
+}
+
+// A 128-bit integer rounded to nearest, ties to even ([conv.fpint]/2): its top 64 bits, with
+// a sticky bit for any below them, round as the whole value does.
+template <class T>
+T from_wide(ast::Bits128 v, bool is_signed) {
+  bool negative = is_signed && ast::is_negative(v);
+  ast::Bits128 m = negative ? ast::wide::neg(v) : v;
+  T r;
+  if (m.hi == 0) {
+    r = static_cast<T>(m.lo);
+  } else {
+    u32 drop = ast::wide::bit_width(m) - 64;  // 1 to 64
+    u64 top = ast::wide::lshr(m, drop).lo;
+    u64 below = drop == 64 ? m.lo : m.lo & ((u64{1} << drop) - 1);
+    r = std::ldexp(static_cast<T>(top | u64(below != 0)), int(drop));
+  }
+  return negative ? -r : r;
+}
+// `x` truncated to a 128-bit integer ([conv.fpint]/1); none when that does not fit.
+template <class T>
+std::optional<ast::Bits128> truncate_wide(T x, bool is_signed) {
+  if (!std::isfinite(x)) return std::nullopt;
+  T t = std::trunc(x);
+  T top = std::ldexp(T(1), is_signed ? 127 : 128);
+  if (is_signed ? (t < -top || t >= top) : (t <= T(-1) || t >= top)) return std::nullopt;
+  T a = std::fabs(t);
+  // Both halves are exact: scaling by a power of two, and the bits of `a` below 2^64.
+  u64 hi = static_cast<u64>(std::ldexp(a, -64));
+  u64 lo = static_cast<u64>(a - std::ldexp(static_cast<T>(hi), 64));
+  ast::Bits128 m{lo, hi};
+  return t < 0 ? ast::wide::neg(m) : m;
 }
 
 Machine::Flow Machine::float_shape(QualType t, const Shape*& s) {
@@ -1106,6 +1282,12 @@ Machine::Flow Machine::float_convert(Frame& f, NodeId n) {
   }
   case Op::f2i: {
     if (to.kind != Kind::integer || from.kind != Kind::floating || a.kind != VKind::floating) return fail(Reason::ill_formed);
+    if (to.width == 128) {
+      auto r = from.width == 32 ? truncate_wide(decode<float>(a.bits), to.is_signed)
+                                : truncate_wide(decode<double>(a.bits), to.is_signed);
+      if (!r) return fail(Reason::float_to_integer);
+      return set(f, n, Value::wide(*r));
+    }
     auto r = from.width == 32 ? truncate(decode<float>(a.bits), to.width, to.is_signed)
                               : truncate(decode<double>(a.bits), to.width, to.is_signed);
     if (!r) return fail(Reason::float_to_integer);
@@ -1114,6 +1296,12 @@ Machine::Flow Machine::float_convert(Frame& f, NodeId n) {
   case Op::i2f: {
     if (to.kind != Kind::floating || from.kind != Kind::integer || a.kind != VKind::integer) return fail(Reason::ill_formed);
     bool s = from.is_signed;
+    if (from.width == 128) {
+      ast::Bits128 v = wide_of(a, from);
+      // Rounding the largest values up to 2^128 overflows `float` to an infinity, as in Clang and GCC.
+      if (to.width == 32) return set(f, n, Value::floating(encode(from_wide<float>(v, s))));
+      return set(f, n, Value::floating(encode(from_wide<double>(v, s))));
+    }
     if (to.width == 32) return set(f, n, Value::floating(encode(s ? static_cast<float>(i64(a.bits)) : static_cast<float>(a.bits))));
     return set(f, n, Value::floating(encode(s ? static_cast<double>(i64(a.bits)) : static_cast<double>(a.bits))));
   }
@@ -1295,6 +1483,10 @@ i64 Machine::offset_of(const Value& p) {
   QualType cur = object.type;
   i64 off = 0;
   for (PathStep st : steps_of(u32(p.bits))) {
+    if (st.step == ir::Step::base) {
+      const auto& base = *object.record->primary_base;
+      return i64(base.offset + (p.past ? base.size : 0));
+    }
     if (st.step == ir::Step::field) {
       const auto& field = object.record->fields[st.index];
       off += i64(field.layout.offset);
@@ -1348,6 +1540,9 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
     default: return fail(Reason::ill_formed);
     }
   }
+  if (a.kind == VKind::object && b.kind == VKind::object &&
+      (objects_[a.ref].unknown_reference || objects_[b.ref].unknown_reference))
+    return fail(Reason::unspecified_comparison);
   if (!equality) {
     if (a.kind == VKind::null && b.kind == VKind::null) return result(pred == le || pred == ge);
     return fail(Reason::unspecified_comparison);
@@ -1368,9 +1563,10 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
 
 // ------------------------------------------------------------------ execution
 
-Machine::Flow Machine::fail(Reason r, u64 arg) {
+Machine::Flow Machine::fail(Reason r, u64 arg, EntityId global) {
   failure_.reason = r;
   failure_.arg = arg;
+  failure_.global = global;
   failure_.stack.clear();
   for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) failure_.stack.push_back({it->entity, NodeId(it->node)});
   failed_ = true;
@@ -1393,13 +1589,13 @@ Machine::Flow Machine::jump(Frame& f, NodeId n, u32 succ) {
 
 // Pushes the callee's frame; its entry block takes the state, then the arguments.
 Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityId callee,
-                             std::span<const ir::ValueId> args) {
+                             std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver) {
   if (frames_.size() >= config_.depth_limit) return fail(Reason::depth_limit, config_.depth_limit);
   if (body->blocks.empty() || body->block(ir::BlockId(0)).nparams != args.size() + 1) return fail(Reason::ill_formed);
   Frame callee_frame{body, callee, std::vector<Value>(body->values.size()), body->block(ir::BlockId(0)).node0};
-  u32 i = 0;
-  for (ir::ValueId p : body->params_of(ir::BlockId(0)))
-    if (i++ > 0) callee_frame.regs[ir::raw(p)] = reg(f, args[i - 2]);
+  const auto parameters = body->params_of(ir::BlockId(0));
+  for (std::size_t i = 0; i < args.size(); ++i)
+    callee_frame.regs[ir::raw(parameters[i + 1])] = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
   frames_.push_back(std::move(callee_frame));  // `f` dangles from here
   return Flow::called;
 }
@@ -1442,7 +1638,7 @@ Result Machine::describe(const Value& v, QualType t) {
   r.type = t;
   switch (v.kind) {
   case VKind::none:
-  case VKind::integer: r.kind = Result::Kind::integer; r.bits = v.bits; break;
+  case VKind::integer: r.kind = Result::Kind::integer; r.bits = v.bits; r.hi = v.hi; break;
   case VKind::floating: r.kind = Result::Kind::floating; r.bits = v.bits; break;
   case VKind::null: r.kind = Result::Kind::null; break;
   case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
@@ -1486,6 +1682,7 @@ Machine::Flow Machine::capture_result(u32 object) {
   const Object& ob = objects_[object];
   if (!ob.storage) return fail(Reason::storage_ended);
   if (ob.record_life == Life::after) return fail(Reason::outside_lifetime);
+  if (ob.record->dynamic) return fail(Reason::unsupported_constant);
   Result result;
   result.kind = Result::Kind::aggregate;
   result.type = ob.type;

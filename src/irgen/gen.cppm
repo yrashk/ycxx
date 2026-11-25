@@ -65,8 +65,8 @@ struct FunctionInput {
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
   // For the thunk of a constant expression (`{ return e; }`, query-engine.md §B7): the values of
   // the enclosing function's locals usable in constant expressions ([expr.const]), by local
-  // index. Each becomes a const object of the thunk, made at its entry; a local without a value
-  // becomes an object outside its lifetime.
+  // index. The thunk sets up their values at entry. A supported opaque record is available
+  // only as an object designator. Other locals have no usable object.
   bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
   // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
@@ -91,11 +91,19 @@ struct FunctionInput {
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
   ast::EntityId destructor_table = ast::EntityId::none;
+  // The table a dynamic class's constructor installs once its base subobject is initialized (#309).
+  ast::EntityId constructor_table = ast::EntityId::none;
   // The initialized prefix of a flat aggregate while evaluating one selected default.
   struct InitializedFields {
     ast::EntityId owner = ast::EntityId::none;
     std::span<const ast::ConstId> values{};
   } initialized_fields{};
+  // Record parameters, their supported reference referents, and direct automatic receivers
+  // available to a thunk. Their lifetimes began outside the evaluation and their values are unknown.
+  // Sorted by local index.
+  std::span<const std::uint32_t> opaque_record_locals{};
+  // Named record reference parameters in the thunk's enclosing frame, sorted by local index.
+  std::span<const std::uint32_t> discardable_reference_parameters{};
 };
 
 struct FunctionIr {
@@ -248,7 +256,7 @@ class Gen {
     std::uint64_t imms[] = {word(ty(p.type)), 0};  // the type, then an empty path
     return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type) | flags));
   }
-  void store(const Place& p, ValueId v) {
+  void store(const Place& p, ValueId v, ir::Flags flags = 0) {
     ValueId ops[] = {p.ptr, v};
     if (p.bit_field) {
       std::uint64_t imms[] = {*p.bit_field};
@@ -256,7 +264,7 @@ class Gen {
       return;
     }
     std::uint64_t imms[] = {word(ty(p.type)), 0};
-    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type));
+    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type) | flags);
   }
   // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
   Place initializing_place(Place p) {
@@ -320,10 +328,10 @@ class Gen {
     std::optional<uint32_t> vacuous_local = {};  // a declaration a jump can bypass
     bool conditional = false;  // a null pointer denotes a temporary that was not created
   };
-  void begin_lifetime(const Place& p) {
+  void begin_lifetime(const Place& p, ir::Flags flags = 0) {
     ValueId ops[] = {p.ptr};
     std::uint64_t imms[] = {word(ty(p.type))};
-    stateful(ir::Op::obj__begin, {}, ops, imms);
+    stateful(ir::Op::obj__begin, {}, ops, imms, flags);
   }
   void start_lifetime(const Place& p, ast::EntityId destructor = ast::EntityId::none,
                       std::optional<uint32_t> vacuous_local = {}) {
@@ -424,6 +432,7 @@ class Gen {
     if (fn_.this_type) this_ = b_.param(block_, 1);
     if (result_param_) result_ = Place{b_.param(block_, result_param_), rt};
     loc_ = fn_.body_offset;
+    pending_constructor_table_ = this_ ? fn_.constructor_table : ast::EntityId::none;
     push_scope();
     // The parameters are the first body locals (#41), named by `LocalRef` like the others.
     slots_.assign(in_.seqs.size(fn_.body.locals), std::nullopt);
@@ -445,16 +454,35 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
-    // A thunk's locals: those with values are const objects; any other is an object whose
-    // lifetime has ended, so reading or modifying it fails.
+    // The thunk imports known values and supported opaque record identities. Other
+    // scalar objects have ended lifetimes and other record slots stay absent.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
       const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
       if (rec.flags & ast::local_flag::requires_parameter) continue;
       ast::QualType t = rec.type;
-      // A class or array local is never usable in a constant expression: naming it is
-      // unsupported, so it needs no object.
-      if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
+      if (std::ranges::binary_search(fn_.opaque_record_locals, i)) {
+        const bool reference = facts_.is_reference(t);
+        const Place p = begin_object(reference ? facts_.referee(t) : t, ir::Init::indeterminate);
+        ir::Flags flags = ir::bit(ir::Flag::outside_unknown);
+        if (reference) flags |= ir::bit(ir::Flag::unknown_reference);
+        begin_lifetime(p, flags);
+        slots_[i] = p;
+        continue;
+      }
+      if (cls(t) == TypeClass::record) {
+        if (i >= fn_.local_values.size() || !fn_.local_values[i]) continue;
+        const auto value = *fn_.local_values[i];
+        if (!in_.values.is<ast::VAggregate>(value)) continue;
+        const auto type = in_.values.get<ast::VAggregate>(value).type;
+        if (!same_type(ast::without_cv(t), ast::without_cv(type))) continue;
+        const Place p = begin_object(t, ir::Init::indeterminate);
+        initialize_constant({p.ptr, type}, value);
+        begin_lifetime(p, ir::bit(ir::Flag::outside_lifetime));
+        slots_[i] = p;
+        continue;
+      }
+      if (cls(t) == TypeClass::array || facts_.is_reference(t) ||
           in_.types.is<ast::TMemberPtr>(in_.types.canon(t)))
         continue;
       // An enclosing automatic nullptr_t can be converted without reading its object (CWG 2907).
@@ -569,6 +597,18 @@ class Gen {
     return f();
   }
 
+  template <class Body>
+  auto with_source_line(At a, Body&& f) {
+    const auto context = get<ast::SourceLineContext>(a);
+    struct Restore {
+      uint32_t& line;
+      uint32_t saved;
+      ~Restore() { line = saved; }
+    } restore{source_line_, source_line_};
+    if (source_line_ == 0) source_line_ = context.line;
+    return f(child(a, context.arg));
+  }
+
   // A substatement is in a scope of its own even if it is not a compound statement ([stmt.pre]).
   void substmt(At a) {
     push_scope();
@@ -621,10 +661,30 @@ class Gen {
     stmt(child(handler_at, handler.body));
   }
 
+  // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point, which the
+  // vptr at offset zero of `*this` holds.
+  void install_vptr(ast::EntityId table_entity) {
+    const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+    const auto table_type = facts_.pointer_to(byte);
+    const auto vptr_type = facts_.pointer_to(table_type);
+    const auto table = pure(ir::Op::global, table_type, {}, {word(table_entity)});
+    const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
+    const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
+    const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
+    store({vptr, table_type}, address_point);
+  }
+
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
     Position here(*this, a.offset);
+    // [class.cdtor], [class.base.init]: a dynamic class's constructor installs its own table
+    // after its base subobject and before its members. A delegating constructor's target does.
+    if (pending_constructor_table_ != ast::EntityId::none && a.id != fn_.body.tree &&
+        !(is<ast::MemberInit>(a) && get<ast::MemberInit>(a).field == ~0u)) {
+      if (!is<ast::DelegatingInit>(a)) install_vptr(pending_constructor_table_);
+      pending_constructor_table_ = ast::EntityId::none;
+    }
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
       push_scope();
@@ -662,18 +722,8 @@ class Gen {
       });
     } else if (is<ast::Destructor>(a)) {
       auto d = get<ast::Destructor>(a);
-      if (fn_.destructor_table != ast::EntityId::none) {
-        // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point.
-        // [class.cdtor]: virtual calls during destruction use the destructor's class.
-        const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
-        const auto table_type = facts_.pointer_to(byte);
-        const auto vptr_type = facts_.pointer_to(table_type);
-        const auto table = pure(ir::Op::global, table_type, {}, {word(fn_.destructor_table)});
-        const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
-        const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
-        const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
-        store({vptr, table_type}, address_point);
-      }
+      // [class.cdtor]: virtual calls during destruction use the destructor's class.
+      if (fn_.destructor_table != ast::EntityId::none) install_vptr(fn_.destructor_table);
       for (ast::Child c : ast_.children(d.members)) epilogue_.push_back(child(a, c));
       stmt(child(a, d.body));
     } else if (is<ast::DeclStmt>(a)) {
@@ -807,6 +857,7 @@ class Gen {
     e = strip_parens(e);
     if (class_selection(e)) return true;
     if (is<ast::DefaultArg>(e)) return selects_class_initializer(child(e, get<ast::DefaultArg>(e).arg));
+    if (is<ast::SourceLineContext>(e)) return selects_class_initializer(child(e, get<ast::SourceLineContext>(e).arg));
     if (is<ast::DefaultMemberInit>(e))
       return selects_class_initializer(child(e, get<ast::DefaultMemberInit>(e).init));
     if (!is<ast::InitList>(e)) return false;
@@ -908,6 +959,7 @@ class Gen {
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
     if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
+    if (is<ast::SourceLineContext>(e)) return value_initializes(child(e, get<ast::SourceLineContext>(e).arg));
     if (is<ast::OrderedBinary>(e)) {
       const auto binary = get<ast::OrderedBinary>(e);
       if (binary.op == ast::OrderedOp::comma) return value_initializes(child(e, binary.rhs));
@@ -1036,6 +1088,46 @@ class Gen {
     }
   }
 
+  // [expr.spaceship]: compares the operands once, then copies the comparison category's static
+  // member that names the result ([cmp.categories]): less, equal, greater, or for a NaN operand
+  // (a partial ordering's fourth member) unordered.
+  void three_way(const Place& p, At e) {
+    const auto tw = get<ast::ThreeWay>(e);
+    const At l = child(e, tw.lhs), r = child(e, tw.rhs);
+    ValueId x{}, y{};
+    unsequenced(std::array{l, r}, [&](std::size_t i, At o) { (i ? y : x) = rvalue(o); });
+    const auto results = in_.seqs.elements(tw.results);
+    if (results.size() < 3) throw Unsupported{"a comparison category without its values"};
+    const ast::QualType ot = info(l).type, b = facts_.bool_type(), ptr = facts_.pointer_to(p.type);
+    // `x < y`, `x == y` or `x > y` in the operands' common type, as `binary` compares.
+    auto compare = [&](ast::BinaryOp op) {
+      using enum ast::BinaryOp;
+      switch (cls(ot)) {
+        case TypeClass::pointer:
+        case TypeClass::floating: {
+          const ir::Pred p = op == lt ? ir::Pred::lt : op == gt ? ir::Pred::gt : ir::Pred::eq;
+          const ir::Op k = cls(ot) == TypeClass::pointer ? ir::Op::ptr_cmp : ir::Op::fcmp;
+          return pure(k, b, {x, y}, {std::to_underlying(p)});
+        }
+        default: {
+          const bool s = is_signed(ot);
+          const ir::Pred p = op == lt ? (s ? ir::Pred::slt : ir::Pred::ult) : op == gt ? (s ? ir::Pred::sgt : ir::Pred::ugt)
+                                      : ir::Pred::eq;
+          return pure(ir::Op::icmp, b, {x, y}, {std::to_underlying(p)});
+        }
+      }
+    };
+    auto value = [&](std::size_t i) { return pure(ir::Op::global, ptr, {}, {word(results[i])}); };
+    const ValueId less = compare(ast::BinaryOp::lt), equal = compare(ast::BinaryOp::eq);
+    ValueId otherwise = value(2);
+    if (results.size() > 3) {
+      // Ordered: false when either operand is a NaN ([expr.rel]), which leaves `unordered`.
+      otherwise = pure(ir::Op::select, ptr, {compare(ast::BinaryOp::gt), value(2), value(3)});
+    }
+    const ValueId source = pure(ir::Op::select, ptr, {less, value(0), pure(ir::Op::select, ptr, {equal, value(1), otherwise})});
+    copy(p, {source, p.type});
+  }
+
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed, bool select_class = false) {
@@ -1043,6 +1135,8 @@ class Gen {
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class);
     if (is<ast::DefaultArg>(e))
       return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class); });
+    if (is<ast::SourceLineContext>(e))
+      return with_source_line(e, [&](At arg) { initialize(p, arg, zeroed, select_class); });
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
@@ -1066,6 +1160,7 @@ class Gen {
       return;
     }
     if (is<ast::CtorCall>(e)) return call_constructor(p.ptr, e, zeroed);
+    if (is<ast::ThreeWay>(e)) return three_way(p, e);
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
       // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
@@ -1170,6 +1265,7 @@ class Gen {
   Place class_source(At e) {
     while (is<ast::Paren>(e) || is<ast::DefaultArg>(e))
       e = child(e, is<ast::Paren>(e) ? get<ast::Paren>(e).operand : get<ast::DefaultArg>(e).arg);
+    if (is<ast::SourceLineContext>(e)) return with_source_line(e, [&](At arg) { return class_source(arg); });
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
@@ -1572,6 +1668,12 @@ class Gen {
   // Evaluates an expression for its side effects ([expr.context]).
   void discard(At a) {
     if (a.id == NodeId::none) return;
+    // A discarded three-way comparison: only its operands' evaluations remain.
+    if (const At s = strip_parens(a); is<ast::ThreeWay>(s)) {
+      const auto tw = get<ast::ThreeWay>(s);
+      unsequenced(std::array{child(s, tw.lhs), child(s, tw.rhs)}, [&](std::size_t, At o) { discard(o); });
+      return;
+    }
     const auto expr = info(a);
     if (expr.category == ast::ValueCategory::prvalue) {
       rvalue_or_void(a);
@@ -1579,7 +1681,35 @@ class Gen {
     }
     // Discarding a nonvolatile direct field designator does not read its value.
     const auto cv = ast::cv_of(expr.type);
-    if ((cv == ast::Cv::none || cv == ast::Cv::const_) && default_field(a)) return;
+    if (cv == ast::Cv::none || cv == ast::Cv::const_) {
+      if (default_field(a)) return;
+      // In a thunk, discarding a record glvalue evaluates its effects without requiring
+      // the object's address. Preserve the sequence and selected arm of compound expressions.
+      if (fn_.thunk && cls(expr.type) == TypeClass::record && access_flags(expr.type) == 0) {
+        const At operand = strip_parens(a);
+        if (is<ast::OrderedBinary>(operand)) {
+          const auto sequence = get<ast::OrderedBinary>(operand);
+          if (sequence.op == ast::OrderedOp::comma) {
+            discard(child(operand, sequence.lhs));
+            discard(child(operand, sequence.rhs));
+            return;
+          }
+        }
+        if (is<ast::Conditional>(operand)) {
+          conditional(operand, /*glvalue=*/false, ast::builtin(facts_.interners(), ast::Builtin::void_));
+          return;
+        }
+        if (is<ast::DeclRef>(operand) && !get<ast::DeclRef>(operand).reference) return;
+        if (is<ast::LocalRef>(operand)) {
+          const auto local = get<ast::LocalRef>(operand).local;
+          // Naming a reference parameter need not observe the referent when the result is
+          // discarded ([expr.const.core]). An actual use still needs its binding.
+          if (!facts_.is_reference(in_.seqs.at(fn_.body.locals, local).type) ||
+              std::ranges::binary_search(fn_.discardable_reference_parameters, local))
+            return;
+        }
+      }
+    }
     lvalue(a);
   }
 
@@ -1638,8 +1768,11 @@ class Gen {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) unsupported(a, "with a pointer-to-member value");
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::ConstantProbe>(a)) return int_constant(t, get<ast::ConstantProbe>(a).proved);
+    if (is<ast::SourceLine>(a))
+      return int_constant(t, source_line_ != 0 ? source_line_ : get<ast::SourceLine>(a).lexical_line);
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
+    if (is<ast::SourceLineContext>(a)) return with_source_line(a, [&](At arg) { return rvalue_or_void(arg); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::DynamicCastVoid>(a)) return dynamic_cast_void(a);
     if (is<ast::DynamicCastPointer>(a)) return dynamic_cast_pointer(a);
@@ -1686,19 +1819,36 @@ class Gen {
     }
     if (is<ast::BuiltinCall>(a)) {
       auto b = get<ast::BuiltinCall>(a);
-      if (b.op == ast::BuiltinOp::trap) {
-        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::explicit_trap));
+      if (b.op == ast::BuiltinOp::trap || b.op == ast::BuiltinOp::unreachable) {
+        // Native code traps on both; constant evaluation names which was reached ([expr.const]).
+        const auto flag = b.op == ast::BuiltinOp::trap ? ir::Flag::explicit_trap : ir::Flag::assumed_unreachable;
+        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(flag));
         live_ = false;
         // A parent expression can still emit its remaining operands or join edge.
         ensure_live();
         return std::nullopt;
       }
-      At arg = child(a, ast_.children(b.args)[0]);
-      ValueId value = rvalue(arg);
+      const auto args = ast_.children(b.args);
       switch (b.op) {
-        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
-        case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
-        case ast::BuiltinOp::trap: std::unreachable();
+        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::strlen: {
+          const At arg = child(a, args[0]);
+          return string_length(t, info(arg).type, rvalue(arg));
+        }
+        case ast::BuiltinOp::add_overflow:
+        case ast::BuiltinOp::mul_overflow: {
+          const At left = child(a, args[0]);
+          const ValueId operands[] = {rvalue(left), rvalue(child(a, args[1]))};
+          const ValueId destination = rvalue(child(a, args[2]));
+          const ast::QualType integer = info(left).type;
+          const ir::Ty results[] = {vty(integer), vty(t)};
+          const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::sadd_overflow : ir::Op::smul_overflow;
+          const ir::NodeId checked = emit(op, results, operands);
+          store({destination, integer}, b_.result(checked), ir::bit(ir::Flag::call_body));
+          return b_.result(checked, 1);
+        }
+        case ast::BuiltinOp::trap:
+        case ast::BuiltinOp::unreachable: std::unreachable();
       }
       std::unreachable();
     }
@@ -2054,7 +2204,6 @@ class Gen {
       case add: case sub:
         if (cls(t) == TypeClass::pointer || cls(ot) == TypeClass::pointer) return pointer_arith(bn.op, t, l, x, r, y);
         return arith(bn.op, t, x, y);
-      case spaceship: unsupported(a, "<=>");
       default: return arith(bn.op, t, x, y);
     }
   }
@@ -2100,7 +2249,8 @@ class Gen {
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
-          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a)))
+          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) ||
+          is<ast::SourceLine>(a) || is<ast::SourceLineContext>(a)))
       return false;
     bool proven = true;
     ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {
@@ -2112,10 +2262,15 @@ class Gen {
   ValueId new_object(At a) {
     auto n = get<ast::NewObject>(a);
     At init = child(a, n.init);
-    if (!fn_.thunk && !nonthrowing_initializer(init))
+    ast::QualType p = n.info.type;
+    // A class's constructor may throw, and [expr.new]/28 then calls the deallocation function.
+    // That needs an exceptional edge, which only certified frames get (#1135). A frame with a
+    // new-expression is never certified (the pipeline's unwind proof admits no NewObject), so
+    // the frame has no unwind information and such an exception terminates the program there,
+    // before a caller could observe the unreleased storage.
+    if (!fn_.thunk && cls(facts_.pointee(p)) != TypeClass::record && !nonthrowing_initializer(init))
       throw Unsupported{"cleanup for a potentially throwing new-initializer"};
     ValueId storage = rvalue(child(a, n.allocation));
-    ast::QualType p = n.info.type;
     if (n.placement) {
       ValueId objects[] = {storage};
       std::uint64_t types[] = {word(ty(facts_.pointee(p)))};
@@ -2126,11 +2281,43 @@ class Gen {
     // initializer can then fall back to runtime without evaluating the new-initializer.
     if (fn_.thunk) return object;
     ast::QualType t = facts_.pointee(p);
-    initialize({object, t}, init, false);
+    // [dcl.init.general]/9: value-initialization zero-initializes a class object before any
+    // constructor runs, and the allocated storage is not zero. Copy a zero object into it.
+    // Zero it in place: a zero temporary would put the whole object on the stack.
+    const bool zeroed = cls(t) == TypeClass::record && value_initializes(init);
+    if (zeroed) zero_bytes(storage, allocated_size(child(a, n.allocation)));
+    initialize({object, t}, init, zeroed);
     ValueId objects[] = {object};
     std::uint64_t types[] = {word(ty(t))};
     stateful(ir::Op::obj__begin, {}, objects, types);
     return object;
+  }
+
+  // The byte count a new-expression passes to its allocation function: sema's `sizeof(T)`.
+  std::uint64_t allocated_size(At allocation) {
+    if (!is<ast::Call>(allocation)) unsupported(allocation, "as an allocation");
+    const auto args = ast_.children(get<ast::Call>(allocation).args);
+    At size = args.empty() ? At{} : strip_parens(child(allocation, args.front()));
+    if (args.empty() || !is<ast::Literal>(size) || !in_.values.is<ast::VInt>(get<ast::Literal>(size).value))
+      unsupported(allocation, "with a computed size");
+    return in_.values.get<ast::VInt>(get<ast::Literal>(size).value).bits.lo;
+  }
+  // Stores zero to each of `count` bytes from `storage`, in a loop.
+  void zero_bytes(ValueId storage, std::uint64_t count) {
+    const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+    const auto bytes = facts_.pointer_to(byte);
+    const ValueId first = pure(ir::Op::ptr_cast, bytes, {storage}, {word(ty(bytes))});
+    const ast::QualType index_type = facts_.ptrdiff_type();
+    const ValueId end = int_constant(index_type, std::int64_t(count));
+    ir::BlockId head = new_block({index_type}), body = new_block(), done = new_block();
+    br(head, {int_constant(index_type, 0)});
+    enter(head);
+    const ValueId index = b_.param(head, 1);
+    cond_br(pure(ir::Op::icmp, facts_.bool_type(), {index, end}, {std::to_underlying(ir::Pred::slt)}), edge(body), edge(done));
+    enter(body);
+    store({pure(ir::Op::ptr_add, bytes, {first, index}, {word(ty(byte))}), byte}, zero(byte));
+    br(head, {arith(ast::BinaryOp::add, index_type, index, int_constant(index_type, 1))});
+    enter(done);
   }
 
   ValueId new_array(At a) {
@@ -2154,10 +2341,18 @@ class Gen {
   void delete_object(At a) {
     if (fn_.thunk) unsupported(a, "in constant evaluation");
     auto d = get<ast::DeleteObject>(a);
-    ValueId addr = rvalue(child(a, d.address));
-    if_nonnull(addr, [&] {
-      stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
-      ValueId args[] = {addr, rvalue(child(a, d.size))};
+    At operand = child(a, d.address);
+    ValueId object = rvalue(operand);
+    if_nonnull(object, [&] {
+      // [expr.delete]/6: the destructor ends the object, then its storage is released.
+      if (d.destructor != ast::EntityId::none) {
+        ValueId self[] = {object};
+        call_fn(d.destructor, facts_.int_type(), self, ImplicitObject::constructor_or_destructor, true);
+      }
+      stateful(ir::Op::obj__end, {}, std::span(&object, 1));
+      ast::QualType void_pointer = facts_.pointer_to(d.info.type);
+      ValueId address = pure(ir::Op::ptr_cast, void_pointer, {object}, {word(ty(void_pointer))});
+      ValueId args[] = {address, rvalue(child(a, d.size))};
       call_fn(d.function, d.info.type, args);
     });
   }
@@ -2307,12 +2502,31 @@ class Gen {
     }
     return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
   }
+  std::optional<ValueId> immediate_virtual_call(At a) {
+    const auto call = get<ast::ImmediateVirtualCall>(a);
+    std::vector<ValueId> args{rvalue(child(a, call.object))};
+    for (ast::Child arg : ast_.children(call.args)) {
+      At x = child(a, arg);
+      if (argument_object(x)) unsupported(a, "of an immediate virtual function with a by-value class argument");
+      args.push_back(argument(x));
+    }
+    if (args.size() > 32) unsupported(a, "with more than 32 arguments");
+    const auto result = result_type(call.info);
+    const ir::Ty value[] = {vty(result)};
+    const bool has_value = cls(result) != TypeClass::void_;
+    const std::uint64_t imms[] = {word(call.function), call.qualified};
+    const auto n = stateful(ir::Op::call_immediate_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
+    return has_value ? std::optional(b_.result(n, 1)) : std::nullopt;
+  }
+
   bool member_call_expression(At a) {
-    return is<ast::MemberCall>(a) || is<ast::VirtualMemberCall>(a) || is<ast::AssignmentCall>(a);
+    return is<ast::MemberCall>(a) || is<ast::VirtualMemberCall>(a) || is<ast::ImmediateVirtualCall>(a) ||
+           is<ast::AssignmentCall>(a);
   }
   // A non-static member function's call: the object's address is the first ABI argument.
   std::optional<ValueId> member_call(At a, std::optional<ValueId> into = std::nullopt) {
     if (is<ast::VirtualMemberCall>(a)) return virtual_member_call(a);
+    if (is<ast::ImmediateVirtualCall>(a)) return immediate_virtual_call(a);
     if (is<ast::AssignmentCall>(a)) {
       auto c = get<ast::AssignmentCall>(a);
       if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
@@ -2489,6 +2703,7 @@ class Gen {
     }
     if (is<ast::Paren>(a)) return lvalue(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return lvalue(child(a, get<ast::DefaultArg>(a).arg)); });
+    if (is<ast::SourceLineContext>(a)) return with_source_line(a, [&](At arg) { return lvalue(arg); });
     if (is<ast::Unary>(a)) {
       auto u = get<ast::Unary>(a);
       At o = child(a, u.operand);
@@ -2642,6 +2857,7 @@ class Gen {
   std::set<uint32_t> bypassed_locals_;       // discovered from scope transitions during first emission
   std::map<uint32_t, Place> jump_bindings_;  // local index to the address of its current instance
   std::optional<ValueId> this_;              // a non-static member function's `this`
+  ast::EntityId pending_constructor_table_ = ast::EntityId::none;  // installed before the first member
   std::optional<Place> result_;              // the object a class result initializes
   uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
@@ -2651,6 +2867,7 @@ class Gen {
   bool selecting_initializer_ = false;      // local class initializer selection and its cleanup
   bool in_aggregate_default_ = false;        // evaluating a selected default member initializer
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
+  uint32_t source_line_ = 0;                 // outermost active default argument's invocation line
 };
 
 template <Facts F>

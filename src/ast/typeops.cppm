@@ -123,7 +123,7 @@ Builtin underlying(const Target& t, Builtin b)
 }
 
 bool is_signed(const Target& t, Builtin b) {
-  return is_integral(b) && b != Builtin::bool_ && is_standard_signed(underlying(t, b));
+  return is_integral(b) && b != Builtin::bool_ && is_signed_integer(underlying(t, b));
 }
 
 // The width in bits of an integral type's values: 1 for bool, its size in bits otherwise (no
@@ -135,7 +135,8 @@ u32 width_of(const Target& t, Builtin b)
 }
 
 // Integer conversion rank ([conv.rank]): bool lowest; a character type has its underlying type's
-// rank; an unsigned type its signed counterpart's.
+// rank; an unsigned type its signed counterpart's. The 128-bit extended types are wider than every
+// standard type, so they rank above them all.
 u32 integer_rank(const Target& t, Builtin b)
   pre(is_integral(b))
 {
@@ -146,6 +147,7 @@ u32 integer_rank(const Target& t, Builtin b)
     case Builtin::int_: case Builtin::unsigned_int: return 4;
     case Builtin::long_: case Builtin::unsigned_long: return 5;
     case Builtin::long_long: case Builtin::unsigned_long_long: return 6;
+    case Builtin::int128: case Builtin::unsigned_int128: return 7;
     default: std::unreachable();
   }
 }
@@ -159,7 +161,7 @@ bool represents(const Target& t, Builtin to, u32 width, bool is_signed_) {
 }
 
 Builtin unsigned_counterpart(Builtin b)
-  pre(is_standard_signed(b) || is_standard_unsigned(b))
+  pre(is_signed_integer(b) || is_unsigned_integer(b))
 {
   switch (b) {
     case Builtin::signed_char: return Builtin::unsigned_char;
@@ -167,6 +169,7 @@ Builtin unsigned_counterpart(Builtin b)
     case Builtin::int_: return Builtin::unsigned_int;
     case Builtin::long_: return Builtin::unsigned_long;
     case Builtin::long_long: return Builtin::unsigned_long_long;
+    case Builtin::int128: return Builtin::unsigned_int128;
     default: return b;
   }
 }

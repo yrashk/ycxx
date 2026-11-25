@@ -35,6 +35,7 @@ enum class Reason : std::uint8_t {
   past_end_access [[=says{"access through a pointer past the end of an object"}]],
   access_type [[=says{"access to an object through a glvalue of a different type"}]],
   modify_const [[=says{"modification of a const object"}]],
+  volatile_object_access [[=says{"access to a volatile object through a non-volatile glvalue"}]],
   unsequenced [[=says{"unsequenced modification and access to the same object"}]],
   // Pointers ([expr.add], [expr.eq], [expr.rel], [expr.static.cast]).
   pointer_bounds [[=says{"pointer arithmetic leaves the bounds of the array"}]],
@@ -58,6 +59,8 @@ enum class Reason : std::uint8_t {
   static_definition [[=says{"control passes through the definition of a static variable"}]],
   unreachable [[=says{"control reached the end of a function that must return a value"}]],
   explicit_trap [[=says{"execution reached __builtin_trap()"}]],
+  // [utility.unreachable]: reaching it is undefined behavior.
+  assumed_unreachable [[=says{"execution reached __builtin_unreachable()"}]],
   local_address [[=says{"the result points to an object with automatic storage duration"}]],
   // Not yet: an operation the interpreter does not evaluate, by its op number.
   unsupported [[=says{"the interpreter does not evaluate '{0}' yet"}]],
@@ -65,6 +68,8 @@ enum class Reason : std::uint8_t {
   unsupported_constant [[=says{"the interpreter does not evaluate this constant yet"}]],
   // The body broke an invariant `ir::verify` does not check (a value of the wrong kind).
   ill_formed [[=says{"internal error: the IR is ill-formed here"}]],
+  unknown_dynamic_type [[=says{"a virtual call on an object whose dynamic type is constexpr-unknown"}]],
+  immediate_dispatch_phase [[=says{"an immediate virtual call during construction or destruction is not supported yet"}]],
 };
 
 consteval auto reason_enumerators() { return std::define_static_array(std::meta::enumerators_of(^^Reason)); }

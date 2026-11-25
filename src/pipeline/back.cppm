@@ -82,7 +82,9 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor };
+enum class Special : std::uint8_t {
+  none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor, template_parameter_object
+};
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -113,6 +115,8 @@ struct Entity {
   bool local_parameter_binding = false;
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
   bool nonthrowing = false;  // including implicit exception specifications on destructors
+  bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
+  bool unsupported_class_parameter_signature = false;
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -149,6 +153,13 @@ struct FunctionDef {
   EntityId constructor_initializer_callee = EntityId::none;
   EntityId unwind_through_constructor = EntityId::none;
   EntityId destructor_table = EntityId::none;  // the primary table installed by D1 and D2
+  // The primary table a dynamic class's constructor installs after its base subobject (#309).
+  EntityId constructor_table = EntityId::none;
+  bool emit_if_referenced = false;  // an eligible immediate definition (#1097)
+  // A named namespace-scope immediate function template instance without local statics or closures.
+  bool plain_immediate_template = false;
+  bool private_constexpr = false;  // a candidate for demand-driven inline emission (#1174)
+  bool unsupported_class_parameter_abi = false;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -160,6 +171,7 @@ struct Variable {
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
   bool coalesced = false;  // an eligible external inline data definition, weak (#432, #903)
+  bool inline_definition = false;
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -188,6 +200,7 @@ struct ClassShape {
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
+  bool dynamic_root = false;  // a dynamic class whose own vptr is at offset zero (#309)
   std::vector<ast::NameId> field_names{};
   bool plain_ownership_record = false;
   EntityId ownership_destructor = EntityId::none;
@@ -209,6 +222,19 @@ struct OwnedVirtualTable {
   std::vector<EntityId> slots;  // in slot order, starting with the key function in the admitted profiles
   EntityId primary_base = EntityId::none;
   bool peer_base_rtti = false;  // a peer's key owns the primary base descriptor
+};
+
+// A dynamic class's primary table and RTTI this unit defines (Itanium C++ ABI §2.5.2, §2.9.5,
+// §5.2.3): strong in the unit defining the key function, else weak in every unit that defines the
+// class. `slots` holds the function entries (D1 and D0 for a virtual destructor, the pure virtual
+// handler for a pure one).
+struct DynamicTable {
+  EntityId entity;  // the virtual table
+  EntityId cls;
+  std::vector<EntityId> slots;
+  EntityId base = EntityId::none;  // the single public primary base, whose RTTI the descriptor names
+  bool weak = false;
+  bool rtti_only = false;  // a keyless base's descriptor for a derived one, its table not used here
 };
 
 struct AsmHiddenSymbol {
@@ -235,10 +261,12 @@ struct TranslationUnit {
   std::optional<ir::CatchAllRuntime> catch_runtime;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
+  std::vector<DynamicTable> dynamic_tables;  // in class definition order: a base before its derived classes
   std::set<EntityId> keyless_type_info;  // definitions selected by the typed-cast ownership check
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
   std::vector<AsmHiddenSymbol> asm_hidden_symbols;
+  bool has_raw_linkage_names = false;  // written asm labels or attributes with raw names
   // The declared heads of class templates whose own arguments may appear in symbols.
   std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
 };
@@ -638,6 +666,7 @@ struct Lowered {
   std::optional<L2Body> body;
   std::vector<StringUse> strings;  // in order of first use
   std::optional<BackError> error;
+  bool unreachable_immediate = false;
 };
 struct Lower {
   using Key = FnKey;
@@ -709,12 +738,23 @@ struct TuValue {
   std::vector<BackError> errors;
   std::vector<FirstDemand> first_demands;
   std::vector<aarch64::Symbol> symbols;
+  std::set<EntityId> omitted_immediate_functions;
 };
 struct Tu {
-  using Key = TuId;
-  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
+  struct Key {
+    TuId tu;
+    bool check_policies = false;
+    bool operator==(const Key&) const = default;
+
+    friend void hash_into(Hasher& h, const Key& k) noexcept {
+      hash_append(h, k.tu);
+      if (k.check_policies) h.uint(std::uint8_t(1));
+    }
+    friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.tu); }
+  };
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k.tu); }
   using Value = TuValue;
-  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+  static engine::query_task<Value> run(engine::Ctx& cx, Key k);
   static std::string errors(const Value& v) {  // for traces (#245)
     std::string out;
     for (const BackError& e : v.errors) out += e.detail() + "\n";
@@ -984,7 +1024,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
     places.push_back(std::move(f));
   }
-  const ast::Target* root = it->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
+  const ast::Target* root = it->peer_virtual_layout == sema::PeerVirtualLayout::root || it->dynamic_root ? target_ : nullptr;
   ast::RecordLayout r = ast::record_layout(bases, places, it->union_, it->pod, key, root,
                                           it->explicit_alignment);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
@@ -1242,6 +1282,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.exceptions_enabled = !config || config->exceptions_enabled;
   input.this_type = d.this_type;
   input.destructor_table = d.destructor_table;
+  input.constructor_table = d.constructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
@@ -1411,6 +1452,18 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
+  if (f.body) {
+    const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
+      return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
+    }, &ir::Node::op);
+    if (checked != f.body->nodes.end()) {
+      const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
+      // A retained immediate caller can reference this definition. Keep its ABI and symbol
+      // while constant evaluation continues to execute the original L1.
+      if (src.def.plain_immediate_template)
+        config.unreachable_body = ir::NodeId(std::uint32_t(checked - f.body->nodes.begin()));
+    }
+  }
   if (linux) {
     const ast::Interners& in = *universe().in;
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
@@ -1429,7 +1482,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     }
     if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
     const ir::Function& body = *f.body;
-    for (std::size_t i = 0; i < body.nodes.size(); ++i) {
+    const std::size_t node_count = config.unreachable_body ? 0 : body.nodes.size();
+    for (std::size_t i = 0; i < node_count; ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
       const bool direct = op == ir::Op::call || op == ir::Op::invoke;
@@ -1479,7 +1533,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
-  } else if (std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
+  } else if (!config.unreachable_body && std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
     if (src.def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = src.cleanup_resume;
   }
@@ -1492,7 +1546,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     auto error = co_await located_error(cx, k.tu, at, "lower: " + l2.error().message);
     co_return Lowered{std::nullopt, {}, std::move(error)};
   }
-  co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt};
+  co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt,
+                    config.unreachable_body.has_value()};
 }
 
 // The entities a function's code refers to (address and direct call operands).
@@ -1652,8 +1707,9 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
   }
   if (l.kind == ir::TypeKind::integer || l.kind == ir::TypeKind::boolean) {
     if (!in.values.is<ast::VInt>(init)) return std::unexpected("an integer variable's initializer is not an integer");
-    std::uint64_t v = in.values.get<ast::VInt>(init).bits.lo;
-    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t(v >> (8 * i));
+    // Little-endian, the high half of a 128-bit integer after the low one.
+    ast::Bits128 v = in.values.get<ast::VInt>(init).bits;
+    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t((i < 8 ? v.lo : v.hi) >> (8 * (i % 8)));
     return {};
   }
   if ((l.kind == ir::TypeKind::array || l.kind == ir::TypeKind::record) && in.values.is<ast::VAggregate>(init)) {
@@ -1828,11 +1884,118 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
   }
 }
 
+// A dynamic class's table and RTTI as the object emits them (`DynamicTable`).
+struct DynamicTableOut {
+  EntityId entity;
+  std::string type_encoding;
+  std::vector<EntityId> slots;
+  std::optional<std::string> base_encoding;
+  bool weak = false;
+  bool emit_type_info = true;
+  bool rtti_only = false;
+};
+
+// Itanium C++ ABI §2.5.2, §2.9.5 and §5.2.3–4 for the general dynamic classes (#309): the table
+// (offset-to-top zero, RTTI, slots), then a `__class_type_info` descriptor for a root or a
+// `__si_class_type_info` one naming the primary base's. A weak table and its descriptor have
+// ELF COMDAT groups of their own, keyed by their names; on Mach-O they are weak definitions, and a
+// weak descriptor and its name follow Apple's arm64 non-unique RTTI convention (hidden, bit 63
+// set in the name pointer) as `emit_keyless_type_info` does. `descriptors` maps each type
+// encoding to its descriptor's symbol, for derived classes emitted later in the same object.
+void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::uint32_t typeinfo_symbol,
+                             std::uint32_t shared_pointers, std::map<std::string, std::uint32_t>& descriptors);
+void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint32_t table_symbol,
+                        std::span<const std::uint32_t> slots, std::map<std::string, std::uint32_t>& descriptors) {
+  using S = obj::standard_section;
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string prefix = elf ? "" : "_";
+  auto section = [&](S kind) {
+    const obj::section standard = obj::section::standard(kind);
+    if (!elf)
+      for (std::uint32_t i = 0; i < o.sections.size(); ++i)
+        if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
+    return o.add_section(standard);
+  };
+  // A symbol by name: the one code already refers to, or a new undefined one.
+  auto named = [&](const std::string& name) {
+    for (std::uint32_t i = 0; i < o.symbols.size(); ++i)
+      if (o.symbols[i].name_view() == name) return i;
+    return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
+  };
+  // An RTTI-only entry's symbol is the descriptor itself.
+  if (table.rtti_only) {
+    if (!table.emit_type_info) return;
+    if (!o.symbols[table_symbol].defined())
+      emit_dynamic_descriptor(o, table, table_symbol, elf ? 0 : section(S::data_const), descriptors);
+    descriptors.emplace(table.type_encoding, table_symbol);
+    return;
+  }
+  const std::uint64_t table_size = rtti_address_point + rtti_pointer_size * slots.size();
+  const auto pointers = section(S::data_const);
+  o.sections[pointers].align(3);
+  auto& symbol = o.symbols[table_symbol];
+  symbol.section = pointers;
+  symbol.offset = o.sections[pointers].size();
+  symbol.object_size = table_size;
+  symbol.weak = table.weak;
+  if (elf && table.weak) o.comdat_groups.push_back({std::string(symbol.name_view()), {pointers}});
+  std::optional<std::uint32_t> typeinfo;
+  if (table.emit_type_info) typeinfo = named(prefix + "_ZTI" + table.type_encoding);
+  o.sections[pointers].emit64(0);  // offset-to-top
+  if (typeinfo) emit_rtti_pointer(o, pointers, *typeinfo);
+  else o.sections[pointers].emit64(0);
+  for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
+  if (!typeinfo) return;
+  // A descriptor this object already defines (a peer profile's keyless base) is reused.
+  if (!o.symbols[*typeinfo].defined()) emit_dynamic_descriptor(o, table, *typeinfo, pointers, descriptors);
+  descriptors.emplace(table.type_encoding, *typeinfo);
+}
+
+void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::uint32_t typeinfo_symbol,
+                             std::uint32_t shared_pointers, std::map<std::string, std::uint32_t>& descriptors) {
+  using S = obj::standard_section;
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string prefix = elf ? "" : "_";
+  const std::optional<std::uint32_t> typeinfo = typeinfo_symbol;
+  auto section = [&](S kind) {
+    const obj::section standard = obj::section::standard(kind);
+    if (!elf)
+      for (std::uint32_t i = 0; i < o.sections.size(); ++i)
+        if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
+    return o.add_section(standard);
+  };
+  auto named = [&](const std::string& name) {
+    for (std::uint32_t i = 0; i < o.symbols.size(); ++i)
+      if (o.symbols[i].name_view() == name) return i;
+    return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
+  };
+  // A weak descriptor has its own ELF COMDAT group; a strong one follows its table.
+  const auto descriptor_section = elf && table.weak ? o.add_section(S::data_const) : shared_pointers;
+  o.sections[descriptor_section].align(3);
+  const auto bind = !elf && table.weak ? obj::binding::hidden : obj::binding::global;
+  auto& descriptor = o.symbols[*typeinfo];
+  descriptor.bind = bind;
+  descriptor.section = descriptor_section;
+  descriptor.offset = o.sections[descriptor_section].size();
+  descriptor.weak = table.weak;
+  descriptor.object_size = table.base_encoding ? 3 * rtti_pointer_size : 2 * rtti_pointer_size;
+  if (elf && table.weak) o.comdat_groups.push_back({prefix + "_ZTI" + table.type_encoding, {descriptor_section}});
+  const auto name_object = emit_type_info_name(o, section(S::rodata), table.type_encoding, bind);
+  const auto runtime_type = table.base_encoding ? si_class_type_info : class_type_info;
+  emit_rtti_pointer(o, descriptor_section, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
+  emit_rtti_pointer(o, descriptor_section, name_object, !elf && table.weak ? std::numeric_limits<std::int64_t>::min() : 0);
+  if (const auto& base = table.base_encoding) {
+    const auto found = descriptors.find(*base);
+    emit_rtti_pointer(o, descriptor_section, found != descriptors.end() ? found->second : named(prefix + "_ZTI" + *base));
+  }
+}
+
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
     const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info,
-    std::span<const EntityId> asm_hidden) {
+    std::span<const EntityId> asm_hidden, std::span<const DynamicTableOut> dynamic_tables,
+    const std::set<EntityId>& template_parameter_objects) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1847,6 +2010,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   for (const auto& d : data) definitions.emplace(d.entity, d.weak);
   for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
   if (table) definitions.emplace(table->entity, false);
+  for (const auto& t : dynamic_tables) definitions.emplace(t.entity, t.weak);
   std::map<std::string_view, std::pair<EntityId, bool>> defined_name;  // name → definition, weak
   for (const auto& s : symbols) {
     const auto d = definitions.find(s.entity);
@@ -1862,18 +2026,21 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     symbol_of.emplace(s.entity, index);
   };
   for (const auto& s : symbols) {
-    if (s.bind != obj::binding::local && !definitions.contains(s.entity)) {
+    const bool undefined_nonlocal = s.bind != obj::binding::local && !definitions.contains(s.entity);
+    if (undefined_nonlocal) {
       if (defined_name.contains(s.name)) {
         defined_by_another.push_back(&s);
         continue;
       }
       if (auto shared = undefined_name.find(s.name); shared != undefined_name.end()) {
+        // Both declarations refer to this one undefined ELF symbol.
+        o.symbols[shared->second].weak |= s.weak_reference;
         share(s, shared->second);
         continue;
       }
       undefined_name.emplace(s.name, static_cast<std::uint32_t>(o.symbols.size()));
     }
-    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, undefined_nonlocal && s.weak_reference}));
   }
   for (const aarch64::Symbol* s : defined_by_another) share(*s, symbol_of.at(defined_name.at(s->name).first));
   auto missing = [](EntityId e) {
@@ -1957,11 +2124,13 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   using S = obj::standard_section;
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
                                {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
-    if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
-    const std::uint32_t index = kind == K::data_const && data_const ? *data_const : o.add_section(section);
-    obj::section& sec = o.sections[index];
+    std::optional<std::uint32_t> ordinary = kind == K::data_const ? data_const : std::nullopt;
     for (const auto& d : data) {
       if (d.kind != kind) continue;
+      const bool parameter = template_parameter_objects.contains(d.entity);
+      if (!parameter && !ordinary) ordinary = o.add_section(section);
+      const std::uint32_t index = parameter ? o.add_section(section) : *ordinary;
+      obj::section& sec = o.sections[index];
       auto sym = symbol_of.find(d.entity);
       if (sym == symbol_of.end()) return missing(d.entity);
       sec.align(std::countr_zero(std::bit_ceil(d.align)));
@@ -1970,6 +2139,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       symbol.section = index;
       symbol.offset = base;
       symbol.weak = symbol.bind == obj::binding::global && d.weak;
+      if (parameter) {
+        symbol.object_size = d.bytes.size();
+        o.comdat_groups.push_back({std::string(symbol.name_view()), {index}});
+      }
       if (kind == K::bss) sec.reserve_zerofill(d.size);
       else sec.emit(d.bytes);
       for (const auto& r : d.relocs) {
@@ -2002,6 +2175,18 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     }
     emit_virtual_table(o, *table, symbol->second, slots, emitted_base);
   }
+  std::map<std::string, std::uint32_t> descriptors;
+  for (const auto& dynamic : dynamic_tables) {
+    const auto symbol = symbol_of.find(dynamic.entity);
+    if (symbol == symbol_of.end()) return missing(dynamic.entity);
+    std::vector<std::uint32_t> slots;
+    for (EntityId slot : dynamic.slots) {
+      const auto target = symbol_of.find(slot);
+      if (target == symbol_of.end()) return missing(slot);
+      slots.push_back(target->second);
+    }
+    emit_dynamic_table(o, dynamic, symbol->second, slots, descriptors);
+  }
   // The directive changes only visibility. Keep the symbol indices that relocations use and
   // the binding, type, size and section determined by ordinary emission.
   for (EntityId e : asm_hidden) o.symbols[symbol_of.at(e)].bind = obj::binding::hidden;
@@ -2013,7 +2198,8 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
 // Functions, variables, string literals and symbols in definition order (§A5.3): functions and
 // variables as the unit lists them, string literal objects by first use in that order, and
 // undefined symbols by first reference.
-engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
+engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
+  const TuId id = k.tu;
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(id);
   ast::Interners& in = *universe().in;
   const auto* config = unit_config(cx, id);
@@ -2040,25 +2226,79 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
+  for (const FunctionDef& f : tu.functions)
+    if (f.unsupported_class_parameter_abi)
+      errors.push_back({ast::Loc{f.item, f.body_offset},
+                        "native functions with class-valued template arguments require supported default visibility and no closures or static locals"});
+  if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
+  // Checked policy records can require a definition, and raw linker names can refer to
+  // another entity without an ordinary typed use of it.
+  const bool defer_private_constexpr = !k.check_policies && !tu.has_raw_linkage_names && tu.asm_hidden_symbols.empty();
+  std::set<std::uint32_t> deferred;
+  if (defer_private_constexpr) {
+    std::set<EntityId> candidates;
+    for (const FunctionDef& f : tu.functions)
+      if (f.private_constexpr && f.coalesced && f.body.tree != ast::NodeId::none)
+        candidates.insert(f.entity);
+    if (!candidates.empty()) {
+      const UnitIndex& index = co_await cx.fetch<UnitIndexQ>(id);
+      std::erase_if(candidates, [&](EntityId entity) {
+        const auto i = indexed(index.entities, entity);
+        if (!i) return true;
+        const Entity& symbol = tu.entities[*i];
+        return symbol.linkage != ast::Linkage::external || symbol.has_local_binding() || symbol.template_type.has_value();
+      });
+      // Find resolved direct calls in checked constant-evaluated arms before requesting any L1
+      // bodies. Other private helpers stay emission roots, including raw-name providers in
+      // another translation unit.
+      auto collect = [&](this auto&& visit, const ast::Red& node, bool consteval_arm) -> void {
+        if (candidates.empty() || node.is<ast::ConstantProbe>()) return;
+        if (node.is<ast::IfConsteval>()) {
+          const auto branch = node.get<ast::IfConsteval>();
+          const ast::Child arm = branch.negated ? branch.else_ : branch.then_;
+          if (arm.id != ast::NodeId::none) visit(ast::Red(in.ast, arm.id), true);
+          return;
+        }
+        if (consteval_arm && node.is<ast::Call>()) {
+          const EntityId function = node.get<ast::Call>().function;
+          if (candidates.erase(function)) deferred.insert(ir::raw(function));
+        }
+        node.for_each_child([&](const ast::Red& child) { visit(child, consteval_arm); });
+      };
+      for (const FunctionDef& f : tu.functions) {
+        if (candidates.empty()) break;
+        if (f.body.tree != ast::NodeId::none) collect(ast::Red(in.ast, f.body.tree), false);
+      }
+    }
+  }
   std::vector<FnKey> fns;
-  for (const FunctionDef& f : tu.functions) fns.push_back({id, f.entity});
+  for (const FunctionDef& f : tu.functions) {
+    if (f.emit_if_referenced) deferred.insert(ir::raw(f.entity));
+    else if (!deferred.contains(ir::raw(f.entity))) fns.push_back({id, f.entity});
+  }
 
-  // Functions: function_ir, then lower. An error points at the construct when it has a node.
-  std::vector<StringUse> strings;
-  auto use = [&](std::span<const StringUse> s) {
-    for (const StringUse& u : s)
-      if (!std::ranges::contains(strings, u.object, &StringUse::object)) strings.push_back(u);
+  // Follow native references in the lowered bodies, where only the runtime edge of an
+  // if consteval remains. Each demanded definition can introduce more demands.
+  std::set<std::uint32_t> used;
+  std::set<EntityId> unreachable_immediate;
+  std::vector<FnKey> pending;
+  auto use_entity = [&](std::uint32_t entity) {
+    if (used.insert(entity).second && deferred.contains(entity))
+      pending.push_back({id, EntityId(entity)});
   };
-  std::vector<FnKey> lowered;
-  {
-    auto ls = co_await cx.par_map<Lower>(fns);
-    for (std::size_t i = 0; i < fns.size(); ++i) {
-      const Lowered& l = ls[i];
+  auto collect_lowered = [&](std::span<const FnKey> keys, const auto& bodies) {
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      const Lowered& l = bodies[i];
       if (l.error) errors.push_back(*l.error);
       if (!l.body) continue;
-      use(l.strings);
-      lowered.push_back(fns[i]);
+      if (l.unreachable_immediate) unreachable_immediate.insert(keys[i].fn);
+      use_entity(ir::raw(keys[i].fn));
+      for (const auto& ref : references(l.body->f)) use_entity(ir::raw(ref.entity));
     }
+  };
+  {
+    const auto ls = co_await cx.par_map<Lower>(fns);
+    collect_lowered(fns, ls);
   }
 
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
@@ -2066,14 +2306,26 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{id}, engine::q<UnitShapeIndex>{id});
   // One layout for every variable, which keeps its class layouts between them (#938).
   QueryLayout layout(cx, shapes, shape_index, target);
-  std::size_t strings_seen = 0;
   for (const Variable& v : tu.variables) {
     auto b = initial_bytes(in, layout, v.type, v.init);
-    use(layout.strings().subspan(strings_seen));
-    strings_seen = layout.strings().size();
     if (!b) {
       errors.push_back({v.at, std::format("{} is not supported yet", b.error())});
       continue;
+    }
+    if (!b->relocs.empty()) {
+      const auto* world = universe().world_for(target);
+      const auto* variable = world ? world->entities.find(v.entity) : nullptr;
+      const auto* owner = variable && variable->scope != EntityId::none ? world->entities.find(variable->scope) : nullptr;
+      const bool shared_storage = variable && variable->linkage != ast::Linkage::internal &&
+          (v.inline_definition || variable->templ != EntityId::none || (owner && owner->kind == sema::EntityKind::class_ &&
+                                                               owner->templ != EntityId::none));
+      if (shared_storage && std::ranges::any_of(b->relocs, [&](const aarch64::DataReloc& relocation) {
+            const auto* entity = world->entities.find(relocation.target);
+            return entity && entity->kind == sema::EntityKind::template_parameter_object;
+          })) {
+        errors.push_back({v.at, "shared native storage initialized with a template parameter object address is not supported yet"});
+        continue;
+      }
     }
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
@@ -2099,6 +2351,49 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     symbols.push_back({slot, std::format("l_.init_func.{}", i), obj::binding::local});
   }
 
+  // Tables and data can also reference definitions. Process these roots before lowering any
+  // deferred definitions, since each newly lowered body can reference another one.
+  if (const auto& table = tu.owned_virtual_table) {
+    use_entity(ir::raw(table->entity));
+    for (EntityId slot : table->slots) use_entity(ir::raw(slot));
+  }
+  for (const DynamicTable& table : tu.dynamic_tables) {
+    use_entity(ir::raw(table.entity));
+    for (EntityId slot : table.slots) use_entity(ir::raw(slot));
+  }
+  for (const aarch64::DataDef& d : data) {
+    use_entity(ir::raw(d.entity));
+    for (const aarch64::DataReloc& r : d.relocs) use_entity(ir::raw(r.target));
+  }
+  while (!pending.empty()) {
+    auto batch = std::exchange(pending, {});
+    const auto ls = co_await cx.par_map<Lower>(batch);
+    collect_lowered(batch, ls);
+  }
+
+  // Restore definition order for code and string literals after the reference walk.
+  std::vector<const FunctionDef*> definitions;
+  fns.clear();
+  for (const FunctionDef& f : tu.functions) {
+    if (deferred.contains(ir::raw(f.entity)) && !used.contains(ir::raw(f.entity))) {
+      if (f.emit_if_referenced) out.omitted_immediate_functions.insert(f.entity);
+      continue;
+    }
+    fns.push_back({id, f.entity});
+    definitions.push_back(&f);
+  }
+  std::vector<StringUse> strings;
+  auto use = [&](std::span<const StringUse> s) {
+    for (const StringUse& u : s)
+      if (!std::ranges::contains(strings, u.object, &StringUse::object)) strings.push_back(u);
+  };
+  {
+    const auto ls = co_await cx.par_map<Lower>(fns);  // all hits
+    for (const Lowered& l : ls)
+      if (l.body) use(l.strings);
+  }
+  use(layout.strings());
+
   // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::uint32_t n = 0;
   for (auto [object, entity] : strings) {
@@ -2121,24 +2416,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
-  // Symbols for the entities the object defines or refers to; a declaration nothing uses needs
-  // no name.
-  std::set<std::uint32_t> used;
-  {
-    const auto ls = co_await cx.par_map<Lower>(lowered);  // all hits
-    for (const Lowered& l : ls) {
-      for (const auto& ref : references(l.body->f)) used.insert(ir::raw(ref.entity));
-    }
-  }
-  for (const FnKey& f : lowered) used.insert(ir::raw(f.fn));
-  if (const auto& table = tu.owned_virtual_table) {
-    used.insert(ir::raw(table->entity));
-    for (EntityId slot : table->slots) used.insert(ir::raw(slot));
-  }
-  for (const aarch64::DataDef& d : data) {
-    used.insert(ir::raw(d.entity));
-    for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
-  }
   // The declarations that own closure types, by entity (docs/design/closures.md).
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
@@ -2215,14 +2492,20 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   };
   std::optional<VirtualTable> virtual_table;
   std::vector<KeylessTypeInfo> keyless_type_info;
+  std::vector<DynamicTableOut> dynamic_tables;
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   std::map<EntityId, std::string> base_object_names;
   std::map<std::string_view, bool> asm_names;
   for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols) asm_names.try_emplace(directive.name, false);
   std::vector<EntityId> asm_hidden;
+  std::set<EntityId> template_parameter_objects;
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
+    if (e.unsupported_class_parameter_signature) {
+      errors.push_back({e.at, "native functions with class-valued template arguments require default-visible signature and argument types"});
+      continue;
+    }
     if (e.local_function != EntityId::none) {
       locals.push_back(&e);
       continue;
@@ -2251,7 +2534,31 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base),
                                      owned->peer_base_rtti, emit_table_type_info};
       }
+      if (const auto dynamic = std::ranges::find(tu.dynamic_tables, e.id, &DynamicTable::entity);
+          dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
+        std::optional<std::string> base;
+        if (dynamic->base != EntityId::none) {
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names);
+          if (!base_encoding) {
+            errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
+                                                base_encoding.error())});
+            continue;
+          }
+          base = std::move(*base_encoding);
+        }
+        dynamic_tables.push_back({e.id, *encoding, dynamic->slots, std::move(base), dynamic->weak, emit_table_type_info,
+                                  dynamic->rtti_only});
+      }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
+      continue;
+    }
+    if (e.special == Special::template_parameter_object) {
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names);
+      if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
+      else {
+        symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
+        template_parameter_objects.insert(e.id);
+      }
       continue;
     }
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2
@@ -2280,7 +2587,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     obj::binding binding = obj::binding::global;
     if (e.has_local_binding()) binding = obj::binding::local;
     else if (e.hidden) binding = obj::binding::hidden;
-    if (linux && e.special == Special::none && binding != obj::binding::local) {
+    if (target.supports(ast::NativeOperation::namespace_hidden_asm) &&
+        e.special == Special::none && binding != obj::binding::local) {
       if (auto directive = asm_names.find(*name); directive != asm_names.end()) {
         directive->second = true;
         asm_hidden.push_back(e.id);
@@ -2294,7 +2602,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       }
       base_object_names.emplace(e.id, std::move(*base_name));
     }
-    symbols.push_back({e.id, std::move(*name), binding});
+    symbols.push_back({e.id, std::move(*name), binding, e.weak_reference});
   }
   for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols)
     if (!asm_names.at(directive.name))
@@ -2327,28 +2635,41 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto ms = co_await cx.par_map<Codegen>(fns);
   for (std::size_t i = 0; i < fns.size(); ++i) {
     if (ms[i].get().ok()) continue;
-    errors.push_back({ast::Loc{tu.functions[i].item, tu.functions[i].body_offset}, "codegen: " + ms[i].get().error});
+    const auto& def = *definitions[i];
+    errors.push_back({ast::Loc{def.item, def.body_offset}, "codegen: " + ms[i].get().error});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
+  const auto weak_definition = [&](const FunctionDef& def) {
+    if (def.coalesced || def.explicit_weak) return true;
+    if (!unreachable_immediate.contains(def.entity) || def.decl.contracts != ast::NodeId::none ||
+        in.seqs.size(def.decl.annotations) != 0)
+      return false;
+    // Different units can retain the same implicit immediate specialization. Coalesce only its
+    // synthesized unreachable definition, keeping source linkage, visibility, and named labels.
+    const auto found = by_id.find(ir::raw(def.entity));
+    return found != by_id.end() && found->second->linkage == ast::Linkage::external &&
+           !found->second->has_local_binding() && found->second->asm_label.empty();
+  };
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
-        const auto& def = tu.functions[i];
+        const auto& def = *definitions[i];
         const auto base_name = base_object_names.find(def.entity);
         const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
         const bool catch_int = def.unwind == UnwindEligibility::hosted_catch && def.hosted_catch->int_binding.has_value();
-        const bool weak = def.coalesced || def.explicit_weak;
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak, def.unwind != UnwindEligibility::none, name, catch_int});
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak_definition(def),
+                        def.unwind != UnwindEligibility::none, name, catch_int});
       }
-      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden);
+      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden, dynamic_tables,
+                            template_parameter_objects);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {
-      const auto& def = tu.functions[i];
+      const auto& def = *definitions[i];
       code.push_back({.entity = fns[i].fn, .code = *ms[i].get().code,
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
-                      .weak = def.coalesced || def.explicit_weak});
+                      .weak = weak_definition(def)});
     }
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (!o) return o;
@@ -2363,7 +2684,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       alias.name = base_name;
       o->add_symbol(std::move(alias));
     }
-    if (!virtual_table) return o;
+    if (!virtual_table && dynamic_tables.empty()) return o;
     // The table and its slots by name: the code may or may not have referred to them.
     auto symbol = [&](EntityId e) -> std::expected<std::uint32_t, aarch64::CodegenError> {
       const auto named = std::ranges::find(symbols, e, &aarch64::Symbol::entity);
@@ -2373,15 +2694,29 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         if (o->symbols[i].name_view() == named->name) return i;
       return o->reference(named->name);
     };
-    const auto table = symbol(virtual_table->entity);
-    if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
-    std::vector<std::uint32_t> slots;
-    for (EntityId slot : virtual_table->slots) {
-      const auto s = symbol(slot);
-      if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
-      slots.push_back(*s);
+    if (virtual_table) {
+      const auto table = symbol(virtual_table->entity);
+      if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
+      std::vector<std::uint32_t> slots;
+      for (EntityId slot : virtual_table->slots) {
+        const auto s = symbol(slot);
+        if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
+        slots.push_back(*s);
+      }
+      emit_virtual_table(*o, *virtual_table, *table, slots);
     }
-    emit_virtual_table(*o, *virtual_table, *table, slots);
+    std::map<std::string, std::uint32_t> descriptors;
+    for (const auto& dynamic : dynamic_tables) {
+      const auto table = symbol(dynamic.entity);
+      if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
+      std::vector<std::uint32_t> slots;
+      for (EntityId slot : dynamic.slots) {
+        const auto s = symbol(slot);
+        if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
+        slots.push_back(*s);
+      }
+      emit_dynamic_table(*o, dynamic, *table, slots, descriptors);
+    }
     return o;
   }();
   if (!o) {
@@ -2407,7 +2742,7 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
   db.set<OptCacheSnapshot>(arch, {});
   db.set<OptLevel>(arch, 0);
   db.set<TuSourceIn>(TuId{0}, {tu.name, std::nullopt, tu});
-  const TuValue& v = db.get<Tu>(TuId{0});
+  const TuValue& v = db.get<Tu>(Tu::Key{TuId{0}});
   if (!v.object) return std::unexpected(v.errors);
   return *v.object;
 }

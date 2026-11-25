@@ -147,7 +147,11 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
 // A `library` builtin `__builtin_f` is the C library's function `f`, and calls it; its signature is
 // sema's (`sema::string_functions`).
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, library, trap, constant_p };
+enum class BuiltinFunction : std::uint8_t {
+  fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
+  source_line,
+};
+inline constexpr std::string_view builtin_line_name = "__builtin_LINE";
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -175,11 +179,16 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_memmove", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memset", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strcmp", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strpbrk", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strrchr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strstr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
+    BuiltinFunctionInfo{"__builtin_unreachable", BuiltinFunction::unreachable},
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
+    BuiltinFunctionInfo{.name = "__builtin_add_overflow", .function = BuiltinFunction::add_overflow, .advertised = false},
+    BuiltinFunctionInfo{.name = "__builtin_mul_overflow", .function = BuiltinFunction::mul_overflow, .advertised = false},
+    BuiltinFunctionInfo{builtin_line_name, BuiltinFunction::source_line},
 };
 inline constexpr std::string_view builtin_prefix = "__builtin_";
 // The C library function a `library` builtin calls.

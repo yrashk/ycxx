@@ -1,0 +1,16 @@
+// A blank line changes a call-site location without changing its tokens. The caller has no
+// builtin spelling of its own. The resident and cold checks must reject only the middle state.
+--- main.cpp
+#include "line.hpp"
+static_assert(line() == 2);
+--- line.hpp
+constexpr unsigned line(unsigned value = __builtin_LINE()) noexcept { return value; }
+=== edit
+--- main.cpp
+#include "line.hpp"
+
+static_assert(line() == 2); //! error
+=== edit
+--- main.cpp
+#include "line.hpp"
+static_assert(line() == 2);

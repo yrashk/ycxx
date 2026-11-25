@@ -3,9 +3,9 @@
 // interpreter (ycxx.interp) runs it in constant mode inside the query that analyses the
 // expression. Callees' bodies and namespace-scope variables come through `Questions`.
 //
-// The enclosing function's locals usable in constant expressions (constexpr, or const integral
-// with a constant initializer) become const objects of the thunk with their values; any other
-// local is an object outside its lifetime, so evaluating a use of it is not constant.
+// The thunk imports the enclosing function's locals usable in constant expressions with their
+// known values. Supported by-value record parameters and direct named automatic receivers can
+// also supply an object identity while their contents remain unavailable to constant evaluation.
 export module ycxx.sema:eval;
 
 import std;
@@ -94,6 +94,10 @@ struct Evaluated {
   bool dependent = false;
   // A demanded specialization already diagnosed a type trait at its original spelling.
   bool type_trait_failure = false;
+  // The global that caused this evaluation to fail already diagnosed its initializer.
+  bool variable_instantiation_failure = false;
+
+  bool diagnosed_failure() const { return type_trait_failure || variable_instantiation_failure; }
 };
 
 class Evaluator {
@@ -179,18 +183,49 @@ private:
         return {lit->value, 0, true};
       return {};
     }
+    const auto receiver = direct_local_receiver(e);
+    const bool immediate_virtual = s_->as<ast::ImmediateVirtualCall>(e).has_value();
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
     NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
-    for (ast::LocalRec& l : locals) {
+    auto local_values = s_->local_values();
+    std::vector<std::optional<ConstId>> filtered_values;
+    std::vector<u32> opaque_record_locals;
+    std::vector<u32> discardable_reference_parameters;
+    for (std::size_t i = 0; i < locals.size(); ++i) {
+      auto& l = locals[i];
+      const bool parameter = (l.flags & local_flag::parameter) &&
+                             !(l.flags & (ast::local_flag::requires_parameter | local_flag::default_argument_parameter));
+      if (s_->types().is_class(l.type)) {
+        if (i < local_values.size() && local_values[i]) {
+          if (!importable_local_record(l.type, local_values[i])) {
+            if (filtered_values.empty()) filtered_values.assign(local_values.begin(), local_values.end());
+            filtered_values[i].reset();
+          }
+        } else if (s_->in_function_body) {
+          const bool named_receiver = receiver == i && l.entity == EntityId::none && l.name != s_->no_name() &&
+                                      !(l.flags & ast::local_flag::structured_binding) &&
+                                      s_->as<ast::LocalVar>({l.decl}).has_value();
+          if ((parameter || named_receiver) &&
+              (importable_local_record(l.type, std::nullopt) ||
+               (immediate_virtual && receiver == i && opaque_dynamic_record(l.type))))
+            opaque_record_locals.push_back(static_cast<u32>(i));
+        }
+      } else if (parameter && s_->in_function_or_lambda_body() && l.name != s_->no_name() &&
+                 s_->types().is_reference(l.type) && s_->types().is_class(s_->types().referee(l.type))) {
+        discardable_reference_parameters.push_back(static_cast<u32>(i));
+        if (immediate_virtual && receiver == i && opaque_dynamic_record(s_->types().referee(l.type)))
+          opaque_record_locals.push_back(static_cast<u32>(i));
+      }
       l.decl = NodeId::none;  // drafts of the enclosing frame
       // In a template's definition a local of dependent type has no object yet; a non-dependent
       // expression cannot name it, so it stands as an `int` outside its lifetime.
       // So does a variable whose initializer is being read to deduce its placeholder type.
       if (s_->types().is_dependent(l.type) || s_->types().has_placeholder(l.type)) l.type = s_->builtin(Builtin::int_);
     }
+    if (!filtered_values.empty()) local_values = filtered_values;
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);
@@ -200,8 +235,10 @@ private:
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals)),
                                              in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{}),
                                              ast::QualType{}, 0, in.intern_seq(std::span<const ast::ClosureDef>{})},
-                               s_->item(), 0, true, s_->local_values()};
+                               s_->item(), 0, true, local_values};
     input.initialized_fields = initialized_fields;
+    input.opaque_record_locals = opaque_record_locals;
+    input.discardable_reference_parameters = discardable_reference_parameters;
     EvalFacts facts(s_->world(), *q_);
     auto body = bytes ? irgen::constant_byte_capture_ir(in, input, facts, bytes->capture) : irgen::function_ir(in, input, facts);
     if (!body) return {};
@@ -209,24 +246,33 @@ private:
     Host host{q_, this};
     interp::Config config{
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
-        .record_layout = [this](QualType t) { return constant_record_layout(t); }};
+        .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
+        .immediate_virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic) {
+          return immediate_virtual_target(selected, receiver, dynamic);
+        }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
-    if (out.status != interp::Outcome::Status::value && host.type_trait_failure)
-      return {std::nullopt, reason_unsupported, false, false, true};
-    if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
-      return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
+      Evaluated result{std::nullopt};
+      result.variable_instantiation_failure = out.failure.global != EntityId::none &&
+                                              q_->variable_instantiation_failed(out.failure.global);
+      result.type_trait_failure = host.type_trait_failure;
+      if (result.type_trait_failure) return result;
+      if (q_->instantiation_gave_up()) {
+        result.dependent = true;
+        return result;
+      }
       interp::Failure f = out.failure;
       // A missing interpreter operation may hide a binding that requires static initialization.
       if (reference_initializer && (f.reason == interp::Reason::unsupported || f.reason == interp::Reason::unsupported_constant ||
                                     f.reason == interp::Reason::callee_unsupported))
-        return {};
+        return result;
       // A selected default can also read a field before its lifetime has begun.
       if (f.reason == interp::Reason::outside_lifetime && initialized_fields.owner == EntityId::none &&
           !f.stack.empty() && f.stack[0].function == EntityId::none)
         f.reason = interp::Reason::not_usable;
-      return {std::nullopt, reason_arg(f)};
+      result.reason = reason_arg(f);
+      return result;
     }
     if (out.values.empty() && s_->types().is_void(e.type())) return {std::nullopt, 0, true};
     if (out.values.size() != 1) return {};
@@ -412,6 +458,85 @@ private:
     return result;
   }
 
+  // Dynamic layouts are available only for live interpreter storage. A stored record
+  // constant cannot represent a polymorphic object or its base subobject.
+  std::optional<interp::ConstantRecordLayout> evaluation_record_layout(QualType type) {
+    Types& types = s_->types();
+    type = types.canonical(type);
+    if (!types.is_class(type) || Types::is_volatile(type)) return std::nullopt;
+    const EntityId entity = types.class_of(type);
+    const ClassRec* record = s_->class_rec(entity);
+    if (!record || !record->dynamic) return constant_record_layout(type);
+    if (!q_->classes().constexpr_dynamic_default(entity) || q_->class_layout_uncertain(entity)) return std::nullopt;
+    const auto layout = s_->class_layout(entity);
+    if (!layout) return std::nullopt;
+    interp::ConstantRecordLayout result{.size = layout->size, .dynamic = true};
+    if (!record->bases.empty()) {
+      const EntityId base = record->bases.front().cls;
+      const auto base_layout = s_->class_layout(base);
+      if (!base_layout || q_->class_layout_uncertain(base)) return std::nullopt;
+      const QualType base_type = types.add_cv(types.class_type(base), Types::cv(type));
+      result.primary_base = interp::ConstantRecordBase{base, base_type, layout->base_offsets.front(), base_layout->size};
+    }
+    return result;
+  }
+
+  bool opaque_dynamic_record(QualType type) {
+    const auto layout = evaluation_record_layout(type);
+    return layout && layout->dynamic;
+  }
+
+  // The direct-base path is checked by the interpreter. Select by the override
+  // edge recorded at class completion, in the context evaluating this call.
+  std::optional<interp::ImmediateVirtualTarget> immediate_virtual_target(EntityId selected, EntityId receiver,
+                                                                        EntityId dynamic) {
+    const auto* declaration = s_->member_decl(selected);
+    const auto* type = s_->class_rec(dynamic);
+    if (!declaration || !declaration->is_virtual || !declaration->is_consteval ||
+        s_->world().entities.rec(selected).scope != receiver || !type)
+      return std::nullopt;
+    if (dynamic != receiver) {
+      if (type->bases.size() != 1 || type->bases.front().cls != receiver) return std::nullopt;
+      const auto override = std::ranges::find(type->members, selected, &MemberDeclRec::overridden_virtual);
+      if (override != type->members.end()) {
+        if (!override->is_consteval || override->is_pure) return std::nullopt;
+        return interp::ImmediateVirtualTarget{override->entity, dynamic};
+      }
+    }
+    if (declaration->is_pure) return std::nullopt;
+    return interp::ImmediateVirtualTarget{selected, receiver};
+  }
+
+  // An ordinary dot call passes the address of its receiver. Import only that named
+  // local, without evaluating its declaration or allocating slots for unrelated locals.
+  std::optional<u32> direct_local_receiver(Ex expression) {
+    NodeId object_pointer = NodeId::none;
+    if (const auto member = s_->as<ast::MemberCall>(expression)) object_pointer = member->object.id;
+    if (const auto call = s_->as<ast::ImmediateVirtualCall>(expression)) object_pointer = call->object.id;
+    if (object_pointer == NodeId::none) return std::nullopt;
+    const auto pointer = s_->as<ast::Unary>({object_pointer});
+    if (!pointer || pointer->op != ast::UnaryOp::address_of) return std::nullopt;
+    Ex object{pointer->operand.id};
+    while (const auto paren = s_->as<ast::Paren>(object)) object.id = paren->operand.id;
+    if (const auto local = s_->as<ast::LocalRef>(object)) return local->local;
+    return std::nullopt;
+  }
+
+  // A thunk can import addresses for supported flat records. Known initializers also
+  // supply integral field values without needing to fetch any other object.
+  bool importable_local_record(QualType type, std::optional<ConstId> value) {
+    const auto& in = s_->ins();
+    if (value && !in.values.is<ast::VAggregate>(*value)) return false;
+    const auto layout = constant_record_layout(type);
+    if (!layout || !std::ranges::all_of(layout->fields, [&](const auto& field) {
+          return s_->types().is_integral(field.type) || s_->types().is_enum(field.type);
+        })) return false;
+    if (!value) return true;
+    const auto elements = in.seqs.elements(in.values.get<ast::VAggregate>(*value).elems);
+    return elements.size() == layout->fields.size() &&
+           std::ranges::all_of(elements, [&](ConstId element) { return in.values.is<ast::VInt>(element); });
+  }
+
   bool constant_record_field(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
@@ -430,7 +555,7 @@ private:
     const auto b = types.builtin_of(type);
     if (!b) return false;
     const auto& target = s_->world().target;
-    return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 64) ||
+    return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 128) ||
            (ast::is_floating(*b) && ast::computes(target[*b].format));
   }
 
@@ -465,7 +590,7 @@ private:
     switch (r.kind) {
     case K::integer: {
       QualType t = s_->types().is_enum(r.type) ? s_->underlying_of(r.type) : r.type;
-      return {vs.integer(t, r.bits), 0, true};
+      return {vs.integer(t, ast::Bits128{r.bits, r.hi}), 0, true};
     }
     case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};

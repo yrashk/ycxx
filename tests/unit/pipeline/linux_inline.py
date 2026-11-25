@@ -147,6 +147,31 @@ def main():
                 run(host_cxx, '-no-pie', *order, '-o', 'host-program')
                 run('./host-program')
 
+        # A separate object refers to a private inline definition by its raw linker name.
+        # A constant-evaluated call to a different helper in the provider leaves it available.
+        (Path(temp) / 'raw-name-provider.cpp').write_text('''\
+class Hidden {
+    static constexpr int helper(int x) { return x + 9; }
+    static constexpr int evaluated(int x) { return x + 1; }
+public:
+    static constexpr int choose(int x) {
+        if consteval { return evaluated(x); } else { return x; }
+    }
+};
+''')
+        (Path(temp) / 'raw-name-consumer.cpp').write_text('''\
+int demand(int) __asm__("_ZN6Hidden6helperEi");
+int main() { return demand(33) - 42; }
+''')
+        compile('raw-name-provider.cpp', 'raw-name-provider.o')
+        compile('raw-name-consumer.cpp', 'raw-name-consumer.o')
+        entry = symbols('raw-name-provider.o').get('_ZN6Hidden6helperEi')
+        assert entry and entry[3:5] == ['FUNC', 'WEAK'] and entry[6] != 'UND', entry
+        for objects in (('raw-name-consumer.o', 'raw-name-provider.o'),
+                        ('raw-name-provider.o', 'raw-name-consumer.o')):
+            link(*objects)
+            run('./program')
+
         inline_symbols = ('_Z12inline_firsti', '_Z12inline_lateri', '_ZN9Operation6memberEi',
                           '_ZN14DeclaredMember6memberEi', '_Z15implicit_inlinei')
         for name in ('main', 'peer'):
@@ -182,7 +207,8 @@ def main():
             obj = f'friend-{name}.o'
             compile(friend / f'{name}.cpp', obj)
             table = symbols(obj)
-            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi'):
+            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi',
+                           '_ZN15inline_template4takeERKNS_4CellIiEE'):
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
         for objects in (('friend-main.o', 'friend-peer.o'), ('friend-peer.o', 'friend-main.o')):

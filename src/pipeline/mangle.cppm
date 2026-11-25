@@ -81,6 +81,11 @@ using ClassNames = std::function<ClassName(ast::EntityId)>;
 // A standalone <type> encoding, with an initially empty substitution table (§5.1.5).
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes);
 
+// The Itanium <special-name> for a class-valued template parameter object.
+std::expected<std::string, std::string> mangled_template_parameter_object(const ast::Interners& in,
+                                                                        const ast::TemplateArg& argument,
+                                                                        const ClassNames& classes);
+
 // `scope` is the class or namespace a function is a member of, none for the global namespace.
 // Direct members of ::std use an <unscoped-name> with St (§5.1.5 and §5.1.10).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
@@ -133,6 +138,8 @@ std::optional<std::string_view> builtin_code(ast::Builtin b) {
     case unsigned_long: return "m";
     case long_long: return "x";
     case unsigned_long_long: return "y";
+    case int128: return "n";
+    case unsigned_int128: return "o";
     case float_: return "f";
     case double_: return "d";
     case long_double: return "e";
@@ -234,11 +241,9 @@ class Mangler {
         // `typename Q::n`: <nested-name> N <prefix> <source-name> E, a substitution candidate
         // (§5.1.5.3).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
-        auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
-        auto p = type(d.qualifier);
+        auto p = dep_prefix(bare);
         if (!p) return p;
-        inner = "N" + *p + source_name(in_.names.spelling(d.name)) + "E";
-        candidates_.push_back(full_key(bare));
+        inner = "N" + *p + "E";
       } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
         // A type-trait built-in of a dependent type: a vendor-extended type `u <source-name>` with
         // its argument, `u11__remove_cvIT_E`, as Clang spells it (docs/EXTENSIONS.md).
@@ -667,6 +672,27 @@ class Mangler {
         if (!e) return e;
         return "X" + *e + "E";
       }
+      if (in_.values.is<ast::VAggregate>(a.value)) {
+        const auto& aggregate = in_.values.get<ast::VAggregate>(a.value);
+        auto t = type(aggregate.type);
+        if (!t) return t;
+        auto fields = in_.seqs.elements(aggregate.elems);
+        for (ast::ConstId field : fields)
+          if (!in_.values.is<ast::VInt>(field))
+            return std::unexpected("a non-integral template argument field");
+        // Itanium's typed braced-init-list omits trailing zero initializers. The
+        // aggregate constant itself still contains every field, including those zeroes.
+        std::size_t count = fields.size();
+        while (count && in_.values.get<ast::VInt>(fields[count - 1]).bits == ast::Bits128{}) --count;
+        out = "Xtl" + *t;
+        for (std::size_t i = 0; i < count; ++i) {
+          const auto& field = in_.values.get<ast::VInt>(fields[i]);
+          auto value = template_arg({ast::TemplateArgKind::value, field.type, fields[i]});
+          if (!value) return value;
+          out += *value;
+        }
+        return out + "EE";
+      }
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
       if (ast::is_pointer(in_, a.type) && in_.values.is<ast::VLvalue>(a.value))
@@ -678,16 +704,14 @@ class Mangler {
         if (!t) return t;
         ast::Bits128 v = in_.values.get<ast::VInt>(a.value).bits;
         bool neg = ast::is_negative(v);
-        return std::format("L{}{}{}E", *t, neg ? "n" : "", neg ? ~v.lo + 1 : v.lo);
+        return std::format("L{}{}{}E", *t, neg ? "n" : "", ast::wide::decimal(neg ? ast::wide::neg(v) : v));
       }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");
       auto v = in_.values.get<ast::VInt>(a.value).bits;
       bool neg = ast::is_signed(ast::aarch64_darwin, *b) && ast::is_negative(v);
-      // The fundamental integral types are at most 64 bits wide on the target.
-      std::uint64_t mag = neg ? ~v.lo + 1 : v.lo;
-      out += std::format("L{}{}{}E", *code, neg ? "n" : "", mag);
+      out += std::format("L{}{}{}E", *code, neg ? "n" : "", ast::wide::decimal(neg ? ast::wide::neg(v) : v));
     }
     return out;
   }
@@ -974,6 +998,45 @@ class Mangler {
   // Keys: a type is its canonical handle, an entity (a class or namespace) and a template name
   // have bit 32 or 33 set.
   std::uint64_t full_key(ast::QualType q) const { return std::to_underlying(in_.canonical(q)); }
+  // The <prefix> a dependent member name `Q::n` or `Q::template n<args>` stands for inside its
+  // `N … E` (§5.1.5.3): Q's own prefix when Q is one too, not a nested `N … E`; then the name, and
+  // the arguments after the <template-prefix> `Q::n`. Each prefix is a candidate, the template
+  // prefix keyed apart from the template-name argument `Q::template n`, which is a <type>.
+  std::expected<std::string, std::string> dep_prefix(ast::QualType q) {
+    ast::QualType bare = ast::without_cv(in_.canonical(q));
+    if (!in_.types.is<ast::TDepName>(in_.types.canon(bare)) || ast::Cv(std::to_underlying(in_.canonical(q)) & 3) != ast::Cv::none)
+      return type(q);
+    if (auto s = find(full_key(bare))) return *s;
+    auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
+    std::string r;
+    auto prefix_and_name = [&]() -> std::expected<std::string, std::string> {
+      auto p = dep_prefix(d.qualifier);
+      if (!p) return p;
+      return *p + source_name(in_.names.spelling(d.name));
+    };
+    if (ast::DepNameForm(d.form) == ast::DepNameForm::template_id) {
+      auto& ins = const_cast<ast::Interners&>(in_);
+      const std::uint64_t key = (std::uint64_t{4} << 32) |
+          full_key(ins.intern_type(ast::TDepName{d.qualifier, d.name, std::uint8_t(ast::DepNameForm::template_name), {}}));
+      if (auto s = find(key)) {
+        r = *s;
+      } else {
+        auto p = prefix_and_name();
+        if (!p) return p;
+        r = *p;
+        candidates_.push_back(key);
+      }
+      auto a = template_args(in_.seqs.elements(d.args));
+      if (!a) return a;
+      r += *a;
+    } else {
+      auto p = prefix_and_name();
+      if (!p) return p;
+      r = *p;
+    }
+    candidates_.push_back(full_key(bare));
+    return r;
+  }
   std::optional<std::string> find(std::uint64_t key) const {
     for (std::size_t i = 0; i < candidates_.size(); ++i)
       if (candidates_[i] == key) return substitution(i);
@@ -1013,6 +1076,14 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes) {
   return Mangler(in, classes, {}, {}).type(type);
+}
+
+std::expected<std::string, std::string> mangled_template_parameter_object(const ast::Interners& in,
+                                                                        const ast::TemplateArg& argument,
+                                                                        const ClassNames& classes) {
+  auto encoding = Mangler(in, classes, {}, {}).template_arg(argument);
+  if (!encoding) return encoding;
+  return "_ZTA" + *encoding;
 }
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,

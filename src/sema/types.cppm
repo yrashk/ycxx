@@ -38,10 +38,11 @@ inline Builtin promoted(const ast::Target& target, Builtin b, u8 bit_width = 0) 
 inline Builtin common_integer(const ast::Target& target, Builtin a, Builtin b) { return *ast::usual_arithmetic(target, a, b); }
 
 constexpr std::string_view spelling(Builtin b) {
-  constexpr std::array<std::string_view, 21> names{
+  constexpr std::array<std::string_view, 23> names{
       "void", "std::nullptr_t", "bool", "char", "signed char", "unsigned char", "wchar_t", "char8_t", "char16_t",
       "char32_t", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long",
-      "unsigned long long", "float", "double", "long double"};
+      "unsigned long long", "__int128", "unsigned __int128", "float", "double", "long double"};
+  static_assert(names.size() == std::to_underlying(Builtin::long_double) + 1);
   auto i = std::to_underlying(b);
   return i < names.size() ? names[i] : "<builtin>";
 }
@@ -70,6 +71,7 @@ struct TypeRec {
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
+  ast::DepNameForm dep_form = ast::DepNameForm::plain;  // a dependent member's: with `args`, or a template
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;  // a template parameter's; a pack index's: its pack is bound to `args`
@@ -219,9 +221,12 @@ public:
       r.rvalue_ref = t.is<ast::TRRef>(c);
       r.inner = r.rvalue_ref ? t.get<ast::TRRef>(c).referee : t.get<ast::TLRef>(c).referee;
     } else if (t.is<ast::TDepName>(c)) {
+      auto d = t.get<ast::TDepName>(c);
       r.kind = TypeKind::dep_name;
-      r.inner = t.get<ast::TDepName>(c).qualifier;
-      r.name = t.get<ast::TDepName>(c).name;
+      r.inner = d.qualifier;
+      r.name = d.name;
+      r.dep_form = ast::DepNameForm(d.form);
+      r.args = d.args;
     } else if (t.is<ast::TTransform>(c)) {
       r.kind = TypeKind::transform;
       r.inner = t.get<ast::TTransform>(c).arg;
@@ -292,6 +297,11 @@ public:
   std::function<bool(EntityId)> class_dependent;
   std::function<std::string(NameId)> dep_name_spelling;
   QualType dep_name(QualType qualifier, NameId name) { return ins_->intern_type(ast::TDepName{qualifier, name}); }
+  // `typename Q::template name<args>` ([temp.names]/4), or the template `Q::template name` as a
+  // template template argument (`DepNameForm::template_name`, no arguments).
+  QualType dep_template(QualType qualifier, NameId name, ast::DepNameForm form, std::span<const ast::TemplateArg> args = {}) {
+    return ins_->intern_type(ast::TDepName{qualifier, name, u8(form), ins_->intern_seq(args)});
+  }
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
   static bool is_const(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 1) != 0; }
@@ -404,8 +414,9 @@ private:
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::dep_name:
-      return cvs + "typename " + spell(r.inner) + "::" + (dep_name_spelling ? dep_name_spelling(r.name) : "<name>") +
-             (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+      return cvs + "typename " + spell(r.inner) + "::" + (r.dep_form == ast::DepNameForm::plain ? "" : "template ") +
+             (dep_name_spelling ? dep_name_spelling(r.name) : "<name>") +
+             (r.dep_form == ast::DepNameForm::template_id ? "<…>" : "") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::template_param:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
@@ -451,6 +462,8 @@ struct ValueRec {
   ValueKind kind = ValueKind::other;
   QualType type{};
   u64 bits = 0;
+  // An integer outside [-2^63, 2^64), which only a 128-bit type holds: `bits` has its low half.
+  bool wide = false;
   double real = 0;
   std::vector<u32> units;
   ConstId base = ConstId::none;
@@ -463,6 +476,7 @@ public:
 
   // An integer of type `t`, wrapped to its width ([conv.integral]).
   ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, *target_, t, ast::Bits128{bits, 0}); }
+  ConstId integer(QualType t, ast::Bits128 bits) { return ast::int_value(*ins_, *target_, t, bits); }
   // A value of standard floating type `t`: `v` rounded to its format ([conv.double]).
   ConstId floating(QualType t, double v) { return ast::float_value(*ins_, *target_, t, v); }
   // A string literal object of array type `t`, including its terminating code unit.
@@ -501,6 +515,9 @@ public:
       r.kind = ValueKind::integer;
       r.type = i.type;
       r.bits = i.bits.lo;
+      const auto b = ast::builtin_of(*ins_, i.type);
+      const bool negative = b && ast::is_signed(*target_, *b) && ast::is_negative(i.bits);
+      r.wide = negative ? i.bits.hi != ~u64{0} || i64(i.bits.lo) >= 0 : i.bits.hi != 0;
     } else if (v.is<ast::VFloat>(c)) {
       auto f = v.get<ast::VFloat>(c);
       r.kind = ValueKind::floating;
@@ -545,7 +562,8 @@ enum class EntityKind : u8 {
   virtual_table,  // an external Itanium vtable, with its class as `scope`
   deleting_destructor,  // an Itanium D0 entry, with its class as `scope`
   type_info,  // an external Itanium type information object, with its class as `scope`
-  base_object_destructor  // an Itanium D2 entry, with its class as `scope`
+  base_object_destructor,  // an Itanium D2 entry, with its class as `scope`
+  template_parameter_object  // a const object, identified by its one canonical value argument
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
@@ -636,6 +654,7 @@ public:
       if ((r.kind == EntityKind::class_ || r.kind == EntityKind::variable) && r.constraints != Fp128{})
         f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.constrained-partial")), r.constraints);
     }
+    if (r.kind == EntityKind::template_parameter_object) f = mix_arg(f, r.args.front());
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
@@ -734,6 +753,33 @@ struct BaseRec {
 // Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
 enum class PeerVirtualLayout : u8 { none, root, primary_base };
 
+// A slot of a primary virtual table (Itanium C++ ABI §2.5.2): a virtual function's final
+// overrider, or one of the two entries a virtual destructor occupies (§3.2.3).
+enum class VirtualSlotKind : u8 { function, complete_destructor, deleting_destructor };
+struct VirtualSlot {
+  EntityId function = EntityId::none;  // the final overrider in this class; a destructor's complete entry
+  VirtualSlotKind kind = VirtualSlotKind::function;
+  bool pure = false;  // [class.abstract]: the slot holds the pure virtual handler
+};
+
+// A dynamic class laid out by the general single-inheritance rules (#309): a root whose vptr is
+// at offset zero, or a class whose single public nonvirtual base is dynamic and primary. Its
+// table extends the primary base's: overriders replace inherited slots, and the declarations
+// that override nothing follow in declaration order. Immediate functions have no slots, including
+// in a class whose only virtuals are immediate (Itanium C++ ABI §2.5.2).
+struct DynamicClass {
+  bool primary_base = false;  // the single base supplies the vptr at offset zero
+  // The first non-pure virtual function not inline at the end of the class definition
+  // (Itanium C++ ABI §5.2.3): the unit defining it owns the table. Else every user emits it.
+  EntityId key_function = EntityId::none;
+  std::vector<VirtualSlot> slots;
+  std::optional<u32> slot_of(EntityId function, VirtualSlotKind kind = VirtualSlotKind::function) const {
+    for (u32 i = 0; i < slots.size(); ++i)
+      if (slots[i].function == function && slots[i].kind == kind) return i;
+    return std::nullopt;
+  }
+};
+
 // Eligibility and triviality for [class.prop] and [special]. An absent or deleted operation is
 // ineligible. Unknown marks a record whose declarations or subobjects do not establish the fact.
 enum class CopyOperation : u8 { unknown, ineligible, eligible_trivial, eligible_nontrivial };
@@ -772,12 +818,21 @@ struct ClassRec {
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool destructor_dependent = false;       // a closure pattern's captures leave usability unresolved
-  bool layout_requires_virtual_support = false;
+  bool layout_requires_virtual_support = false;  // it or a subobject is polymorphic
+  // It or a subobject is polymorphic outside the general dynamic layout (`dynamic`).
+  bool virtual_layout_unsupported = false;
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   // The sole abstract primary base of a class admitted for plain automatic default initialization.
   EntityId peer_automatic_primary_base = EntityId::none;
+  // A polymorphic class outside the peer profiles above, with its own table and constructors.
+  std::optional<DynamicClass> dynamic;
+  // The implicitly defined default constructor of a dynamic class without user-declared ones.
+  EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
+  // Member alias templates ([temp.alias], [temp.mem]): `type` is the pattern, at the member's own
+  // depth; named only with arguments (`Sema::member_alias_template`), so not among `types`.
+  std::vector<NestedType> alias_templates;
   std::vector<EntityId> pure_final_overriders;
   bool is_abstract() const { return !pure_final_overriders.empty(); }
   // Special members ([special]): whether a constructor is user-declared; the destructor and the
@@ -840,10 +895,19 @@ struct ClassRec {
   // Each member's access ([class.access.spec]), by entity: data members, member functions,
   // constructors, static data members and nested types.
   std::vector<std::pair<EntityId, ast::Access>> access;
-  // Its friends ([class.friend]): functions and classes, by entity.
+  // Its friends ([class.friend]): functions, classes and class templates, by entity.
   std::vector<EntityId> friends;
   // The unqualified friend function declarations ADL can find through this class.
   std::vector<ast::MemberRec> adl_friends;
+
+  // Whether `e` is a friend: one of `friends`, or a specialization of a friend class template,
+  // whichever of its partial specializations it was instantiated from ([temp.friend]/1).
+  bool befriends(EntityId e, const Entities& entities) const {
+    if (e == EntityId::none) return false;
+    if (std::ranges::contains(friends, e)) return true;
+    const EntityId templ = entities.rec(e).templ;
+    return templ != EntityId::none && std::ranges::contains(friends, templ);
+  }
 
   const MemberDeclRec* implicit_copy_assignment() const {
     const auto copy = std::ranges::find_if(members, [](const MemberDeclRec& m) {
@@ -898,10 +962,10 @@ public:
     return std::nullopt;
   }
 
-  // `r`, a definition's record, unless one is published already; the published one.
+  // Keep incomplete recovery records available to sema without exporting them as definitions.
   const ClassRec& publish(EntityId c, ClassRec r, const std::function<void(ClassRec&)>& finish = {}) {
     auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
-    if (fresh) {
+    if (fresh && it->second.defined) {
       class_order_.push_back(c);
       has_virtual_layouts_ |= it->second.layout_requires_virtual_support;
       if (finish) finish(it->second);
@@ -915,10 +979,10 @@ public:
     else if (!it->second.defined && r.defined) it->second = std::move(r);
     return it->second;
   }
-  // The classes and enumerations with records, in the order they were published.
+  // Defined classes and recorded enumerations, in publication order.
   std::span<const EntityId> classes() const { return class_order_; }
   std::span<const EntityId> enums() const { return enum_order_; }
-  // A defined class's record.
+  // A class record, including one retained for error recovery.
   const ClassRec& rec(EntityId c) const
     pre(find(c) != nullptr)
   {
@@ -940,6 +1004,25 @@ public:
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
+  }
+
+  // [class.default.ctor]: the checked implicit default initialization of a fieldless dynamic
+  // root or a fieldless class with one public nonvirtual root base. A root may be abstract
+  // because its constructor can initialize a base subobject.
+  bool constexpr_dynamic_default(EntityId cls) const {
+    const auto eligible = [](const ClassRec* r) {
+      return r && r->defined && r->dynamic && !r->virtual_layout_unsupported && !r->unapplied_layout &&
+             r->fields.empty() && r->destructor_usable && r->destructor == EntityId::none &&
+             r->implicit_default_ctor != EntityId::none;
+    };
+    const auto* r = find(cls);
+    if (!eligible(r)) return false;
+    if (r->bases.empty()) return true;
+    if (r->bases.size() != 1) return false;
+    const auto& edge = r->bases.front();
+    const auto* base = find(edge.cls);
+    return !edge.virtual_ && !edge.dependent_in_pattern && edge.access == ast::Access::public_ &&
+           eligible(base) && base->bases.empty();
   }
 
   // [class.prop]: compute the source type property from complete declarations in this unit.
@@ -1045,6 +1128,13 @@ public:
   }
 
   bool has_virtual_layouts() const { return has_virtual_layouts_; }
+  bool virtual_layout_unsupported(QualType t) const {
+    if (!has_virtual_layouts()) return false;
+    auto r = types_->rec(t);
+    while (r.kind == TypeKind::array) r = types_->rec(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c && c->virtual_layout_unsupported;
+  }
   bool layout_requires_virtual_support(QualType t) const {
     if (!has_virtual_layouts()) return false;
     auto r = types_->rec(t);
@@ -1137,6 +1227,7 @@ inline constexpr std::array string_functions{
     StringFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
     StringFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},
     StringFunction{"strchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    StringFunction{"strcmp", CType::int_, {CType::const_char_pointer, CType::const_char_pointer}, 2},
     StringFunction{"strpbrk", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
     StringFunction{"strrchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
     StringFunction{"strstr", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},

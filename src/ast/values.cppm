@@ -53,6 +53,96 @@ constexpr Bits128 bits_of(std::int64_t v) { return {u64(v), v < 0 ? ~u64{0} : 0}
 constexpr Bits128 bits_of(u64 v) { return {v, 0}; }
 constexpr bool is_negative(Bits128 v) { return std::int64_t(v.hi) < 0; }
 
+// Two's-complement arithmetic modulo 2^128, for the 128-bit integer types (#1172). C++26 has no
+// 128-bit integer, so the halves are combined by hand.
+namespace wide {
+
+constexpr bool is_zero(Bits128 a) { return (a.lo | a.hi) == 0; }
+constexpr Bits128 bit_not(Bits128 a) { return {~a.lo, ~a.hi}; }
+constexpr Bits128 bit_and(Bits128 a, Bits128 b) { return {a.lo & b.lo, a.hi & b.hi}; }
+constexpr Bits128 bit_or(Bits128 a, Bits128 b) { return {a.lo | b.lo, a.hi | b.hi}; }
+constexpr Bits128 bit_xor(Bits128 a, Bits128 b) { return {a.lo ^ b.lo, a.hi ^ b.hi}; }
+constexpr Bits128 add(Bits128 a, Bits128 b) {
+  u64 lo = a.lo + b.lo;
+  return {lo, a.hi + b.hi + u64(lo < a.lo)};
+}
+constexpr Bits128 sub(Bits128 a, Bits128 b) { return {a.lo - b.lo, a.hi - b.hi - u64(a.lo < b.lo)}; }
+constexpr Bits128 neg(Bits128 a) { return sub({}, a); }
+constexpr bool ult(Bits128 a, Bits128 b) { return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo; }
+constexpr bool slt(Bits128 a, Bits128 b) { return a.hi != b.hi ? std::int64_t(a.hi) < std::int64_t(b.hi) : a.lo < b.lo; }
+
+// The whole product of two 64-bit numbers.
+constexpr Bits128 mul64(u64 a, u64 b) {
+  constexpr u64 low32 = 0xffff'ffff;
+  u64 a0 = a & low32, a1 = a >> 32, b0 = b & low32, b1 = b >> 32;
+  u64 p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+  u64 mid = (p00 >> 32) + (p01 & low32) + (p10 & low32);
+  return {(mid << 32) | (p00 & low32), p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32)};
+}
+constexpr Bits128 mul(Bits128 a, Bits128 b) {
+  Bits128 r = mul64(a.lo, b.lo);
+  r.hi += a.lo * b.hi + a.hi * b.lo;
+  return r;
+}
+
+// Shifts by `k` < 128.
+constexpr Bits128 shl(Bits128 a, u32 k) {
+  if (k == 0) return a;
+  if (k >= 64) return {0, a.lo << (k - 64)};
+  return {a.lo << k, (a.hi << k) | (a.lo >> (64 - k))};
+}
+constexpr Bits128 lshr(Bits128 a, u32 k) {
+  if (k == 0) return a;
+  if (k >= 64) return {a.hi >> (k - 64), 0};
+  return {(a.lo >> k) | (a.hi << (64 - k)), a.hi >> k};
+}
+constexpr Bits128 ashr(Bits128 a, u32 k) {
+  if (k == 0) return a;
+  u64 fill = is_negative(a) ? ~u64{0} : 0;
+  if (k >= 64) return {u64(std::int64_t(a.hi) >> (k - 64)), fill};
+  return {(a.lo >> k) | (a.hi << (64 - k)), u64(std::int64_t(a.hi) >> k)};
+}
+
+constexpr u32 bit_width(Bits128 a) { return a.hi ? 64 + u32(std::bit_width(a.hi)) : u32(std::bit_width(a.lo)); }
+constexpr u32 countr_zero(Bits128 a) { return a.lo ? u32(std::countr_zero(a.lo)) : 64 + u32(std::countr_zero(a.hi)); }
+
+struct QuotRem {
+  Bits128 quot, rem;
+};
+// Unsigned division by a nonzero `b`, one quotient bit at a time.
+constexpr QuotRem udivrem(Bits128 a, Bits128 b) {
+  if (a.hi == 0 && b.hi == 0) return {{a.lo / b.lo, 0}, {a.lo % b.lo, 0}};
+  Bits128 q{}, r{};
+  for (u32 i = 128; i-- > 0;) {
+    // The partial remainder is at most the bits of `a` above `i`, so doubling it cannot pass 2^128.
+    r = shl(r, 1);
+    r.lo |= (i >= 64 ? a.hi >> (i - 64) : a.lo >> i) & 1;
+    if (!ult(r, b)) {
+      r = sub(r, b);
+      (i >= 64 ? q.hi : q.lo) |= u64{1} << (i % 64);
+    }
+  }
+  return {q, r};
+}
+// Signed division truncating toward zero, the remainder taking the dividend's sign
+// ([expr.mul]/4), by a nonzero `b`; the minimum divided by -1 wraps.
+constexpr QuotRem sdivrem(Bits128 a, Bits128 b) {
+  bool na = is_negative(a), nb = is_negative(b);
+  auto [q, r] = udivrem(na ? neg(a) : a, nb ? neg(b) : b);
+  return {na != nb ? neg(q) : q, na ? neg(r) : r};
+}
+
+// The decimal digits of `a` read as unsigned.
+inline std::string decimal(Bits128 a) {
+  if (a.hi == 0) return std::to_string(a.lo);
+  constexpr u64 chunk = 10'000'000'000'000'000'000u;  // 10^19, the largest power of ten in 64 bits
+  auto [q, r] = udivrem(a, {chunk, 0});
+  std::string low = std::to_string(r.lo);
+  return decimal(q) + std::string(19 - low.size(), '0') + low;
+}
+
+}  // namespace wide
+
 // ---------------------------------------------------------------- non-dependent kinds
 
 // An integral value of `type` ([basic.fundamental]): bool, a character or integer type.

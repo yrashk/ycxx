@@ -80,6 +80,8 @@ Message message(Session& s, FileId file, std::string_view presumed, const Diag& 
 // The same, from the text of the file the diagnostic is in and the spellings of the session that
 // preprocessed it.
 Message message(const Spellings& sp, std::string_view text, std::string_view presumed, const Diag& d);
+// Render a diagnostic emitted by Pp, whose directive text lives in the returned region.
+std::string render_diagnostic(const Region& region, lex::LexDiag kind, std::span<const u64> args);
 // The process's session for a configuration (the one `Pp` uses for a unit with that `SourceOf`).
 // Sessions live as long as the process: the regions `Pp` returns hold their spellings' numbers.
 Session& session_for(const Config& cfg);
@@ -296,6 +298,10 @@ FileNames& file_names() {
   return n;
 }
 
+bool has_directive_text(lex::LexDiag kind) {
+  return kind == lex::LexDiag::error_directive || kind == lex::LexDiag::warning_directive;
+}
+
 }  // namespace ycxx::pp
 
 export namespace ycxx::pp {
@@ -425,6 +431,15 @@ Preprocessed preprocess(std::string_view text, std::string_view path) {
   return preprocess(s, text, path);
 }
 
+std::string render_diagnostic(const Region& region, lex::LexDiag kind, std::span<const u64> args) {
+  if (has_directive_text(kind)) {
+    const auto it = std::ranges::find(region.directive_messages, Fp128{args[0], args[1]},
+                                      &std::pair<Fp128, std::string>::first);
+    if (it != region.directive_messages.end()) return it->second;
+  }
+  return lex::render(kind, args);
+}
+
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
   return message(s.spellings, c ? std::string_view(c->text) : std::string_view(), presumed, d);
@@ -435,7 +450,7 @@ Message message(const Spellings& s, std::string_view file_text, std::string_view
   auto at = std::ranges::upper_bound(starts, d.offset);
   std::string text = lex::render(d.kind, d.args);
   // #error and #warning say their line's text, a spelling of the session.
-  if (d.kind == lex::LexDiag::error_directive || d.kind == lex::LexDiag::warning_directive)
+  if (has_directive_text(d.kind))
     text = s.name(static_cast<u32>(d.args[0]));
   u32 line = static_cast<u32>(at - starts.begin());
   std::string name(presumed);
@@ -558,8 +573,16 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
       std::vector<u32> starts;
     };
     std::map<u16, FileLines> files;
-    for (const Diag& d : result.diags) {
+    for (Diag& d : result.diags) {
       const lex::message info = lex::message_of(d.kind);
+      if (has_directive_text(d.kind)) {
+        const std::string_view text = s.spellings.name(static_cast<u32>(d.args[0]));
+        const Fp128 key = fingerprint128(text);
+        auto& messages = result.region.directive_messages;
+        if (std::ranges::find(messages, key, &std::pair<Fp128, std::string>::first) == messages.end())
+          messages.emplace_back(key, text);
+        d.args = {key.lo, key.hi};
+      }
       if (info.severity != lex::Severity::error || info.text[0] == 0) continue;
       auto [it, fresh] = files.try_emplace(d.file);
       if (fresh) {
@@ -574,7 +597,7 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
         std::format_to(std::back_inserter(result.region.error_details), "{}:{}:{}: ", name,
                        line - starts.begin(), offset - *(line - 1) + 1);
       }
-      result.region.error_details += lex::render(d.kind, d.args);
+      result.region.error_details += render_diagnostic(result.region, d.kind, d.args);
       result.region.error_details += '\n';
     }
     return result;

@@ -75,10 +75,16 @@ export struct PathStep {
 
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
-// `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
-// the caller's other evaluations ([intro.execution]).
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap };
-export using Flags = std::uint8_t;
+// `call_body` marks accesses of a lowered builtin body, which are indeterminately sequenced with
+// the caller's other evaluations ([intro.execution]). `explicit_trap` and `assumed_unreachable`
+// mark an `unreachable` that `__builtin_trap()` and `__builtin_unreachable()` lower to.
+export enum class Flag : std::uint8_t {
+  nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap, assumed_unreachable,
+  outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
+  outside_unknown,   // obj.begin imports a record's identity without a readable value
+  unknown_reference, // the record is the unknown referent of a parameter
+};
+export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
 // Traits of the op itself.
@@ -206,11 +212,11 @@ export enum class Op : std::uint16_t {
   // Memory and object lifetime ([basic.life], [basic.stc], [class.union]).
   alloc [[=state({S}, {S, V}).imms({type, storage, init})]],
   dealloc [[=state({S, V}, {S}).imms({storage})]],
-  obj__begin [[=state({S, V}, {S}).imms({type})]],
+  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({outside_lifetime, outside_unknown, unknown_reference})]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
-  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_})]],
+  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src
@@ -273,8 +279,9 @@ export enum class Op : std::uint16_t {
   cond_br [[=control({V}, {}, 2)]],                      // true, false
   switch_ [[=control({V}, {}, 1, true).imms({consts})]],  // default, then one per case value
   ret [[=control({S, Vs}, {}, 0)]],
-  // The flags distinguish an explicit trap and a static definition ([expr.const]) from falling off the end.
-  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap})]],
+  // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
+  // ([expr.const]) from falling off the end.
+  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
   consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
@@ -303,6 +310,14 @@ export enum class Op : std::uint16_t {
 
   // The implicit object of an ordinary member call must designate valid storage ([basic.life]).
   obj__check_receiver [[=state({S, V}, {S})]],
+
+  // Constant-evaluated signed intmax arithmetic yields the converted value, then overflow.
+  sadd_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
+  smul_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
+
+  // An immediate virtual member invocation: receiver, converted arguments, selected function,
+  // and whether the member name was qualified ([expr.call], [expr.const.core]).
+  call_immediate_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

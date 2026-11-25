@@ -58,6 +58,11 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.tu_local_parameter_symbols
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
+  # Two units sharing a nested class's inline static members (#306); unit.linux_nested_classes
+  # checks the same on Linux.
+  add_test(NAME unit.darwin_nested_classes
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nested_classes.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
   # The Darwin counterpart of unit.linux_archive (#842), checked against the system linker.
   add_test(NAME unit.darwin_archive
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
@@ -92,6 +97,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_array_delete
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_array_delete.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # The Darwin runs of the same sources are tests/own/class-allocation in the core suite.
+  add_test(NAME unit.linux_class_new
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_class_new.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # The Darwin runs of the same sources are tests/own/classes/nested in the core suite (#306).
+  add_test(NAME unit.linux_nested_classes
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nested_classes.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} linux)
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
       COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_fixed_array_new.py
@@ -145,6 +158,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_function_addresses
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_function_addresses.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: runs the freestanding ELF counterpart of builtin-line.run.cpp.
+  add_test(NAME unit.linux_builtin_line
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_line.py
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own/builtins/builtin-line.run.cpp)
   # PARITY: by design: links and runs x86-64 ELF objects with native peers.
   add_test(NAME unit.linux_virtual_member_final
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_member_final.py
@@ -175,6 +192,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # PARITY: by design: links the ELF base and complete object entries with native peers.
   add_test(NAME unit.linux_base_object_variants
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_base_object_variants.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: the run suite runs the same tests on macOS; this links them with native
+  # x86-64 ELF compilers and runtimes.
+  add_test(NAME unit.linux_virtual_dispatch
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_dispatch.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   # PARITY: by design: links virtual destructor entries with native x86-64 ELF peers.
   add_test(NAME unit.linux_root_virtual_destructor
@@ -211,6 +233,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_immediate_functions
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_immediate_functions.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
+  # PARITY: by design: examines and links native x86-64 ELF objects.
+  add_test(NAME unit.linux_immediate_template_link
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_immediate_template_link.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: checks x86-64 ELF symbol tables and runs the native link.
+  add_test(NAME unit.linux_consteval_private_inline
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_consteval_private_inline.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_elf_comdat
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_comdat.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR})

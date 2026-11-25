@@ -51,13 +51,25 @@ struct Unary {
 };
 
 // The binary operators whose operands are unsequenced ([intro.execution]).
-enum class BinaryOp : u8 { mul, div, rem, add, sub, lt, gt, le, ge, spaceship, eq, ne, bit_and, bit_xor, bit_or };
+enum class BinaryOp : u8 { mul, div, rem, add, sub, lt, gt, le, ge, eq, ne, bit_and, bit_xor, bit_or };
 
 struct Binary {
   ExprInfo info;
   BinaryOp op;
   [[=unsequenced]] Child lhs;
   [[=unsequenced]] Child rhs;
+};
+
+// The built-in three-way comparison `a <=> b` ([expr.spaceship]): `lhs` and `rhs` are prvalues of
+// their common arithmetic or object pointer type. The result, a prvalue of a comparison category
+// type ([cmp.categories]), is a copy of one of `results`: the static data members of that type
+// that name its values, `less`, `equal` (`equivalent`), `greater` and, for
+// `std::partial_ordering`, `unordered`.
+struct ThreeWay {
+  ExprInfo info;
+  [[=unsequenced]] Child lhs;
+  [[=unsequenced]] Child rhs;
+  SeqId<EntityId> results;
 };
 
 // The binary operators whose left operand is sequenced before the right: shifts ([expr.shift]),
@@ -123,7 +135,7 @@ struct Call {
   LibraryBuiltin builtin = LibraryBuiltin::none;
 };
 
-// A scalar new-expression ([expr.new]): allocation is sequenced before initialization.
+// A single-object new-expression ([expr.new]): allocation is sequenced before initialization.
 struct NewObject {
   ExprInfo info;
   [[=sequenced(0)]] Child allocation;
@@ -131,13 +143,15 @@ struct NewObject {
   bool placement = false;
 };
 
-// Single-object delete of a complete scalar ([expr.delete]): the operand has been converted
-// to void*. The deallocation function is called only when the address is non-null.
+// Single-object delete of a complete scalar or class object ([expr.delete]): the operand is
+// the typed pointer prvalue. When it is non-null, the destructor (none when trivial) ends the
+// object, and the usual sized deallocation function releases its storage.
 struct DeleteObject {
   ExprInfo info;
   EntityId function;
   [[=sequenced(0)]] Child address;
   [[=sequenced(1)]] Child size;
+  EntityId destructor = EntityId::none;
 };
 
 // One-dimensional array new ([expr.new]). The bound is converted to size_t, and the
@@ -157,7 +171,7 @@ struct DeleteArray {
 };
 
 // Built-in functions handled during evaluation (docs/EXTENSIONS.md).
-enum class BuiltinOp : u8 { fabs, strlen, trap };
+enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable, add_overflow, mul_overflow };
 struct BuiltinCall {
   ExprInfo info;
   BuiltinOp op;
@@ -270,6 +284,17 @@ struct VirtualMemberCall {
   u32 slot;
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
+};
+
+// An immediate virtual member call ([expr.const.core], [class.virtual]). `function` is the
+// statically selected member, which also supplies any default arguments. Only an unqualified
+// call needs the receiver's dynamic type.
+struct ImmediateVirtualCall {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
+  u8 qualified;
 };
 
 // `dynamic_cast<cv void*>(p)` ([expr.dynamic.cast]): the address of the most derived object.
@@ -478,6 +503,21 @@ struct DefaultArg {
   SeqId<u32> dependent_calls{};
 };
 
+// A source-line expression in a default argument. An early constant evaluation uses its
+// lexical line. Evaluation at an actual call uses the enclosing source-line context.
+struct SourceLine {
+  ExprInfo info;
+  u32 lexical_line;
+};
+
+// A default expression that observes the invocation line, including through nested defaults.
+// The declaration leaves the line unset. Use of the argument supplies a presumed line.
+struct SourceLineContext {
+  ExprInfo info;
+  [[=sequenced]] Child arg;
+  u32 line;
+};
+
 // ---------------------------------------------------------------- declarations (item trees)
 
 // One declarator of an item ([dcl.decl]): the ordinal of its record in `ItemSema::decls`, its
@@ -593,7 +633,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
-                          ConstantProbe>;
+                          ConstantProbe, ThreeWay, SourceLine, SourceLineContext, ImmediateVirtualCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -1,7 +1,11 @@
 # Process-level daemon tests (docs/design/daemon.md §8.2). #98 grows this suite.
+add_test(NAME daemon.runtime_dir
+  COMMAND python3 -B -X utf8 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_dir_test.py)
 add_test(NAME daemon.auto_var_init
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/auto_var_init.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
+# Overlap the comparison with other tests even before CTest has timing history (#1230).
+set_tests_properties(daemon.compare PROPERTIES COST 400)
 add_test(NAME daemon.no_rtti
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_rtti.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_CXX_COMPILER}")
@@ -42,6 +46,10 @@ add_test(NAME daemon.no_exceptions
 # PARITY: by design: checks x86-64 ELF relocation metadata and runs native mixed objects.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME daemon.weak_undefined_object
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/weak_undefined_object.py
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx
+            "${CMAKE_CXX_COMPILER}" "${CMAKE_READELF}" "${CMAKE_AR}")
   add_test(NAME daemon.derived_virtual_destructor
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})

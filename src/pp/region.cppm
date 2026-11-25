@@ -230,6 +230,8 @@ struct Region {
   std::vector<Tok> tokens;
   // Parallel to `tokens`; the eof's offset is the main file's size.
   std::vector<TokLoc> locs;
+  // Presumed lines parallel to tokens when the expanded unit contains __builtin_LINE.
+  std::vector<u32> presumed_lines;
   // Identifier and ud-suffix spellings in UTF-8, universal-character-names replaced; an
   // identifier's payload indexes them. Numbered in order of appearance.
   std::vector<std::string> names;
@@ -242,6 +244,8 @@ struct Region {
   std::vector<std::string> file_names;
   // The expansions `TokLoc::expansion` indexes; [0] is unused.
   std::vector<Expansion> expansions{Expansion{}};
+  // Directive messages keyed by text fingerprint, independent of session spelling numbers.
+  std::vector<std::pair<Fp128, std::string>> directive_messages;
   // Engine trace details, rendered while the source files of this preprocessing run are open.
   std::string error_details;
   // Token ranges where a pack pragma can change a record's layout. Layout still uses its

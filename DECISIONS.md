@@ -136,6 +136,9 @@ reasoning; do not leave decisions only in issue threads.
      the converted `std::size_t` (`Lm0E`), a substituted parameter in that parameter's type
      (`Li1E`), and a bound pack as `J <args> E`. Clang writes the literal as spelled (`Li0E`) and
      a bound pack as a placeholder. ycxx writes GCC's form.
+   - The same holds for a dependent member template as a template template argument,
+     `Use<Y<T>::template apply>` (#340): GCC writes `N1YIT_E5applyE`, Clang `sr1YIT_EE5applyE`.
+     ycxx writes GCC's form.
 
 ## 2. Provenance
 
@@ -309,6 +312,12 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
    - [Stored typed array pointers](docs/design/ast.md#55-constants) retain their array subobject
      and position for constant evaluation, including one-past positions. Native relocations
      use the root symbol and byte addend (Astra, #111).
+   - [Immediate function emission](docs/design/immediate-function-emission.md) omits eligible
+     nonvirtual members and function template specializations during native collection.
+     The interpreter still reads their checked bodies (#1097).
+   - [Private static constexpr helpers](docs/design/native-private-constexpr.md) of ordinary
+     non-template classes can reuse the native reference walk. A runtime use demands the
+     coalesced inline definition. Astra reviewed the design (#1174).
 7. **One binary, many fronts.** The `ycxx` binary is the daemon and also its clients: a
    `c++`-compatible command line, an LSP server and a control interface (reload, status, query).
 8. **Optimization is search over verified transformations, and it runs while the compiler is idle.**
