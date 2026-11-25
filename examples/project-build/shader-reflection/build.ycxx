@@ -1,0 +1,39 @@
+use plugin("rules/package") as shaders
+
+shaders.module "vertex" {
+    source = "shaders/triangle.vert"
+    stage = "vertex"
+    compiler = "/usr/bin/glslc"
+}
+
+shaders.module "fragment" {
+    source = "shaders/triangle.frag"
+    stage = "fragment"
+    compiler = "/usr/bin/glslc"
+}
+
+shaders.pack "scene" {
+    vertex = "vertex"
+    fragment = "fragment"
+    python = "/usr/bin/python3"
+}
+
+shaders.reflect "fragment_reflection" {
+    module = "fragment"
+    reflector = "/usr/bin/spirv-cross"
+}
+
+shaders.bindings "scene_bindings" {
+    facts = { layout = value("fragment_reflection", "layout") }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("scene_bindings", "header")]
+    runtime_assets = [artifact("scene", "bundle")]
+}
+
+cpp.executable "runtime_only" {
+    sources = ["runtime_only.cc"]
+    runtime_assets = [artifact("scene", "bundle")]
+}
