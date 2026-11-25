@@ -930,7 +930,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 non-template class is a member class: defined in its class, or declared there (`class failure;`) and
 defined later, also out of class (`class O::I : public B { … };`), with members defined as
 `O::I::f`. Its members find the enclosing classes' types, static members and enumerators, and it
-can have virtual functions. Nested classes of class templates are not supported yet.
+can have virtual functions. Class templates and their specializations support in-class definitions
+of non-template member classes. An implicit instantiation checks the member definition when a use
+requires the member class to be complete.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
 
 **Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of

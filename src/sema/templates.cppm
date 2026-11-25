@@ -136,9 +136,20 @@ public:
       return types().add_cv(a->type, cv);
     }
     case TypeKind::class_: {
-      // `X<T…>`: the specialization for the substituted arguments ([temp.inst]).
       const EntityRec rec = w_->entities.rec(r.entity);
-      if (rec.templ == EntityId::none || !types().is_dependent(t)) return t;
+      if (!types().is_dependent(t)) return t;
+      if (rec.templ == EntityId::none) {
+        if (rec.scope == EntityId::none || w_->entities.rec(rec.scope).kind != EntityKind::class_) return t;
+        // A known member class of the current instantiation ([temp.dep.type]). Substitute its
+        // owner first, so the selected specialization supplies the member ([temp.inst]/3).
+        const auto owner = substitute(types().class_type(rec.scope), b);
+        if (!owner || !types().is_class(*owner)) return std::nullopt;
+        const EntityId cls = types().class_of(*owner);
+        if (cls == rec.scope) return t;
+        if (types().is_dependent(*owner)) return types().add_cv(types().dep_name(*owner, rec.name), cv);
+        return class_member_type(cls, rec.name, cv);
+      }
+      // `X<T…>`: the specialization for the substituted arguments ([temp.inst]).
       auto args = substitute_args(rec.args, b);
       if (!args) return std::nullopt;
       return types().add_cv(types().class_type(specialize_class(rec.templ, *args)), cv);
@@ -167,16 +178,7 @@ public:
       if (!types().is_class(*q)) return std::nullopt;
       // Asked at a point: the class completed there, a specialization instantiated for it
       // ([temp.inst]/2), or the members a class being defined has declared so far.
-      if (member_type) {
-        auto t = member_type(types().class_of(*q), r.name);
-        if (!t) return std::nullopt;
-        return types().add_cv(*t, cv);
-      }
-      const ClassRec* c = classes_->find(types().class_of(*q));
-      if (!c) return std::nullopt;
-      for (const auto& [n, mt, te] : c->types)
-        if (n == r.name) return types().add_cv(mt, cv);
-      return std::nullopt;
+      return class_member_type(types().class_of(*q), r.name, cv);
     }
     case TypeKind::builtin:
     case TypeKind::enum_:
@@ -2215,6 +2217,17 @@ public:
 
 private:
   static constexpr u16 unique_depth = 0x7fff;
+
+  std::optional<QualType> class_member_type(EntityId cls, NameId name, Cv cv) {
+    if (member_type) {
+      if (auto t = member_type(cls, name)) return types().add_cv(*t, cv);
+      return std::nullopt;
+    }
+    if (const ClassRec* c = classes_->find(cls))
+      for (const auto& [n, type, entity] : c->types)
+        if (n == name) return types().add_cv(type, cv);
+    return std::nullopt;
+  }
 
   enum class BooleanSubstitution { evaluate, defer, discard };
 

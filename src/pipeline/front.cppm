@@ -1566,11 +1566,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
-                  (program.in_global_scope(it.parent) || program.ordinary_nested_class(it.parent));
+                  (program.in_global_scope(it.parent) || program.named_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
     // A class template member is not emitted from its pattern. A friend class declaration
     // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
-    if (member && items.items[it.parent].template_depth > 0) {
+    if (member && !program.enclosing_heads(k).empty()) {
       if (const auto* pattern = linux ? program.analysed_item(k) : nullptr)
         for (const auto& declaration : ins.seqs.elements(pattern->decls))
           if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);

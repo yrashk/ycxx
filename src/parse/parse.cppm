@@ -481,8 +481,12 @@ public:
         entity && entity->kind == sema::EntityKind::class_ && !entity->unnamed_type_ordinal &&
         w_->ins.names.spelling(entity->name).empty())
       return classes_.is_defined(c);
-    ensure_declared(c, item);  // its definition, if an earlier item has it
     EntityId templ = w_->entities.rec(c).templ;
+    if (templ == EntityId::none && class_patterns_.contains(std::to_underlying(c))) {
+      const sema::ClassRec* r = instantiate_member_class(c, item);
+      return r && r->defined;
+    }
+    ensure_declared(c, item);  // its definition, if an earlier item has it
     if (templ != EntityId::none) specializations_before(item);
     auto it = class_items_.find(std::to_underlying(c));
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
@@ -910,7 +914,7 @@ public:
   // constant a variable usable in constant expressions was initialized with ([expr.const]), and a
   // function's defining item, each with the item that said it. An answer at `item` sees only what
   // items up to it said, so it does not depend on which other cells have run (§A1).
-  void declared(const ast::DeclSema& d, u32 item) {
+  void declared(const ast::DeclSema& d, u32 item, bool replayed_class = false) {
     decls_[std::to_underlying(d.entity)].push_back({item, d});
     if (d.flags & sema::decl_flag::specialization) explicit_specs_.emplace(std::to_underlying(d.entity), item);
     // A partial specialization ([temp.spec.partial]): a pattern its template's specializations may
@@ -936,6 +940,10 @@ public:
     if (d.kind == ast::DeclKind::variable && (d.flags & sema::decl_flag::template_) && (d.flags & sema::decl_flag::definition))
       var_templates_.emplace(std::to_underlying(d.entity), item);
     if (d.kind == ast::DeclKind::class_ && (d.flags & sema::decl_flag::definition)) {
+      if (replayed_class) {
+        class_patterns_.emplace(std::to_underlying(d.entity), item);
+        return;
+      }
       class_items_.emplace(std::to_underlying(d.entity), item);
       class_entities_.emplace(item, d.entity);
       class_heads_.emplace(item, d);
@@ -1156,6 +1164,8 @@ public:
         ast::DeclSema h = w_->ins.seqs.at(ps.decls, 0);
         if (h.flags & sema::decl_flag::template_) r.push_back(w_->ins.seqs.elements(h.template_params));
       }
+    } else if (parent != items::none && items_->items[parent].kind == ItemKind::class_def) {
+      return enclosing_heads(parent);
     }
     return r;
   }
@@ -1620,6 +1630,9 @@ public:
   // specialization, its member items analysed with the arguments bound, built whole and then
   // published; none when the template has no definition before `item`, or for a dependent one.
   const sema::ClassRec* instantiate_class(EntityId spec, u32 point);
+  const sema::ClassRec* instantiate_member_class(EntityId cls, u32 point);
+  const sema::ClassRec* replay_class(EntityId spec, u32 item, u32 point,
+                                     std::span<const ast::TemplateParamSema> params, const sema::Bindings& args);
   std::optional<sema::BaseRec> instantiate_base(EntityId spec, const ClassBasePattern& pattern, u32 item, u32 point,
                                                 std::span<const ast::TemplateParamSema> params, const sema::Bindings& args);
   // The member of a class template specialization a member function entity is, if it is one:
@@ -1727,7 +1740,7 @@ public:
   bool in_global_scope(u32 k) const { return !in_class_[k]; }
   // A member of an ordinary class ([class.mem]): every class enclosing item `k` is a named or
   // unnamed class defined at namespace scope or in such a class, with no template-head and no
-  // specialization. Nested classes of class templates are not supported yet (#306).
+  // specialization (#306).
   bool ordinary_class_member(u32 k) const {
     u32 p = items_->items[k].parent;
     if (p == items::none || items_->items[p].kind != ItemKind::class_def) return false;
@@ -1740,17 +1753,17 @@ public:
   void complete_class_items(u32 k) {
     class_def(k);
     for (u32 m : items_->items[k].members)
-      if (ordinary_nested_class(m) && class_entity(m) != EntityId::none) class_def(m);
+      if (named_nested_class(m) && class_entity(m) != EntityId::none) class_def(m);
     for (u32 m : items_->items[k].members) {
       if (items_->items[m].kind == ItemKind::function && items_->items[m].has_body()) analyze_body(m);
-      else if (ordinary_nested_class(m) && class_entity(m) != EntityId::none) complete_class_items(m);
+      else if (named_nested_class(m) && class_entity(m) != EntityId::none) complete_class_items(m);
     }
   }
-  // A named class defined inside an ordinary class ([class.nest]).
-  bool ordinary_nested_class(u32 k) const {
+  // An in-class definition of a named, non-template member class ([class.nest]).
+  bool named_nested_class(u32 k) const {
     const items::Item& it = items_->items[k];
     return it.kind == ItemKind::class_def && it.unnamed_type_ordinal == items::none && !it.template_depth &&
-           !it.specialization && ordinary_class_member(k);
+           !it.specialization && it.parent != items::none && items_->items[it.parent].kind == ItemKind::class_def;
   }
   // What analysis reached, without analysing more (#170): an item's semantics and its body, if
   // analysed.
@@ -2369,6 +2382,13 @@ public:
     // An enumerator initializer is read at its original class-member declaration, where the
     // enclosing class is incomplete ([class.mem.general]).
     if (replaying_scoped_enum != EntityId::none && c == instantiating) return false;
+    // A declaration replay uses the enclosing class's prefix at the written point.
+    const u32 parent = p_->items().items[item_].parent;
+    if (instantiating != EntityId::none && parent != items::none && p_->named_nested_class(parent)) {
+      for (EntityId owner = instantiating; owner != EntityId::none && !p_->is_namespace(owner);
+           owner = p_->world().entities.rec(owner).scope)
+        if (owner == c) return false;
+    }
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
   bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
@@ -2485,15 +2505,17 @@ public:
   }
   std::optional<ast::DeclSema> enclosing_earlier_member(EntityId cls, ast::NameId name, bool type_only,
                                                        std::vector<ast::DeclSema>* functions) override {
-    if (instantiating != EntityId::none) return std::nullopt;
-    const auto definition = p_->class_items_.find(std::to_underlying(cls));
-    if (definition == p_->class_items_.end()) return std::nullopt;
+    const auto key = std::to_underlying(cls);
+    const auto definition = p_->class_items_.find(key);
+    const auto pattern = p_->class_patterns_.find(key);
+    if (definition == p_->class_items_.end() && pattern == p_->class_patterns_.end()) return std::nullopt;
+    const u32 source = definition != p_->class_items_.end() ? definition->second : pattern->second;
     // The member of `cls` that contains this item: the nested class being defined.
     u32 limit = item_;
-    while (limit != items::none && p_->items().items[limit].parent != definition->second)
+    while (limit != items::none && p_->items().items[limit].parent != source)
       limit = p_->items().items[limit].parent;
     if (limit == items::none) return std::nullopt;
-    return members_before(definition->second, limit, cls, name, type_only, functions);
+    return members_before(source, limit, cls, name, type_only, functions);
   }
   // The declarations of `name` by the members of class item `cls_item` before its member `limit`.
   // A class declared there is a member only when it is nested in `owner` ([class.nest]): an
@@ -2504,8 +2526,9 @@ public:
     for (u32 m : p_->items().items[cls_item].members) {
       if (m == limit) break;
       // In a class template's instantiation, the specialization's own records of its members.
-      const ast::ItemSema& ms = instantiating != EntityId::none && p_->items().items[m].kind != ItemKind::access_spec
-                                    ? p_->class_member_sema(m, instantiating)
+      const ast::ItemSema& ms = p_->class_patterns_.contains(std::to_underlying(owner)) &&
+                                      p_->items().items[m].kind != ItemKind::access_spec
+                                    ? p_->class_member_sema(m, owner)
                                     : p_->item_sema(m).value;
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls)) {
         if (d.entity == EntityId::none || (d.flags & sema::decl_flag::friend_) ||
@@ -3414,7 +3437,7 @@ public:
         unsupported_class_alignment();
       } else if (member && it_->unnamed_type_ordinal != items::none) {
         unnamed_union_member();
-      } else if (member && !inst_ && p_->ordinary_nested_class(k_)) {
+      } else if (member && p_->named_nested_class(k_)) {
         class_definition();
       } else if (member) {
         s_.diag(0, Diag::not_supported, p_->region().tokens[it_->begin].kind);  // nested classes
@@ -4609,7 +4632,7 @@ private:
     if (!record_class_key(sem.entity, key, at)) return false;
     if (sem.flags & sema::decl_flag::definition) p_->class_definition_keys_.emplace(k_, key);
     decls_.push_back(sem);
-    p_->declared(sem, k_);
+    p_->declared(sem, k_, inst_.has_value());
     return true;
   }
 
@@ -4748,7 +4771,7 @@ private:
   void class_definition() {
     if (!supported_definition_attributes(after_definition_attributes())) return bad();
     const bool nested = p_->in_class(k_);
-    const EntityId owner = nested ? p_->class_entity(it_->parent) : EntityId::none;
+    const EntityId owner = inst_ ? inst_->spec : nested ? p_->class_entity(it_->parent) : EntityId::none;
     if (nested && owner == EntityId::none) return bad();
     // Names in the class-head are looked up in the enclosing class first ([basic.lookup.unqual]).
     if (nested) s_.current_class = owner;
@@ -4845,15 +4868,23 @@ private:
         s_.diag(ps_.pos(), Diag::union_with_base);  // [class.union.general]/1
         return bad();
       }
-      if (!base_clause(key, name, bases, base_pattern, member_class ? entity_of() : EntityId::none)) return bad();
+      if (inst_) {
+        // Instantiating the owner declares the member class. Its bases are part of its definition.
+        ps_.seek(it_->brace_begin);
+      } else if (!base_clause(key, name, bases, base_pattern, member_class ? entity_of() : EntityId::none,
+                              nested && !s_.template_scopes.empty())) {
+        return bad();
+      }
     }
     if (!ps_.is(Tk::l_brace)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
       return bad();
     }
-    if (member_class)
+    if (member_class) {
+      if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
       return member_class_definition(key, name, name_at, entity_of(), owner, is_final, bases, annotations,
                                      leading_annotations, at, td);
+    }
     for (DeclId p : q_.visible_decls(name))
       if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds)) {
         if (ds->kind == ast::DeclKind::enum_) {
@@ -4953,6 +4984,10 @@ private:
     const u32 name_at = ps_.pos();
     ps_.bump();
     const EntityId entity = nested_class_entity(name, owner);
+    if (s_.declared_template_param(name)) {
+      s_.diag(name_at, Diag::redeclared_local, name);
+      return bad();
+    }
     if (name == s_.world().entities.rec(owner).name) {  // [class.mem.general]: not the class's name
       s_.diag(name_at, Diag::member_named_as_class, name);
       return bad();
@@ -4990,8 +5025,8 @@ private:
     const EntityId owner = s_.types().class_of(*scope->type);
     const sema::EntityRec& o = s_.world().entities.rec(owner);
     if (o.kind != sema::EntityKind::class_ || o.templ != EntityId::none ||
-        p_->class_templates_.contains(std::to_underlying(owner))) {
-      s_.diag(at, Diag::not_supported, Tk::coloncolon);  // members of class templates (#306)
+        !p_->is_namespace(p_->outermost_class_scope(owner))) {
+      s_.diag(at, Diag::not_supported, Tk::coloncolon);  // out-of-class definitions for #1187
       return EntityId::none;
     }
     const sema::ClassRec* record = q_.is_complete(owner) ? p_->classes().find(owner) : nullptr;
@@ -5017,6 +5052,10 @@ private:
   void member_class_definition(Tk key, NameId name, u32 name_at, EntityId entity, EntityId owner, bool is_final,
                                std::vector<sema::BaseRec>& bases, std::vector<ast::AnnotationSema>& annotations,
                                std::vector<ast::AnnotationSema>& leading_annotations, u32 at, bool td) {
+    if (s_.declared_template_param(name)) {
+      s_.diag(name_at, Diag::redeclared_local, name);
+      return bad();
+    }
     if (owner != EntityId::none && name == s_.world().entities.rec(owner).name) {  // [class.mem.general]
       s_.diag(name_at, Diag::member_named_as_class, name);
       return bad();
@@ -5026,7 +5065,8 @@ private:
     // An earlier definition: in the class, whose members were analysed above, or out of class in
     // an earlier top-level item, which is analysed only when asked (#947).
     p_->ensure_declared(entity, k_);
-    if (const auto def = p_->class_items_.find(std::to_underlying(entity)); def != p_->class_items_.end() && def->second != k_) {
+    const auto& definitions = inst_ ? p_->class_patterns_ : p_->class_items_;
+    if (const auto def = definitions.find(std::to_underlying(entity)); def != definitions.end() && def->second != k_) {
       s_.diag(name_at, Diag::class_redefinition, name);
       return bad();
     }
@@ -5118,7 +5158,9 @@ private:
   // private for a `class`, public for a `struct` ([class.access.base]/2). `self` is the class
   // being defined when it is a specialization, whose other specializations may be bases.
   bool base_clause(Tk key, NameId name, std::vector<sema::BaseRec>& bases,
-                   std::optional<Program::ClassBasePattern>& pattern, EntityId self = EntityId::none) {
+                   std::optional<Program::ClassBasePattern>& pattern, EntityId self = EntityId::none,
+                   bool replay = false) {
+    const bool template_pattern = template_ || replay;
     ps_.bump();
     sema::Types& types = s_.types();
     do {
@@ -5133,7 +5175,7 @@ private:
       else if (ps_.accept(Tk::kw_protected)) access = ast::Access::protected_;
       else if (ps_.accept(Tk::kw_private)) access = ast::Access::private_;
       u32 at = ps_.pos();
-      if (template_ && !ps_.is(Tk::identifier) && !ps_.is(Tk::coloncolon) && !ps_.is(Tk::kw_decltype)) {
+      if (template_pattern && !ps_.is(Tk::identifier) && !ps_.is(Tk::coloncolon) && !ps_.is(Tk::kw_decltype)) {
         s_.diag(at, Diag::not_supported, ps_.kind());  // pack-index-specifiers and other base forms (#308)
         return false;
       }
@@ -5141,13 +5183,13 @@ private:
       DeclSpec spec;
       {
         AtItem::RestoreTypeTraitPattern restore{q_};
-        q_.retain_type_trait_pattern = template_;
-        ps_.class_template_base = template_;
+        q_.retain_type_trait_pattern = template_pattern;
+        ps_.class_template_base = template_pattern;
         spec = ps_.decl_specifiers();
         ps_.class_template_base = false;
       }
       if (!spec.ok) return false;
-      if (template_) {
+      if (template_pattern) {
         if (!spec.has_type || ps_.is(Tk::comma) || ps_.is(Tk::ellipsis) || s_.names_pack(spec.type)) {
           s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // multiple bases and base packs (#308)
           return false;
@@ -5689,7 +5731,7 @@ private:
       }
     }
     // `class-key identifier ;` declares a member class ([class.nest], [dcl.type.elab]/3).
-    if (!member_template_ && !inst_ && p_->ordinary_class_member(k_) && Parser::is_class_key(ps_.kind()) &&
+    if (!member_template_ && Parser::is_class_key(ps_.kind()) &&
         ps_.kind(ps_.past_attributes(1)) == Tk::identifier && ps_.kind(ps_.past_attributes(1) + 1) == Tk::semi)
       return member_class_declaration(ce);
     if (!member_template_ && s_.template_scopes.empty() && !inst_)
@@ -12616,6 +12658,29 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   ast::DeclSema head = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(head.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(params.empty() ? 0 : params[0].depth, rec.args);
+  return replay_class(spec, k, point, params, args);
+}
+
+// [temp.inst]/3: instantiating the enclosing class supplies the member declaration. Only
+// a demand for completeness replays its definition with the enclosing arguments bound.
+const sema::ClassRec* Program::instantiate_member_class(EntityId cls, u32 point) {
+  const u32 key = std::to_underlying(cls);
+  if (failed_class_assertions_.contains(cls) || failed_type_trait_instantiations_.contains(cls) ||
+      classes_instantiating_.contains(key)) return nullptr;
+  const u32 k = class_patterns_.at(key);
+  if (point <= last_member(k)) return nullptr;
+  if (classes_instantiated_.contains(key)) return classes_.find(cls);
+  if (too_deep(classes_instantiating_.size(), k)) return nullptr;
+  const EntityId owner = w_->entities.rec(cls).scope;
+  const auto& args = class_args_.at(std::to_underlying(owner));
+  class_def(k);
+  const auto heads = enclosing_heads(k);
+  return replay_class(cls, k, point, heads.front(), args);
+}
+
+const sema::ClassRec* Program::replay_class(EntityId spec, u32 k, u32 point,
+                                          std::span<const ast::TemplateParamSema> params, const sema::Bindings& args) {
+  const u32 key = std::to_underlying(spec);
   classes_instantiating_.insert(key);
   std::vector<sema::BaseRec> bases;
   if (auto p = class_base_patterns_.find(k); p != class_base_patterns_.end()) {
@@ -12674,8 +12739,9 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
     return nullptr;
   }
   classes_instantiated_.insert(key);
+  if (named_nested_class(k) && !member_declarations_valid) return nullptr;
   for (const ast::MemberRec& m : c.members)
-    if (w_->entities.rec(m.entity).kind != sema::EntityKind::data_member)
+    if (const auto kind = w_->entities.rec(m.entity).kind; kind != sema::EntityKind::data_member && kind != sema::EntityKind::class_)
       member_patterns_.emplace(std::to_underlying(m.entity), MemberOf{index(m.decl.item), spec});
   // A friend function the class defines is instantiated from its item as members are
   // ([temp.inst]/4); the first specialization to define it does.

@@ -1335,8 +1335,13 @@ struct World {
     };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
     types.class_dependent = [this](EntityId e) {
-      const EntityRec& r = entities.rec(e);
-      return r.closure_pattern || std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return arg_dependent(a); });
+      for (EntityId cls = e; cls != EntityId::none;) {
+        const EntityRec& r = entities.rec(cls);
+        if (r.kind != EntityKind::class_) break;
+        if (r.closure_pattern || std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return arg_dependent(a); })) return true;
+        cls = r.scope;
+      }
+      return false;
     };
   }
   World(const World&) = delete;
