@@ -63,7 +63,9 @@ std::expected<RuleCompilerCandidates, std::string> discover_rule_compilers(
 
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec);
-  if (ec) return std::unexpected("cannot locate the invoking directory for rule compiler discovery: " + ec.message());
+  // BOOTSTRAP: GCC 16 -Wstringop-overflow: avoid prefix insertion into the temporary message.
+  if (ec) return std::unexpected(std::format("cannot locate the invoking directory for rule compiler discovery: {}",
+                                             ec.message()));
 
   RuleCompilerCandidates result;
   std::vector<fs::path> directories;

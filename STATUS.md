@@ -3205,6 +3205,8 @@ bundled and workspace packages use the same worker. `cxx()` in a package recipe
 tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
 selects one compiler. Package compilation and worker execution appear in the
 build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
+when inserting a prefix into a temporary string.
 
 ## The engine trace (#245, 2026-11-19)
 
