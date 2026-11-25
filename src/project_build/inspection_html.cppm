@@ -96,7 +96,7 @@ constexpr std::string_view styles = R"HTML(
   .module-side { display: block; min-width: 0; padding: .5rem .65rem; border: 1px solid #e8edf2; border-radius: .4rem; }
   .module-side.before { background: #f9fafc; }
   .module-side.after { background: #f2f8f8; }
-  .module-side > span { display: block; }
+  .module-side > .side-label, .module-side > .module-status, .module-detail-label { display: block; }
   .module-side code { color: inherit; white-space: pre-wrap; }
   .module-side-items { margin: .2rem 0 0; padding-left: 1.15rem; }
   .manifest { position: sticky; top: 1rem; background: #182537; color: #ecf4ff; border-color: #24374e; }
@@ -424,6 +424,7 @@ void append_changed_import(std::string& out, const ModuleImportInspection& edge,
   out += "</span>";
   append_module_site_link(out, edge.location, "import", edge.unit_id, edge.directive_index, side.current);
   std::format_to(std::back_inserter(out), R"( <span class="module-meta">· Unit {}</span>)", edge.unit_id);
+  if (!edge.candidates.empty()) out += R"(<span class="module-meta module-detail-label">Provider candidates</span>)";
   append_module_candidates(out, edge.candidates, side.sites.declarations, side.current);
 }
 
@@ -433,7 +434,7 @@ void append_changed_unit(std::string& out, const ModuleUnitInspection& unit, Mod
   escaped(out, module_label(unit.scan));
   out += "</span>";
   if (unit.configuration && !unit.configuration->include_dirs.empty()) {
-    out += R"(<span class="module-meta">Include path order</span><ol class="module-side-items">)";
+    out += R"(<span class="module-meta module-detail-label">Include path order</span><ol class="module-side-items">)";
     for (const auto& directory : unit.configuration->include_dirs) {
       out += "<li><code>";
       escaped(out, directory);
@@ -477,12 +478,12 @@ void append_module_change(std::string& out, const ModuleChange<Record>& change, 
   }
   out += R"(</div><div class="module-sides">)";
   if (change.before) {
-    out += R"(<div class="module-side before"><span>Before</span>)";
+    out += R"(<div class="module-side before"><span class="side-label">Before</span>)";
     render(out, *change.before, sides[0]);
     out += "</div>";
   }
   if (change.after) {
-    out += R"(<div class="module-side after"><span>After</span>)";
+    out += R"(<div class="module-side after"><span class="side-label">After</span>)";
     render(out, *change.after, sides[1]);
     out += "</div>";
   }
