@@ -1157,6 +1157,15 @@ public:
     }
     return path;
   }
+  // Whether an earlier member of a class that contains item `j` is being analysed: `j`, a friend
+  // declaration or a nested class's member, is read once that member is, with its class.
+  bool after_running_member(u32 j) const {
+    for (u32 p = items_->items[j].parent; p != items::none && items_->items[p].kind == ItemKind::class_def;
+         p = items_->items[p].parent)
+      if (std::ranges::any_of(running_, [&](u32 r) { return r < j && r > p && last_member(r) < j && items_->items[r].parent == p; }))
+        return true;
+    return false;
+  }
   // Analyses the items up to `point` that may declare `e`, those that declare its name, so that
   // what `declared` recorded of it there does not depend on which items other cells analysed
   // first (§A1, #947). With every earlier item analysed (`analyze_all`) it analyses nothing.
@@ -1172,7 +1181,7 @@ public:
     ask(Probe::declares, name, path);
     for (auto [j, k] : named(name)) {
       if (j > point) break;
-      if (j < scanned || std::ranges::contains(running_, j)) continue;
+      if (j < scanned || std::ranges::contains(running_, j) || after_running_member(j)) continue;
       if (Program::passes(*ix_, Probe::declares, path, j, k)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
