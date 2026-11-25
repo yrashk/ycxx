@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 import std;
 import ycxx.build.action;
