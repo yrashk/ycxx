@@ -688,7 +688,13 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
     const auto unit_id = graph.size();
     append_module_unit(graph, units, file, source.path, scan);
     const bool first_unit = !graph.back().same_unit_as;
-    if (first_unit) report.units.push_back({unit_id, module_path(source.path, cwd), std::string(scan_status), {}});
+    if (first_unit) {
+      const auto path = module_path(source.path, cwd);
+      ModuleUnitConfiguration configuration{logical_module_path(path, native_triple), {}};
+      for (const auto& include : source.includes)
+        configuration.include_dirs.push_back(logical_module_path(module_path(include, cwd), native_triple));
+      report.units.push_back({unit_id, path, std::string(scan_status), {}, std::move(configuration)});
+    }
     auto& names = fact_names.emplace_back();
     std::map<std::pair<pipeline::ModuleDirectiveKind, std::string_view>, std::size_t> occurrences;
     for (std::size_t index = 0; index < scan.directives.size(); ++index) {
