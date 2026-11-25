@@ -1,5 +1,6 @@
-"""Exercise receipt-backed planning inputs through the resident daemon (#1335)."""
+"""Exercise receipt-backed planning inputs through the resident daemon (#1335, #1337)."""
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import re
@@ -7,6 +8,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import time
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
@@ -38,11 +40,18 @@ generate "cycle_inventory" {
 '''
 
 WIRE_CONFIG = r'''
+generate "wire_source" {
+    tool = "/bin/sh"
+    args = ["-c", "cat \"$1\" > \"$2\"", "profile-source", input("source"), output("config")]
+    inputs = { source = "wire.cfg" }
+    outputs = { config = "source.cfg" }
+}
+
 generate "wire_config" {
     tool = "/bin/sh"
     args = ["-c", "cat \"$1\" > \"$2\" && printf 'enabled\\n' > \"$3\"", "profile",
             input("source"), output("mode"), output("witness")]
-    inputs = { source = "wire.cfg" }
+    inputs = { source = artifact("wire_source", "config") }
     outputs = { mode = "profile.cfg", witness = "witness.cfg" }
 }
 '''
@@ -216,6 +225,61 @@ def check_builds(ycxx, scope, env, journal):
     check_watch(ycxx, scope, env, journal, installed, stable, expanded)
 
 
+def check_in_flight(ycxx, scope, env):
+    prepare(scope)
+    stale_shader = 'triangle-stale'
+    started = scope.parent / 'inventory-started'
+    released = scope.parent / 'inventory-released'
+    script = scope / 'rules/inventory.sh'
+    shebang, source = script.read_text(encoding='utf-8').split('\n', 1)
+    # Pause only after the producer has received the superseded staged input.
+    gate = f'''\
+case $(/bin/cat "$1") in
+    *'{stale_shader} '*)
+        : > {shlex.quote(str(started))}
+        while [ ! -f {shlex.quote(str(released))} ]; do /bin/sleep 0.02; done
+        ;;
+esac
+'''
+    script.write_text(f'{shebang}\n{gate}{source}', encoding='utf-8')
+    original = (scope / INVENTORY).read_text(encoding='utf-8')
+    stale = original + f'{stale_shader} fragment {ACCENT_SOURCE}\n'
+    assets = (scope / BUNDLE, scope / '.ycxx/assets/app/release-note.txt')
+    try:
+        traced_build(ycxx, scope, env, 'publish the initial inventory')
+        installed_assets = [publication(path) for path in assets]
+        installed_native = native_publication(scope)
+        replace_source(scope, INVENTORY, stale)
+
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            build = workers.submit(traced_build, ycxx, scope, env, 'edit inventory during generation')
+            try:
+                deadline = time.monotonic() + 30
+                while not started.exists() and not build.done() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                if build.done():
+                    raise AssertionError(('build finished before the generator was released', build.result()[0]))
+                assert started.exists(), 'generator did not receive the staged inventory'
+                assert [publication(path) for path in assets] == installed_assets, 'in-flight input changed assets'
+                assert native_publication(scope) == installed_native, 'in-flight input replaced the native executable'
+                replace_source(scope, INVENTORY, original + ACCENT_ROW)
+            finally:
+                released.touch()
+            _, events = build.result()
+
+        check_external_actions(events, GENERATOR, GENERATOR, compile_key(ACCENT), 'scene')
+        assert action_keys(events, 'RuleWorker') == ['scene'], events
+        check_bundle(scope, accent=True)
+        check_native_reuse(scope, events, installed_native)
+
+        # Asking for the superseded input again must run its generator before the rule can use it.
+        replace_source(scope, INVENTORY, stale)
+        _, events = traced_build(ycxx, scope, env, 'request the discarded inventory again')
+        check_external_actions(events, GENERATOR, compile_key(stale_shader), 'scene')
+    finally:
+        run_client(ycxx, scope, env, 'ctl', 'shutdown')
+
+
 def check_cycles(ycxx, workspace, env):
     for name, reference, extra in (
         ('self', 'artifact("scene", "bundle")', ''),
@@ -267,7 +331,7 @@ reads = ["rules/check-mode.sh"]
         for text, state, status in (('enabled\n', 'supported', 0), ('disabled\n', 'unsupported', 10)):
             (scope / 'wire.cfg').write_text(text, encoding='utf-8')
             _, events = traced_build(ycxx, scope, env, f'generated witness {state}')
-            check_external_actions(events, 'config', 'wire_config')
+            check_external_actions(events, 'config', 'wire_config', 'wire_source')
             assert action_keys(events, 'RuleWitness') == (['wire.fast-mode'] if previous_receipt is None else []), events
             assert action_keys(events, 'RuleClassifier') == ['wire.fast-mode'], events
             check_program(scope / NATIVE, status)
@@ -305,6 +369,7 @@ def main():
             check_builds(ycxx, scope, env, workspace / 'inventory-runs')
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
+        check_in_flight(ycxx, workspace / 'in-flight', env)
         check_cycles(ycxx, workspace, env)
         check_typed_witness(ycxx, workspace / 'typed-witness', env)
 
