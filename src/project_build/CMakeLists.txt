@@ -22,6 +22,7 @@ target_sources(ycxxc_project_build PUBLIC FILE_SET CXX_MODULES FILES
   inspection_model.cppm
   inspection_html.cppm
   inspection.cppm
+  module_providers.cppm
   plan.cppm
   publication.cppm
   ${YCXXC_PUBLICATION_OS}
