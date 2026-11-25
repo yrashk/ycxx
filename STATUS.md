@@ -2331,6 +2331,12 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
+- **Dependent layout arguments in variable template-ids** (#1371): a visible namespace variable
+  template can take `alignof(type-id)` and `sizeof(type-id)` in a variable template initializer or
+  a class template's fixed-type inline static member initializer. Replay checks layout at demand,
+  converts the target `size_t` result to the declared parameter type and expands the whole query
+  in pack order, including repeated elements and empty packs. General dependent alias arguments
+  remain in #209 and placeholder non-type parameters in #1244.
 - **Integral arithmetic in variable template initializers** (#1091): a direct variable template-id
   such as `extent<T, I - 1>` in a namespace variable template initializer evaluates its argument
   and checks its conversion when the initializer is instantiated with the selected definition's
