@@ -2853,8 +2853,16 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
-- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
-  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
+- The unary operators `+ - ! ~ * &`, prefix `++` and `--`, and the compound assignments find
+  hidden friends by ADL, on class and enumeration operands and, for a dependent operand, at the
+  point of instantiation (#1178). With no class operand only a candidate with an enumeration
+  parameter matching its operand takes part ([over.match.oper]/3). Unary operators rank the
+  conversions of hidden friends, other nonmembers and members together, a non-template before a
+  template. Compound assignments do
+  so where `ordinary_binary_choice` models the conversions; elsewhere the member is tried first
+  (#219). A postfix friend can be declared, and called in function notation only (#219). Access
+  and deletion are checked for the selected operator. Overloaded compound assignment is not yet
+  sequenced right to left (#1275). A friend function of a nested class is not supported (#1277).
 - **Friends in class templates** ([temp.friend], `templated_friend` in parse.cppm, #259): an
   unqualified friend function definition in a namespace-scope class template (or partial
   specialization) declares, for each specialization, an inline function of the namespace with
@@ -2896,11 +2904,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   chooses. Protected is checked as private until base classes exist.
 - C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
   class templates, private member operator wording, and elaborated types in member parameters
-  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
-  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
-  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Non-defining
+  friend function templates are [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
   trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
-  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
+  and deleted friends of class templates and friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
