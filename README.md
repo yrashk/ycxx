@@ -37,6 +37,8 @@ The resident engine builds executable targets from C++ source groups and declare
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
 Use `ycxx build app --watch` to rebuild after workspace edits.
+The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
+`use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
 can be compared with the checkout and rendered as a standalone HTML report.
 [Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
