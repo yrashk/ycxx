@@ -163,3 +163,46 @@ Inspection reuses the build definition resolver and lists directory entries.
 It does no tool execution or native compilation. It reports planned generator
 inputs and tools by path, so a reviewer can inspect the layout before those
 tools are installed or the inputs are available.
+
+## Native rule packages (#1257)
+
+A package owns its definition and exports a host rule plugin target. A workspace
+imports that target under a local alias.
+
+```text
+use plugin("tools/wire-rules/rules") as wire
+
+wire.generator "wire_files" {
+    schema = "schema.txt"
+    reads = ["settings.txt"]
+}
+```
+
+```text
+# tools/wire-rules/build.ycxx
+ycxx.rule_plugin "rules" {
+    compiler = "/usr/bin/c++"
+    sources = ["rule.cc"]
+}
+```
+
+The planner returns a request when it reaches a custom declaration. The
+coordinator builds the package using the selected host C++ toolchain, stages
+the resulting shared library, and invokes a worker. Both steps use the
+declared action runner. The package definition uses the built-in plugin
+target, giving this slice a bootstrap path that needs no other plugin.
+
+The worker loads the library in its own process and passes a versioned C ABI
+record to its entry point. The SDK exposes attributes as strings and declared
+file observations as byte ranges. Missing files and empty files are different
+observations. A rule emits one ordinary generator declaration, which is
+validated by the workspace planner. A worker failure produces diagnostics
+before the coordinator can admit a successful result.
+
+The bootstrap action key includes the SDK, source and header inputs, host
+compiler identity, and build arguments. The worker action key includes the
+library bytes, invocation, and declared observations. Prepared declarations
+are revalidated against the current inputs. Equivalent expanded generator
+actions keep their own keys when the shared library changes. The worker
+process bounds crash effects, and cacheable rules use the SDK for their
+workspace observations.
