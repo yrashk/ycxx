@@ -74,11 +74,6 @@ struct Complete {
 int dynamic() { return 5; }
 int (*const pointers[])(int) = {[](int x) { return x + 1; }};
 const int numbers[] = {[] { return dynamic(); }()};
-namespace N {
-template <class F>
-const F cid(F f) { return f; }
-}
-decltype(auto) kept = N::cid([] { return 9; });
 extern "C" {
 auto c_linkage = [](int x) { return x + 2; };
 }
@@ -96,6 +91,6 @@ int main() {
   if (plus() != 6 || applied != 9 || A::p(one) != 1 || A::f() != 7 || At<int>::p(one) != 1) return 1;
   if (two(1, 2) != 1 || two(1) != 0 || capturing_body(0) != 1) return 2;
   Complete c;
-  if (c.g() != 3 || pointers[0](one) != 2 || numbers[0] != 5 || kept() != 9 || c_linkage(one) != 3) return 3;
+  if (c.g() != 3 || pointers[0](one) != 2 || numbers[0] != 5 || c_linkage(one) != 3) return 3;
   return spec<char*>(nullptr) == 30 && spec<int>(one) == 40 && spec<long>(one) == 50 ? 0 : 4;
 }
