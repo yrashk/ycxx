@@ -6794,7 +6794,8 @@ public:
       const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx,
                                                             Cv::none, ast::RefQual::none,
                                                             (d->is_pure || dynamic_owner) && fr.fn_noexcept));
-      return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
+      return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children),
+                                         dynamic_owner ? fe : EntityId::none}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
   }

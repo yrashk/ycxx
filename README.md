@@ -674,6 +674,9 @@ written default member initializer are value-initialized.
   [#257](https://github.com/yrashk/ycxx/issues/257)
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive
   until the end of the full-expression on each executed path. [#902](https://github.com/yrashk/ycxx/issues/902)
+  Ordinary virtual calls dispatch on a completed fieldless local object with implicit default
+  construction, including through its single public nonvirtual base. The final overrider must
+  be constexpr and defined before evaluation. [#322](https://github.com/yrashk/ycxx/issues/322)
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)

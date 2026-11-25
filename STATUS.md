@@ -3551,6 +3551,23 @@ dynamic type. Immediate members remain absent from native vtables.
 Construction and destruction phases, persisted base references, and richer receiver
 layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 
+## Evaluated ordinary virtual calls (#322)
+
+An ordinary virtual call with a supported scalar or void result can dispatch through
+a complete local polymorphic object in constant evaluation, including through a
+base reference in a constexpr helper ([class.virtual], [expr.const]). The object
+has completed implicit default construction and has implicit trivial destruction.
+This supports fieldless externally linked namespace-scope classes with no base
+or one direct public nonvirtual fieldless root base. The statically selected
+member supplies the arguments' defaults. Its final overrider must be constexpr
+and defined before the evaluation, including when the statically selected
+member is pure or lacks a constexpr specifier. Explicit qualification selects the
+named function. Both native targets keep ordinary vtable dispatch.
+
+Construction and destruction phases and broader receiver layouts remain tracked in
+[#322](https://github.com/yrashk/ycxx/issues/322) and
+[#25](https://github.com/yrashk/ycxx/issues/25).
+
 ## Virtual functions: general single inheritance (#309, 2026-11-24)
 
 - Both targets compile, link and run ordinary non-template polymorphic classes with external
@@ -3582,7 +3599,8 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
   An override must agree with its base declaration on `consteval`. Immediate declarations count
   toward polymorphism and pure final overriders. The vtable retains its header and contains only
   ordinary virtual entries. Immediate definitions are checked and have no native symbol.
-  Evaluated calls and immediate virtual assignments remain unsupported.
+  Evaluated immediate calls have the completed-local profile described above.
+  Immediate virtual assignments remain tracked in #1097.
   [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
   declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
@@ -3592,7 +3610,7 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
   (with `-fno-exceptions`: local unwind cleanups around throwing calls are #1104/#648's).
 - Not yet: class templates with virtual members, local and internal-linkage classes,
   non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
-  #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
+  #931), covariant returns, `typeid` (#294), broader constant evaluation of polymorphic objects (#322, #25),
   virtual bases (#310); follow-ups are listed in #309.
   [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)
 

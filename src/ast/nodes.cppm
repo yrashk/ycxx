@@ -277,13 +277,16 @@ struct ExplicitDestroy {
   [[=sequenced]] Child object;  // the object's address
 };
 
-// A virtual call on an opaque root. The slot is relative to the table's address point.
+// An unqualified ordinary virtual call ([class.virtual]). The slot is relative to the ABI
+// table's address point. For a class with semantic layout, function names the statically
+// selected member, which supplies the default arguments.
 struct VirtualMemberCall {
   ExprInfo info;
   QualType callee;  // pointer to the ABI function type, which includes the receiver parameter
   u32 slot;
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
+  EntityId function = EntityId::none;  // none for peer-only virtual call profiles
 };
 
 // An immediate virtual member call ([expr.const.core], [class.virtual]). `function` is the

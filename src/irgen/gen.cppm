@@ -2481,8 +2481,13 @@ class Gen {
   }
   // Itanium ABI §3.2.4: the address point sits at offset zero in this root subobject.
   std::optional<ValueId> virtual_member_call(At a) {
-    if (fn_.thunk) unsupported(a, "in constant evaluation");
     const auto c = get<ast::VirtualMemberCall>(a);
+    if constexpr (F::evaluating_constants) {
+      if (c.function != ast::EntityId::none && c.info.category == ast::ValueCategory::prvalue &&
+          !class_prvalue(c.info) && !facts_.ellipsis_after(c.function))
+        return evaluated_virtual_call(a, c.info, c.function, c.object, c.args, ir::VirtualCallKind::ordinary);
+    }
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
     const ValueId receiver = rvalue(child(a, c.object));
     const auto table_type = facts_.pointer_to(c.callee);
     const auto receiver_type = facts_.pointer_to(table_type);
@@ -2502,21 +2507,27 @@ class Gen {
     }
     return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
   }
-  std::optional<ValueId> immediate_virtual_call(At a) {
-    const auto call = get<ast::ImmediateVirtualCall>(a);
-    std::vector<ValueId> args{rvalue(child(a, call.object))};
-    for (ast::Child arg : ast_.children(call.args)) {
+  std::optional<ValueId> evaluated_virtual_call(At a, ast::ExprInfo info, ast::EntityId function,
+                                                ast::Child object, ast::ChildList arguments, ir::VirtualCallKind kind) {
+    Position here(*this, a.offset);
+    std::vector<ValueId> args{rvalue(child(a, object))};
+    for (ast::Child arg : ast_.children(arguments)) {
       At x = child(a, arg);
-      if (argument_object(x)) unsupported(a, "of an immediate virtual function with a by-value class argument");
+      if (argument_object(x)) unsupported(a, "of a virtual function with a by-value class argument");
       args.push_back(argument(x));
     }
     if (args.size() > 32) unsupported(a, "with more than 32 arguments");
-    const auto result = result_type(call.info);
+    const auto result = result_type(info);
     const ir::Ty value[] = {vty(result)};
     const bool has_value = cls(result) != TypeClass::void_;
-    const std::uint64_t imms[] = {word(call.function), call.qualified};
-    const auto n = stateful(ir::Op::call_immediate_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
+    const std::uint64_t imms[] = {word(function), word(kind)};
+    const auto n = stateful(ir::Op::call_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
     return has_value ? std::optional(b_.result(n, 1)) : std::nullopt;
+  }
+  std::optional<ValueId> immediate_virtual_call(At a) {
+    const auto call = get<ast::ImmediateVirtualCall>(a);
+    const auto kind = call.qualified ? ir::VirtualCallKind::qualified_immediate : ir::VirtualCallKind::immediate;
+    return evaluated_virtual_call(a, call.info, call.function, call.object, call.args, kind);
   }
 
   bool member_call_expression(At a) {
