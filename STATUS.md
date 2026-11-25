@@ -2795,6 +2795,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
   return-type-requirement, also a qualified concept) and nested requirements, checked in place:
   false in a templated entity when a requirement is invalid, ill-formed elsewhere.
+  During substitution with bound template arguments, a decisive failure ends the
+  requirement sequence before later dependent checks. A separately instantiated class
+  still emits a hard error when a reached requirement needs it (#1283).
 - **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
   instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
 - **`static_assert` in a template definition** (#241, P2593, [dcl.pre]): a non-dependent condition
