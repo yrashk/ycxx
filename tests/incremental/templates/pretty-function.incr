@@ -1,0 +1,43 @@
+// ACTION: syntax
+// #1361: changing an alias changes which specialization supplies the signature.
+--- main.cpp
+namespace left { struct Item {}; }
+namespace right { struct Item {}; }
+template<class T>
+consteval const char* spelling() { return __PRETTY_FUNCTION__; }
+consteval bool same_text(const char* first, const char* second) {
+  for (; *first == *second; ++first, ++second) {
+    if (*first == '\0') return true;
+  }
+  return false;
+}
+using Selected = left::Item;
+static_assert(same_text(spelling<left::Item>(), spelling<Selected>()));
+=== edit
+--- main.cpp
+namespace left { struct Item {}; }
+namespace right { struct Item {}; }
+template<class T>
+consteval const char* spelling() { return __PRETTY_FUNCTION__; }
+consteval bool same_text(const char* first, const char* second) {
+  for (; *first == *second; ++first, ++second) {
+    if (*first == '\0') return true;
+  }
+  return false;
+}
+using Selected = right::Item;
+static_assert(same_text(spelling<left::Item>(), spelling<Selected>())); //! error
+=== edit
+--- main.cpp
+namespace left { struct Item {}; }
+namespace right { struct Item {}; }
+template<class T>
+consteval const char* spelling() { return __PRETTY_FUNCTION__; }
+consteval bool same_text(const char* first, const char* second) {
+  for (; *first == *second; ++first, ++second) {
+    if (*first == '\0') return true;
+  }
+  return false;
+}
+using Selected = left::Item;
+static_assert(same_text(spelling<left::Item>(), spelling<Selected>()));
