@@ -101,12 +101,19 @@ void roots() {
   write(t / "wt" / "sub" / "d.cpp", "");
   check(find_root(s(t / "wt" / "sub" / "d.cpp"), home) == s(t / "wt"), "a worktree's submodule belongs to the worktree");
 
-  // `.ycxx`: the nearest marker wins, and `root =` widens.
-  write(t / "repo" / "vendor" / "lib" / ".ycxx", "");
-  write(t / "repo" / "vendor" / "lib" / "e.cpp", "");
-  check(find_root(s(t / "repo" / "vendor" / "lib" / "e.cpp"), home) == s(t / "repo" / "vendor" / "lib"), "a .ycxx marker");
-  write(t / "repo" / "vendor" / "lib" / ".ycxx", "# widen\nroot = ../..\n");
-  check(find_root(s(t / "repo" / "vendor" / "lib" / "e.cpp"), home) == s(t / "repo"), "a .ycxx root = widens the scope");
+  fs::path project = t / "repo" / "vendor" / "lib";
+  write(project / "e.cpp", "");
+  fs::create_directory(project / "build.ycxx");
+  check(find_root(s(project / "e.cpp"), home) == s(t / "repo"), "a directory named build.ycxx is not a marker");
+  fs::remove(project / "build.ycxx");
+  write(project / "build.ycxx", "");
+  check(find_root(s(project / "e.cpp"), home) == s(project), "a build manifest defines its own scope");
+
+  // `.ycxx` at the same directory still takes precedence, and `root =` widens.
+  write(project / ".ycxx", "");
+  check(find_root(s(project / "e.cpp"), home) == s(project), "a .ycxx marker");
+  write(project / ".ycxx", "# widen\nroot = ../..\n");
+  check(find_root(s(project / "e.cpp"), home) == s(t / "repo"), "a .ycxx root = widens the scope");
 
   // A symbolic link is walked from its target.
   fs::create_directory_symlink(t / "repo" / "src", t / "home" / "link");

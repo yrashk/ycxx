@@ -3187,6 +3187,8 @@ native executable under `.ycxx/out`. The first rules are `cpp.executable`,
 `cpp.library` (a source-backed object group), and `generate` (a declared host
 tool with staged inputs and named outputs). Explicit source globs are resolved on
 each request. Linux uses the native freestanding compiler and linker.
+The manifest identifies the daemon scope before the first build creates `.ycxx`,
+including when the workspace is nested in a checkout (#1305).
 
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between

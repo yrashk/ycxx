@@ -48,10 +48,10 @@ session that owns the issue wrote this document and the bookkeeping.
 
 ## 1. Decisions in brief
 
-1. **One daemon per project root and compiler build.** The root is the nearest ancestor with a
-   `.ycxx` marker, else the nearest version-control root (a submodule does not count), else a
-   per-user home scope. Configurations share one daemon, because prefixes are rooted at the
-   configuration. (§2)
+1. **One daemon per project root and compiler build.** The root is found at the nearest
+   directory with a `.ycxx` marker, `build.ycxx` file or version-control marker (a submodule does
+   not count), with a per-user home scope as the fallback. Configurations share one daemon
+   because prefixes are rooted at the configuration. (§2)
 2. **A Unix socket in a per-user 0700 directory, named by the scope and the build hash.** Messages
    are length-prefixed and serialized by the engine's reflection serializer. Client and daemon are
    always the same binary, so the protocol has no cross-version compatibility. (§3.1)
@@ -83,10 +83,12 @@ session that owns the issue wrote this document and the bookkeeping.
 ## 2. Scope: one daemon per project root
 
 One daemon serves one **scope** for one ycxx binary. `YCXX_ROOT`, if set, is the root. Otherwise
-one upward walk from the starting path finds the first directory that contains either:
+one upward walk from the starting path finds the first directory with a marker:
 
 - `.ycxx`, the project's explicit marker. A `.ycxx` file may say `root = <relative path>` to
   widen the scope (to join vendored nested repositories); it is the only way to widen one.
+- A `build.ycxx` file. It identifies a workspace before a build creates its `.ycxx` output
+  directory. An explicit `.ycxx` at the same directory takes precedence.
 - a version-control marker: a `.git` directory, `.hg`, `.jj`, or a `.git` file. A `.git` file whose
   `gitdir` path has a `modules` component is a submodule (also one inside a worktree,
   `.git/worktrees/x/modules/<name>`): it does not count, and the walk continues, so a submodule
@@ -101,7 +103,8 @@ daemon.
 its first input file, else its working directory, never the working directory first: CMake runs
 compilers in a build directory that may lie outside the source tree. The LSP front starts from the
 workspace folder. Both resolve the same markers, so an editor and a build of one project meet in
-one daemon.
+one daemon. Project builds and implicit `ycxx ctl` discovery start from the working directory and
+use the same walk.
 
 Configurations (Debug and Release, different targets) share the daemon: every prefix is rooted at
 the configuration (§B1.1), so they never collide and still share leaves whose traces agree.
