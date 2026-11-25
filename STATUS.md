@@ -1009,6 +1009,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
   query. Target CRT selection, versioned imports, provider dependencies and library discovery
   remain part of [#390](https://github.com/yrashk/ycxx/issues/390).
+- On Linux x86-64, `-shared -nostdlib` produces a leaf `ET_DYN` with a SONAME, SysV dynamic hash,
+  and mapped dynamic symbols. The loader uses the program headers, and native and system linkers
+  can consume the library. Only strong, default-visible functions are exported. References to
+  local and hidden definitions use position-independent relocations. Source inputs require
+  `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
+  imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
+  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
