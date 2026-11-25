@@ -37,7 +37,12 @@ cpp.executable "app" {
 
 `ycxx build app` prints the path to `.ycxx/out/app` on success. Use
 `--trace-engine=stream`, `--trace-engine=interactive`, or `--trace-engine=json`
-to inspect the request. The library in this slice is an ordered group of
+to inspect the request. `ycxx build app --watch --trace-engine=interactive`
+keeps successive builds in one trace. Ordinary source and include changes use
+the daemon's file watcher. While waiting, the daemon also reobserves the
+project plan so manifest changes, generator inputs, and new glob matches can
+wake the next build. A failed build leaves the last executable available and
+the watch continues. The library in this slice is an ordered group of
 native objects included in the executable link. The generator example in
 `tests/daemon/project_build.py` shows how to bind named staged paths with
 `input("name")` and `output("name")`. Tools must use the inputs declared by

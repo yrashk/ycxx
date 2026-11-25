@@ -32,7 +32,7 @@ class Coordinator {
                     const std::function<void()>& refresh, const std::function<bool()>& cancelled,
                     const std::function<void(const std::function<void(engine::Db&)>&)>& apply,
                     const std::function<bool(engine::Revision, const std::function<void()>&)>& publish,
-                    engine::Tracer* tracer = nullptr);
+                    const std::function<void()>& tick, engine::Tracer* tracer = nullptr);
 
  private:
   pipeline::Session& session_;
@@ -196,7 +196,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                                const std::function<void()>& refresh, const std::function<bool()>& cancelled,
                                const Apply& apply,
                                const std::function<bool(engine::Revision, const std::function<void()>&)>& publish,
-                               engine::Tracer* tracer) {
+                               const std::function<void()>& tick, engine::Tracer* tracer) {
   std::lock_guard lock(mutex_);
   ProjectReport report;
   const auto output = cwd / ".ycxx" / "out" / target;
@@ -221,7 +221,11 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
 
     for (;;) {
       const auto before = session_.db().revision();
-      auto demand = session_.run<WorkspaceBuild>(key, cancelled, nullptr, tracer);
+      auto demand = session_.run<WorkspaceBuild>(key, [&] {
+        tick();
+        return cancelled();
+      }, nullptr, tracer);
+      tick();
       if (!demand) return fail("build cancelled");
 
       if (!demand->pending.empty()) {
@@ -245,17 +249,25 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             }
           });
           ++report.actions_executed;
-          const auto started = std::chrono::steady_clock::now();
-          const auto trace_id = tracer ? session_.db().reserve_trace_id() : 0;
+          engine::TraceEvent event;
+          if (tracer) {
+            event.id = session_.db().reserve_trace_id();
+            event.kind = "ExternalAction";
+            event.key = generator.name;
+            event.start = event.end = std::chrono::steady_clock::now();
+            if (tracer->starts()) tracer->started(event);
+          }
+          tick();
           auto result = execute(generator.action, generator.inputs, *scratch, stop.get_token());
           monitor.request_stop();
           monitor.join();
           if (tracer) {
-            tracer->event({.id = trace_id, .kind = "ExternalAction", .key = generator.name,
-                           .outcome = result.exit_status == 0 ? engine::Outcome::executed : engine::Outcome::failed,
-                           .start = started, .end = std::chrono::steady_clock::now(), .value = {},
-                           .errors = result.exit_status == 0 ? std::string{} : result.err, .span = {}});
+            event.outcome = result.exit_status == 0 ? engine::Outcome::executed : engine::Outcome::failed;
+            event.end = std::chrono::steady_clock::now();
+            if (result.exit_status != 0) event.errors = result.err;
+            tracer->event(std::move(event));
           }
+          tick();
           const auto observed = plan_project(cwd, target);
           if (!observed || std::ranges::none_of(observed->generators, [&](const auto& current) {
                 return current.name == generator.name && action_key(current) == id;

@@ -25,9 +25,17 @@ struct ProjectPlan {
   std::vector<SourcePlan> sources;
 };
 
+struct ProjectWatchState {
+  Fp128 stamp;
+  std::vector<std::string> paths;
+};
+
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
                            std::string_view filename);
 std::expected<ProjectPlan, std::string> plan_project(const std::filesystem::path& cwd, std::string_view target);
+// Reobserve planning inputs without launching any actions. Native source contents and include
+// probes are tracked separately by the daemon's file table.
+ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target);
 
 }  // namespace ycxx::build
 
@@ -42,6 +50,13 @@ std::string path_text(const fs::path& path) {
 
 struct PlanningError {
   std::string message;
+};
+
+struct WatchObservations {
+  std::optional<Fp128> manifest;
+  std::set<std::string> paths;
+  // Keep observations made before a failed plan, when there is no ProjectPlan to fingerprint.
+  std::vector<Fp128> values;
 };
 
 [[noreturn]] void fail(SourceLocation at, std::string why) {
@@ -137,7 +152,7 @@ void include_once(std::vector<std::string>& includes, std::string path) {
 
 class Planner {
  public:
-  Planner(const fs::path& cwd, const Manifest& manifest) : cwd_(cwd) {
+  Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch) : cwd_(cwd), watch_(watch) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
   }
 
@@ -150,6 +165,14 @@ class Planner {
   }
 
  private:
+  void observe(const fs::path& path) const {
+    if (!watch_) return;
+    auto normalized = path.lexically_normal();
+    if (normalized != normalized.root_path() && normalized.filename().empty())
+      normalized = normalized.parent_path();
+    watch_->paths.insert(path_text(normalized));
+  }
+
   const TargetDecl& find(std::string_view name, SourceLocation at) const {
     if (!basename(name)) fail(at, std::format("invalid target name '{}'", name));
     const auto match = declarations_.find(name);
@@ -165,13 +188,16 @@ class Planner {
     const auto& spelling = as<std::string>(tool, "an absolute tool path");
     if (spelling.contains('\0') || !fs::path(spelling).is_absolute())
       fail(tool.location, "expected an absolute tool path");
+    observe(spelling);
     std::error_code ec;
     const auto tool_path = fs::canonical(spelling, ec);
     if (ec) fail(tool.location, std::format("cannot locate tool '{}': {}", spelling, ec.message()));
+    observe(tool_path);
     const auto status = regular_file(tool_path, tool.location);
     if (!executable(status.permissions())) fail(tool.location, std::format("tool '{}' is not executable", spelling));
     plan.action.tool = spelling;
     const auto fp = Hasher{}.bytes(read_file(tool_path, tool.location)).finish();
+    if (watch_) watch_->values.push_back(fp);
     plan.tool_fingerprint = std::format("{:016x}{:016x}", fp.lo, fp.hi);
 
     std::set<std::string> input_paths;
@@ -180,9 +206,12 @@ class Planner {
         if (name.empty()) fail(value.location, "input name is empty");
         const auto path = relative_path(as<std::string>(value, "an input path"), value.location);
         if (!input_paths.insert(path_text(path)).second) fail(value.location, "duplicate staged input path");
+        observe(cwd_ / path);
         const auto input_status = regular_file(cwd_ / path, value.location);
         const auto contents = read_file(cwd_ / path, value.location);
-        plan.inputs.push_back({name, path_text(path), {{contents.begin(), contents.end()}, executable(input_status.permissions())}});
+        const bool can_execute = executable(input_status.permissions());
+        if (watch_) watch_->values.push_back(fingerprint(std::tie(contents, can_execute)));
+        plan.inputs.push_back({name, path_text(path), {{contents.begin(), contents.end()}, can_execute}});
       }
     }
 
@@ -239,8 +268,11 @@ class Planner {
 
     std::vector<std::string> includes;
     if (const auto* dirs = field(decl, "public_include_dirs")) {
-      for (const auto& value : as<List>(*dirs, "a list of include directories"))
-        include_once(includes, path_text(cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true)));
+      for (const auto& value : as<List>(*dirs, "a list of include directories")) {
+        const auto path = cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true);
+        observe(path);
+        include_once(includes, path_text(path));
+      }
     }
     if (const auto* headers = field(decl, "generated_headers")) {
       for (const auto& value : as<List>(*headers, "a list of generated headers")) {
@@ -262,9 +294,17 @@ class Planner {
       plan_.sources.push_back({std::move(path), includes});
     };
     const auto add_glob = [&](const Glob& glob, SourceLocation at) {
-      const auto matches = expand_glob(glob, [&](std::string_view dir) { return list_directory(cwd_, dir); });
+      const auto matches = expand_glob(glob, [&](std::string_view dir) {
+        observe(cwd_ / dir);
+        return list_directory(cwd_, dir);
+      });
       if (!matches) fail(at, matches.error());
-      for (const auto& match : *matches) add(path_text(cwd_ / match), at);
+      if (watch_) watch_->values.push_back(fingerprint(*matches));
+      for (const auto& match : *matches) {
+        const auto path = cwd_ / match;
+        observe(path);
+        add(path_text(path), at);
+      }
     };
     if (const auto* files = field(decl, "sources")) {
       if (const auto* glob = std::get_if<Glob>(&files->data)) {
@@ -272,7 +312,9 @@ class Planner {
       } else {
         for (const auto& value : as<List>(*files, "a list of C++ sources or a glob")) {
           if (const auto* path = std::get_if<std::string>(&value.data)) {
-            add(path_text(cwd_ / relative_path(*path, value.location)), value.location);
+            const auto absolute = cwd_ / relative_path(*path, value.location);
+            observe(absolute);
+            add(path_text(absolute), value.location);
           } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
             add(artifact(*ref, value.location), value.location);
           } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
@@ -288,12 +330,32 @@ class Planner {
   }
 
   const fs::path& cwd_;
+  WatchObservations* watch_;
   std::map<std::string, const TargetDecl*, std::less<>> declarations_;
   std::map<std::string, std::size_t> generators_;
   std::set<std::string> active_;
   std::map<std::string, std::vector<std::string>> finished_;
   ProjectPlan plan_;
 };
+
+std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::string_view target,
+                                                   WatchObservations* watch) {
+  std::error_code ec;
+  const auto root = fs::absolute(cwd, ec).lexically_normal();
+  if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
+  try {
+    const auto path = root / "build.ycxx";
+    if (watch) watch->paths.insert(path_text(path));
+    (void)regular_file(path, {});
+    const auto text = read_file(path, {});
+    if (watch) watch->manifest = fingerprint128(text);
+    auto manifest = parse_manifest(text);
+    if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
+    return Planner(root, *manifest, watch).run(target);
+  } catch (PlanningError& error) {
+    return std::unexpected(std::move(error.message));
+  }
+}
 
 }  // namespace
 
@@ -302,18 +364,15 @@ std::string generated_path(const fs::path& cwd, std::string_view generator, std:
 }
 
 std::expected<ProjectPlan, std::string> plan_project(const fs::path& cwd, std::string_view target) {
-  std::error_code ec;
-  const auto root = fs::absolute(cwd, ec).lexically_normal();
-  if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
-  try {
-    const auto path = root / "build.ycxx";
-    (void)regular_file(path, {});
-    auto manifest = parse_manifest(read_file(path, {}));
-    if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
-    return Planner(root, *manifest).run(target);
-  } catch (PlanningError& error) {
-    return std::unexpected(std::move(error.message));
-  }
+  return read_project(cwd, target, nullptr);
+}
+
+ProjectWatchState watch_project(const fs::path& cwd, std::string_view target) {
+  WatchObservations observed;
+  const auto plan = read_project(cwd, target, &observed);
+  const auto stamp = plan ? fingerprint(std::tie(observed.manifest, *plan)) :
+                           fingerprint(std::tie(observed.manifest, observed.values, plan.error()));
+  return {stamp, {observed.paths.begin(), observed.paths.end()}};
 }
 
 }  // namespace ycxx::build
