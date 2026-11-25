@@ -1,0 +1,62 @@
+// ACTION: run
+// Add native demand while the deduced type is already cached (#1272).
+--- main.cpp
+// EXIT: 0
+
+template<bool Enabled>
+struct Counter {
+  static long leaf(long value) {
+    static_assert(Enabled, "leaf must be enabled");
+    return value + 1L;
+  }
+
+  static long helper(long value) { return leaf(value); }
+  static auto wrapper(long value) { return helper(value); }
+};
+
+static_assert(sizeof(Counter<true>::wrapper(0L)) == sizeof(long));
+
+int main() { return 0; }
+=== edit
+--- main.cpp
+// EXIT: 0
+
+template<bool Enabled>
+struct Counter {
+  static long leaf(long value) {
+    static_assert(Enabled, "leaf must be enabled");
+    return value + 1L;
+  }
+
+  static long helper(long value) { return leaf(value); }
+  static auto wrapper(long value) { return helper(value); }
+};
+
+static_assert(sizeof(Counter<true>::wrapper(0L)) == sizeof(long));
+
+// In a resident session, add this address and update main after the type-only run.
+long (*stored_wrapper)(long) = &Counter<true>::wrapper;
+
+int main() {
+  const long direct = Counter<true>::wrapper(1L);
+  const long indirect = stored_wrapper(2L);
+  return direct == 2L && indirect == 3L ? 0 : 1;
+}
+=== edit
+--- main.cpp
+// EXIT: 0
+
+template<bool Enabled>
+struct Counter {
+  static long leaf(long value) {
+    static_assert(Enabled, "leaf must be enabled");
+    return value + 1L;
+  }
+
+  static long helper(long value) { return leaf(value); }
+  static auto wrapper(long value) { return helper(value); }
+};
+
+static_assert(sizeof(Counter<true>::wrapper(0L)) == sizeof(long));
+
+int main() { return 0; }

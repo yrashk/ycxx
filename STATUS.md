@@ -4036,6 +4036,9 @@ static argument tracked in #1301 and #209.
   template member specialization instantiated where it is named ([temp.inst]/8); its own body
   sees the type once a return deduced it. The back end and the interpreter get the deduced type
   with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+  An unevaluated use of a non-constexpr static function of a class template specialization
+  checks the member and its required callees when deducing the return type. An evaluated call
+  or an emitted function address also demands a native definition. [#1272](https://github.com/yrashk/ycxx/issues/1272)
 - **Linux direct calls:** the AMD64 ABI check uses the callee definition's deduced signature
   when the declaration still needs its result type. The definition is already in the translation
   unit. Calls can return supported `auto` and `decltype(auto)` results, including references and

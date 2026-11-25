@@ -1308,17 +1308,21 @@ public:
     ast::ClosureDef def;
     u32 item;
     u32 begin;
+    EntityId lazy_member = EntityId::none;
   };
   std::map<u32, DeclarationClosure> declaration_closures_;
-  // The used static data members of class template specializations whose initializers have lambdas
-  // (`member_value`): what their closures' members, when referenced, need.
-  struct MemberClosures {
+  // A replayed class static initializer and the definitions it names.
+  struct MemberInitializer {
+    EntityId member;
     u32 item;
-    ast::ItemSema value;
+    ast::SeqId<ast::ClosureDef> closures;
     std::vector<sema::Demand> demands;
+    bool type_only = false;
+    bool native_closure_use = false;
+    bool emits_closures() const { return !type_only || native_closure_use; }
   };
-  std::deque<MemberClosures> member_closures_;
-  const std::deque<MemberClosures>& member_closures() const { return member_closures_; }
+  std::deque<MemberInitializer> member_initializers_;
+  const std::deque<MemberInitializer>& member_initializers() const { return member_initializers_; }
   void declaration_closures(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
     for (const ast::ClosureDef& c : w_->ins.seqs.elements(closures))
       for (EntityId f : {c.call, c.invoker})
@@ -1472,8 +1476,8 @@ public:
   };
   // Static data members of class templates ([temp.inst]/3). The template's analysis records where
   // each in-class initializer ends; a specialization declares the member and skips it
-  // (`lazy_member`); its value is instantiated on first use (`member_value`), and the members used
-  // are defined in the unit (`used_members`).
+  // (`lazy_member`); its value is instantiated on first use (`member_value`). A native use
+  // retains the storage and the initializer's native dependencies.
   void set_static_init_end(u32 item, u32 ordinal, u32 end) { static_init_ends_[{item, ordinal}] = end; }
   std::optional<u32> static_init_end(u32 item, u32 ordinal) {
     item_sema(item);  // the template's analysis records it
@@ -1486,6 +1490,7 @@ public:
     u32 ordinal;
     ClassInstantiation inst;
     enum class State : u8 { pending, running, done } state = State::pending;
+    std::optional<std::size_t> initializer = std::nullopt;
   };
   void lazy_member(EntityId e, u32 item, u32 ordinal, const ClassInstantiation& inst) {
     lazy_members_.try_emplace(std::to_underlying(e), LazyMember{item, ordinal, inst});
@@ -1493,11 +1498,20 @@ public:
   bool is_lazy_member(EntityId e) const { return lazy_members_.contains(std::to_underlying(e)); }
   void member_value(EntityId e);
   void use_member(EntityId e) {
-    if (!is_lazy_member(e) || std::ranges::contains(used_members_, e)) return;
+    if (!is_lazy_member(e) || used_member(e)) return;
     used_members_.push_back(e);
     member_value(e);
   }
-  std::span<const EntityId> used_members() const { return used_members_; }
+  bool used_member(EntityId e) const { return std::ranges::contains(used_members_, e); }
+  std::optional<std::size_t> member_initializer_index(EntityId e) const {
+    if (auto found = lazy_members_.find(std::to_underlying(e)); found != lazy_members_.end())
+      return found->second.initializer;
+    return std::nullopt;
+  }
+  bool emits_lazy_member(EntityId e) const {
+    const auto i = member_initializer_index(e);
+    return i && !member_initializers_[*i].type_only;
+  }
   // Whether a member's initializer was instantiated and gave no value: its error was reported.
   bool member_failed(EntityId e) const {
     auto it = lazy_members_.find(std::to_underlying(e));
@@ -1642,7 +1656,15 @@ public:
   void instantiate_all();
   void instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point);
   void references(NodeId n, std::vector<EntityId>& out) const;
+  void references(ConstId value, std::vector<EntityId>& out) const;
+  void part_references(NodeId root, ast::SeqId<ast::ClosureDef> closures, std::vector<EntityId>& out) const;
+  void check_type_only_instances(const std::set<u32>& native);
+  bool has_type_only_instances() const {
+    return !type_only_instances_.empty() || std::ranges::any_of(member_initializers_, &MemberInitializer::type_only);
+  }
+  void mark_type_only_instances(std::size_t first_function, std::size_t first_variable, std::size_t first_member);
   std::span<const Instance* const> instances() const { return instance_order_; }
+  bool emits_instance(EntityId spec) const { return !type_only_instances_.contains(spec); }
   // Every specialization whose definition the unit requires, in order of first demand.
   std::span<const EntityId> required() const { return required_; }
   std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
@@ -1971,6 +1993,7 @@ private:
   std::map<EntityId, PendingMoveConstructor> move_constructors_;
   std::deque<Instance> instances_;               // a deque: instances are referred to as they are added
   std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
+  std::set<EntityId> type_only_instances_;  // specializations instantiated for type checking
   std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
   std::set<u32> instantiating_;                  // specializations whose instantiation is running
   std::map<u32, u32> var_templates_;             // by variable template entity: its defining item
@@ -10833,8 +10856,13 @@ void Program::member_value(EntityId e) {
   ++members_running_;
   Result<ast::ItemSema> r = ItemAnalysis(*this, m.item, m.inst, m.ordinal).run();
   --members_running_;
-  if (r.diags.empty() && w_->ins.seqs.size(r.value.closures) != 0)
-    member_closures_.push_back({m.item, r.value, r.demands});
+  if (r.diags.empty()) {
+    lazy_members_.at(std::to_underlying(e)).initializer = member_initializers_.size();
+    member_initializers_.push_back({e, m.item, r.value.closures, std::move(r.demands)});
+    for (const auto& closure : w_->ins.seqs.elements(r.value.closures))
+      for (EntityId f : {closure.call, closure.invoker})
+        if (f != EntityId::none) declaration_closures_.at(std::to_underlying(f)).lazy_member = e;
+  }
   // What the template's definition diagnosed it says once, there.
   if (item_sema(m.item).diags.empty())
     for (engine::Diagnostic& d : r.diags)
@@ -12966,9 +12994,32 @@ void Program::references(NodeId n, std::vector<EntityId>& out) const {
         references(h, out);
       } else if constexpr (std::is_same_v<H, ast::ChildList>) {
         for (ast::Child c : w_->ins.ast.children(h)) references(c.id, out);
+      } else if constexpr (std::is_same_v<H, ConstId>) {
+        references(h, out);
       }
     });
   });
+}
+
+void Program::references(ConstId value, std::vector<EntityId>& out) const {
+  if (value == ConstId::none) return;
+  const auto& values = w_->ins.values;
+  if (values.is<ast::VLvalue>(value)) {
+    const ConstId base = values.get<ast::VLvalue>(value).base;
+    if (values.is<ast::VEntity>(base)) out.push_back(values.get<ast::VEntity>(base).entity);
+  } else if (values.is<ast::VAggregate>(value)) {
+    for (ConstId element : w_->ins.seqs.elements(values.get<ast::VAggregate>(value).elems))
+      references(element, out);
+  }
+}
+
+void Program::part_references(NodeId root, ast::SeqId<ast::ClosureDef> closures, std::vector<EntityId>& out) const {
+  references(root, out);
+  for (const auto& closure : w_->ins.seqs.elements(closures)) {
+    if (!sema::Sema::closure_has_code(*w_, closure)) continue;
+    references(closure.body, out);
+    references(closure.invoker_body, out);
+  }
 }
 
 // A potentially-constant variable named by a surviving expression needs its definition for
@@ -13013,6 +13064,7 @@ void Program::instantiate_all() {
   std::map<EntityId, std::size_t> unused_synthesized;
   std::set<EntityId> used_special_members;
   std::set<EntityId> tables;
+  std::vector<std::size_t> promoted_initializers;
   std::function<void(std::span<const EntityId>, ItemId)> require;
   auto required_members = [&](NodeId root, ItemId at) {
     std::vector<EntityId> refs;
@@ -13061,15 +13113,42 @@ void Program::instantiate_all() {
         synth_.push_back(pending.definition);
         work.insert(work.end(), pending.demands.begin(), pending.demands.end());
       }
-      if (member_patterns_.contains(std::to_underlying(e))) work.push_back({e, ast::Loc{at, 0}});
+      if (const auto i = member_initializer_index(e); i && member_initializers_[*i].type_only) {
+        member_initializers_[*i].type_only = false;
+        use_member(e);
+        promoted_initializers.push_back(*i);
+      }
+      // A closure's callable address can survive folding even when its owner's storage does not.
+      if (const auto c = declaration_closures_.find(std::to_underlying(e));
+          c != declaration_closures_.end() && c->second.lazy_member != EntityId::none)
+        if (const auto i = member_initializer_index(c->second.lazy_member); i && !member_initializers_[*i].emits_closures()) {
+          member_initializers_[*i].native_closure_use = true;
+          promoted_initializers.push_back(*i);
+        }
+      if (member_patterns_.contains(std::to_underlying(e)) || type_only_instances_.contains(e))
+        work.push_back({e, ast::Loc{at, 0}});
     }
   };
   const auto required_part = [&](NodeId root, ast::SeqId<ast::ClosureDef> closures, ItemId at) {
-    required_members(root, at);
-    for (const auto& closure : w_->ins.seqs.elements(closures)) {
-      if (!sema::Sema::closure_has_code(*w_, closure)) continue;
-      required_members(closure.body, at);
-      required_members(closure.invoker_body, at);
+    std::vector<EntityId> refs;
+    part_references(root, closures, refs);
+    require(refs, at);
+  };
+  auto require_value = [&](ConstId value, ItemId at) {
+    if (value == ConstId::none) return;
+    std::vector<EntityId> refs;
+    references(value, refs);
+    require(refs, at);
+  };
+  // A constant initializer can name a function in the emitted data instead of in a body.
+  auto require_static_values = [&](const ast::ItemSema& part, ItemId at) {
+    if (part.tree == NodeId::none || !w_->ins.ast.is<ast::DeclGroup>(part.tree)) return;
+    for (const ast::Child child : w_->ins.ast.children(w_->ins.ast.get<ast::DeclGroup>(part.tree).declarators)) {
+      const auto declarator = w_->ins.ast.get<ast::Declarator>(child.id);
+      if (declarator.value == ConstId::none) continue;
+      const auto declaration = w_->ins.seqs.at(part.decls, declarator.decl);
+      if (declaration.kind == ast::DeclKind::variable && (declaration.flags & sema::decl_flag::definition))
+        require_value(declarator.value, at);
     }
   };
   // The items with cells, in item order: a group's Program has few (#947).
@@ -13082,7 +13161,11 @@ void Program::instantiate_all() {
       work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
       // A namespace-scope variable's initializer, and its destructor ([basic.start.term]), are code
       // of the unit's initialization function.
-      if (!templated_body(k) && in_class_[k]) required_part(NodeId::none, item_cells_[k]->value.closures, id(k));
+      if (!templated_body(k) && in_class_[k]) {
+        const auto& part = item_cells_[k]->value;
+        required_part(NodeId::none, part.closures, id(k));
+        require_static_values(part, id(k));
+      }
       if (!templated_body(k) && !in_class_[k]) {
         const auto& part = item_cells_[k]->value;
         required_part(part.tree, part.closures, id(k));
@@ -13163,22 +13246,32 @@ void Program::instantiate_all() {
   const u32 limit = instantiation_limit;
   std::set<u32> seen;
   std::size_t walked_members = 0;
-  std::size_t walked_closures = 0;
+  std::size_t walked_initializers = 0;
+  std::size_t walked_promotions = 0;
+  std::size_t walked_member_values = 0;
+  std::size_t walked_instances = 0;
+  std::size_t walked_variable_values = 0;
+  std::set<EntityId> included_initializers;
+  auto require_initializer = [&](const MemberInitializer& initializer) {
+    if (!included_initializers.insert(initializer.member).second) return;
+    work.append_range(initializer.demands);
+    required_part(NodeId::none, initializer.closures, id(initializer.item));
+  };
   for (std::size_t i = 0; ; ++i) {
-    // A class template's static data members' closures, and other class members' in their items
-    // (#338): their bodies are code where something refers to them.
-    for (; walked_closures < member_closures_.size(); ++walked_closures) {
-      const MemberClosures m = member_closures_[walked_closures];
-      work.insert(work.end(), m.demands.begin(), m.demands.end());
-      required_part(NodeId::none, m.value.closures, id(m.item));
-      depth.resize(work.size(), 1);
+    for (; walked_initializers < member_initializers_.size(); ++walked_initializers) {
+      const auto& initializer = member_initializers_[walked_initializers];
+      if (initializer.emits_closures() && w_->ins.seqs.size(initializer.closures) != 0)
+        require_initializer(initializer);
     }
+    depth.resize(work.size(), 1);
     // Class-specialization replay can add member cells while processing this worklist.
     for (; walked_members < class_member_order_.size(); ++walked_members) {
-      const auto& key = class_member_order_[walked_members];
+      const auto key = class_member_order_[walked_members];
       const auto& cell = class_member_cells_.at(key);
       if (!cell.diags.empty()) continue;
-      required_part(NodeId::none, cell.value.closures, id(key.first));
+      const auto& part = cell.value;
+      required_part(NodeId::none, part.closures, id(key.first));
+      require_static_values(part, id(key.first));
       depth.resize(work.size(), 1);
       for (sema::Demand demand : cell.demands) {
         if (!demand.variable_type) continue;
@@ -13188,8 +13281,40 @@ void Program::instantiate_all() {
         depth.push_back(1);
       }
     }
+    // A class static can retain a function address after replaying the initializer
+    // separately from its declaration.
+    for (; walked_member_values < used_members_.size(); ++walked_member_values) {
+      const EntityId member = used_members_[walked_member_values];
+      const auto initializer = member_initializer_index(member);
+      if (!initializer || member_initializers_[*initializer].type_only) continue;
+      const auto& m = member_initializers_[*initializer];
+      require_initializer(m);
+      require_value(member_init(member), id(m.item));
+    }
+    for (; walked_promotions < promoted_initializers.size(); ++walked_promotions) {
+      const auto& initializer = member_initializers_[promoted_initializers[walked_promotions]];
+      require_initializer(initializer);
+      if (!initializer.type_only) require_value(member_init(initializer.member), id(initializer.item));
+    }
+    depth.resize(work.size(), 1);
+    if (i == work.size() && has_type_only_instances()) {
+      // Other checked instances still follow the ordinary emission rules. Walk their
+      // definitions if they can promote an instance checked during deduction.
+      for (; walked_instances < instance_order_.size(); ++walked_instances) {
+        const Instance& in = *instance_order_[walked_instances];
+        if (emits_instance(in.spec) && !seen.contains(std::to_underlying(in.spec)))
+          work.push_back({in.spec, {id(in.item), 0}});
+      }
+      for (; walked_variable_values < var_instances_.size(); ++walked_variable_values) {
+        const VarInstance& v = var_instances_[walked_variable_values];
+        if (emits_instance(v.spec) && !seen.contains(std::to_underlying(v.spec)))
+          work.push_back({v.spec, {id(v.item), 0}});
+      }
+      depth.resize(work.size(), 1);
+    }
     if (i == work.size()) break;
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
+    type_only_instances_.erase(work[i].spec);
     required_.push_back(work[i].spec);
     if (depth[i] > limit) {
       if (!depth_reported_)
@@ -13201,13 +13326,10 @@ void Program::instantiate_all() {
     // A variable template specialization's initializer, and what it demands ([temp.inst]/7).
     end_at_ = engine::Loc{std::to_underlying(work[i].at.item), work[i].at.offset};
     if (const VarInstance* v = variable_instance(work[i].spec, end())) {
-      if (v->cell.diags.empty())
-        for (const sema::Demand& d : v->cell.demands) {
-          work.push_back(d);
-          depth.push_back(depth[i] + 1);
-        }
       if (v->cell.diags.empty()) {
+        work.append_range(v->cell.demands);
         required_part(NodeId::none, v->cell.value.closures, id(v->item));
+        require_static_values(v->cell.value, id(v->item));
         depth.resize(work.size(), depth[i] + 1);
       }
       continue;
@@ -13222,6 +13344,73 @@ void Program::instantiate_all() {
     require_installed(in->spec, id(in->item));
     walk_synthesized();
     depth.resize(work.size(), depth[i] + 1);
+  }
+  check_type_only_instances(seen);
+}
+
+void Program::mark_type_only_instances(std::size_t first_function, std::size_t first_variable, std::size_t first_member) {
+  for (const Instance* in : std::span(instance_order_).subspan(first_function))
+    type_only_instances_.insert(in->spec);
+  for (std::size_t v = first_variable; v < var_instances_.size(); ++v)
+    type_only_instances_.insert(var_instances_[v].spec);
+  for (std::size_t m = first_member; m < member_initializers_.size(); ++m)
+    member_initializers_[m].type_only = true;
+}
+
+// Expressions in an instantiated body have their own evaluation contexts. Check the
+// definitions they require, including a called member with a written return type.
+// The checked definitions have no native roots of their own ([dcl.spec.auto.general], [temp.inst]).
+void Program::check_type_only_instances(const std::set<u32>& native) {
+  if (!has_type_only_instances()) return;
+  struct Pending {
+    sema::Demand demand;
+    u32 depth;
+  };
+  std::vector<Pending> work;
+  std::set<EntityId> checked;
+  std::size_t walked_functions = 0;
+  std::size_t walked_variables = 0;
+  std::size_t walked_members = 0;
+  for (std::size_t i = 0; ; ++i) {
+    for (; walked_functions < instance_order_.size(); ++walked_functions) {
+      const Instance& in = *instance_order_[walked_functions];
+      if (!emits_instance(in.spec)) work.push_back({{in.spec, {id(in.item), 0}}, 1});
+    }
+    for (; walked_variables < var_instances_.size(); ++walked_variables) {
+      const VarInstance& v = var_instances_[walked_variables];
+      if (!emits_instance(v.spec)) work.push_back({{v.spec, {id(v.item), 0}}, 1});
+    }
+    for (; walked_members < member_initializers_.size(); ++walked_members) {
+      const auto& initializer = member_initializers_[walked_members];
+      if (initializer.type_only) work.push_back({{initializer.member, {id(initializer.item), 0}}, 1});
+    }
+    if (i == work.size()) break;
+    const auto [d, depth] = work[i];
+    if (native.contains(std::to_underlying(d.spec)) || !checked.insert(d.spec).second) continue;
+    end_at_ = engine::Loc{std::to_underlying(d.at.item), d.at.offset};
+    if (too_deep(depth - 1, index(d.at.item), d.at.offset)) break;
+    const std::size_t first_fn = instance_order_.size();
+    const std::size_t first_var = var_instances_.size();
+    const std::size_t first_member = member_initializers_.size();
+    auto enqueue = [&](std::span<const sema::Demand> demands, NodeId tree, ast::SeqId<ast::ClosureDef> closures,
+                       u32 item, ConstId value = ConstId::none) {
+      for (const auto& next : demands) work.push_back({next, depth + 1});
+      std::vector<EntityId> refs;
+      part_references(tree, closures, refs);
+      references(value, refs);
+      for (EntityId ref : refs)
+        if (member_patterns_.contains(std::to_underlying(ref))) work.push_back({{ref, {id(item), 0}}, depth + 1});
+    };
+    if (const auto m = member_initializer_index(d.spec)) {
+      const auto& initializer = member_initializers_[*m];
+      enqueue(initializer.demands, NodeId::none, initializer.closures, initializer.item, member_init(d.spec));
+    } else if (const VarInstance* v = variable_instance(d.spec, end())) {
+      if (v->cell.diags.empty()) enqueue(v->cell.demands, v->cell.value.tree, v->cell.value.closures, v->item);
+    } else if (const Instance* in = instance(d.spec, end())) {
+      if (!in->failed && in->body.diags.empty())
+        enqueue(in->body.demands, in->body.value.tree, in->body.value.closures, in->item);
+    }
+    mark_type_only_instances(first_fn, first_var, first_member);
   }
 }
 
@@ -13582,8 +13771,17 @@ std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
   }
   // A member function of a class template specialization, instantiated likewise.
   if (member_patterns_.contains(std::to_underlying(f))) {
+    const std::size_t first_fn = instance_order_.size();
+    const std::size_t first_var = var_instances_.size();
+    const std::size_t first_member = member_initializers_.size();
     const Instance* in = instance(f, item);
     if (!in || in->failed || !in->body.value.deduced) return std::nullopt;
+    // Instantiation for deduction alone does not supply a native use. An evaluated
+    // reference to this static member will take the ordinary END worklist path.
+    constexpr u16 static_member = sema::decl_flag::member | sema::decl_flag::static_;
+    if ((in->decl.flags & static_member) == static_member &&
+        !(in->decl.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)))
+      mark_type_only_instances(first_fn, first_var, first_member);
     return in->body.value.deduced_type;
   }
   ensure_declared(f, item);

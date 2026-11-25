@@ -1758,6 +1758,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
+    if (!program.emits_instance(in->spec)) continue;
     // An immediate constructor's calls are all folded ([expr.const]): a constructor template's
     // specialization, or a constructor of a class template's specialization.
     const auto& entity = world.entities.rec(in->spec);
@@ -1822,7 +1823,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   // The variable template specializations instantiated ([temp.inst]/7), with their constants.
   for (const parse::Program::VarInstance& v : program.variable_instances()) {
-    if (!v.cell.diags.empty()) continue;
+    if (!v.cell.diags.empty() || !program.emits_instance(v.spec)) continue;
     const ast::ItemSema& is = v.cell.value;
     closures_of(is.closures, program.id(v.item), 0, true);
     for (std::size_t i = 0; i < ins.seqs.size(is.decls); ++i) {
@@ -1839,8 +1840,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   // The static data members of class template specializations that are defined in the class
   // (constexpr or inline, [class.static.data]/4) and used, with their constants.
-  for (const parse::Program::MemberClosures& m : program.member_closures())
-    closures_of(m.value.closures, program.id(m.item), 0, true);
+  for (const auto& initializer : program.member_initializers())
+    if (initializer.emits_closures())
+      closures_of(initializer.closures, program.id(initializer.item), 0, true);
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
@@ -1851,14 +1853,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if (dr.decl >= ins.seqs.size(is.decls)) continue;
       ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
       if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
-      // One whose initializer waits for a use is defined when it was used ([temp.inst]/3).
-      ast::ConstId value = dr.value;
-      if (program.is_lazy_member(d.entity)) {
-        if (!std::ranges::contains(program.used_members(), d.entity)) continue;
-        value = program.member_init(d.entity);
-      }
+      // The checked declaration can survive even when its replayed initializer has no native use.
+      const bool lazy = program.is_lazy_member(d.entity);
+      if (lazy && !program.used_member(d.entity)) continue;
       ast::Loc at{program.id(m.item), c.at};
       declare(d, at);
+      if (lazy && !program.emits_lazy_member(d.entity)) continue;
+      const ast::ConstId value = lazy ? program.member_init(d.entity) : dr.value;
       tu.variables.push_back({d.entity, d.type, value, at});
       if (value != ast::ConstId::none) tu.variables.back().coalesced = weak_inline_variable(d);
     }
