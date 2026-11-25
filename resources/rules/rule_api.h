@@ -43,6 +43,11 @@ typedef struct ycxx_rule_host_v1 {
      and borrowed through the entry point's return. It is null when the count is zero. */
   const ycxx_rule_capability_v1* capabilities;
   size_t capability_count;
+
+  /* Check struct_size before accessing this callback. Supply one nonempty diagnostic of
+     at most 4096 bytes. The worker copies it and reports it when the entry point fails.
+     Return 0 on success or -1 on an invalid, repeated or oversized diagnostic. */
+  int (*diagnose)(void* context, const char* text, size_t size);
 } ycxx_rule_host_v1;
 
 /* Call the host from this thread before returning. Return 0 after successfully emitting

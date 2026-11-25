@@ -31,6 +31,7 @@ constexpr char sdk_header[] = {
     , 0};
 constexpr std::size_t max_request_size = 8 * 1024 * 1024;
 constexpr std::size_t max_definition_size = 1024 * 1024;
+constexpr std::size_t max_diagnostic_size = 4096;
 constexpr std::uint32_t abi_version = 1;
 constexpr std::uint32_t max_capability_support = 2;  // YCXX_RULE_INDETERMINATE_V1
 
@@ -57,6 +58,7 @@ struct Host {
   int (*emit)(void*, const char*, std::size_t);
   const Capability* capabilities;
   std::size_t capability_count;
+  int (*diagnose)(void*, const char*, std::size_t);
 };
 
 struct Library {
@@ -143,8 +145,10 @@ struct Invocation {
   const RuleWorkerRequest& request;
   const RuleInputs& inputs;
   std::string emitted;
+  std::string diagnostic;
   bool invalid_read = false;
   bool invalid_emit = false;
+  bool invalid_diagnose = false;
 };
 
 int attribute(void* context, const char* name, Bytes* result) noexcept {
@@ -173,21 +177,31 @@ int read(void* context, const char* path, Bytes* result) noexcept {
   return -1;
 }
 
-int emit(void* context, const char* definition, std::size_t size) noexcept {
-  if (!context) return -1;
-  auto& invocation = *static_cast<Invocation*>(context);
-  if (invocation.invalid_emit || !invocation.emitted.empty() || !definition || size == 0 ||
-      size > max_definition_size) {
-    invocation.invalid_emit = true;
+int copy_once(std::string& output, bool& invalid, const char* text, std::size_t size,
+              std::size_t limit) noexcept {
+  if (invalid || !output.empty() || !text || size == 0 || size > limit) {
+    invalid = true;
     return -1;
   }
   try {
-    invocation.emitted.assign(definition, size);
+    output.assign(text, size);
   } catch (...) {
-    invocation.invalid_emit = true;
+    invalid = true;
     return -1;
   }
   return 0;
+}
+
+int emit(void* context, const char* definition, std::size_t size) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  return copy_once(invocation.emitted, invocation.invalid_emit, definition, size, max_definition_size);
+}
+
+int diagnose(void* context, const char* text, std::size_t size) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  return copy_once(invocation.diagnostic, invocation.invalid_diagnose, text, size, max_diagnostic_size);
 }
 
 }  // namespace
@@ -219,14 +233,19 @@ int run_rule_worker(std::span<const std::string_view> args) {
     for (const auto& capability : *request->capabilities)
       capabilities.push_back({capability.name.c_str(), capability.support});
   }
-  Invocation invocation{*request, *inputs, {}};
+  Invocation invocation{*request, *inputs, {}, {}};
   const Host host{abi_version, sizeof(Host), request->rule.c_str(), request->target.c_str(),
                   borrow(request->definition), &invocation, attribute, read, emit,
-                  capabilities.empty() ? nullptr : capabilities.data(), capabilities.size()};
+                  capabilities.empty() ? nullptr : capabilities.data(), capabilities.size(), diagnose};
   const int status = plan(&host);
   if (invocation.invalid_read) return fail("rule attempted an invalid or undeclared read");
   if (invocation.invalid_emit) return fail("rule attempted an invalid, repeated or oversized definition");
-  if (status != 0) return fail(std::format("rule '{}' failed with status {}", request->rule, status));
+  if (invocation.invalid_diagnose) return fail("rule supplied an invalid, repeated or oversized diagnostic");
+  if (status != 0) {
+    auto message = std::format("rule '{}' failed with status {}", request->rule, status);
+    if (!invocation.diagnostic.empty()) message.append(": ").append(invocation.diagnostic);
+    return fail(message);
+  }
   if (invocation.emitted.empty()) return fail("rule did not emit a definition");
 
   std::ofstream output(std::string(args[2]), std::ios::binary | std::ios::noreplace);
