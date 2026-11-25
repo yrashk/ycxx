@@ -55,10 +55,10 @@ struct ToolchainMatrix {
   std::vector<ToolchainObservation> observations;
 };
 
-using RunProbe = std::function<ActionResult(
+using RunProbe = std::function_ref<ActionResult(
     std::string_view kind, std::string_view label, const Action&, std::span<const ActionInput>)>;
-using MeasureProbe = std::function<MeasuredToolchainProbe(
-    ProbeKey, const std::function<MeasuredToolchainProbe()>&)>;
+using MeasureProbe = std::function_ref<MeasuredToolchainProbe(
+    ProbeKey, std::function_ref<MeasuredToolchainProbe()>)>;
 
 bool known_toolchain_probe(std::string_view id);
 std::string_view probe_support_name(ProbeSupport support);

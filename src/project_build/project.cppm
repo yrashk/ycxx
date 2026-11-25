@@ -115,6 +115,14 @@ struct CapabilitySupport {
     co_return std::nullopt;
   }
 };
+
+// BOOTSTRAP: GCC 16 modules: a boxed nested lambda exposes TU-local operations.
+struct AdmitProbeReceipts {
+  std::span<std::pair<ProbeKey, MeasuredToolchainProbe>> pending;
+  void operator()(engine::Db& db) const {
+    for (auto& [key, record] : pending) db.set<ToolchainProbeReceipt>(key, std::move(record));
+  }
+};
 struct Prepared {
   Fp128 output;
   Fp128 plan;
@@ -322,9 +330,9 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
 
 using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
     std::string_view, std::string_view, const Action&, std::span<const ActionInput>, Fp128,
-    const std::function<bool()>&)>;
+    std::function_ref<bool()>)>;
 using RunRulePackage = std::function<std::expected<RulePackageBuild, std::string>(
-    const RulePackageRef&, const RulePackagePlan&, Fp128, const std::function<bool()>&)>;
+    const RulePackageRef&, const RulePackagePlan&, Fp128, std::function_ref<bool()>)>;
 using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePackagePlan&, const RulePackageAction&)>;
 using ResolveCapabilities = std::function<std::expected<ProjectedCapabilities, std::string>(
     const RuleDemand&, std::vector<RuleProbeSnapshot>&)>;
@@ -620,7 +628,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   };
   const RunRuleAction run_rule = [&](std::string_view kind, std::string_view label, const Action& action,
                                    std::span<const ActionInput> inputs, Fp128 id,
-                                   const std::function<bool()>& still_current)
+                                   std::function_ref<bool()> still_current)
       -> std::expected<std::vector<NamedArtifact>, std::string> {
     auto known = session_.run<RuleActionResult>(id, poll, nullptr, tracer);
     if (!known || cancelled()) return std::unexpected("build cancelled");
@@ -638,7 +646,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return std::move(result.outputs);
   };
   const RunRulePackage run_package = [&](const RulePackageRef& package, const RulePackagePlan& plan, Fp128 id,
-                                         const std::function<bool()>& still_current)
+                                         std::function_ref<bool()> still_current)
       -> std::expected<RulePackageBuild, std::string> {
     auto known = session_.run<RulePackageResult>(id, poll, nullptr, tracer);
     if (!known || cancelled()) return std::unexpected("build cancelled");
@@ -672,7 +680,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (!selected.cxx)
       return std::unexpected(std::format("package '{}' needs a cxx() tool for compiler probes", package.target));
     std::vector<std::pair<ProbeKey, MeasuredToolchainProbe>> pending;
-    const MeasureProbe measure = [&](ProbeKey key, const std::function<MeasuredToolchainProbe()>& execute) {
+    const auto measure = [&](ProbeKey key, std::function_ref<MeasuredToolchainProbe()> execute) {
       const auto known = session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
       if (known && *known &&
           (!(**known).discovery_stamp ||
@@ -689,8 +697,8 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (profile.native && std::ranges::none_of(profile.environment, [](const auto& variable) {
           return variable.first == "YCXX_THREADS";
         })) profile.environment.emplace_back("YCXX_THREADS", "2");
-    const RunProbe run_probe = [&](std::string_view kind, std::string_view label, const Action& action,
-                                   std::span<const ActionInput> inputs) {
+    const auto run_probe = [&](std::string_view kind, std::string_view label, const Action& action,
+                               std::span<const ActionInput> inputs) {
       return run_action(kind, label, action, inputs, std::chrono::seconds(selected.native ? 3 : 10));
     };
     auto matrix = measure_toolchain_matrix(cwd, package.target, std::move(profile),
@@ -708,9 +716,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       return std::unexpected(std::format("toolchain profile '{}' changed during measurement", package.target));
     }
     if (!pending.empty()) {
-      apply([&](engine::Db& db) {
-        for (auto& [key, record] : pending) db.set<ToolchainProbeReceipt>(key, std::move(record));
-      });
+      apply(AdmitProbeReceipts{pending});
       for (const auto& [key, record] : pending)
         (void)session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
     }
