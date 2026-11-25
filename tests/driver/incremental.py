@@ -309,7 +309,7 @@ def run_test(test, ctx, tr, flags, timeout, work):
             tr.note(f'incremental: {inc[i]!r:.300}\ncold:        {cold!r:.300}')
             raise kinds.Failed(f'state {i}: the incremental result differs from the cold run')
         if action == 'syntax':
-            expected = kinds.expected_errors([d / p for p in s])
+            expected = kinds.expected_errors([d / p for p in s], compiler=ctx.cut.name)
             problems, _ = kinds.verdict_problems(ctx, r, expected, d)
             if problems:
                 raise kinds.Failed(f'state {i} (cold): ' + '; '.join(problems))

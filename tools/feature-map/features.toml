@@ -2420,7 +2420,8 @@ group = 'const'
 clauses = ['expr.const.core']
 std = 'C++20'
 ftm = '__cpp_constexpr'
-status = 'missing'
+status = 'partial'
+note = 'Ordinary constexpr virtual calls with supported scalar or void results work on completed fieldless local objects with implicit default construction and trivial destruction. The externally linked namespace-scope class has no base or one direct public nonvirtual fieldless root base.'
 probe = '''
 struct B { constexpr virtual int f() const { return 1; } }; struct D : B { constexpr int f() const override { return 2; } };
 constexpr int g() { D d; const B& b = d; return b.f(); }
