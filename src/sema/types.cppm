@@ -1228,7 +1228,7 @@ public:
     return !c->copy_deleted || c->move_usable;
   }
 
-private:
+  // The move constructor class `c` declares, not a template's; none if it declares none.
   const MemberDeclRec* declared_move(EntityId c, const ClassRec& r) const {
     const auto m = std::ranges::find_if(r.members, [&](const MemberDeclRec& m) {
       if (!m.is_ctor || m.is_template) return false;
@@ -1239,6 +1239,8 @@ private:
     });
     return m == r.members.end() ? nullptr : &*m;
   }
+
+private:
   ast::Interners* ins_;
   Types* types_;
   std::map<u32, bool> class_keys_;  // whether the parsed class-key names a union

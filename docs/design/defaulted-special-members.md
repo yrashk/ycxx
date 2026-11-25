@@ -23,7 +23,9 @@ default-initialized. The class itself is still incomplete. The result is one of 
   assignment operator is not a candidate
   ([[over.match.funcs.general]](https://eel.is/c++draft/over.match.funcs.general));
 - **trivial**: every subobject's operation is, and the class is not polymorphic. A volatile scalar
-  member does not matter ([class.copy.ctor]/11). Uses lower to the
+  member does not matter ([class.copy.ctor]/11). A volatile class member's operation is selected like
+  any other, so it is deleted unless that class declares one that takes a volatile object; an
+  implicit copy, move or copy assignment of a class with one is classified too. Uses lower to the
   representation copy, `DefaultInit` or `ValueInit`;
 - **nontrivial**: uses call the function;
 - **unsupported**: a subobject's operation met a limit of ycxx. A use is diagnosed, and native
@@ -68,7 +70,7 @@ implicit move of a class with a defaulted copy, are unsupported, not copies.
 
 The Itanium ABI's POD for layout, whose tail padding is not reused, follows Clang on each target.
 On arm64 macOS it is C++11's: trivial and standard-layout, where a deleted default constructor
-counts as trivial. On x86-64 Linux it is C++03's: no user-provided constructor, destructor or copy
+counts as trivial, and no class with a volatile class member is. On x86-64 Linux it is C++03's: no user-provided constructor, destructor or copy
 assignment, only public members and no bases. GCC 16 agrees on Linux except for class template
 specializations, whose defaulted constructors it counts as user-provided.
 

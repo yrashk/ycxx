@@ -37,6 +37,11 @@ struct Volatile {
   volatile int x;
 };
 
+struct Aggregate { int x; char y; };
+// [class.copy.ctor]: copy and move are deleted, so calls pass these by address.
+struct VolatileClass { VolatileClass() = default; volatile Aggregate p; char c; };
+struct DerivedVolatile : VolatileClass { DerivedVolatile() = default; DerivedVolatile(const DerivedVolatile&) = default; int k; };
+
 struct CopyOnly { CopyOnly(const CopyOnly&) = default; int x; char c; };
 struct DefaultAndCopy { DefaultAndCopy() = default; DefaultAndCopy(const DefaultAndCopy&) = default; int x; char c; };
 struct DefaultAndOther { DefaultAndOther() = default; DefaultAndOther(int); int x; char c; };
@@ -45,19 +50,20 @@ struct DeletedCopy { DeletedCopy() = default; DeletedCopy(const DeletedCopy&) = 
 struct Assigned { Assigned& operator=(Assigned&&) = default; int x; char c; };
 class Private { public: Private() = default; Private(const Private&) = default; private: int x; char c; };
 struct VolatileMember { VolatileMember() = default; VolatileMember(const VolatileMember&) = default; volatile int x; char c; };
+struct DeletedVolatile { DeletedVolatile() = default; DeletedVolatile(const DeletedVolatile&) = delete; volatile Aggregate p; char c; };
 struct Initialized { Initialized() = default; int x = 1; char c; };
 struct Member { Member() = default; DefaultAndOther m; char c; };
 template <class T> struct Templated { Templated(const Templated&) = default; ~Templated() = default; T x; char c; };
 
 template <class T> struct After : T { char last; };
 
-constexpr int layouts = 11;
+constexpr int layouts = 13;
 static int layout(int i) {
   const int sizes[layouts] = {
       sizeof(After<CopyOnly>), sizeof(After<DefaultAndCopy>), sizeof(After<DefaultAndOther>), sizeof(After<MoveOnly>),
       sizeof(After<DeletedCopy>), sizeof(After<Assigned>), sizeof(After<Private>), sizeof(After<Initialized>),
       sizeof(After<Member>), sizeof(After<Templated<int>>),
-      sizeof(After<VolatileMember>)};
+      sizeof(After<VolatileMember>), sizeof(After<VolatileClass>), sizeof(After<DeletedVolatile>)};
   return sizes[i];
 }
 
@@ -67,3 +73,5 @@ Indirect peer_next(Indirect i);
 int peer_sum(Indirect i);
 long peer_first(MayThrow m, long b);
 Volatile peer_volatile(Volatile v);
+int take_derived(DerivedVolatile d);
+int peer_derived();

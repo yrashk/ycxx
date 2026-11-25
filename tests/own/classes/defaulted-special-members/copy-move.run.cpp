@@ -115,6 +115,29 @@ struct Qualified {
   Qualified& operator=(Qualified&&) & = default;
 };
 
+// The only copy or move operation is a trivial move.
+struct Moved {
+  int v;
+  Moved(int x) : v(x) {}
+  Moved(Moved&&) = default;
+};
+struct HoldsMoved {
+  Moved m;
+  HoldsMoved(int x) : m(x) {}
+  HoldsMoved(HoldsMoved&&) = default;
+};
+Moved make_moved(int x) {
+  Moved m(x);
+  return m;
+}
+
+struct VolatileScalar { volatile int v; };
+struct HasVolatile {
+  VolatileScalar s;
+  volatile char text[3];
+  HasVolatile& operator=(const HasVolatile&) = default;
+};
+
 int main() {
   Trivial t(3);
   Trivial u(t);
@@ -160,6 +183,17 @@ int main() {
   const Both f;
   Both e2(e), f2(f);
   if (e2.how != 0 || f2.how != 1) return 14;
+
+  HoldsMoved hm(4);
+  HoldsMoved hn(static_cast<HoldsMoved&&>(hm));
+  Moved mm = make_moved(7);
+  if (hn.m.v != 4 || mm.v != 7) return 17;
+
+  VolatileScalar va{1}, vb{2};
+  va = vb;
+  HasVolatile ha{{3}, {'a', 'b', 'c'}}, hb{{4}, {'x', 'y', 'z'}};
+  ha = hb;
+  if (va.v != 2 || ha.s.v != 4 || ha.text[2] != 'z') return 18;
 
   Qualified q{6}, s{0};
   s = q;

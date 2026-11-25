@@ -7383,7 +7383,7 @@ public:
       cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
       // [class.copy.ctor]: a class whose implicit copy is deleted can still use a trivial
       // implicit move and transfer its representation. General implicit move is tracked in #244.
-      if (cr->copy_deleted && cr->move_usable && !cr->move_nontrivial && args.size() == 1 &&
+      if (cr->copy_deleted && cr->move_usable && !cr->move_nontrivial && !classes().declared_move(c, *cr) && args.size() == 1 &&
           args[0].cat() == ValueCategory::xvalue && same_unqualified(args[0].type(), ut) &&
           object_cv(args[0].type()) == Cv::none) {
         QualType move = types().rvalue_ref(ut);
@@ -9102,8 +9102,8 @@ public:
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
       const ClassRec* cr = class_rec(types().class_of(target));
       // A copy through a constructor that is not trivial, or one converting another type
-      // ([class.conv.ctor]).
-      if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
+      // ([class.conv.ctor]). An implicit copy constructor does not take a volatile object.
+      if (cr && (cr->user_ctors || (initializes(target, e) && Types::is_volatile(types().canonical(e.type()))) || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
                  cr->defaulted_copy != CopyState::ordinary))
         return construct(target, {e}, e.begin, e.end, Construction::copy);
       if (!initializes(target, e)) {

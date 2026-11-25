@@ -20,3 +20,6 @@ int peer_sum(Indirect i) { return i.c.v + i.pad; }
 long peer_first(MayThrow m, long b) { return m.a * 10 + b; }
 
 Volatile peer_volatile(Volatile v) { return Volatile(v.x + 1); }
+
+// A prvalue argument: the caller constructs the object it passes.
+int peer_derived() { return take_derived(DerivedVolatile()) ; }

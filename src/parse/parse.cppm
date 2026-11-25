@@ -1380,7 +1380,7 @@ public:
   const ast::BodySema& synthesized_body(std::size_t i);
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::vector<engine::Diagnostic>* class_diags = nullptr,
                        sema::Sema* closure_context = nullptr, std::optional<u32> point = std::nullopt);
-  void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move);
+  void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move, std::optional<u32> point);
   void defaulted_assignments(u32 item, EntityId cls, sema::ClassRec& rec, std::optional<u32> point);
   sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t, bool move = false);
@@ -1831,6 +1831,13 @@ private:
   Classified classify_special_member(u32 item, EntityId cls, const sema::ClassRec& rec, EntityId function,
                                      SpecialMember kind, bool const_source, std::optional<u32> point);
   bool copy_takes_const(const sema::ClassRec& rec, bool assignment) const;
+  // A volatile class object or an array of them: no implicit copy or move operation takes one.
+  bool volatile_class(QualType t) const {
+    auto& types = w_->types;
+    for (t = types.canonical(t); types.is_array(t);)
+      t = types.canonical(types.add_cv(types.rec(t).inner, sema::Types::cv(t)));
+    return types.is_class(t) && sema::Types::is_volatile(t);
+  }
   bool calls_trivial_member(const sema::ClassRec& rec, const ast::DeclSema& decl, bool calls) const;
   void defaulted_constructors(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit_copy, std::optional<u32> point);
   // An enumerator initializer can synchronously instantiate another enum definition.
@@ -11360,7 +11367,9 @@ void Program::defaulted_constructors(u32 item, EntityId cls, sema::ClassRec& rec
     defaulted_constructors_.insert_or_assign(m.entity, DefaultedConstructor{{member_item, *decl, kind}});
   }
   if (!implicit_copy || dependent) return;
-  const auto depends_on_defaulting = [&](QualType t) { return classes_.defaulted_copy_of(t) != ordinary; };
+  const auto depends_on_defaulting = [&](QualType t) {
+    return classes_.defaulted_copy_of(t) != ordinary || volatile_class(t);
+  };
   if (std::ranges::none_of(rec.bases, [&](const sema::BaseRec& b) { return depends_on_defaulting(types.class_type(b.cls)); }) &&
       std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) { return depends_on_defaulting(f.type); })) return;
   if (rec.closure) {  // its captures were copied where it is defined
@@ -11774,7 +11783,13 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
   }
   // [class.copy.ctor]/8, 10–11: implicit move requires no user-declared copy, move or destructor.
   const bool implicit_move = implicit_copy && !user_copy_assignment && !user_dtor;
-  if (implicit_move) {
+  const auto volatile_field = [&](const sema::FieldRec& f) { return volatile_class(f.type); };
+  const bool volatile_classes = !rec.closure && !types.is_dependent(ct) && std::ranges::any_of(rec.fields, volatile_field);
+  if (implicit_move && volatile_classes) {
+    const auto move = classify_special_member(item, cls, rec, EntityId::none, SpecialMember::move_constructor, false, point).state;
+    rec.move_usable = move != sema::CopyState::deleted;
+    rec.move_nontrivial = rec.move_usable && move != sema::CopyState::trivial;
+  } else if (implicit_move) {
     rec.move_usable = !rec.copy_deleted || std::ranges::none_of(subobjects, [&](QualType t) {
                         return !types.is_reference(t) && classes_.unmovable(t);
                       });
@@ -11821,13 +11836,15 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
         !provided_assignment(true) && one_access && (rec.fields.empty() || !data_in_bases)
       : std::ranges::none_of(rec.members, provided_constructor) && rec.bases.empty() &&
         std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return rec.access_of(f.entity) == ast::Access::public_; });
-  rec.pod = !rec.layout_requires_virtual_support && (rec.destructor == EntityId::none || (user_dtor && user_dtor->is_deleted)) &&
+  // No operation of a volatile class member is trivial for Apple's definition, even one that is deleted.
+  const bool pod_fields = !w_->target.apple_calls || std::ranges::none_of(rec.fields, volatile_field);
+  rec.pod = pod_fields && !rec.layout_requires_virtual_support && (rec.destructor == EntityId::none || (user_dtor && user_dtor->is_deleted)) &&
             pod_definition &&
             !provided_assignment(false) && std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); });
   defaulted_assignments(item, cls, rec, point);
-  if (!user_copy_assignment) declare_copy_assignment(item, cls, rec, deletes_implicit_copy);
+  if (!user_copy_assignment) declare_copy_assignment(item, cls, rec, deletes_implicit_copy, point);
   return implicit_move;
 }
 
@@ -11954,7 +11971,7 @@ void Program::defaulted_assignments(u32 item, EntityId cls, sema::ClassRec& rec,
   }
 }
 
-void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move) {
+void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move, std::optional<u32> point) {
   using sema::CopyAssignment;
   auto& types = w_->types;
   const QualType ct = types.class_type(cls);
@@ -11975,10 +11992,6 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
     if (types.is_array(t)) memberwise = false;
     while (types.is_array(t)) t = types.add_cv(types.rec(t).inner, sema::Types::cv(t));
     t = types.canonical(t);
-    if (sema::Types::is_volatile(t)) {
-      trivial = false;
-      memberwise = false;
-    }
     if (!types.is_class(t)) {
       const_member |= sema::Types::is_const(t);
       trivial &= types.is_object(t) && !types.is_member_pointer(t);
@@ -12016,6 +12029,14 @@ void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& re
     copy_assignments_.try_emplace(d.entity,
         PendingCopyAssignment{{definition_item, d, SpecialMember::copy_assignment}, state});
   };
+  // [class.copy.assign]/7: an operator of a volatile class member is selected like any other.
+  if (!rec.closure && std::ranges::any_of(rec.fields, [&](const sema::FieldRec& f) { return volatile_class(f.type); })) {
+    const auto found = classify_special_member(item, cls, rec, EntityId::none, SpecialMember::copy_assignment,
+                                               const_parameter, point).state;
+    deleted |= found == sema::CopyState::deleted;
+    trivial &= found == sema::CopyState::trivial;
+    memberwise &= found == sema::CopyState::trivial || found == sema::CopyState::nontrivial;
+  }
   const CopyAssignment state = const_member ? CopyAssignment::const_member
                                : deleted || user_move ? CopyAssignment::deleted
                                : trivial ? CopyAssignment::trivial

@@ -169,7 +169,38 @@ struct VolatileClass {
   VolatileClass(const VolatileClass&) = default;
   volatile Plain p;
 };
-static_assert(!made_from<VolatileClass, const VolatileClass&>);
+static_assert(!made_from<VolatileClass, const VolatileClass&> && !made_from<VolatileClass, VolatileClass>);
+// Nor has an implicit operation, in the class itself or in one that contains it.
+struct Aggregate { int x; };
+struct ImplicitVolatile { volatile Aggregate p; };
+struct ContainsVolatile { ContainsVolatile(const ContainsVolatile&) = default; ImplicitVolatile i; };
+struct DerivedVolatile : ImplicitVolatile { DerivedVolatile() = default; DerivedVolatile(const DerivedVolatile&) = default; };
+struct ArrayVolatile { ArrayVolatile() = default; volatile Plain p[2]; };
+static_assert(!made_from<ImplicitVolatile, const ImplicitVolatile&> && !made_from<ImplicitVolatile, ImplicitVolatile>);
+static_assert(!made_from<ContainsVolatile, const ContainsVolatile&>);
+static_assert(!made_from<DerivedVolatile, const DerivedVolatile&> && !made_from<DerivedVolatile, DerivedVolatile>);
+static_assert(!made_from<ArrayVolatile, const ArrayVolatile&> && !made_from<ArrayVolatile, ArrayVolatile>);
+static_assert(!assigned_from<ImplicitVolatile&, const ImplicitVolatile&>);
+// One that takes volatile objects is selected.
+struct TakesVolatile {
+  TakesVolatile();
+  TakesVolatile(const volatile TakesVolatile&);
+};
+struct UsesVolatile { UsesVolatile() = default; UsesVolatile(const UsesVolatile&) = default; volatile TakesVolatile t; };
+static_assert(made_from<UsesVolatile, const UsesVolatile&>);
+// A volatile object is not copied by an implicit copy constructor.
+static_assert(!made_from<Aggregate, volatile Aggregate&>);
+// The implicit assignment of a class with a volatile scalar.
+struct ImplicitScalar { volatile int x; };
+struct HasImplicitScalar { HasImplicitScalar& operator=(const HasImplicitScalar&) = default; ImplicitScalar i; };
+static_assert(assigned_from<ImplicitScalar&, const ImplicitScalar&>);
+static_assert(assigned_from<HasImplicitScalar&, const HasImplicitScalar&>);
+
+// A class whose only copy or move operation is a trivial move.
+struct TrivialMove { TrivialMove() = default; TrivialMove(TrivialMove&&) = default; int x; };
+struct HasTrivialMove { HasTrivialMove() = default; HasTrivialMove(HasTrivialMove&&) = default; TrivialMove t; };
+static_assert(made_from<TrivialMove, TrivialMove> && !made_from<TrivialMove, const TrivialMove&>);
+static_assert(made_from<HasTrivialMove, HasTrivialMove> && !made_from<HasTrivialMove, const HasTrivialMove&>);
 
 // Variant members ([class.default.ctor], [class.copy.ctor]).
 union TrivialUnion {
