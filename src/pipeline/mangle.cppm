@@ -175,6 +175,10 @@ class Mangler {
     q = in_.canonical(q);
     ast::Cv cv = ast::cv_of(q);
     ast::QualType bare = ast::without_cv(q);
+    if (in_.types.is<ast::TDeferredAlias>(bare)) {
+      const auto alias = in_.types.get<ast::TDeferredAlias>(bare);
+      return type(const_cast<ast::Interners&>(in_).qualified(alias.result, cv));
+    }
     std::string inner;
     if (auto b = ast::builtin_of(in_, bare)) {
       auto code = builtin_code(*b);
@@ -871,6 +875,7 @@ class Mangler {
   // Whether a type names a template parameter.
   bool dependent(ast::QualType q) {
     ast::QualType c = in_.types.canon(ast::without_cv(in_.canonical(q)));
+    if (in_.types.is<ast::TDeferredAlias>(c)) return dependent(in_.types.get<ast::TDeferredAlias>(c).result);
     if (in_.types.is<ast::TTemplateParam>(c) || in_.types.is<ast::TDepName>(c) || in_.types.is<ast::TPackExpansion>(c) ||
         in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c) ||
         in_.types.is<ast::TPackIndex>(c))

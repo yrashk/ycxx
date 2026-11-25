@@ -1009,6 +1009,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
   query. Target CRT selection, versioned imports, provider dependencies and library discovery
   remain part of [#390](https://github.com/yrashk/ycxx/issues/390).
+- On Linux x86-64, `-shared -nostdlib` produces a leaf `ET_DYN` with a SONAME, SysV dynamic hash,
+  and mapped dynamic symbols. The loader uses the program headers, and native and system linkers
+  can consume the library. Only strong, default-visible functions are exported. References to
+  local and hidden definitions use position-independent relocations. Source inputs require
+  `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
+  imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
+  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -2565,6 +2572,12 @@ session's.*
   argument. The result uses the target size type. An array of unknown bound is supported when
   its element type is complete. Pointer-only uses of the specialization leave evaluation deferred
   ([expr.alignof], [temp.inst], #1067).
+- `__array_rank(T)` returns the number of array dimensions as the target size type. Unknown bounds
+  count, incomplete element types need no layout, and nonarrays have rank zero. Dependent type
+  operands resolve through template argument substitution and variable-template initializer replay.
+  Namespace aliases replay rank arguments they discard and preserve conversions of forwarded rank
+  defaults. An omitted type default checks those arguments before looking up the specialization
+  ([meta.unary.prop.query], [temp.alias], [temp.arg], #1082).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private

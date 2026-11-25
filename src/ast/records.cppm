@@ -54,6 +54,7 @@ struct TemplateParamSema {
   // A template template parameter's own template-head ([temp.param]/1), its parameters at
   // `depth + 1`; empty otherwise.
   SeqId<TemplateParamSema> params{};
+  u8 rank_type_default = 0;  // substituting the written type default can check a dependent rank
   constexpr bool operator==(const TemplateParamSema&) const = default;
 };
 

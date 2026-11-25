@@ -10,11 +10,12 @@ tool), recompute only what that change can affect.
 
 ## Watch mode demo
 
-Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows one function through
-L1 IR, lowered L2 IR, and emitted ARM64 instructions, then shows compiler errors and their fixes.
-The final Linux x86-64 self-check uses the freestanding support in [#380](https://github.com/yrashk/ycxx/pull/380).
+Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows a function through
+L1 IR, lowered L2 IR, and codegen byte and relocation counts. A source error shows its file,
+line and column. After recovery, objdump shows the emitted x86-64 instructions and the Linux
+executable passes its self-check.
 
-![Vim and ycxx watch mode showing live rebuilds, L1 and L2 IR, and ARM64 assembly](docs/media/ycxx-watch-ir-codegen.gif)
+![Vim and ycxx watch mode showing a live error and recovery, L1 and L2 IR, and x86-64 instructions](docs/media/ycxx-watch-ir-codegen.gif)
 
 [View the GIF at full size](docs/media/ycxx-watch-ir-codegen.gif)
 
@@ -198,6 +199,15 @@ loader must be able to find each SONAME when the executable runs. [#390](https:/
 ```sh
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$target_loader" \
   example.cpp "$target_library" -o example
+```
+
+On x86-64 Linux, `-shared` emits a loadable leaf shared library from position-independent C++
+or supported ELF object inputs. Its strong, default-visible function definitions are available
+to `dlopen` callers and to native and system linkers. The SONAME defaults to the output basename.
+Use `-Wl,-soname,NAME` to specify a different one. [#391](https://github.com/yrashk/ycxx/issues/391)
+
+```sh
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -shared -fPIC -nostdlib provider.cpp -o libprovider.so
 ```
 
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
@@ -609,6 +619,8 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
   through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
+- `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
+  and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.
