@@ -1,4 +1,4 @@
-"""Check project module graphs in JSON and HTML and legacy plan snapshots (#1363, #1378)."""
+"""Check project module graphs in JSON, HTML and plan comparisons (#1363, #1378, #1383)."""
 
 from collections import Counter
 from copy import deepcopy
@@ -13,7 +13,7 @@ from project_build import daemon_identity, env_for, run_client, traced_build
 from project_build_watch import replace_source
 from project_module_providers import (
     CHOICE, CHOICES, CONFLICTS, EXPECTED_CYCLES, EXTERNAL, GENERATED, GENERATOR, SOURCES,
-    build, check_plan, definition, displayed_paths, facts, prepare, reports, show,
+    build, check_plan, definition, displayed_paths, facts, prepare, reports, show, state,
 )
 from project_shader_bundle import check_external_actions
 from project_targets import DARWIN, LINUX, executable, journal_contents, namespace
@@ -297,15 +297,158 @@ def check_provider_reuse(summary, events):
     assert {event['outcome'] for event in semantic} <= {'reused', 'verified', 'durable'}, semantic
 
 
+def compare(ycxx, scope, env, journal, triple, before):
+    snapshot = scope.parent / 'graph-comparison.json'
+    snapshot.write_text(json.dumps(before), encoding='utf-8')
+    return show(ycxx, scope, env, journal, triple, '--against', str(snapshot))
+
+
+def check_module_changes(diff, *, metadata=None, **groups):
+    assert diff['schema'] == 1 and diff['target'] == 'app' and isinstance(diff['changes'], list), diff
+    assert 'module_changes' in diff, 'comparison of two module graphs omitted module_changes'
+    changes = diff['module_changes']
+    metadata = {} if metadata is None else metadata
+    kinds = {'units', 'imports', 'conflicts', 'cycles'}
+    assert groups.keys() <= kinds, groups
+    assert set(changes) == kinds | metadata.keys(), changes
+    assert {key: changes[key] for key in metadata} == metadata, changes
+    for key in kinds:
+        rows = [(row['change'], row.get('before'), row.get('after')) for row in changes[key]]
+        assert Counter(json.dumps(row, sort_keys=True) for row in rows) == Counter(
+            json.dumps(row, sort_keys=True) for row in groups.get(key, ())), (key, rows, groups.get(key, ()))
+
+
+def legacy_graph(plan):
+    legacy = deepcopy(plan)
+    for unit in legacy['module_graph']['units']:
+        unit.pop('configuration')
+    return legacy
+
+
+def renumber_graph(plan):
+    renumbered = deepcopy(plan)
+    graph = renumbered['module_graph']
+    ids = {unit['id']: 100 + 3 * i for i, unit in enumerate(reversed(graph['units']))}
+    for unit in graph['units']:
+        unit['id'] = ids[unit['id']]
+        for declaration in unit['declarations']:
+            declaration['directive_index'] += 10
+    for entry in graph['imports']:
+        entry['unit_id'] = ids[entry['unit_id']]
+        entry['directive_index'] += 10
+    for entry in (*graph['imports'], *graph['conflicts']):
+        for candidate in entry['candidates']:
+            candidate['unit_id'] = ids[candidate['unit_id']]
+            candidate['directive_index'] += 10
+    graph['cycles'] = [[ids[unit] for unit in reversed(cycle)] for cycle in graph['cycles']]
+    return renumbered
+
+
+def check_invalid_graph(ycxx, scope, env, journal, plan):
+    invalid = renumber_graph(plan)
+    provider = next(entry['candidates'][0] for entry in invalid['module_graph']['imports'] if entry['candidates'])
+    provider['unit_id'] += 1000
+    snapshot = scope.parent / 'invalid-module-graph.json'
+    snapshot.write_text(json.dumps(invalid), encoding='utf-8')
+    before = state(scope), journal_contents(journal)
+    result = run_client(ycxx, scope, env, 'show', 'app', f'--target={LINUX}', '--format=json',
+                        '--against', str(snapshot))
+    assert result.returncode != 0 and 'saved module graph' in result.stderr.lower(), result
+    assert (state(scope), journal_contents(journal)) == before, 'comparison wrote state or ran a tool'
+
+
+def unit_for_source(graph, source):
+    unit, = (unit for unit in graph['units'] if unit['source'] == source)
+    return unit
+
+
+def platform_changes(old, new):
+    before, = (entry for entry in old['imports'] if entry['name'] == CHOICE)
+    after, = (entry for entry in new['imports'] if entry['name'] == CHOICE)
+    units = [('changed', unit_for_source(old, name), unit_for_source(new, name)) for name in CHOICES.values()]
+    return {'units': units, 'imports': [('changed', before, after)]}
+
+
+def check_target_comparison(ycxx, scope, env, journal, linux, darwin):
+    old, new = linux['module_graph'], darwin['module_graph']
+    diff = compare(ycxx, scope, env, journal, DARWIN, linux)
+    check_module_changes(diff, **platform_changes(old, new))
+
+    without_graph = {key: value for key, value in linux.items() if key != 'module_graph'}
+    legacy = compare(ycxx, scope, env, journal, DARWIN, without_graph)
+    assert legacy == {key: value for key, value in diff.items() if key != 'module_changes'}, legacy
+    legacy = legacy_graph(linux)
+    check_module_changes(compare(ycxx, scope, env, journal, DARWIN, legacy),
+                         metadata={'matching': 'legacy_source_only'},
+                         **platform_changes(legacy['module_graph'], new))
+
+
+def check_partial_comparison(ycxx, scope, env, journal, complete, partial, source, *, added=False):
+    old, new = complete['module_graph'], partial['module_graph']
+    old_unit = None if added else unit_for_source(old, source)
+    units = [('added' if added else 'changed', old_unit, unit_for_source(new, source))]
+    partial_status = {'resolved': 'provisional', 'external_or_unresolved': 'pending',
+                      'unresolved_partition': 'pending'}
+    old_imports = {(entry['unit_id'], entry['directive_index']): entry for entry in old['imports']}
+    new_imports = {(entry['unit_id'], entry['directive_index']): entry for entry in new['imports']}
+    assert old_imports.keys() == new_imports.keys(), new_imports
+    imports = []
+    for key, before in old_imports.items():
+        after = new_imports[key]
+        assert after['status'] == partial_status.get(before['status'], before['status']), (before, after)
+        if before['status'] != after['status']:
+            imports.append(('changed', before, after))
+    check_module_changes(compare(ycxx, scope, env, journal, LINUX, complete), units=units, imports=imports,
+                         metadata={'completeness': {'change': 'changed', 'before': True, 'after': False}})
+
+
+def check_conflict_and_cycle_comparison(ycxx, scope, env, journal, before):
+    edits = {
+        'duplicate_z.cc': 'export module former.duplicate;\n',
+        'self.cc': 'export module cycle.single;\n',
+        'bottom.cc': SOURCES['bottom.cc'] + 'import beam.bottom;\n',
+    }
+    for source, text in edits.items():
+        replace_source(scope, source, text)
+    after = show(ycxx, scope, env, journal, LINUX)
+    old, new = before['module_graph'], after['module_graph']
+    old_duplicate = [entry for entry in old['imports'] if entry['name'] == 'duplicate.example']
+    new_duplicate = [entry for entry in new['imports'] if entry['name'] == 'duplicate.example']
+    assert len(old_duplicate) == len(new_duplicate) == 2, (old_duplicate, new_duplicate)
+    assert {entry['status'] for entry in old_duplicate} == {'ambiguous'}, old_duplicate
+    assert {entry['status'] for entry in new_duplicate} == {'resolved'}, new_duplicate
+    added, = (entry for entry in new['imports'] if entry['unit_id'] == unit_for_source(new, 'bottom.cc')['id'])
+    removed, = (entry for entry in old['imports'] if entry['unit_id'] == unit_for_source(old, 'self.cc')['id'])
+    assert (added['name'], added['status'], removed['name']) == ('beam.bottom', 'resolved', 'cycle.single')
+    conflict, = (entry for entry in old['conflicts'] if entry['name'] == 'duplicate.example')
+    assert {entry['name'] for entry in new['conflicts']} == {'unused.clash'}, new
+    added_cycle, = (cycle for cycle in new['cycles'] if cycle == [added['unit_id']])
+    removed_cycle, = (cycle for cycle in old['cycles'] if cycle == [removed['unit_id']])
+    reciprocal_imports = {unit_for_source(new, source)['id'] for source in ('left.cc', 'duplicate_a.cc')}
+    unblocked_cycle, = (cycle for cycle in new['cycles'] if set(cycle) == reciprocal_imports)
+    check_module_changes(
+        compare(ycxx, scope, env, journal, LINUX, before),
+        units=[('changed', unit_for_source(old, 'duplicate_z.cc'), unit_for_source(new, 'duplicate_z.cc'))],
+        imports=[('changed', first, second) for first, second in zip(old_duplicate, new_duplicate)]
+        + [('added', None, added), ('removed', removed, None)],
+        conflicts=[('removed', conflict, None)],
+        cycles=[('added', None, added_cycle), ('added', None, unblocked_cycle), ('removed', removed_cycle, None)],
+    )
+    for source in edits:
+        replace_source(scope, source, SOURCES[source])
+
+
 def check_edits(ycxx, scope, env, journal, before):
     legacy = {key: value for key, value in before.items() if key != 'module_graph'}
     saved = scope.parent / 'old-schema-1.json'
     saved.write_text(json.dumps(legacy), encoding='utf-8')
     current_snapshot = scope.parent / 'with-module-graph.json'
     current_snapshot.write_text(json.dumps(before), encoding='utf-8')
-    for snapshot in (saved, current_snapshot):
-        diff = show(ycxx, scope, env, journal, LINUX, '--against', str(snapshot))
-        assert diff == {'schema': 1, 'target': 'app', 'changes': []}, diff
+    diff = show(ycxx, scope, env, journal, LINUX, '--against', str(saved))
+    assert diff == {'schema': 1, 'target': 'app', 'changes': []}, diff
+    check_module_changes(show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot)))
+    check_module_changes(compare(ycxx, scope, env, journal, LINUX, renumber_graph(before)))
+    check_invalid_graph(ycxx, scope, env, journal, before)
     html = show_html(ycxx, scope, env, journal, LINUX, before, '--against', str(saved))
     assert 'No changes.' in html.section('changes', 'Plan changes').visible()
 
@@ -313,6 +456,7 @@ def check_edits(ycxx, scope, env, journal, before):
     summary, events = build(ycxx, scope, env, LINUX, 'body-only edit retains the structured graph')
     check_provider_reuse(summary, events)
     assert show(ycxx, scope, env, journal, LINUX) == before
+    check_module_changes(show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot)))
 
     shifted = '\n\n' + SOURCES['main.cc']
     replace_source(scope, 'main.cc', shifted)
@@ -322,7 +466,9 @@ def check_edits(ycxx, scope, env, journal, before):
         if entry['location']['path'] == 'main.cc':
             entry['location']['line'] += 2
     assert check_graph(scope, moved, LINUX) == require_moved, moved
-    assert show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot))['changes'] == []
+    diff = show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot))
+    assert diff['changes'] == [], diff
+    check_module_changes(diff)
     summary, events = build(ycxx, scope, env, LINUX, 'moving an import only updates its provenance')
     check_provider_reuse(summary, events)
 
@@ -334,9 +480,20 @@ def check_edits(ycxx, scope, env, journal, before):
     old_edge, = (row for row in facts(before, 'module-provider') if row['name'] == old_import['name'])
     assert len(diff) == 2 and all(row['change'] == 'removed' and row.get('after') is None for row in diff), diff
     assert [row['before'] for row in diff] == [old_import, old_edge], diff
+    old_module, = (entry for entry in before['module_graph']['imports'] if entry['name'] == EXTERNAL)
+    module_diff = show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot))
+    assert module_diff['changes'] == diff, module_diff
+    check_module_changes(module_diff, imports=[('removed', old_module, None)])
     html = show_html(ycxx, scope, env, journal, LINUX, reduced, '--against', str(saved))
     changes = html.section('changes', 'Plan changes')
     assert contains_words(changes, 'removed') and EXTERNAL in changes.visible(), changes.visible()
+
+    # The surviving identical import pairs with the first original occurrence.
+    replace_source(scope, 'main.cc', shifted.replace('import beam.top;', '// removed the first copy', 1))
+    first, second = (entry for entry in before['module_graph']['imports'] if entry['name'] == 'beam.top')
+    assert first['directive_index'] < second['directive_index'], (first, second)
+    check_module_changes(show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot)),
+                         imports=[('removed', second, None)])
     replace_source(scope, 'main.cc', shifted)
 
 
@@ -356,12 +513,16 @@ def check_project(ycxx, scope, env, journal):
     check_graph(scope, darwin, DARWIN)
     show_html(ycxx, scope, env, journal, DARWIN, darwin)
     assert show(ycxx, scope, env, journal, LINUX) == before
+    check_target_comparison(ycxx, scope, env, journal, before, darwin)
 
     check_edits(ycxx, scope, env, journal, before)
+    complete = show(ycxx, scope, env, journal, LINUX)
+    check_conflict_and_cycle_comparison(ycxx, scope, env, journal, complete)
     replace_source(scope, 'darwin.cc', '#include "missing-fixture.h"\n' + SOURCES['darwin.cc'])
     partial = show(ycxx, scope, env, journal, LINUX)
     check_graph(scope, partial, LINUX, incomplete='darwin.cc', reason='preprocessing_incomplete')
     show_html(ycxx, scope, env, journal, LINUX, partial)
+    check_partial_comparison(ycxx, scope, env, journal, complete, partial, 'darwin.cc')
     replace_source(scope, 'darwin.cc', SOURCES['darwin.cc'])
 
     replace_source(scope, 'build.ycxx', definition(journal, generated=True))
@@ -371,6 +532,19 @@ def check_project(ycxx, scope, env, journal):
     partial = show(ycxx, scope, env, journal, LINUX)
     check_graph(scope, partial, LINUX, incomplete=generated, reason='generated_inputs_unavailable')
     show_html(ycxx, scope, env, journal, LINUX, partial)
+    check_partial_comparison(ycxx, scope, env, journal, complete, partial, generated, added=True)
+
+    build(ycxx, scope, env, DARWIN, 'admit the same generated module source for Darwin')
+    generated_darwin = str(namespace(DARWIN) / 'virtual' / GENERATOR / GENERATED)
+    darwin = show(ycxx, scope, env, journal, DARWIN)
+    check_graph(scope, darwin, DARWIN, incomplete=generated_darwin, reason='generated_inputs_unavailable')
+    old, new = partial['module_graph'], darwin['module_graph']
+    linux_unit = unit_for_source(old, generated)
+    darwin_unit = unit_for_source(new, generated_darwin)
+    logical_source = str(namespace(None) / 'virtual' / GENERATOR / GENERATED)
+    assert linux_unit['configuration'] == darwin_unit['configuration'], (linux_unit, darwin_unit)
+    assert linux_unit['configuration']['source'] == logical_source, linux_unit
+    check_module_changes(compare(ycxx, scope, env, journal, DARWIN, partial), **platform_changes(old, new))
     assert journal_contents(journal) == 'generated\n' and daemon_identity(ycxx, scope, env) == daemon
 
 
@@ -388,18 +562,21 @@ export module cycle.left;
 import cycle.left;
 #else
 export module cycle.right;
+#ifndef DISABLE_RIGHT_CYCLE
 import cycle.right;
+#endif
 #endif
 ''', encoding='utf-8')
     for directory, side in (('left-include', 1), ('right-include', 2)):
         (scope / directory).mkdir()
         (scope / directory / 'config.hh').write_text(f'#define SIDE {side}\n', encoding='utf-8')
-    (scope / 'build.ycxx').write_text(f'''\
-cpp.library "left" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["left-include"] }}
-cpp.library "right" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["right-include"] }}
-cpp.library "again" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["left-include"] }}
-cpp.executable "app" {{ sources = ["main.cc"] deps = ["left", "right", "again"] }}
-''', encoding='utf-8')
+    configuration_manifest = f'''\
+cpp.library "left" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["left-include", "right-include"] }}
+cpp.library "right" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["right-include", "left-include"] }}
+cpp.library "again" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["left-include", "right-include"] }}
+cpp.executable "app" {{ sources = ["main.cc"] deps = ["again", "left", "right"] }}
+'''
+    (scope / 'build.ycxx').write_text(configuration_manifest, encoding='utf-8')
     build(ycxx, scope, env, LINUX, 'resolve repeated and distinct configured units')
     plan = show(ycxx, scope, env, journal, LINUX)
     graph = module_graph(plan, LINUX)
@@ -421,6 +598,38 @@ cpp.executable "app" {{ sources = ["main.cc"] deps = ["left", "right", "again"] 
         assert declaration['directive_index'] == expected_index and edge['directive_index'] == expected_index + 1, edge
     html = show_html(ycxx, scope, env, journal, LINUX, plan)
     assert UNSAFE_SOURCE not in html.document, 'the source name was embedded as unescaped HTML'
+
+    configurations = {unit['declarations'][0]['name']: unit['configuration'] for unit in shared}
+    assert configurations == {
+        'cycle.left': {'source': UNSAFE_SOURCE, 'include_dirs': ['left-include', 'right-include']},
+        'cycle.right': {'source': UNSAFE_SOURCE, 'include_dirs': ['right-include', 'left-include']},
+    }, configurations
+    # Keep the first dependency fixed so the application's inherited include order stays stable.
+    reordered = configuration_manifest.replace('["again", "left", "right"]', '["again", "right", "left"]')
+    replace_source(scope, 'build.ycxx', reordered)
+    build(ycxx, scope, env, LINUX, 'reorder the repeated and distinct configured units')
+    reordered_plan = show(ycxx, scope, env, journal, LINUX)
+    current = module_graph(reordered_plan, LINUX)
+    before_ids = {unit['declarations'][0]['name']: unit['id'] for unit in shared}
+    after_ids = {unit['declarations'][0]['name']: unit['id'] for unit in current['units']
+                 if unit['source'] == UNSAFE_SOURCE}
+    assert before_ids.keys() == after_ids.keys() and before_ids != after_ids, (before_ids, after_ids)
+
+    diff = compare(ycxx, scope, env, journal, LINUX, plan)
+    check_module_changes(diff)
+    legacy = compare(ycxx, scope, env, journal, LINUX, legacy_graph(plan))
+    assert legacy['changes'] == diff['changes'], legacy
+    check_module_changes(legacy, metadata={'unavailable': 'ambiguous_legacy_configuration'})
+
+    replace_source(scope, 'build.ycxx', reordered.replace('"left-include"', '"left-include/"'))
+    build(ycxx, scope, env, LINUX, 'add a trailing separator to an include directory')
+    check_module_changes(compare(ycxx, scope, env, journal, LINUX, reordered_plan))
+
+    right_import, = (entry for entry in current['imports'] if entry['name'] == 'cycle.right')
+    right_cycle, = (cycle for cycle in current['cycles'] if cycle == [right_import['unit_id']])
+    replace_source(scope, 'right-include/config.hh', '#define SIDE 2\n#define DISABLE_RIGHT_CYCLE\n')
+    check_module_changes(compare(ycxx, scope, env, journal, LINUX, reordered_plan),
+                         imports=[('removed', right_import, None)], cycles=[('removed', right_cycle, None)])
 
 
 def check_empty_graph(ycxx, scope, env, journal):

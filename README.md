@@ -48,8 +48,9 @@ project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
 report to follow links from imports to their provider declarations.
 Use `ycxx show app --format=json` to read these dependencies and their physical
-source locations as a structured `module_graph`. Named-module compilation and
-BMI support are tracked in
+source locations as a structured `module_graph`. Add `--against before.json`
+to compare module dependencies with a saved snapshot. Named-module compilation
+and BMI support are tracked in
 [#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
