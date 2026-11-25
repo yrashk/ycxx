@@ -601,6 +601,8 @@ written default member initializer are value-initialized.
   constraints. [#908](https://github.com/yrashk/ycxx/issues/908)
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
+  A failed dependent type requirement can end substitution before later requirements
+  instantiate their types. [#1283](https://github.com/yrashk/ycxx/issues/1283)
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Directly
   written namespace alias-template IDs check constraints before expansion in non-template code
