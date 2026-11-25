@@ -193,6 +193,12 @@ struct AdmitProbeReceipts {
     for (auto& [key, record] : pending) db.set<ToolchainProbeReceipt>(key, std::move(record));
   }
 };
+template<class Input>
+struct AdmitRuleInput {
+  Fp128 key;
+  typename Input::Value value;
+  void operator()(engine::Db& db) const { db.set<Input>(key, value); }
+};
 struct Prepared {
   Fp128 output;
   Fp128 plan;
@@ -825,7 +831,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       return std::unexpected(std::format("witness '{}': {}", label,
           result.err.empty() ? std::format("did not exit normally (status {})", result.exit_status) : result.err));
     WitnessEvidence evidence{result.exit_status, std::move(result.out), std::move(result.err)};
-    apply([&](engine::Db& db) { db.set<RuleWitnessReceipt>(id, evidence); });
+    apply(AdmitRuleInput<RuleWitnessReceipt>{id, evidence});
     return evidence;
   };
   const AdmitRuleValue admit_value = [&](std::string_view producer, std::string_view field, RuleValueRecord record) {
@@ -833,7 +839,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (const auto* prior = session_.db().peek<RuleValueReceipt>(id); prior && *prior &&
         (**prior).receipt == record.receipt && (**prior).support == record.support &&
         (**prior).origin == record.origin) return;
-    apply([&](engine::Db& db) { db.set<RuleValueReceipt>(id, std::move(record)); });
+    apply(AdmitRuleInput<RuleValueReceipt>{id, std::move(record)});
   };
   const RunRulePackage run_package = [&](const RulePackageRef& package, const RulePackagePlan& plan, Fp128 id,
                                          std::function_ref<bool()> still_current)
@@ -947,7 +953,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       const auto consumer = fingerprint(std::tie(workspace, demand.target));
       const auto* prior = session_.db().peek<RuleValueBindings>(consumer);
       if (!prior || fingerprint(*prior) != fingerprint(values))
-        apply([&](engine::Db& db) { db.set<RuleValueBindings>(consumer, std::move(values)); });
+        apply(AdmitRuleInput<RuleValueBindings>{consumer, std::move(values)});
       auto observed = session_.run<RuleValueArguments>(consumer, poll, nullptr, tracer);
       if (!observed || cancelled()) return std::unexpected("build cancelled");
       if (!*observed) return std::unexpected(std::format("rule '{}' has unresolved values", demand.target));
