@@ -2,27 +2,27 @@
 // functions, applied through references and to objects with constructors and destructors.
 // EXIT: 0
 class Shape {
-    virtual int area() const = 0;
-    virtual void grow(int) = 0;
+    virtual int area() const noexcept = 0;
+    virtual void grow(int) noexcept = 0;
 
 public:
     virtual ~Shape() = default;
-    friend int operator*(const Shape& s) { return s.area(); }
-    friend bool operator!(const Shape& s) { return s.area() == 0; }
-    friend Shape& operator++(Shape& s) { s.grow(1); return s; }
-    friend Shape& operator*=(Shape& s, int n) { s.grow(n); return s; }
+    friend int operator*(const Shape& s) noexcept { return s.area(); }
+    friend bool operator!(const Shape& s) noexcept { return s.area() == 0; }
+    friend Shape& operator++(Shape& s) noexcept { s.grow(1); return s; }
+    friend Shape& operator*=(Shape& s, int n) noexcept { s.grow(n); return s; }
 };
 struct Square : Shape {
     int side = 0;
-    int area() const override { return side * side; }
-    void grow(int n) override { side += n; }
+    int area() const noexcept override { return side * side; }
+    void grow(int n) noexcept override { side += n; }
 };
 struct Line : Shape {
     int len = 1;
-    int area() const override { return len; }
-    void grow(int n) override { len += 10 * n; }
+    int area() const noexcept override { return len; }
+    void grow(int n) noexcept override { len += 10 * n; }
 };
-int use(Shape& s) { return *(++s *= 2); }
+int use(Shape& s) noexcept { return *(++s *= 2); }
 
 int main() {
     Square q;

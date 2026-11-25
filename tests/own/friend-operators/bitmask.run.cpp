@@ -19,20 +19,20 @@ class Base {
   friend constexpr fmt& operator^=(fmt& x, fmt y) noexcept { return x = x ^ y; }
   Base() {}
   virtual ~Base() {}
-  fmt flags() const { return flags_; }
-  fmt setf(fmt f, fmt mask) {
+  fmt flags() const noexcept { return flags_; }
+  fmt setf(fmt f, fmt mask) noexcept {
     fmt old = flags_;
     flags_ &= ~mask;
     flags_ |= f & mask;
     return old;
   }
-  void flip(fmt f) { flags_ ^= f; }
+  void flip(fmt f) noexcept { flags_ ^= f; }
 
  private:
   fmt flags_ = dec;
 };
 
-constexpr Base::fmt compute() {
+constexpr Base::fmt compute() noexcept {
   Base::fmt f = Base::dec;
   (f |= Base::hex) |= Base::oct;
   f &= ~Base::hex;
