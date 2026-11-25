@@ -3018,9 +3018,12 @@ public:
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
+          // An argument nested in a default has its own destination type ([temp.arg.nontype]).
+          const bool saved_default = std::exchange(in_integral_template_default_, false);
           const bool saved_value_argument = std::exchange(in_template_value_argument_, true);
           Ex e = conditional_expression();
           in_template_value_argument_ = saved_value_argument;
+          in_integral_template_default_ = saved_default;
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
