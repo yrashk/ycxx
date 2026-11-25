@@ -15,6 +15,7 @@ import ycxx.trace;
 
 export namespace ycxx::client {
 int cxx(std::span<const std::string_view> args);
+int build(std::span<const std::string_view> args);
 int lsp(std::span<const std::string_view> args);
 int control(std::span<const std::string_view> args);
 }
@@ -174,10 +175,10 @@ struct Interrupt {
 // `instance`, when given, is set to the daemon that answered (`Welcome::instance`); `cut`, when given, can interrupt it.
 // `said`, when given, takes the line `verbose` prints instead (a browser has the screen).
 using OnTrace = std::function<void(daemon::TraceBatch&&)>;
-std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
-                                                         const std::function<void()>& on_retry = {}, std::uint64_t* instance = nullptr,
-                                                         Interrupt* cut = nullptr, std::vector<std::string>* said = nullptr) {
-  std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
+template <class Done, class Request, class Report>
+std::expected<Done, std::string> request_daemon(const std::string& root, Request request, Report report,
+                                              const std::function<void()>& on_retry,
+                                              std::uint64_t* instance, Interrupt* cut) {
   std::string why;
   for (int attempt = 0; attempt < 2; ++attempt) {
     if (cut && cut->is_stopped()) return std::unexpected("stopped");
@@ -185,22 +186,32 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
     auto c = daemon::reach(root, true);
     if (!c) return std::unexpected(c.error());
     if (cut && !cut->enter(c->fd.get())) return std::unexpected("stopped");
-    auto d = daemon::request_compile(*c, r, on_trace);
+    auto d = request(*c);
     if (cut) cut->leave();
     if (d) {
       if (instance) *instance = c->welcome.instance;
-      if (verbose) {
-        std::string line = std::format("ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
-                                       c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
-        if (said) said->push_back(std::move(line));
-        else std::println(std::cerr, "{}", line);
-      }
+      report(*c, *d);
       return std::move(*d);
     }
     why = d.error().why;
     if (!d.error().lost) break;
   }
   return std::unexpected(why);
+}
+
+std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
+                                                         const std::function<void()>& on_retry = {}, std::uint64_t* instance = nullptr,
+                                                         Interrupt* cut = nullptr, std::vector<std::string>* said = nullptr) {
+  const std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
+  return request_daemon<compile::Done>(
+      root, [&](daemon::Connection& c) { return daemon::request_compile(c, r, on_trace); },
+      [&](const daemon::Connection& c, const compile::Done& d) {
+        if (!verbose) return;
+        std::string line = std::format("ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
+                                       c.welcome.daemon_pid, c.welcome.root, d.report.revision, d.report.restarts, d.report.regions_reused);
+        if (said) said->push_back(std::move(line));
+        else std::println(std::cerr, "{}", line);
+      }, on_retry, instance, cut);
 }
 
 // `compile::finish` for `--trace-engine=json`, where every stderr line is JSON: outputs written,
@@ -212,6 +223,25 @@ int finish_json(compile::Done& d) {
   return d.exit_status;
 }
 
+int finish_project(const daemon::ProjectBuildDone& d, TraceMode mode) {
+  if (mode == TraceMode::json) {
+    std::string diagnostics;
+    for (const std::string& message : d.diagnostics) {
+      if (!diagnostics.empty()) diagnostics += ',';
+      diagnostics += trace::json_string(message);
+    }
+    std::println(std::cerr, R"({{"status":{},"output":{},"actions_executed":{},"diagnostics":[{}]}})",
+                 d.status, trace::json_string(d.output), d.actions_executed, diagnostics);
+  } else {
+    for (const std::string& diagnostic : d.diagnostics) std::println(std::cerr, "{}", diagnostic);
+    if (d.status == 0 && !d.output.empty()) {
+      std::println(std::cout, "{}", d.output);
+      std::cout << std::flush;
+    }
+  }
+  return d.status;
+}
+
 // Seconds since the epoch: a request's `build_time`.
 std::int64_t now_seconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -221,7 +251,8 @@ std::int64_t now_seconds() {
 // of daemon `instance` (0: no build was answered) (#245): how many batches changed something (0: the daemon stopped, so the next
 // build starts a new one), or nothing when it cannot be asked or was interrupted.
 std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t since, std::uint64_t instance, Interrupt& cut,
-                                          bool json = false, const std::function<void(std::vector<std::string>)>& on_watching = {}) {
+                                          bool json, const std::function<void(std::vector<std::string>)>& on_watching,
+                                          const std::optional<daemon::WatchedProject>& project) {
   auto c = daemon::reach(root, true);
   if (!c) {
     const std::string why = "--watch: cannot reach the daemon: " + c.error();
@@ -230,19 +261,33 @@ std::optional<std::uint64_t> await_change(const std::string& root, std::uint64_t
     return std::nullopt;
   }
   if (!cut.enter(c->fd.get())) return std::nullopt;
-  auto changed = daemon::await_change(*c, since, instance, on_watching);
+  auto changed = daemon::await_change(*c, since, instance, on_watching, project);
   cut.leave();
   if (cut.is_stopped()) return std::nullopt;
   return changed.value_or(0);
 }
 
-// `ycxx cxx --watch` (#245): builds, then waits for the daemon to see a file some build read
+struct WatchRun {
+  OnTrace trace;
+  std::function<void()> retry;
+  std::uint64_t& instance;
+  Interrupt& cut;
+  TraceOut* output = nullptr;
+  bool browsing = false;
+};
+struct WatchAnswer {
+  std::uint64_t started_at = 0;
+  std::optional<daemon::WatchedProject> project;
+  std::string text;  // diagnostics and output for the browser's detail pane
+};
+using WatchBuild = std::function<std::expected<WatchAnswer, std::string>(const WatchRun&)>;
+
+// `ycxx cxx --watch` (#245) and `ycxx build --watch` (#1263): builds and waits for inputs to
 // change, and builds again, until interrupted. The daemon is what watches the files, so it is
 // required. With the stream, each build prints its trace under a header; with the browser, the
 // builds run on a thread of their own and each becomes a node of a live tree, holding its
 // diagnostics.
-int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
-  const std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
+int watch_builds(const std::string& root, TraceMode mode, const WatchBuild& build) {
   Interrupt cut;
   const auto build_label = [](std::uint64_t n, std::optional<std::uint64_t> changed) {
     if (n == 1) return std::string("build 1");
@@ -255,28 +300,20 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
     for (std::uint64_t n = 1;; ++n) {
       if (mode == TraceMode::json) std::println(std::cerr, R"({{"build":{},"label":{}}})", n, trace::json_string(build_label(n, changed)));
       else std::println(std::cerr, "\n── {}", build_label(n, changed));
-      r.build_time = now_seconds();
       std::optional<TraceOut> traced;
       if (mode != TraceMode::off) traced.emplace(each);
       std::uint64_t instance = 0;
-      std::uint64_t revision = 0;
-      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
+      auto d = build({[&](daemon::TraceBatch&& b) {
         if (traced) traced->batch(std::move(b));
       }, [&] {
         if (traced) traced->restart("the daemon was lost; asking a new one");
-      }, &instance);
+      }, instance, cut, traced ? &*traced : nullptr});
       const bool json = mode == TraceMode::json;
-      if (d) {
-        revision = d->report.started_at;
-        if (json) finish_json(*d);
-        else compile::finish(*d);
-        if (traced) traced->finish();
-      } else if (json) {
-        std::println(std::cerr, R"({{"error":{}}})", trace::json_string("the daemon could not build it: " + d.error()));
-      } else {
-        std::println(std::cerr, "ycxx: error: the daemon could not build it: {}", d.error());
+      if (!d) {
+        if (json) std::println(std::cerr, R"({{"error":{}}})", trace::json_string("the daemon could not build it: " + d.error()));
+        else std::println(std::cerr, "ycxx: error: the daemon could not build it: {}", d.error());
       }
-      changed = await_change(root, revision, instance, cut, json, [&](std::vector<std::string> paths) {
+      changed = await_change(root, d ? d->started_at : 0, instance, cut, json, [&](std::vector<std::string> paths) {
         if (json) {
           std::string list;
           for (const std::string& p : paths) list += (list.empty() ? "" : ",") + trace::json_string(p);
@@ -295,7 +332,7 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
         std::println(std::cerr, "ycxx: watching {}{}{}; ^C to stop", list.empty() ? "no file of the project" : list,
                      others ? std::format(" and {} other file{} (system headers)", others, others == 1 ? "" : "s") : "",
                      "");
-      });
+      }, d ? d->project : std::nullopt);
       if (!changed) return 1;
     }
   }
@@ -334,31 +371,22 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
   std::jthread builder([&] {
     std::optional<std::uint64_t> changed;
     for (std::uint64_t n = 1; !cut.is_stopped(); ++n) {
-      r.build_time = now_seconds();
       const std::string label = build_label(n, changed);
       const auto offset = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - first).count());
       // Event numbers restart in another engine (a retry, a new daemon): each run gets a space.
       std::uint64_t run = n << 2;
       std::uint64_t instance = 0;
-      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
+      auto d = build({[&](daemon::TraceBatch&& b) {
         post({Item::trace, n, run, offset, std::move(b), label, {}});
-      }, [&] { ++run; }, &instance, &cut);
-      Item done{Item::done, n, run, offset, {}, label, {}};
-      std::uint64_t revision = 0;
-      if (d) {
-        revision = d->report.started_at;
-        compile::write_outputs(*d);
-        done.text = d->out + d->err;
-        if (done.text.empty()) done.text = d->exit_status == 0 ? "built, no diagnostics" : "failed";
-      } else {
-        done.text = "the daemon could not build it: " + d.error();
-      }
-      post(std::move(done));
-      changed = await_change(root, revision, instance, cut, false, [&](std::vector<std::string> paths) {
+      }, [&] { ++run; }, instance, cut, nullptr, true});
+      if (cut.is_stopped()) break;
+      post({Item::done, n, run, offset, {}, label,
+            d ? std::move(d->text) : "the daemon could not build it: " + d.error()});
+      changed = await_change(root, d ? d->started_at : 0, instance, cut, false, [&](std::vector<std::string> paths) {
         std::string text = std::format("\n\nwatching {} file{}:\n", paths.size(), paths.size() == 1 ? "" : "s");
         for (const std::string& p : paths) text += "  " + p + "\n";
         post({Item::files, n, run, offset, {}, label, std::move(text)});
-      });
+      }, d ? d->project : std::nullopt);
       if (!changed) break;
     }
     std::lock_guard g(shared.m);
@@ -629,7 +657,23 @@ int cxx(std::span<const std::string_view> args) {
       r.trace = trace_mode == TraceMode::stream ? compile::Trace::events : compile::Trace::values;
     // The browser shows each build while it runs (#939).
     if (trace_mode == TraceMode::interactive && trace::is_terminal(0)) r.trace = compile::Trace::live;
-    return watch_builds(std::move(r), verbose, trace_mode);
+    return watch_builds(daemon::root_for(compile::first_input(r.argv), r.cwd), trace_mode,
+        [&](const WatchRun& run) -> std::expected<WatchAnswer, std::string> {
+          r.build_time = now_seconds();
+          auto d = through_daemon(r, verbose, run.trace, run.retry, &run.instance, &run.cut);
+          if (!d) return std::unexpected(std::move(d.error()));
+          WatchAnswer answer{d->report.started_at, std::nullopt, {}};
+          if (run.browsing) {
+            compile::write_outputs(*d);
+            answer.text = d->out + d->err;
+            if (answer.text.empty()) answer.text = d->exit_status == 0 ? "built, no diagnostics" : "failed";
+          } else {
+            if (trace_mode == TraceMode::json) finish_json(*d);
+            else compile::finish(*d);
+            if (run.output) run.output->finish();
+          }
+          return answer;
+        });
   }
   // The browser while the build runs (#939), when there is a terminal for it; without one, the
   // trace is gathered and printed as the stream after the build, as before.
@@ -678,6 +722,70 @@ int cxx(std::span<const std::string_view> args) {
     traced->memory({memory::process().current, window->peak()});
   }
   return finish(d);
+}
+
+// Project builds use the resident session so action and compiler results survive requests.
+int build(std::span<const std::string_view> args) {
+  constexpr std::string_view usage = "usage: ycxx build <target> [--watch] [--trace-engine=stream|interactive|json]";
+  std::string target;
+  std::optional<TraceMode> requested_trace;
+  std::string invalid;
+  bool watch = false;
+  for (std::string_view arg : args) {
+    if (arg == "--help") {
+      std::println("{}", usage);
+      return 0;
+    }
+    if (auto mode = trace_mode_named(arg)) requested_trace = *mode;
+    else if (arg == "--watch") watch = true;
+    else if (!arg.empty() && !arg.starts_with('-') && target.empty()) target = arg;
+    else if (invalid.empty()) invalid = std::format("unexpected argument '{}'\n{}", arg, usage);
+  }
+  const TraceMode mode = requested_trace ? *requested_trace : trace_mode_from_environment();
+  const auto fail = [mode](std::string_view message, int status) {
+    if (mode == TraceMode::json) std::println(std::cerr, R"({{"error":{}}})", trace::json_string(message));
+    else std::println(std::cerr, "ycxx: error: {}", message);
+    return status;
+  };
+  if (!invalid.empty()) return fail(invalid, 2);
+  if (target.empty()) return fail(std::format("a build target is required\n{}", usage), 2);
+
+  daemon::ProjectBuildRequest request{.cwd = cwd_now(), .target = std::move(target),
+                                      .trace = mode != TraceMode::off,
+                                      .trace_values = mode == TraceMode::interactive || mode == TraceMode::json};
+  if (request.cwd.empty()) return fail("cannot determine the working directory", 1);
+  const std::string root = daemon::root_for(std::nullopt, request.cwd);
+  if (watch) {
+    request.watch = true;
+    return watch_builds(root, mode, [&](const WatchRun& run) -> std::expected<WatchAnswer, std::string> {
+      request.trace_live = run.browsing;
+      auto d = request_daemon<daemon::ProjectBuildDone>(
+          root, [&](daemon::Connection& c) { return daemon::request_project_build(c, request, run.trace); },
+          [](const daemon::Connection&, const daemon::ProjectBuildDone&) {}, run.retry, &run.instance, &run.cut);
+      if (!d) return std::unexpected(std::move(d.error()));
+      WatchAnswer answer{d->started_at, std::move(d->watched_project), {}};
+      if (run.browsing) {
+        if (d->status == 0 && !d->output.empty()) answer.text = std::format("built {}\n", d->output);
+        for (const std::string& diagnostic : d->diagnostics) answer.text += diagnostic + "\n";
+        if (answer.text.empty()) answer.text = d->status == 0 ? "built, no diagnostics" : "failed";
+      } else {
+        if (run.output) run.output->finish();
+        finish_project(*d, mode);
+      }
+      return answer;
+    });
+  }
+  auto connection = daemon::reach(root, true);
+  if (!connection) return fail(std::format("cannot reach the daemon: {}", connection.error()), 1);
+
+  std::optional<TraceOut> traced;
+  if (request.trace) traced.emplace(mode);
+  auto result = daemon::request_project_build(*connection, request, [&](daemon::TraceBatch&& batch) {
+    if (traced) traced->batch(std::move(batch));
+  });
+  if (traced) traced->finish();
+  if (!result) return fail(result.error().why, 1);
+  return finish_project(*result, mode);
 }
 
 // `ycxx lsp [--root DIR]`: the editor's language server, which runs in the daemon of DIR's scope

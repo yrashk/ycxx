@@ -133,6 +133,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_sysv_reference_fields
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_sysv_reference_fields.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+  # PARITY: by design: own/int128 on x86-64 ELF, with native peers; the driver runs it on macOS.
+  add_test(NAME unit.linux_int128
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_int128.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/tests/own/int128)
   # PARITY: by design: links x86-64 ELF objects against the host Itanium C++ ABI runtime.
   add_test(NAME unit.linux_borrowed_typed_downcast
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_borrowed_typed_downcast.py
@@ -262,6 +266,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
             ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_dynamic
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_dynamic.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  # PARITY: #393 for native Mach-O shared output; this test exercises ELF metadata and loading.
+  add_test(NAME unit.linux_shared_output
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_shared_output.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
   # PARITY: #294 for the Darwin borrowed typed downcast counterpart.
   add_test(NAME unit.linux_keyless_base_rtti

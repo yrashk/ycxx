@@ -286,6 +286,17 @@ struct VirtualMemberCall {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
+// An immediate virtual member call ([expr.const.core], [class.virtual]). `function` is the
+// statically selected member, which also supplies any default arguments. Only an unqualified
+// call needs the receiver's dynamic type.
+struct ImmediateVirtualCall {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
+  u8 qualified;
+};
+
 // `dynamic_cast<cv void*>(p)` ([expr.dynamic.cast]): the address of the most derived object.
 struct DynamicCastVoid {
   ExprInfo info;
@@ -623,7 +634,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
-                          ConstantProbe, ThreeWay, SourceLine, SourceLineContext>;
+                          ConstantProbe, ThreeWay, SourceLine, SourceLineContext, ImmediateVirtualCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

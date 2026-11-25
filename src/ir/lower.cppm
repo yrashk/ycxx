@@ -1,6 +1,8 @@
 // `lower`: L1 to L2 (optimization design §2.1, §2.3's last column; #26). C++ is erased:
 //   - C++ scalar types become `iN`, `ptr`, `f32` and `f64` by their size from `layout`; `bool` is
-//     `i1` as a value and one byte in memory;
+//     `i1` as a value and one byte in memory. A 128-bit integer is an `i128` whatever the target;
+//     `legalize` expands what the target lacks (#1172). Only where the calling convention passes
+//     one in two 64-bit words does `lower` split it;
 //   - access paths and pointer arithmetic become byte offsets from `layout`;
 //   - automatic and temporary `alloc`s become `alloca` frame objects, an `erroneous` or `zero`
 //     initial state becomes stores of zero (the erroneous value is zero on every target), an
@@ -71,9 +73,11 @@ export struct SubObject {
 // address of an entity's object (a variable, a string literal) plus a byte offset. An integer
 // converts to one.
 export struct ConstValue {
-  std::int64_t bits = 0;            // the value, or the offset from `base`
+  std::int64_t bits = 0;            // the value (a 128-bit one's low half), or the offset from `base`
+  std::int64_t high = 0;            // a 128-bit integer's high half
   std::optional<EntityId> base{};   // an address constant
-  constexpr ConstValue(std::int64_t v = 0) : bits(v) {}
+  constexpr ConstValue(std::int64_t v = 0) : bits(v), high(v < 0 ? -1 : 0) {}
+  constexpr ConstValue(std::int64_t low, std::int64_t high) : bits(low), high(high) {}
   constexpr ConstValue(EntityId e, std::int64_t offset) : bits(offset), base(e) {}
 };
 
@@ -116,6 +120,11 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
+  // A 128-bit integer passes and returns as two 64-bit integer words, low first: in registers
+  // when two are left, else whole in 16-byte-aligned stack (AMD64 psABI §3.2.3; AAPCS64 C.9,
+  // without C.8's even-numbered register, as Apple's convention has it). Unset for a calling
+  // convention with 128-bit registers, which takes the `i128` itself.
+  bool int128_in_words = true;
   const ThrowRuntime* throw_runtime = nullptr;
   std::optional<CatchAllRuntime> catch_all{};
   EntityId cleanup_resume = EntityId::none;
@@ -139,7 +148,7 @@ export class Amd64ArgumentPlan {
   static constexpr std::uint32_t sse_registers = 8;
 
   Amd64ArgumentLocation place(l2::Type type, std::uint32_t register_words = 1,
-                              std::uint32_t stack_words = 1) {
+                              std::uint32_t stack_words = 1, std::uint32_t stack_align_words = 1) {
     const bool sse = l2::is_float(type);
     auto& used = sse ? sse_used_ : integer_used_;
     const auto limit = sse ? sse_registers : integer_registers;
@@ -148,6 +157,7 @@ export class Amd64ArgumentPlan {
       used += register_words;
       return {sse ? Amd64ArgumentKind::sse : Amd64ArgumentKind::integer, first};
     }
+    stack_used_ = (stack_used_ + stack_align_words - 1) / stack_align_words * stack_align_words;
     const auto first = stack_used_;
     stack_used_ += stack_words;
     return {Amd64ArgumentKind::stack, first};
@@ -182,9 +192,10 @@ namespace ycxx::ir {
 class Amd64ArgumentOrder {
  public:
   Amd64ArgumentLocation add(std::uint32_t first, l2::Type type, std::uint32_t register_words = 1,
-                            std::uint32_t stack_words = 1) {
-    const auto location = plan_.place(type, register_words, stack_words);
+                            std::uint32_t stack_words = 1, std::uint32_t stack_align_words = 1) {
+    const auto location = plan_.place(type, register_words, stack_words, stack_align_words);
     if (location.kind == Amd64ArgumentKind::stack) {
+      stack_.resize(location.index, none);  // the words that align it
       for (std::uint32_t w = 0; w < stack_words; ++w) stack_.push_back(first + w);
     } else {
       auto& registers = location.kind == Amd64ArgumentKind::sse ? sse_ : integer_;
@@ -339,6 +350,13 @@ class Lowering {
     return std::int64_t(u);
   }
 
+  bool in_words(T t) const { return t == T::i128 && config_.int128_in_words; }
+  // The words a 128-bit value passes in, and the value they make.
+  std::array<ValueId, 2> words(ValueId v) {
+    return {emit1(Op2::trunc, T::i64, {v}), emit1(Op2::high, T::i64, {v})};
+  }
+  ValueId pair(ValueId low, ValueId high) { return emit1(Op2::pair, T::i128, {low, high}); }
+
   // Integer `v` of type `from` to type `to`: extended by `sign`, or truncated.
   ValueId resize(ValueId v, T to, bool sign) {
     T from = b_.peek().type(v);
@@ -420,7 +438,7 @@ class Lowering {
 
   std::expected<void, LowerError> block(BlockId b) {
     bool entry = raw(b) == 0;
-    bool place_amd64 = entry && config_.sysv_amd64 && f_.byval_params;
+    bool place_amd64 = entry && config_.sysv_amd64 && (f_.byval_params || has_words(b));
     std::vector<T> params;
     // Words that fill a by-value parameter, or a local destination for a class result.
     struct ClassObject {
@@ -430,6 +448,7 @@ class Lowering {
       ClassPieces pieces;
     };
     std::vector<ClassObject> objects;
+    std::vector<std::pair<ValueId, std::uint32_t>> joined;  // 128-bit parameters and their first words
     Amd64ArgumentOrder amd64_args;
     std::vector<std::int64_t> l2_of;  // per L1 parameter: its L2 parameter, or -1
     std::uint32_t j = 0;              // the value parameter's index
@@ -494,6 +513,8 @@ class Lowering {
             const T piece = pieces.type;
             pad_registers(used(params, piece, 1, indirect_result_), pieces.words, piece,
                           [&] { params.push_back(piece); });
+            if (piece == T::i64)
+              align_words(params, 1, indirect_result_, pieces.words, object.align, [] { return T::i64; });
           }
           objects.push_back({p, std::uint32_t(params.size()), false, pieces});
           l2_of.push_back(-1);
@@ -504,6 +525,16 @@ class Lowering {
       }
       auto t = type_of(cxx(p));
       if (!t) return fail(t.error());
+      if (entry && in_words(*t)) {
+        if (place_amd64)
+          amd64_args.add(std::uint32_t(params.size()), T::i64, 2, 2, 2);
+        else
+          align_words(params, 1, indirect_result_, 2, 16, [] { return T::i64; });
+        joined.push_back({p, std::uint32_t(params.size())});
+        l2_of.push_back(-1);
+        params.insert(params.end(), 2, T::i64);
+        continue;
+      }
       if (place_amd64) amd64_args.add(std::uint32_t(params.size()), *t);
       l2_of.push_back(std::int64_t(params.size()));
       params.push_back(*t);
@@ -541,6 +572,7 @@ class Lowering {
       if (l2_of[i] >= 0) map_[raw(p)] = param(std::uint32_t(l2_of[i]));
       ++i;
     }
+    for (auto [p, first] : joined) map_[raw(p)] = pair(param(first), param(first + 1));
     if (!objects.empty()) {
       // The objects the words fill, or the class result's object, in this frame.
       ValueId state = map_[raw(*f_.params_of(b).begin())];
@@ -618,7 +650,10 @@ class Lowering {
           out(n, 0, add_offset(emit1(Op2::symbol, T::ptr, {}, {raw(*c.base)}), std::uint64_t(c.bits)));
           return {};
         }
-        out(n, 0, constant(*t, c.bits));
+        if (*t == T::i128 && c.high != (c.bits < 0 ? -1 : 0))
+          out(n, 0, pair(constant(T::i64, c.bits), constant(T::i64, c.high)));
+        else
+          out(n, 0, constant(*t, c.bits));
         return {};
       }
       case Op::global:
@@ -676,12 +711,12 @@ class Lowering {
         return {};
       }
       case Op::f2i: {
-        // [conv.fpint]: truncated in 32 or 64 bits, then to the type's width; a value the type
+        // [conv.fpint]: truncated in 32, 64 or 128 bits, then to the type's width; a value the type
         // cannot hold is undefined, so the bits dropped do not matter.
         auto t = result_type();
         if (!t) return fail(t.error());
         if (*t == T::i1) return fail("a floating value converts to bool by `tobool`");
-        T wide = l2::bits(*t) <= 32 ? T::i32 : T::i64;
+        T wide = l2::bits(*t) <= 32 ? T::i32 : *t;
         ValueId v = emit1(is_signed(l1_result(n)) ? Op2::fptosi : Op2::fptoui, wide, {in(n, 0)});
         out(n, 0, resize(v, *t, false));
         return {};
@@ -870,6 +905,11 @@ class Lowering {
       case Op::va_start:
       case Op::va_arg: {
         auto o = origin();
+        if (nd.op == Op::va_arg) {
+          auto fetch = type_of(cxx(f_.results_of(n)[1]));
+          if (!fetch) return fail(fetch.error());
+          if (*fetch == T::i128) return fail("128-bit variable arguments are not supported yet");  // #1172
+        }
         if (!config_.sysv_amd64 && nd.op == Op::va_arg) {
           // Apple arm64: the cursor holds the address of the next argument, each in an 8-byte
           // slot of its own, the value in its low bytes (little-endian).
@@ -917,6 +957,8 @@ class Lowering {
         else out(n, 0, store_field(in(n, 0), in(n, 1), field, in(n, 2)));
         return {};
       }
+      case Op::call_immediate_virtual:
+        return fail("an immediate virtual call reached native lowering");
       case Op::call:
       case Op::call_ind: {
         bool ind = nd.op == Op::call_ind;
@@ -927,6 +969,10 @@ class Lowering {
         std::uint64_t sext = 0;
         std::uint64_t byval = imms[ind ? 1 : 2], result_arg = imms[ind ? 2 : 3];
         bool place_amd64 = config_.sysv_amd64 && byval;
+        for (std::size_t i = ind ? 2 : 1; i < l1ops.size(); ++i)
+          if (in_words(b_.peek().type(map_[raw(l1ops[i])]))) place_amd64 |= config_.sysv_amd64;
+        // L1's last arguments, which the callee's ellipsis matches.
+        const std::size_t named = l1ops.size() - std::size_t(imms[ind ? 0 : 1]);
         std::uint32_t indirect = 0;           // L2's: 1 + the index of the indirect result's address
         std::optional<ValueId> result_dst;    // a class result in registers: where it goes
         ClassPieces result_pieces;
@@ -978,12 +1024,24 @@ class Lowering {
                 std::span<const ValueId> args(ops.begin() + (ind ? 2 : 1), ops.end());
                 pad_registers(used(args, piece, 0, indirect), pieces.words, piece,
                               [&] { ops.push_back(constant(piece, 0)); });
+                if (piece == T::i64)
+                  align_words(ops, ind ? 2 : 1, indirect, pieces.words, layout(c).align,
+                              [&] { return constant(T::i64, 0); });
               }
               for (std::uint32_t w = 0; w < pieces.words; ++w)
                 ops.push_back(load_class_piece(state, v, pieces, w));
               continue;
             }
             else if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate argument");
+          }
+          if (in_words(b_.peek().type(v))) {
+            if (i >= named) return fail("128-bit variable arguments are not supported yet");  // #1172
+            if (place_amd64)
+              amd64_args.add(std::uint32_t(ops.size()), T::i64, 2, 2, 2);
+            else
+              align_words(ops, ind ? 2 : 1, indirect, 2, 16, [&] { return constant(T::i64, 0); });
+            ops.append_range(words(v));
+            continue;
           }
           bool signed_arg = b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i]);
           if (place_amd64) {
@@ -1009,6 +1067,11 @@ class Lowering {
         for (std::uint32_t i = 1; i < nd.nres; ++i) {
           auto t = type_of(cxx(l1_result(n, i)));
           if (!t) return fail(t.error());
+          if (in_words(*t)) {  // a single result, in two words
+            res.insert(res.end(), 2, T::i64);
+            narrow.push_back(std::nullopt);
+            continue;
+          }
           auto abi = abi_type(*t);
           res.push_back(abi.value_or(*t));
           narrow.push_back(abi ? std::optional(*t) : std::nullopt);
@@ -1031,6 +1094,7 @@ class Lowering {
         out(n, 0, after);
         for (std::uint32_t i = 1; i < nd.nres; ++i) {
           ValueId v = b_.peek().result(c, i);
+          if (res.size() == nd.nres + 1) v = pair(v, b_.peek().result(c, i + 1));
           // Only the result's own bits are read: a bool is bit 0, whatever the callee left above it.
           if (narrow[i - 1]) v = emit1(Op2::trunc, *narrow[i - 1], {v});
           out(n, i, v);
@@ -1122,6 +1186,13 @@ class Lowering {
         for (std::size_t i = 1; i < l1ops.size(); ++i) {
           ValueId v = map_[raw(l1ops[i])];
           T t = b_.peek().type(v);
+          if (in_words(t)) {
+            for (ValueId w : words(v)) {
+              ops.push_back(w);
+              types.push_back(T::i64);
+            }
+            continue;
+          }
           if (auto abi = abi_type(t)) v = resize(v, *abi, t != T::i1 && is_signed(l1ops[i]));
           ops.push_back(v);
           types.push_back(b_.peek().type(v));
@@ -1180,11 +1251,15 @@ class Lowering {
       }
       case Op::asm_: {
         const ConstId text{std::uint32_t(imms[0])};
-        constexpr std::uint32_t int3[] = {'i', 'n', 't', '3', 0};
-        if constexpr (requires { layout_.ordinary_string_is(text, int3); }) {
-          if (config_.sysv_amd64 && nd.nopnd == 1 && nd.nres == 1 && layout_.ordinary_string_is(text, int3)) {
-            out(n, 0, emit1(Op2::int3, T::state, {in(n, 0)}));
-            return {};
+        if constexpr (requires { layout_.breakpoint_statement_asm(text); }) {
+          if (nd.nopnd == 1 && nd.nres == 1) {
+            if (const auto instruction = layout_.breakpoint_statement_asm(text)) {
+              switch (*instruction) {
+                case ast::BreakpointInstruction::x86_int3:
+                  out(n, 0, emit1(Op2::int3, T::state, {in(n, 0)}));
+                  return {};
+              }
+            }
           }
         }
         return fail("unsupported asm instruction");
@@ -1219,6 +1294,34 @@ class Lowering {
     }
     return n;
   }
+  // Apple's arm64 convention: `n` integer words of a 16-byte-aligned value go to consecutive
+  // registers, or else on the stack at its alignment, which a `word` no one reads, appended to
+  // `vals`, reaches. The words before, from index `first`, are packed by their natural sizes.
+  template <class V, class Word>
+  void align_words(std::vector<V>& vals, std::size_t first, std::uint32_t indirect, std::uint32_t n, std::uint32_t align,
+                   Word&& word) {
+    pad_registers(used(vals, T::i64, first, indirect), n, T::i64, [&] { vals.push_back(word()); });
+    if (align <= 8) return;
+    std::uint32_t ints = 0, floats = 0, stack = 0;
+    for (std::size_t i = first; i < vals.size(); ++i) {
+      T t;
+      if constexpr (std::same_as<V, T>) t = vals[i];
+      else t = b_.peek().type(vals[i]);
+      if (t == T::state || i - first + 1 == indirect) continue;
+      if (l2::is_float(t) ? floats++ < config_.float_arg_registers : ints++ < config_.int_arg_registers) continue;
+      const std::uint32_t size = l2::bytes(t);
+      stack = (stack + size - 1) / size * size + size;
+    }
+    if (ints >= config_.int_arg_registers && (stack + 7) / 8 * 8 % align != 0) vals.push_back(word());
+  }
+  // Whether a parameter of the entry block passes in two words.
+  bool has_words(BlockId b) const {
+    return std::ranges::any_of(f_.params_of(b), [&](ValueId p) {
+      if (f_.value(p).type.kind != TyKind::cxx) return false;
+      const auto t = type_of(cxx(p));
+      return t && in_words(*t);
+    });
+  }
   // An AMD64 record's INTEGER eightbytes, or its full stack representation. On AAPCS64
   // a small record uses integer words or, for an HFA, one floating register per member.
   ClassPieces class_pieces(QualType c, Amd64ArgumentOrder* args = nullptr, std::uint32_t first = 0) const {
@@ -1230,7 +1333,7 @@ class Lowering {
       if (!chunks) return {};
       auto registers = std::uint32_t(std::popcount(chunks));
       if (!args) return {registers, T::i64, l.size, chunks};
-      bool in_registers = args->add(first, T::i64, registers, words).kind == Amd64ArgumentKind::integer;
+      bool in_registers = args->add(first, T::i64, registers, words, l.align > 8 ? 2 : 1).kind == Amd64ArgumentKind::integer;
       if (!in_registers) chunks = std::uint8_t((1u << words) - 1);
       std::uint32_t passed_words = in_registers ? registers : words;
       return {passed_words, T::i64, l.size, chunks};

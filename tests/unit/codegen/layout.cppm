@@ -2,7 +2,8 @@
 // Types are numbered as the tests' L1 text spells them (`T<n>`), and a constant's id is its value
 // read as a 32-bit signed integer (`#4294967295` is -1), except for the 64-bit constants
 // numbered from `#2130706432` (0x7f000000), and the address constants from `#2130706688`
-// (0x7f000100), which is the address of the object @100, then @101, and so on.
+// (0x7f000100), which is the address of the object @100, then @101, and so on, and the 128-bit
+// constant `#2130706944` (0x7f000200), 2^64 + 5.
 export module ycxx.unit.codegen;
 
 import std;
@@ -14,7 +15,7 @@ export namespace ycxx::unit {
 // T1 int, T2 bool, T3 long, T4 unsigned, T5 char (signed on arm64 macOS), T6 const char*,
 // T7 int*, T8 char[16], T9 char(*)[16], T10 unsigned char, T11 struct { int a; long b; },
 // T12 T11*, T13 short, T14 unsigned long, T15 const char**, T16 bool*, T17 long*, T18 int(*)(int),
-// T20 char[40000], T21 char(*)[40000].
+// T20 char[40000], T21 char(*)[40000], T22 __int128, T23 __int128*.
 struct TestLayout {
   ir::TypeLayout type(ir::QualType t) const {
     using enum ir::TypeKind;
@@ -40,6 +41,8 @@ struct TestLayout {
       case 19: return {function, 0, 1, false, {}};
       case 20: return {array, 40000, 1, false, {}};
       case 21: return {pointer, 8, 8, false, ir::QualType(20)};
+      case 22: return {integer, 16, 16, true, {}};
+      case 23: return {pointer, 8, 8, false, ir::QualType(22)};
       default: return {};
     }
   }
@@ -53,6 +56,7 @@ struct TestLayout {
     std::uint32_t i = ir::raw(c) - 0x7f000000u;
     if (i < std::size(wide)) return wide[i];
     if (i >= 0x100 && i < 0x200) return {ir::EntityId(i - 0x100 + 100), 0};  // the address of @100 + n
+    if (i == 0x200) return {std::int64_t{5}, std::int64_t{1}};
     return std::int32_t(ir::raw(c));
   }
 };

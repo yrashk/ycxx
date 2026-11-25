@@ -10,11 +10,12 @@ tool), recompute only what that change can affect.
 
 ## Watch mode demo
 
-Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows one function through
-L1 IR, lowered L2 IR, and emitted ARM64 instructions, then shows compiler errors and their fixes.
-The final Linux x86-64 self-check uses the freestanding support in [#380](https://github.com/yrashk/ycxx/pull/380).
+Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows a function through
+L1 IR, lowered L2 IR, and codegen byte and relocation counts. A source error shows its file,
+line and column. After recovery, objdump shows the emitted x86-64 instructions and the Linux
+executable passes its self-check.
 
-![Vim and ycxx watch mode showing live rebuilds, L1 and L2 IR, and ARM64 assembly](docs/media/ycxx-watch-ir-codegen.gif)
+![Vim and ycxx watch mode showing a live error and recovery, L1 and L2 IR, and x86-64 instructions](docs/media/ycxx-watch-ir-codegen.gif)
 
 [View the GIF at full size](docs/media/ycxx-watch-ir-codegen.gif)
 
@@ -31,6 +32,13 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 
 ### What you can do today
 
+**Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
+The resident engine builds executable targets from C++ source groups and declared external
+generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
+or `--trace-engine=json` to inspect the tool steps and native compiler queries.
+Use `ycxx build app --watch` to rebuild after workspace edits.
+[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
 The unary `noexcept` operator checks whether calls and constructions can throw.
@@ -46,6 +54,10 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. [#317](https://github.com/yrashk/ycxx/issues/317)
+
+An explicitly specialized class can name a flat structural argument directly, as in
+`template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
+selects the same specialization. [#1248](https://github.com/yrashk/ycxx/issues/1248)
 
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
@@ -99,6 +111,10 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+Fixed reference and single-pointer arguments can deduce through a unique most-derived
+base that matches a named class-template parameter.
+[#1144](https://github.com/yrashk/ycxx/issues/1144)
+
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
@@ -112,6 +128,11 @@ template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issue
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
 [#662](https://github.com/yrashk/ycxx/issues/662)
+
+Constant evaluation can dispatch immediate virtual functions on supported completed
+local objects. Base reference calls select the final overrider and keep the statically
+selected default arguments. Qualification calls the named implementation.
+[#1097](https://github.com/yrashk/ycxx/issues/1097)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -185,6 +206,15 @@ loader must be able to find each SONAME when the executable runs. [#390](https:/
 ```sh
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$target_loader" \
   example.cpp "$target_library" -o example
+```
+
+On x86-64 Linux, `-shared` emits a loadable leaf shared library from position-independent C++
+or supported ELF object inputs. Its strong, default-visible function definitions are available
+to `dlopen` callers and to native and system linkers. The SONAME defaults to the output basename.
+Use `-Wl,-soname,NAME` to specify a different one. [#391](https://github.com/yrashk/ycxx/issues/391)
+
+```sh
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -shared -fPIC -nostdlib provider.cpp -o libprovider.so
 ```
 
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
@@ -551,8 +581,11 @@ written default member initializer are value-initialized.
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …), and the 128-bit integer types `__int128` and
-  `unsigned __int128` (with `__SIZEOF_INT128__`) in declarations, templates, symbols and
-  constant evaluation. `__is_destructible`, `__is_nothrow_destructible`, and
+  `unsigned __int128` (with `__SIZEOF_INT128__`), in constant evaluation and in native code on
+  both targets. Their division, remainder and floating conversions call the compiler runtime
+  (`__divti3` and its siblings), which macOS's system library provides and which a Linux link
+  takes from libgcc or compiler-rt.
+  [#1172](https://github.com/yrashk/ycxx/issues/1172) `__is_destructible`, `__is_nothrow_destructible`, and
   `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
   of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
   [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
@@ -568,8 +601,11 @@ written default member initializer are value-initialized.
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
   Non-template code outside requires-expression bodies also checks constraints on directly named
-  primary namespace variable templates with explicit non-dependent type arguments. Templates support
-  `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
+  primary namespace variable templates with explicit non-dependent type arguments. Directly
+  written namespace alias-template IDs check constraints before expansion in non-template code
+  outside requires-expressions when all type arguments are explicit and non-dependent.
+  [#1227](https://github.com/yrashk/ycxx/issues/1227)
+  Templates support `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's. Native function templates can call an unambiguous
   externally linked target supplied as a function pointer argument, including a concrete
   `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
@@ -593,6 +629,8 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
   through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
+- `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
+  and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.
@@ -896,7 +934,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
 - Native code generation for member-pointer values and general member-pointer expressions.
   [#411](https://github.com/yrashk/ycxx/issues/411)
-- Native arithmetic on `__int128` values ([#1172](https://github.com/yrashk/ycxx/issues/1172)),
+- 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),

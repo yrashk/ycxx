@@ -369,6 +369,76 @@ void editor_view() {
   fs::remove_all(dir);
 }
 
+// Virtual sources and headers are distinct path inputs. Earlier disk candidates still matter,
+// and a file under the virtual directory has no fallback to a stale file on disk.
+void generated_view() {
+  const std::string root = "/ycxx-generated-view-test";
+  const std::string generated = root + "/.ycxx/virtual/wire";
+  const std::string source_path = generated + "/wire.cpp";
+  const std::string header_path = generated + "/wire.h";
+  const std::string disk_header = root + "/include/wire.h";
+  const std::string disk_source = "int wire() { return 99; }\n";
+  const std::string main_text = "#include <wire.h>\nint main() { return VALUE; }\n";
+  const auto put_disk = [](engine::Db& db, const std::string& path, std::optional<std::string> text) {
+    db.set<pp::FileContent>(pp::path_id(path), std::move(text));
+  };
+
+  pl::Session s;
+  pp::Config cfg;
+  cfg.view = pp::View::build;
+  cfg.angle_dirs = {root + "/include", generated};
+  cfg.system_from = cfg.angle_dirs.size();
+  const auto main = s.unit({"main.cpp", root, cfg, "main.o"});
+  const auto wire = s.unit({source_path, root, cfg, "wire.o"});
+  const auto request = s.request({.units = {main, wire}, .until = pl::Until::object});
+  const pp::FileId main_file{main.n};
+  s.apply([&](engine::Db& db) {
+    put_disk(db, root + "/main.cpp", main_text);
+    put_disk(db, source_path, disk_source);
+    s.set_generated(source_path, "#include \"wire.h\"\nint wire() { return VALUE; }\n");
+    s.set_generated(header_path, "#define VALUE 3\n");
+  });
+  const pl::Built first = s.get<pl::Build>(request);
+  check(first.units[0].object && first.units[1].object,
+        "native build can read a generated source and header: " + pl::Build::errors(first));
+  if (!first.units[0].object || !first.units[1].object) return;
+  const auto object_bytes = [](const pl::UnitBuilt& unit) {
+    return unit.object ? obj::macho::write_object(*unit.object) : std::vector<std::uint8_t>{};
+  };
+  const auto main_first = object_bytes(first.units[0]);
+  const auto wire_first = object_bytes(first.units[1]);
+  const auto main_pp = s.db().runs<pp::Pp>(main_file);
+
+  s.apply([&](engine::Db&) {
+    s.set_generated(source_path, "#include \"wire.h\"\nint wire() { return VALUE + 2; }\n");
+    check(!s.set_generated(header_path, "#define VALUE 3\n"), "an equal generated header input stays equal");
+  });
+  const pl::Built second = s.get<pl::Build>(request);
+  check(object_bytes(second.units[0]) == main_first && s.db().runs<pp::Pp>(main_file) == main_pp,
+        "editing a generated sibling leaves a consumer of the header green");
+  check(second.units[1].object && object_bytes(second.units[1]) != wire_first,
+        "the generated source itself recompiles");
+
+  s.apply([&](engine::Db& db) { put_disk(db, disk_header, "#define VALUE 4\n"); });
+  const pl::Built shadowed = s.get<pl::Build>(request);
+  check(shadowed.units[0].object && object_bytes(shadowed.units[0]) != main_first &&
+        s.db().runs<pp::Pp>(main_file) > main_pp, "a newly appearing earlier include candidate shadows the generated one");
+  check(object_bytes(shadowed.units[1]) == object_bytes(second.units[1]),
+        "the generated source finds its sibling through quoted include lookup");
+
+  s.apply([&](engine::Db&) { s.set_generated(header_path, "\n#error changed generated header\n"); });
+  const auto diagnostic = s.get<pl::Build>(request);
+  check(std::ranges::any_of(diagnostic.units[1].messages, [&](const pl::Message& message) {
+          return message.where.starts_with(header_path + ":2:") && message.text.contains("changed generated header");
+        }), "generated diagnostics report the location in the virtual file");
+
+  s.apply([&](engine::Db&) { s.set_generated(source_path, std::nullopt); });
+  check(!s.get<pl::Build>(request).units[1].readable, "the build view cannot consume a removed virtual source from disk");
+  s.set_source(tu, source_path, disk_source, "ordinary.o", root);
+  const auto ordinary = s.request({.units = {tu}, .until = pl::Until::object});
+  check(s.get<pl::Build>(ordinary).units[0].object.has_value(), "the normal compiler view still reads disk at the same path");
+}
+
 // A session on a pool (#137): every worker is bound to the session's universe, and the program's
 // bytes equal an inline session's, at 2 and 8 threads and under chaos seeds.
 void pooled() {
@@ -901,6 +971,7 @@ int main() {
   two_units();
   headers();
   editor_view();
+  generated_view();
   pooled();
   pooled_units();
   records();

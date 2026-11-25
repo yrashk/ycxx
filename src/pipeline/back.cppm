@@ -38,6 +38,7 @@ import ycxx.ast;
 import ycxx.engine;
 import ycxx.ir;
 import ycxx.ir.l2;
+import ycxx.ir.legalize;
 import ycxx.ir.lower;
 import ycxx.irgen;
 import ycxx.items;
@@ -453,6 +454,7 @@ struct ClassLayout {
 
 struct ConstLayout {
   std::int64_t bits = 0;
+  std::int64_t high = 0;           // a 128-bit integer's high half
   std::optional<EntityId> base;    // an address constant
   std::optional<ConstId> string;   // the string literal object `base` is the entity of
 };
@@ -465,6 +467,12 @@ struct [[=engine::cheap]] LayoutConstant {
 // A string literal object a function or variable uses, and its entity.
 struct StringUse {
   ConstId object = ConstId::none;
+  EntityId entity = EntityId::none;
+};
+
+// A compiler runtime function (compiler-rt, libgcc) a function's code calls, and its entity.
+struct RuntimeUse {
+  ir::Runtime function{};
   EntityId entity = EntityId::none;
 };
 
@@ -505,19 +513,19 @@ class QueryLayout {
   bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
-    if (!v.base) return v.bits;
+    if (!v.base) return {v.bits, v.high};
     if (v.string && !std::ranges::contains(strings_, *v.string, &StringUse::object)) strings_.push_back({*v.string, *v.base});
     return {*v.base, v.bits};
   }
   // An asm template is literal data, without a native string object's address.
-  bool ordinary_string_is(ConstId c, std::span<const std::uint32_t> units) const {
+  std::optional<ast::BreakpointInstruction> breakpoint_statement_asm(ConstId c) const {
     const ast::Interners& in = *universe().in;
-    if (!in.values.is<ast::VString>(c)) return false;
+    if (!in.values.is<ast::VString>(c)) return std::nullopt;
     const auto text = in.values.get<ast::VString>(c);
     const auto type = in.types.canon(text.type);
     if (!in.types.is<ast::TArray>(type) ||
-        ast::builtin_of(in, in.types.get<ast::TArray>(type).elem) != ast::Builtin::char_) return false;
-    return std::ranges::equal(in.seqs.elements(text.units), units);
+        ast::builtin_of(in, in.types.get<ast::TArray>(type).elem) != ast::Builtin::char_) return std::nullopt;
+    return target_->breakpoint_statement_asm(in.seqs.elements(text.units));
   }
   std::span<const StringUse> strings() const { return strings_; }
 
@@ -667,6 +675,7 @@ struct Lowered {
   std::vector<StringUse> strings;  // in order of first use
   std::optional<BackError> error;
   bool unreachable_immediate = false;
+  std::vector<RuntimeUse> runtime{};  // in order of first use
 };
 struct Lower {
   using Key = FnKey;
@@ -979,8 +988,9 @@ bool QueryLayout::contains_mutable_field(QualType type) const {
 // System V AMD64 psABI §3.2.3. Flat records of integral, object-pointer or object lvalue-reference members.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
+  // Only a 128-bit integer member raises the alignment above 8: an alignment-specifier is refused.
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
-      l.fields.empty() || l.size > 16 || l.align > 8) return 0;
+      l.fields.empty() || l.size > 16 || (l.align > 8 && shape.explicit_alignment)) return 0;
   const ast::Interners& in = *universe().in;
   std::uint64_t end = 0;
   std::uint8_t mask = 0;
@@ -992,7 +1002,7 @@ std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const
              (in.types.is<ast::TLRef>(f.type) && !ast::is_function(in, in.types.get<ast::TLRef>(f.type).referee)))
       field = {target_->pointer_size, target_->pointer_align};
     else return 0;
-    if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
+    if (!field.size || field.size > 16 || field.align > l.align || f.offset % field.align ||
         f.offset < end || f.offset + field.size > l.size) return 0;
     end = f.offset + field.size;
     mask |= std::uint8_t((1u << (f.offset / 8)) | (1u << ((end - 1) / 8)));
@@ -1070,12 +1080,15 @@ ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
   ast::Interners& in = *universe().in;
   if (auto a = universe().consts->address(c)) {
     if (in.values.is<ast::VEntity>(a->object))
-      return {a->offset, in.values.get<ast::VEntity>(a->object).entity, {}};
+      return {a->offset, 0, in.values.get<ast::VEntity>(a->object).entity, {}};
     EntityId e = in.entities.add<EntityId>(ast::mix(ast::seed("ycxx.pipeline.string"), in.values.fp(a->object)));
-    return {a->offset, e, a->object};
+    return {a->offset, 0, e, a->object};
   }
-  if (in.values.is<ast::VInt>(c)) return {std::int64_t(in.values.get<ast::VInt>(c).bits.lo), {}, {}};
-  if (in.values.is<ast::VFloat>(c)) return {std::int64_t(in.values.get<ast::VFloat>(c).bits.lo), {}, {}};
+  if (in.values.is<ast::VInt>(c)) {
+    const ast::Bits128 v = in.values.get<ast::VInt>(c).bits;
+    return {std::int64_t(v.lo), std::int64_t(v.hi), {}, {}};
+  }
+  if (in.values.is<ast::VFloat>(c)) return {std::int64_t(in.values.get<ast::VFloat>(c).bits.lo), 0, {}, {}};
   return {};  // a null pointer, or not a constant `lower` reads: `lower` reports what it cannot use
 }
 
@@ -1373,7 +1386,7 @@ bool linux_ellipsis_scalar(ir::TypeLayout l) {
 
 bool linux_integer_scalar(ir::TypeLayout l) {
   return l.kind == ir::TypeKind::boolean || linux_ellipsis_scalar(l) ||
-         (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
+         (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2 || l.size == 16));
 }
 
 enum class LinuxSignatureUse { definition, direct_call, indirect_call };
@@ -1399,6 +1412,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
                     : "defaulted copy ABI classification is unavailable for a parameter";
+    if (f.variadic && l.kind == ir::TypeKind::integer && l.size == 16)  // #1172
+      return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
         (allow_aggregates && l.sysv_integer_eightbytes)) return {};
     if (fixed_direct && !result && l.sysv_empty_argument) return {};
@@ -1413,8 +1428,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
       return result ? "unsupported fixed-prototype result type" : "unsupported fixed-prototype parameter type";
     if (use == direct_call)
       return result ? "unsupported direct variadic result type" : "unsupported direct variadic parameter type";
-    return result ? "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported"
-                  : "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+    return result ? "only void, bool, integer, pointer and reference results are supported"
+                  : "only bool, integer, pointer and reference parameters are supported";
   };
   if (auto error = error_for(f.ret, true); !error.empty()) return error;
   for (QualType p : in.seqs.elements(f.params))
@@ -1547,8 +1562,26 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     auto error = co_await located_error(cx, k.tu, at, "lower: " + l2.error().message);
     co_return Lowered{std::nullopt, {}, std::move(error)};
   }
-  co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt,
-                    config.unreachable_body.has_value()};
+  // Both targets' general registers hold 64 bits: an `i128` becomes two of them (#1172).
+  std::vector<RuntimeUse> runtime;
+  auto legal = ir::legalize(std::move(*l2), ir::Int128Support{}, [&](ir::Runtime r) {
+    auto used = std::ranges::find(runtime, r, &RuntimeUse::function);
+    if (used != runtime.end()) return used->entity;
+    const EntityId e = universe().in->entities.add<EntityId>(
+        ast::mix(ast::seed("ycxx.pipeline.runtime"), ast::seed(ir::name_of(r))));
+    runtime.push_back({r, e});
+    return e;
+  });
+  if (!legal) {
+    // The L2 node came from an L1 node, whose position it takes.
+    const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
+    std::optional<ast::Loc> at;
+    if (legal.error().at && ir::raw(*legal.error().at) < debug.loc.size()) at = debug.loc[ir::raw(*legal.error().at)];
+    auto error = co_await located_error(cx, k.tu, at, "legalize: " + legal.error().message);
+    co_return Lowered{std::nullopt, {}, std::move(error)};
+  }
+  co_return Lowered{L2Body{std::move(*legal)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt,
+                    config.unreachable_body.has_value(), std::move(runtime)};
 }
 
 // The entities a function's code refers to (address and direct call operands).
@@ -2384,15 +2417,22 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     definitions.push_back(&f);
   }
   std::vector<StringUse> strings;
+  std::vector<RuntimeUse> runtime;
   auto use = [&](std::span<const StringUse> s) {
     for (const StringUse& u : s)
       if (!std::ranges::contains(strings, u.object, &StringUse::object)) strings.push_back(u);
   };
   {
     const auto ls = co_await cx.par_map<Lower>(fns);  // all hits
-    for (const Lowered& l : ls)
-      if (l.body) use(l.strings);
+    for (const Lowered& l : ls) {
+      if (!l.body) continue;
+      use(l.strings);
+      for (const RuntimeUse& r : l.runtime)
+        if (!std::ranges::contains(runtime, r.entity, &RuntimeUse::entity)) runtime.push_back(r);
+    }
   }
+  for (const RuntimeUse& r : runtime)
+    symbols.push_back({r.entity, std::format("{}{}", linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
   use(layout.strings());
 
   // String literal objects, as `lower` and the variables met them ([lex.string]).

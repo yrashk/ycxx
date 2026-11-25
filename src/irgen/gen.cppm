@@ -98,8 +98,8 @@ struct FunctionInput {
     ast::EntityId owner = ast::EntityId::none;
     std::span<const ast::ConstId> values{};
   } initialized_fields{};
-  // Record parameters and direct automatic receivers whose identity is available to a
-  // thunk. Their contents are unknown and their lifetimes began outside the evaluation.
+  // Record parameters, their supported reference referents, and direct automatic receivers
+  // available to a thunk. Their lifetimes began outside the evaluation and their values are unknown.
   // Sorted by local index.
   std::span<const std::uint32_t> opaque_record_locals{};
   // Named record reference parameters in the thunk's enclosing frame, sorted by local index.
@@ -461,14 +461,16 @@ class Gen {
       const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
       if (rec.flags & ast::local_flag::requires_parameter) continue;
       ast::QualType t = rec.type;
+      if (std::ranges::binary_search(fn_.opaque_record_locals, i)) {
+        const bool reference = facts_.is_reference(t);
+        const Place p = begin_object(reference ? facts_.referee(t) : t, ir::Init::indeterminate);
+        ir::Flags flags = ir::bit(ir::Flag::outside_unknown);
+        if (reference) flags |= ir::bit(ir::Flag::unknown_reference);
+        begin_lifetime(p, flags);
+        slots_[i] = p;
+        continue;
+      }
       if (cls(t) == TypeClass::record) {
-        // Record imports keep their enclosing automatic identity and outside lifetime.
-        if (std::ranges::binary_search(fn_.opaque_record_locals, i)) {
-          const Place p = begin_object(t, ir::Init::indeterminate);
-          begin_lifetime(p, ir::bit(ir::Flag::outside_unknown));
-          slots_[i] = p;
-          continue;
-        }
         if (i >= fn_.local_values.size() || !fn_.local_values[i]) continue;
         const auto value = *fn_.local_values[i];
         if (!in_.values.is<ast::VAggregate>(value)) continue;
@@ -2511,12 +2513,31 @@ class Gen {
     }
     return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
   }
+  std::optional<ValueId> immediate_virtual_call(At a) {
+    const auto call = get<ast::ImmediateVirtualCall>(a);
+    std::vector<ValueId> args{rvalue(child(a, call.object))};
+    for (ast::Child arg : ast_.children(call.args)) {
+      At x = child(a, arg);
+      if (argument_object(x)) unsupported(a, "of an immediate virtual function with a by-value class argument");
+      args.push_back(argument(x));
+    }
+    if (args.size() > 32) unsupported(a, "with more than 32 arguments");
+    const auto result = result_type(call.info);
+    const ir::Ty value[] = {vty(result)};
+    const bool has_value = cls(result) != TypeClass::void_;
+    const std::uint64_t imms[] = {word(call.function), call.qualified};
+    const auto n = stateful(ir::Op::call_immediate_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
+    return has_value ? std::optional(b_.result(n, 1)) : std::nullopt;
+  }
+
   bool member_call_expression(At a) {
-    return is<ast::MemberCall>(a) || is<ast::VirtualMemberCall>(a) || is<ast::AssignmentCall>(a);
+    return is<ast::MemberCall>(a) || is<ast::VirtualMemberCall>(a) || is<ast::ImmediateVirtualCall>(a) ||
+           is<ast::AssignmentCall>(a);
   }
   // A non-static member function's call: the object's address is the first ABI argument.
   std::optional<ValueId> member_call(At a, std::optional<ValueId> into = std::nullopt) {
     if (is<ast::VirtualMemberCall>(a)) return virtual_member_call(a);
+    if (is<ast::ImmediateVirtualCall>(a)) return immediate_virtual_call(a);
     if (is<ast::AssignmentCall>(a)) {
       auto c = get<ast::AssignmentCall>(a);
       if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");

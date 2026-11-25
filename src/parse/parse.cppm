@@ -1314,6 +1314,12 @@ public:
     return interp::GlobalVar{type, c, c.has_value()};
   }
   bool is_constexpr(EntityId f, u32 item) {
+    if (auto constructor = dynamic_synthesized_.find(f); constructor != dynamic_synthesized_.end()) {
+      const auto& synthesized = synth_[constructor->second];
+      const EntityId owner = w_->entities.rec(f).scope;
+      return synthesized.item < item && synthesized.kind == SpecialMember::default_constructor &&
+             classes_.constexpr_dynamic_default(owner) && classes_.rec(owner).implicit_default_ctor == f;
+    }
     if (auto copy = copy_assignments_.find(f); copy != copy_assignments_.end())
       return copy->second.definition.item <= item;
     // A specialization is as its template is declared, unless explicitly specialized ([temp.expl.spec]/14).
@@ -2747,6 +2753,7 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   q.type_trait_demand = q.at_point;
   const auto before = caller.diag_count();
   sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
+  s.replaying_type_default = caller.replaying_type_default;
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
@@ -3428,8 +3435,7 @@ private:
         return;
       }
     }
-    // A template-head ([temp.pre]): what follows declares a function or variable template, or
-    // declares a class template. Alias templates and nested heads are not supported yet.
+    // A template-head ([temp.pre]): what follows declares a template or a concept.
     else if (ps_.is(Tk::kw_template)) {
       if (ps_.kind(1) != Tk::less) {
         s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
@@ -3475,12 +3481,16 @@ private:
         const auto begin = ps_.pos();
         const auto calls = ps_.deferred_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
+        const auto ranks = ps_.deferred_rank_checks();
         auto t = ps_.type_id();
         if (!t || !alias_template(name, name_at, *t)) return bad();
         if (ps_.deferred_immediate_calls() != calls) {
           const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained
                                                                      : sema::AliasCallPattern::may_erase;
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), kind});
+        } else if (ps_.deferred_rank_checks() != ranks) {
+          p_->alias_call_patterns_.emplace(decls_.back().entity,
+              Program::AliasCallPattern{k_, begin, ps_.pos(), sema::AliasCallPattern::rank_checks});
         }
         if (!ps_.expect(Tk::semi)) bad();
         return;
@@ -3617,6 +3627,8 @@ private:
         bool dtor = ps_.kind(next) == Tk::tilde && ps_.kind(next + 1) == Tk::identifier &&
                     ps_.name_of(ps_.tok(next + 1)) == cname;
         if (ctor || dtor) {
+          sc = ps_.committed_nested_name(ctor_at, next);
+          if (!sc) return bad();
           auto flags = constructor_flags(ctor_at, dtor);
           if (!flags) return bad();
           return out_of_class_special(*sc->type, next - ctor_at, *flags);
@@ -4263,6 +4275,7 @@ private:
     sem.linkage = ast::Linkage::none;
     sem.flags = sema::decl_flag::template_;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    sem.constraints = associated_constraints();
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
@@ -4816,9 +4829,10 @@ private:
     const u32 at = ps_.pos();
     u32 next = 0;
     const auto diags = s_.diag_count();
-    auto scope = ps_.nested_name(0, next);
+    bool alias_failed = false;
+    auto scope = ps_.committed_nested_name(0, next, &alias_failed);
     if (!scope) {
-      if (!s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
+      if (!alias_failed && !s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
       return EntityId::none;
     }
     if (ps_.kind(next) != Tk::identifier || ps_.kind(next + 1) == Tk::coloncolon || !scope->type ||
@@ -12787,6 +12801,34 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
+  if (auto constructor = dynamic_synthesized_.find(f); constructor != dynamic_synthesized_.end()) {
+    if (!c.is_constexpr) return c;
+    const std::size_t index = constructor->second;
+    const auto& s = synth_[index];
+    const u32 key = std::to_underlying(f);
+    if (!instance_irs_.contains(key)) {
+      const auto& body = synthesized_body(index);
+      std::optional<irgen::FunctionIr> ir;
+      if (body.tree != NodeId::none) {
+        irgen::FunctionInput input{f, s.decl, body, id(s.item), 0};
+        input.this_type = this_type(s.decl);
+        // L1 constant evaluation runs the checked initialization of the subobjects.
+        // Native IR generation separately supplies the constructor's ABI table.
+        AtItem q(*this, s.item, true);
+        q.own_class_complete = true;
+        sema::EvalFacts facts(*w_, q);
+        if (auto r = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*r);
+      }
+      instance_irs_.emplace(key, std::move(ir));
+    }
+    const auto& ir = instance_irs_.at(key);
+    if (!ir) c.unsupported = true;
+    else {
+      c.body = &ir->body;
+      c.default_constructs = w_->entities.rec(f).scope;
+    }
+    return c;
+  }
   if (auto copy = copy_assignments_.find(f); copy != copy_assignments_.end()) {
     if (!c.is_constexpr || !copy->second.body) return c;
     const u32 key = std::to_underlying(f);

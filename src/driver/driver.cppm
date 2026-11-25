@@ -11,12 +11,13 @@ import ycxx.driver.archive;
 
 namespace ycxx::driver {
 
-enum class front { daemon, cxx, lsp, ctl, archive };
+enum class front { daemon, cxx, build, lsp, ctl, archive };
 
 int run_front(front f, std::span<const std::string_view> args) {
   switch (f) {
     case front::daemon: return daemon::run(args);
     case front::cxx: return client::cxx(args);
+    case front::build: return client::build(args);
     case front::lsp: return client::lsp(args);
     case front::ctl: return client::control(args);
     case front::archive: return run_archive(args);

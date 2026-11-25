@@ -138,6 +138,7 @@ public:
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
   u32 deferred_argument_checks() const { return deferred_argument_checks_; }
   u32 deferred_immediate_calls() const { return deferred_immediate_calls_; }
+  u32 deferred_rank_checks() const { return deferred_rank_checks_; }
   void bump() {
     half_ = false;
     if (i_ < end_) ++i_;
@@ -525,25 +526,67 @@ public:
     return s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
   }
 
-  // The offset of the token after the template argument list whose `<` is at `j` ahead: angle
-  // brackets balanced outside parentheses and brackets, `>>` closing two ([temp.names]/4).
-  u32 past_template_args(u32 j) {
+  // In an argument, a nested `<` can be an operator. Type-template names reached through
+  // namespace lookup give a definite opener without expanding an alias or looking up a member.
+  bool type_template_before(u32 less, u32 list) {
+    const u32 name = less - 1;
+    if (kind(name) != Tk::identifier) return false;
+    u32 start = name;
+    if (kind(start - 1) == Tk::kw_template) --start;
+    while (start > list + 1 && kind(start - 1) == Tk::coloncolon && kind(start - 2) == Tk::identifier)
+      start -= 2;
+    std::optional<sema::Sema::Scope> ns;
+    if (start > list + 1 && kind(start - 1) == Tk::coloncolon) {
+      switch (kind(start - 2)) {
+      case Tk::greater: case Tk::greatergreater: case Tk::r_paren: case Tk::r_square:
+        return false;  // a qualifier whose type or arguments would need semantic analysis
+      default:
+        ns = sema::Sema::global_scope();
+      }
+    }
+    if (start == name && !ns)
+      return s_->current_class == ast::EntityId::none && s_->names_type_template(name_of(tok(name)));
+    while (start < name && kind(start + 1) == Tk::coloncolon) {
+      const NameId component = name_of(tok(start));
+      ns = ns ? s_->scope_member(*ns, component) : s_->scope_named(component);
+      if (!ns || !ns->ns) return false;
+      start += 2;
+    }
+    return ns && ns->ns && s_->namespace_type_template(*ns->ns, name_of(tok(name)));
+  }
+
+  struct TemplateArgumentEnd {
+    u32 next;
+    bool closed;
+    bool half;
+  };
+
+  // Balance angles outside delimiters. For syntactic classification, verify nested
+  // openers before relying on the extent ([temp.names]/4).
+  TemplateArgumentEnd template_argument_end(u32 j, bool verify_openers = false) {
+    const u32 list = j;
     int angles = 0, parens = 0;
     for (; i_ + j < end_; ++j) {
       Tk k = kind(j);
       if (k == Tk::l_paren || k == Tk::l_square || k == Tk::l_brace) ++parens;
       else if ((k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace) && parens > 0) --parens;
-      else if (parens == 0 && k == Tk::less) ++angles;
-      else if (parens == 0 && k == Tk::greater && --angles == 0) return j + 1;
+      else if (parens == 0 && k == Tk::less) {
+        if (verify_openers && j != list && !type_template_before(j, list)) {
+          if (lex::is_literal(kind(j - 1))) continue;
+          break;
+        }
+        ++angles;
+      } else if (parens == 0 && k == Tk::greater && --angles == 0) return {j + 1, true, false};
       else if (parens == 0 && k == Tk::greatergreater) {
         // `>>` closes this list in its first half when only this list is open ([temp.names]/4).
-        if (angles == 1) return j;
-        if ((angles -= 2) == 0) return j + 1;
+        if (angles == 1) return {j, true, true};
+        if ((angles -= 2) == 0) return {j + 1, true, false};
       }
-      else if (parens == 0 && (k == Tk::semi || k == Tk::l_brace)) return j;
+      else if (parens == 0 && (k == Tk::semi || k == Tk::l_brace)) break;
     }
-    return j;
+    return {j, false, false};
   }
+  u32 past_template_args(u32 j) { return template_argument_end(j).next; }
 
   // `X<args>` where X is a class template ([temp.names]): the specialization's type, from the
   // name; the arguments are consumed.
@@ -553,22 +596,50 @@ public:
     const ast::TemplateParamSema* tt = s_->template_template_param(name);
     auto tmpl = tt ? std::nullopt : s_->type_template(name);
     bump();
+    const u32 ranks = deferred_rank_checks_;
     auto args = template_argument_list();
     if (!args) return std::nullopt;
     if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
     if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
-    return type_template_id(*tmpl, *args, at);
+    s_->unqualified_type_template_access(*tmpl, name, at);
+    return type_template_id(*tmpl, *args, at, deferred_rank_checks_ != ranks);
   }
 
-  std::optional<QualType> type_template_id(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args, u32 at) {
+  std::optional<QualType> type_template_id(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args, u32 at,
+                                          bool written_rank_check) {
     // An alias can erase a dependent argument from the resulting type, but the written argument
     // still has to be valid when substituted ([temp.alias]).
-    if (tmpl.kind == ast::DeclKind::type_alias && std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); })) {
-      ++deferred_argument_checks_;
-      if (s_->questions().alias_call_pattern(tmpl.entity) != sema::AliasCallPattern::none)
-        ++deferred_immediate_calls_;
+    bool defer_rank_alias = false;
+    if (std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); })) {
+      bool rank_check = false;
+      if (args.size() < s_->ins().seqs.size(tmpl.template_params)) {
+        // An enclosing alias can erase a class specialization along with its omitted default.
+        const auto params = s_->ins().seqs.elements(tmpl.template_params);
+        rank_check = std::ranges::any_of(std::span(params).subspan(args.size()), [&](const ast::TemplateParamSema& p) {
+          return p.rank_type_default ||
+                 (p.has_default && s_->ins().values.is<ast::VDepOp>(p.default_.value) &&
+                  s_->ins().values.get<ast::VDepOp>(p.default_.value).op == ast::DepOp::array_rank);
+        });
+      }
+      if (tmpl.kind == ast::DeclKind::type_alias) {
+        ++deferred_argument_checks_;
+        const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
+        if (pattern != sema::AliasCallPattern::none && pattern != sema::AliasCallPattern::rank_checks)
+          ++deferred_immediate_calls_;
+        rank_check = rank_check || pattern == sema::AliasCallPattern::rank_checks;
+        defer_rank_alias = type_alias_checks_ && (rank_check || written_rank_check);
+      }
+      if (rank_check) ++deferred_rank_checks_;
     }
-    return s_->class_template_id(tmpl, args, at);
+    // A resolved template-id used as a qualifier or type argument needs satisfaction even
+    // while the surrounding grammar is deciding how to use it.
+    bool constraint_failed = false;
+    auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
+                                      alias_constraints_enabled_ ? &constraint_failed : nullptr);
+    if (type && defer_rank_alias && !in_template_id_lookahead_)
+      type_alias_checks_->emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
+    alias_constraint_failures_ += constraint_failed;
+    return type;
   }
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
@@ -736,9 +807,10 @@ public:
         // until the template is instantiated.
         u32 at = pos();
         bump();
+        const auto alias_failures = alias_constraint_failures_;
         auto q = qualified_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
-          s_->diag(at, Diag::expected_type_specifier);
+          if (alias_constraint_failures_ == alias_failures) s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
           goto done;
         }
@@ -847,6 +919,7 @@ public:
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             const auto diags = s_->diag_count();
+            const auto alias_failures = alias_constraint_failures_;
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
                       function_pointer_declarator_ahead(q->second) ||
@@ -855,7 +928,7 @@ public:
               take_qualified(q->second);
               continue;
             }
-            if (s_->has_error_since(diags)) d.ok = false;
+            if (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures) d.ok = false;
             goto done;
           }
           if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
@@ -1455,9 +1528,11 @@ public:
       // that scope.
       u32 next = 0;
       l.qualifier_at = pos();
-      auto sc = nested_name(0, next);
+      bool alias_failed = false;
+      auto sc = committed_nested_name(0, next, &alias_failed);
       if (!sc) {
-        s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+        if (!alias_failed)
+          s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
         ok = false;
         return l;
       }
@@ -1633,8 +1708,10 @@ public:
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
                                                bool* failed_qualifier = nullptr,
                                                std::optional<u32>* committed_failure = nullptr,
-                                               std::optional<u32>* ambiguous_namespace = nullptr) {
+                                               std::optional<u32>* ambiguous_namespace = nullptr,
+                                               bool committed_type = false) {
     u32 j = start;
+    const auto alias_failures = alias_constraint_failures_;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
       u32 saved = i_;
@@ -1659,7 +1736,8 @@ public:
       if (!s) return std::nullopt;
       j += 2;
     } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
-                                          failed_qualifier, committed_failure)) {
+                                          failed_qualifier, committed_failure, /*conversion=*/false,
+                                          committed_type || member_pointer)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1692,9 +1770,11 @@ public:
         s = m;
         j += 2;
       } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access,
-                                            failed_qualifier, committed_failure)) {
+                                            failed_qualifier, committed_failure, /*conversion=*/false,
+                                            committed_type || member_pointer)) {
         s = t;
       } else {
+        if (alias_constraint_failures_ != alias_failures) return std::nullopt;
         break;
       }
     }
@@ -1711,6 +1791,14 @@ public:
     next = j;
     return s;
   }
+  // A selected nested name checks namespace alias constraints. Its caller still handles access.
+  std::optional<sema::Sema::Scope> committed_nested_name(u32 start, u32& next, bool* alias_failed = nullptr) {
+    const auto before = alias_constraint_failures_;
+    auto scope = nested_name(start, next, /*member_pointer=*/false, /*checked=*/false, QualifierLookup::ordinary,
+                             /*check_injected_access=*/false, nullptr, nullptr, nullptr, nullptr, /*committed_type=*/true);
+    if (alias_failed) *alias_failed = alias_constraint_failures_ != before;
+    return scope;
+  }
   // A component `X<args>::` at `j` ahead naming a class template specialization, found by
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
   // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
@@ -1719,7 +1807,8 @@ public:
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
                                                      bool checked = false, bool* failed_qualifier = nullptr,
                                                      std::optional<u32>* committed_failure = nullptr,
-                                                     bool conversion = false) {
+                                                     bool conversion = false, bool committed_type = false,
+                                                     bool classify_only = false) {
     // `Q::template M<args>` ([temp.names]/4): the keyword says M names a template.
     const bool keyword = in && kind(j) == Tk::kw_template;
     const u32 k = keyword ? j + 1 : j;
@@ -1739,36 +1828,70 @@ public:
     }
     bool builtin = !in && !tt && !tmpl && s_->builtin_template(n);  // `__make_integer_seq<…>::`
     if (!tmpl && !tt && !builtin && !dependent_member) return std::nullopt;
+    const bool namespace_template = tmpl && (!in || in->ns) && s_->namespace_scoped(tmpl->entity);
+    const bool ordinary = alias_constraints_enabled_ && !s_->templated();
+    TemplateArgumentEnd extent{};
+    if (ordinary && namespace_template && (scope || classify_only)) {
+      extent = template_argument_end(k + 1, /*verify_openers=*/true);
+      if (extent.closed && (extent.half || kind(extent.next) != Tk::coloncolon)) {
+        if (scope) return std::nullopt;
+        qualified_half_ = extent.half;
+        j = extent.next;
+        // Classification consumes only the extent. The selected reading will form the type.
+        return sema::Sema::Scope{std::nullopt, s_->builtin(Builtin::dependent)};
+      }
+    }
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
+    const auto alias_failures = alias_constraint_failures_;
     const u32 name_at = pos() + k;
+    const bool selected = !in_template_id_lookahead_ && (checked || committed_failure || committed_type);
+    const bool known_qualifier = scope && extent.closed && !extent.half && kind(extent.next) == Tk::coloncolon;
     i_ += k + 1;
     bool took_closer = false;
-    auto args = template_argument_list(nullptr, &took_closer);
+    const u32 ranks = deferred_rank_checks_;
+    auto args = [&] {
+      const TemplateIdLookahead lookahead{*this, !selected};
+      return template_argument_list(nullptr, &took_closer);
+    }();
     u32 after = i_ - saved;
     bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
     bool ended_half = half_;  // the list ended in the first half of a `>>`
+    const bool constrained_alias = tmpl && tmpl->kind == ast::DeclKind::type_alias && tmpl->constraints != sema::ConstId::none;
     std::optional<QualType> t;
-    if (args && closed)
-      t = tt ? s_->template_param_id(*tt, *args, 0)
-          : builtin ? s_->builtin_template_id(n, *args, 0)
-          : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
-                             : type_template_id(*tmpl, *args, name_at);
+    if (args && closed) {
+      // A terminal namespace alias already names a type in lookahead. Its expansion may
+      // instantiate another template, so leave substitution to the committed parse.
+      if (classify_only && in && in->ns && constrained_alias && (half_ || kind() != Tk::coloncolon))
+        t = s_->builtin(Builtin::dependent);
+      else
+        t = tt ? s_->template_param_id(*tt, *args, 0)
+            : builtin ? s_->builtin_template_id(n, *args, 0)
+            : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
+                               : type_template_id(*tmpl, *args, name_at, deferred_rank_checks_ != ranks);
+    }
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
-    const bool probe_failure = args && failed_qualifier;
+    const bool alias_failed = alias_constraint_failures_ != alias_failures;
+    if (alias_failed && failed_qualifier) *failed_qualifier = true;
+    if (alias_failed && selected && committed_failure && scope && (known_qualifier || closed))
+      *committed_failure = (known_qualifier ? extent.next : after) + 1;
+    const bool probe_failure = args && failed_qualifier && (scope || constrained_alias);
     const bool commit_argument_failure = scope && !args && committed_failure;
     if (!t && closed && (probe_failure || commit_argument_failure)) {
       const bool unsatisfied = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
         return sema::sema_diag_of(d.id) == Diag::constraints_not_satisfied;
       });
-      if (probe_failure) *failed_qualifier = unsatisfied;
+      if (probe_failure) *failed_qualifier |= unsatisfied || constrained_alias;
       if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
-    if (t && checked && in && in->type && tmpl) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
-    if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
+    if (t && checked && tmpl) {
+      if (!in) s_->unqualified_type_template_access(*tmpl, n, name_at);
+      else if (in->type) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
+    }
+    if (!checked && !(selected && alias_failed) && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
     return sema::Sema::Scope{std::nullopt, *t};
@@ -1791,9 +1914,12 @@ public:
                                                        bool* terminal_template_id = nullptr,
                                                        bool template_argument = false,
                                                        bool conversion = false) {
+    const bool classify_only = !checked && alias_constraints_enabled_ && !s_->templated();
+    const TemplateIdLookahead lookahead{*this, in_template_id_lookahead_ || !checked};
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
+    const auto alias_failures = alias_constraint_failures_;
     std::optional<u32> ambiguous_namespace;
     auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, QualifierLookup::type, checked,
                          nullptr, failed_qualifier, nullptr, conversion ? &ambiguous_namespace : nullptr);
@@ -1801,14 +1927,15 @@ public:
       s_->diag(pos() + *ambiguous_namespace, Diag::ambiguous_name, name_of(tok(*ambiguous_namespace)));
       return std::nullopt;
     }
-    if (checked && s_->has_error_since(diags)) return std::nullopt;
+    if (checked && (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures)) return std::nullopt;
     if (!s) return std::nullopt;
     // `C::M<args>`, `C::template M<args>`, `Q::template M<args>`: a member alias template's
     // specialization ([temp.mem], [temp.names]/4).
     if ((s->type || kind(next) == Tk::kw_template) && (kind(next) == Tk::identifier || kind(next) == Tk::kw_template)) {
       u32 j = next;
       qualified_half_ = false;
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) {
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr,
+                                     /*conversion=*/false, /*committed_type=*/false, classify_only)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
@@ -1824,11 +1951,12 @@ public:
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr, conversion)) {
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, failed_qualifier, nullptr, conversion,
+                                     /*committed_type=*/false, classify_only)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
-      if (checked && s_->has_error_since(diags)) return std::nullopt;
+      if (checked && (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures)) return std::nullopt;
     }
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
@@ -2445,6 +2573,16 @@ public:
     return expect(Tk::greater) && ok;
   }
 
+  bool template_type_default(ast::TemplateParamSema& p) {
+    const u32 ranks = deferred_rank_checks_;
+    auto type = type_id(/*placeholder_ok=*/false, /*retain_alias_checks=*/true);
+    if (!type) return false;
+    p.has_default = 1;
+    p.rank_type_default = deferred_rank_checks_ != ranks;
+    p.default_ = s_->templates().type_arg(*type);
+    return true;
+  }
+
   std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok) {
     ast::TemplateParamSema p{};
     p.depth = depth;
@@ -2483,14 +2621,9 @@ public:
       }
       cargs.insert(cargs.begin(), s_->templates().type_arg(p.type));
       if (auto nf = s_->concept_constraint(*c, cargs, at)) s_->head_constraints.push_back(*nf);
-      if (accept(Tk::equal)) {
-        auto t = type_id();
-        if (!t) {
-          ok = false;
-          return std::nullopt;
-        }
-        p.has_default = 1;
-        p.default_ = {ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none};
+      if (accept(Tk::equal) && !template_type_default(p)) {
+        ok = false;
+        return std::nullopt;
       }
       return p;
     }
@@ -2513,14 +2646,9 @@ public:
       }
       p.kind = ast::TemplateArgKind::type;
       p.type = s_->types().template_param(depth, index);
-      if (accept(Tk::equal)) {
-        auto t = type_id();
-        if (!t) {
-          ok = false;
-          return std::nullopt;
-        }
-        p.has_default = 1;
-        p.default_ = {ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none};
+      if (accept(Tk::equal) && !template_type_default(p)) {
+        ok = false;
+        return std::nullopt;
       }
       return p;
     }
@@ -2614,20 +2742,21 @@ public:
     }
     return p;
   }
-  // Whether a template argument here is a template-name alone ([temp.arg.template]/1): one naming
-  // a class or alias template, or a template template parameter, followed by the argument's end.
-  bool template_name_ahead() {
+  // The last token of a template-name alone ([temp.arg.template]/1): a class or alias template
+  // or a template template parameter, followed by the argument's end.
+  std::optional<u32> template_name_end_ahead() {
     u32 at = 0;
     std::optional<ast::TemplateArg> a = template_name_at(at);
     Tk k = kind(at + 1);
-    return a && (k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis);
+    if (a && (k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis)) return at;
+    return std::nullopt;
   }
   // A template-name here, `X`, `N::X`, a class's member template `C::X` or `Q::template X`
   // ([temp.arg.template]/1, [temp.names]/4), as a template argument; `at` is its last token.
   std::optional<ast::TemplateArg> template_name_at(u32& at, bool checked = false) {
     at = 0;
     if (qualified_ahead()) {
-      auto sc = nested_name(0, at);
+      auto sc = checked ? committed_nested_name(0, at) : nested_name(0, at);
       if (!sc) return std::nullopt;
       const bool keyword = kind(at) == Tk::kw_template;
       if (keyword) ++at;
@@ -2638,7 +2767,8 @@ public:
       if (a && checked && a->templ != ast::EntityId::none) s_->member_template_access(*sc->type, a->templ, n, pos() + at);
       return a;
     }
-    if (is(Tk::identifier)) return s_->template_name_arg(std::nullopt, name_of(tok()));
+    if (is(Tk::identifier))
+      return s_->template_name_arg(std::nullopt, name_of(tok()), checked ? std::optional{pos()} : std::nullopt);
     return std::nullopt;
   }
   // A template argument that is a template-name (`template_name_at`): none, with nothing read,
@@ -2672,8 +2802,9 @@ public:
   // A type-id ([dcl.name]): a type-specifier-seq and an optional abstract declarator.
   // A placeholder is allowed only where `placeholder_ok` says (a trailing return type,
   // [dcl.spec.auto.general]/3): not in a template argument, a cast or an alias ([dcl.spec.auto.general]/6).
-  std::optional<QualType> type_id(bool placeholder_ok = false) {
+  std::optional<QualType> type_id(bool placeholder_ok = false, bool retain_alias_checks = false) {
     const VariableTemplateInitializerScope initializer(*this, false);
+    const TypeAliasCheckScope aliases{*this, retain_alias_checks};
     DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
     if (!spec.ok) return std::nullopt;
     Declarator d = declarator(spec.type, true);
@@ -2686,6 +2817,11 @@ public:
       s_->diag(spec.begin, Diag::auto_not_allowed);
       return std::nullopt;
     }
+    // Keep alias checks on the finished type so a nondependent alias still participates in
+    // parsing and lookup through the type it denotes. A nested type-id inside a pack expansion
+    // retains its own checks in the expansion pattern.
+    for (const auto& [entity, args] : aliases.checks | std::views::reverse)
+      d.type = s_->types().deferred_alias(entity, args, d.type);
     return d.type;
   }
 
@@ -2736,7 +2872,7 @@ public:
     while (auto p = s_->as<ast::Paren>(operand)) operand.id = p->operand.id;
     if (auto lit = s_->as<ast::Literal>(operand); lit && s_->ins().values.is_dependent(lit->value)) {
       if (s_->ins().values.is<ast::VDepOp>(lit->value) && !s_->types().is(t, Builtin::bool_) &&
-          s_->ins().values.get<ast::VDepOp>(lit->value).op != ast::DepOp::alignof_type) {
+          !ast::returns_size_type(s_->ins().values.get<ast::VDepOp>(lit->value).op)) {
         s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
         return std::nullopt;
       }
@@ -2758,11 +2894,10 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
-      // A class template's base-specifier is parsed again with the arguments bound when a
-      // specialization is instantiated (`Program::instantiate_base`), so its pattern needs no
-      // representation of the value: it stands as an unevaluated placeholder (#308). A pack
-      // expansion's pattern must keep the packs it names, so it is not one.
-      if (class_template_base && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+      // Class bases and type requirements replay with their arguments bound. A dependent
+      // value whose expression has no representation can wait until replay, provided it
+      // contains no pack that an expansion needs to retain.
+      if ((class_template_base || in_type_requirement_) && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       }
@@ -2832,10 +2967,15 @@ public:
         // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
         const bool decay_copy = is(Tk::kw_auto) &&
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
-        if (template_name_ahead()) {
-          args.push_back(*template_name_argument());
+        if (auto end = template_name_end_ahead()) {
+          if (auto a = template_name_argument()) args.push_back(*a);
+          else {
+            for (u32 j = 0; j <= *end; ++j) bump();
+            ok = false;
+          }
         } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
-          auto t = type_id();
+          auto t = type_id(/*placeholder_ok=*/false,
+                           /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
@@ -3171,6 +3311,8 @@ public:
   // an invalid requirement makes it false; elsewhere it is ill-formed (/5).
   Ex requires_expression() {
     DisableDependentDecayCopy disable{dependent_decay_copy_body};
+    const DisableAliasConstraints disable_aliases{alias_constraints_enabled_};
+    const TemplateIdLookahead lookahead{*this, true};
     u32 begin = pos();
     bump();
     s_->push_scope();
@@ -3215,6 +3357,12 @@ public:
       u32 before = i_;
       bool failed = false;
       if (is(Tk::kw_typename)) {  // a type-requirement
+        const TypeRequirementScope requirement{*this};
+        // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
+        if (kind(1) == Tk::identifier && !qualified_ahead(1)) {
+          const u32 end = kind(2) == Tk::less ? past_template_args(2) : 2;
+          if (kind(end) == Tk::semi) bump();
+        }
         auto t = type_id();
         if (t && s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
@@ -3947,7 +4095,7 @@ public:
           return {NodeId::none, e.begin, pos()};
         }
         std::optional<NameId> member_class;
-        // This stage recognizes only a direct qualified invocation on the native consumer path.
+        // Recognize a direct invocation with one class qualifier ([expr.ref]).
         if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren) {
           member_class = name_of(tok());
           bump();
@@ -4128,12 +4276,14 @@ public:
     case Tk::kw_typename: {
       bump();
       const auto diags = s_->diag_count();
+      const auto alias_failures = alias_constraint_failures_;
       auto type = qualified_ahead()
           ? qualified_type(0, /*checked=*/true, /*type_only=*/false, nullptr, nullptr,
                            /*template_argument=*/false, /*conversion=*/true)
           : std::nullopt;
       if (!type) {
-        if (!s_->has_error_since(diags)) s_->diag(begin, Diag::expected_type_specifier);
+        if (!s_->has_error_since(diags) && alias_constraint_failures_ == alias_failures)
+          s_->diag(begin, Diag::expected_type_specifier);
         return {NodeId::none, begin, pos()};
       }
       take_qualified(type->second);
@@ -4210,8 +4360,10 @@ public:
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
           Ex result = s_->trait_expr(tr->trait, n, args, begin, pos());
-          if (tr->replay_dependent && s_->dependent(result))
+          if (tr->replay_dependent && s_->dependent(result)) {
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
+            if (tr->trait == lex::TypeTrait::array_rank) ++deferred_rank_checks_;
+          }
           return result;
         }
       if (qualified_ahead()) return qualified_id(begin);
@@ -4584,9 +4736,10 @@ public:
       // target type of a functional conversion.
       const auto diags = s_->diag_count();
       if (auto tmpl = s_->namespace_expression_type_template(*s->ns, n, name_at)) {
+        const u32 ranks = deferred_rank_checks_;
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        auto type = type_template_id(*tmpl, *args, name_at);
+        auto type = type_template_id(*tmpl, *args, name_at, deferred_rank_checks_ != ranks);
         if (!type) return {NodeId::none, begin, pos()};
         return type_conversion(*type, begin);
       }
@@ -4598,9 +4751,10 @@ public:
       bool dependent = false;
       if (auto tmpl = s_->member_template_scope(*s, n, keyword, dependent)) {
         s_->member_template_access(*s->type, tmpl->entity, n, name_at);
+        const u32 ranks = deferred_rank_checks_;
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        auto type = type_template_id(*tmpl, *args, name_at);
+        auto type = type_template_id(*tmpl, *args, name_at, deferred_rank_checks_ != ranks);
         if (!type) return {NodeId::none, begin, pos()};
         return type_conversion(*type, begin);
       }
@@ -6592,10 +6746,17 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   bool in_template_value_argument_ = false;
+  bool in_type_requirement_ = false;
   bool variable_template_initializer_ = false;
+  bool in_template_id_lookahead_ = false;
+  bool alias_constraints_enabled_ = true;
+  u32 alias_constraint_failures_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
+  u32 deferred_rank_checks_ = 0;
+  using TypeAliasChecks = std::vector<std::pair<ast::EntityId, std::vector<ast::TemplateArg>>>;
+  TypeAliasChecks* type_alias_checks_ = nullptr;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   struct VariableTemplateInitializerScope {
@@ -6611,6 +6772,32 @@ public:
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
+  struct TypeRequirementScope {
+    Parser& parser;
+    bool saved = std::exchange(parser.in_type_requirement_, true);
+    ~TypeRequirementScope() { parser.in_type_requirement_ = saved; }
+  };
+  struct TypeAliasCheckScope {
+    Parser& parser;
+    TypeAliasChecks checks;
+    TypeAliasChecks* saved = parser.type_alias_checks_;
+    TypeAliasCheckScope(Parser& parser, bool collect_here) : parser(parser) {
+      if (collect_here) parser.type_alias_checks_ = &checks;
+    }
+    ~TypeAliasCheckScope() { parser.type_alias_checks_ = saved; }
+  };
+  struct TemplateIdLookahead {
+    Parser& parser;
+    bool saved;
+    TemplateIdLookahead(Parser& parser, bool lookahead)
+        : parser(parser), saved(std::exchange(parser.in_template_id_lookahead_, lookahead)) {}
+    ~TemplateIdLookahead() { parser.in_template_id_lookahead_ = saved; }
+  };
+  struct DisableAliasConstraints {
+    bool& enabled;
+    bool saved = std::exchange(enabled, false);
+    ~DisableAliasConstraints() { enabled = saved; }
+  };
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).
   struct Unangle {
     int& angle;

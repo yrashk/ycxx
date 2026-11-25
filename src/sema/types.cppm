@@ -51,7 +51,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 enum class TypeKind : u8 {
   builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
-  placeholder, dep_spec, builtin_spec, member_pointer, pack_index, other
+  placeholder, dep_spec, builtin_spec, member_pointer, pack_index, deferred_alias, other
 };
 
 // The canonical form of a type, read out by value.
@@ -168,6 +168,9 @@ public:
   QualType builtin_spec(ast::BuiltinTemplate which, std::span<const ast::TemplateArg> args) {
     return ins_->intern_type(ast::TBuiltinSpec{u8(which), ins_->intern_seq(args)});
   }
+  QualType deferred_alias(EntityId alias, std::span<const ast::TemplateArg> args, QualType result) {
+    return ins_->intern_type(ast::TDeferredAlias{alias, ins_->intern_seq(args), canonical(result)});
+  }
   // A floating-point type ([basic.fundamental]); `float`, `double` and `long double` have values.
   bool is_floating(QualType q) const {
     auto b = builtin_of(q);
@@ -248,6 +251,12 @@ public:
       r.kind = TypeKind::builtin_spec;
       r.trait = t.get<ast::TBuiltinSpec>(c).which;
       r.args = t.get<ast::TBuiltinSpec>(c).args;
+    } else if (t.is<ast::TDeferredAlias>(c)) {
+      auto a = t.get<ast::TDeferredAlias>(c);
+      r.kind = TypeKind::deferred_alias;
+      r.entity = a.alias;
+      r.args = a.args;
+      r.inner = a.result;
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
@@ -279,6 +288,7 @@ public:
     case TypeKind::pack_index:
     case TypeKind::transform:
     case TypeKind::dep_spec:
+    case TypeKind::deferred_alias:
     case TypeKind::builtin_spec: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
@@ -435,6 +445,8 @@ private:
              (inner.empty() ? "" : " " + inner);
     case TypeKind::placeholder:
       return cvs + (r.decltype_auto ? "decltype(auto)" : "auto") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    case TypeKind::deferred_alias:
+      return cvs + (class_name ? class_name(r.entity) : "<alias>") + "<…>" + (inner.empty() ? "" : " " + inner);
     case TypeKind::dep_spec:
     case TypeKind::builtin_spec: {
       std::string name = r.kind == TypeKind::builtin_spec ? std::string("__make_integer_seq")
@@ -1004,6 +1016,25 @@ public:
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
+  }
+
+  // [class.default.ctor]: the checked implicit default initialization of a fieldless dynamic
+  // root or a fieldless class with one public nonvirtual root base. A root may be abstract
+  // because its constructor can initialize a base subobject.
+  bool constexpr_dynamic_default(EntityId cls) const {
+    const auto eligible = [](const ClassRec* r) {
+      return r && r->defined && r->dynamic && !r->virtual_layout_unsupported && !r->unapplied_layout &&
+             r->fields.empty() && r->destructor_usable && r->destructor == EntityId::none &&
+             r->implicit_default_ctor != EntityId::none;
+    };
+    const auto* r = find(cls);
+    if (!eligible(r)) return false;
+    if (r->bases.empty()) return true;
+    if (r->bases.size() != 1) return false;
+    const auto& edge = r->bases.front();
+    const auto* base = find(edge.cls);
+    return !edge.virtual_ && !edge.dependent_in_pattern && edge.access == ast::Access::public_ &&
+           eligible(base) && base->bases.empty();
   }
 
   // [class.prop]: compute the source type property from complete declarations in this unit.

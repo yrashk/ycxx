@@ -1009,6 +1009,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
   query. Target CRT selection, versioned imports, provider dependencies and library discovery
   remain part of [#390](https://github.com/yrashk/ycxx/issues/390).
+- On Linux x86-64, `-shared -nostdlib` produces a leaf `ET_DYN` with a SONAME, SysV dynamic hash,
+  and mapped dynamic symbols. The loader uses the program headers, and native and system linkers
+  can consume the library. Only strong, default-visible functions are exported. References to
+  local and hidden definitions use position-independent relocations. Source inputs require
+  `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
+  imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
+  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -2174,6 +2181,14 @@ template's tokens again with the arguments bound.
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
   definitions of specializations are #124.
 
+## Derived-base function template deduction (#1144)
+
+When ordinary deduction fails for a fixed class-reference or single-pointer parameter
+with a named class-template pattern, deduction examines concrete bases at the call site.
+A unique most-derived matching specialization supplies the arguments, and the normal
+conversion checks the selected call. By-value deduction and conversion ranking through
+repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/ycxx/issues/1144).
+
 ## Native function pointer template arguments (#406)
 
 - A function pointer template argument can name an unambiguous externally linked C++ or C
@@ -2428,6 +2443,11 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Direct uses of namespace alias-template IDs in non-template code outside requires-expressions
+  check the alias template's associated constraints before expanding its type when every argument
+  is an explicit non-dependent type. Type-constraints and the template-head's requires-clause
+  contribute to the check ([temp.names]/9, [temp.constr.decl]).
+  [#1227](https://github.com/yrashk/ycxx/issues/1227)
 - Dependent static member calls through class and alias template qualifiers preserve argument
   pack expansions when an ordinary template parameter precedes the pack. The supported cases
   include forwarding empty and mixed lvalue/rvalue packs. A known member type of the current
@@ -2552,6 +2572,12 @@ session's.*
   argument. The result uses the target size type. An array of unknown bound is supported when
   its element type is complete. Pointer-only uses of the specialization leave evaluation deferred
   ([expr.alignof], [temp.inst], #1067).
+- `__array_rank(T)` returns the number of array dimensions as the target size type. Unknown bounds
+  count, incomplete element types need no layout, and nonarrays have rank zero. Dependent type
+  operands resolve through template argument substitution and variable-template initializer replay.
+  Namespace aliases replay rank arguments they discard and preserve conversions of forwarded rank
+  defaults. An omitted type default checks those arguments before looking up the specialization
+  ([meta.unary.prop.query], [temp.alias], [temp.arg], #1082).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
@@ -3045,7 +3071,7 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
   [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
 
-## 128-bit integers, slices 1–3 (#1172)
+## 128-bit integers (#1172)
 
 - `__int128` and `unsigned __int128` are `ast::Builtin::int128` and `unsigned_int128`, after
   `unsigned_long_long`, so `ast::is_integral` covers them. `ast::is_extended_signed` and
@@ -3069,13 +3095,25 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   bounds reject it. Substitution checks a dependent array bound against the target's
   `size_t` range before conversion. [#1212](https://github.com/yrashk/ycxx/issues/1212)
 - Static data of 16-byte integer type is written with its high half.
+- **Native code**: L2 has `i128` (`ycxx.ir.l2`), and `lower` writes `i128` operations for every
+  target. `legalize` (`ycxx.ir.legalize`) is an L2-to-L2 pass, run at the end of the `lower` cell,
+  that expands what `Int128Support` does not list for the target: into two i64 halves, with carries
+  and the new `umulh`, or into a call of a compiler runtime function (`ir::Runtime`; `Lowered::runtime`
+  carries the symbols to the object). The table is empty for AArch64 and x86-64. `unit.lower` runs
+  it for a mock target with native 128-bit `add`, `load` and `store`. Both code generators refuse a
+  body with an `i128` left in it.
+- **Calls**: `lower` splits a 128-bit parameter, argument or result into two integer words
+  (`LowerConfig::int128_in_words`). Both go in registers when two are left, else on the stack at
+  16 bytes. Apple's arm64 convention has no even-numbered-register rule (measured with Clang and
+  GCC as black boxes). A class holding one is placed the same way.
 - Not yet:
-  - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
-    bytes" (#1172, slice 4).
+  - A 128-bit integer through an ellipsis, or named in a variadic function on x86-64 (#1247).
   - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
     are diagnosed as not supported (#1176).
 - Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
-  peer). `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
+  peer, native arithmetic against constant evaluation, and calls in both directions with a Clang
+  peer), and `unit.linux_int128` runs the native ones on x86-64 Linux with GCC and Clang peers.
+  `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
   `-Wno-pedantic` for the oracles.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
@@ -3134,6 +3172,31 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
   with Clang's sizes and member offsets).
+
+## Resident project builds (#1251, #1255)
+
+`ycxx build <target>` reads `build.ycxx` in the workspace and publishes a successful
+native executable under `.ycxx/out`. The first rules are `cpp.executable`,
+`cpp.library` (a source-backed object group), and `generate` (a declared host
+tool with staged inputs and named outputs). Explicit source globs are resolved on
+each request. Linux uses the native freestanding compiler and linker.
+
+A resident workspace query asks for generator receipts and fetches the native
+compiler under the same query context. The coordinator admits tool results between
+epochs. Each generated path is a separate input, so unchanged sibling bytes cut
+off compiler work. Ordinary include probes continue to use the daemon file table,
+including missing candidates. The existing trace carries the native query tree,
+and reports external tool execution between workspace query attempts.
+
+`ycxx build --watch` uses the compiler watch loop and live trace browser
+(#1263). The daemon watches native compiler inputs and reobserves the project
+plan between runs for changes to the definition, generator inputs, and glob
+matches. It continues after a failed run.
+
+The initial build accepts a fixed host toolchain and explicit generator inputs.
+It checks host tool identity before admitting a receipt, and compares the resolved
+plan again before publishing. Rule packages, richer project configurations and
+resolved plan inspection are tracked under #1256, #1257 and #1259.
 
 ## The engine trace (#245, 2026-11-19)
 
@@ -3515,6 +3578,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
 
+## Evaluated immediate virtual calls (#1097)
+
+Fieldless completed local objects with one nonvirtual base can dispatch immediate
+virtual calls in constant evaluation. The checked receiver path selects the final
+overrider. Explicit qualification selects the named implementation. Default arguments
+come from the statically selected declaration. An unqualified call requires a known
+dynamic type. Immediate members remain absent from native vtables.
+
+Construction and destruction phases, persisted base references, and richer receiver
+layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
+
 ## Virtual functions: general single inheritance (#309, 2026-11-24)
 
 - Both targets compile, link and run ordinary non-template polymorphic classes with external
@@ -3643,6 +3717,12 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 
 ## Flat structural class template arguments (#317, 2026-11-24)
 
+A directly named explicit class specialization accepts a braced flat structural
+argument. The item splitter keeps grouped initializer tokens in the head and
+records the real class body and its child scope. Equivalent named and braced
+values select the same specialization. Native item checks and resident edits
+cover the body boundary, key changes, and restoration. [#1248](https://github.com/yrashk/ycxx/issues/1248)
+
 - Fixed-type parameters accept named complete flat aggregates with public nonmutable integral
   fields. The canonical argument records the class type and converted field values. Named
   constant expressions and equivalent braced values select the same specialization.
@@ -3680,10 +3760,12 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   the oracle's calls).
   `<iostream>` on macOS arm64: `'using' is not supported yet` 83 → 72 (the rest are #1150 and
   `using enum`), errors 3,237 → 3,165.
-- Not yet: constraints of an alias template, namespace or member, are not checked when it is
-  named (#234); access through a dependent name substituted in an alias template, as for a member
-  type (#1199); `typename T::M<args>` without `template` (the oracles disagree); immediate calls
-  in a member alias template's type are not replayed per use as a namespace one's are (#340).
+- Not yet: checking member alias constraints and checking namespace alias constraints with
+  dependent, defaulted or pack arguments or during substitution in requirements
+  ([#234](https://github.com/yrashk/ycxx/issues/234)). Access through a dependent name substituted
+  in an alias template, as for a member type, remains open (#1199), as does `typename T::M<args>`
+  without `template` (the oracles disagree). Immediate calls in a member alias template's type
+  still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
 
@@ -4483,6 +4565,13 @@ the body. A non-generic lambda body uses its own evaluation context.
   as `0 @ (y <=> x)`; `x <=> y` tries the reversed one, `0 <=> (y <=> x)`. The `0` is a
   one-token literal, so it is a null pointer constant too. A rewritten expression's own
   operator is not rewritten again.
+- With viable forward and reversed candidates, `Sema::ranked_three_way` compares their
+  conversion sequences in source operand order before preferring the forward orientation on
+  a tie ([over.match.best.general], [#1223](https://github.com/yrashk/ycxx/issues/1223)).
+  This covers fixed-arity, non-template members and nonmembers for integral operands and
+  complete non-template class operands without bases or conversion functions. It compares exact
+  bindings and by-value integral conversions. For relational expressions this ranking applies
+  when lookup finds no ordinary relational operator declaration.
 - A defaulted `operator<=>` ([class.spaceship]) is declared as `==` is. Completion
   (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
   `auto` becomes the common comparison category of the results (`strong_ordering` with no

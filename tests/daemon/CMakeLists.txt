@@ -4,6 +4,8 @@ add_test(NAME daemon.runtime_dir
 add_test(NAME daemon.auto_var_init
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/auto_var_init.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
+# Overlap the comparison with other tests even before CTest has timing history (#1230).
+set_tests_properties(daemon.compare PROPERTIES COST 400)
 add_test(NAME daemon.no_rtti
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_rtti.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_CXX_COMPILER}")
@@ -62,3 +64,7 @@ add_test(NAME daemon.warning_options
 add_test(NAME daemon.engine_snapshot
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/engine_snapshot.py
           $<TARGET_FILE:ycxxc> $<TARGET_FILE:unit_engine_snapshot>)
+
+add_test(NAME daemon.project_build COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_build.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_build_watch COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_build_watch.py $<TARGET_FILE:ycxxc>)
