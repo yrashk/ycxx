@@ -1293,7 +1293,7 @@ public:
 
   // `function_ir(F)` for a function defined in an item before `item` ([expr.const]: a function
   // defined later is not defined at the point of evaluation).
-  interp::Callee function_ir(EntityId f, u32 item);
+  interp::Callee function_ir(EntityId f, u32 item, bool* diagnosed_failure = nullptr);
   // A closure type's record, published by the analysis of `item`, its lambda's
   // (docs/design/closures.md), with its implicit special members ([expr.prim.lambda.closure]/14).
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, u32 item, sema::Sema& context) {
@@ -1925,7 +1925,7 @@ private:
   std::set<std::tuple<EntityId, ItemId, u32>> replaying_function_defaults_;
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::map<u32, ClassBasePattern> class_base_patterns_;  // by defining item
-  struct AliasCallPattern { u32 item, begin, end; sema::AliasCallPattern kind; };
+  struct AliasCallPattern { u32 item, begin, end; sema::AliasCallPattern call; };
   std::map<EntityId, AliasCallPattern> alias_call_patterns_;
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
   std::set<EntityId> failed_type_trait_instantiations_;
@@ -2352,10 +2352,10 @@ public:
     if (!std::ranges::contains(p_->template_parameter_objects_, e)) p_->template_parameter_objects_.push_back(e);
   }
   bool plain_class_template_type(EntityId c) override { return p_->plain_class_template_type(c); }
-  interp::Callee function_ir(EntityId f) override {
+  interp::Callee function_ir(EntityId f, bool& diagnosed_failure) override {
     if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
       return {.is_constexpr = p_->is_constexpr(f, point())};
-    return p_->function_ir(f, point());
+    return p_->function_ir(f, point(), &diagnosed_failure);
   }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
@@ -2444,7 +2444,7 @@ public:
   }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override {
     auto it = p_->alias_call_patterns_.find(e);
-    return it == p_->alias_call_patterns_.end() ? sema::AliasCallPattern::none : it->second.kind;
+    return it == p_->alias_call_patterns_.end() ? sema::AliasCallPattern{} : it->second.call;
   }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                             const sema::Bindings& args) override;
@@ -2874,12 +2874,14 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
   ps.set_questions(q);
   ps.seek(item.begin + pattern.begin);
+  ps.namespace_alias_type = pattern.call.class_result;
   try {
     auto type = ps.type_id();
     if (type && ps.at_end() && !s.has_error_since(before)) return type;
   } catch (const TooDeep&) {
     // The parser has already diagnosed its limit.
   }
+  caller.diagnosed_constant_calls += s.diagnosed_constant_calls;
   return std::nullopt;
 }
 
@@ -3199,7 +3201,9 @@ public:
   void use_library_function(EntityId f) override { at_.use_library_function(f); }
   void use_template_parameter_object(EntityId e) override { at_.use_template_parameter_object(e); }
   bool plain_class_template_type(EntityId c) override { return at_.plain_class_template_type(c); }
-  interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
+  interp::Callee function_ir(EntityId f, bool& diagnosed_failure) override {
+    return p_->function_ir(f, p_->end(), &diagnosed_failure);
+  }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
     return p_->generic_instance(spec, known, p_->end());
@@ -3602,20 +3606,26 @@ private:
         ps_.bump();
         const auto begin = ps_.pos();
         const auto calls = ps_.deferred_immediate_calls();
+        const auto class_calls = ps_.deferred_class_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
         const auto ranks = ps_.deferred_rank_checks();
+        ps_.namespace_alias_type = true;
         auto t = ps_.type_id();
+        ps_.namespace_alias_type = false;
         if (!t || !alias_template(name, name_at, *t)) return bad();
+        const bool rank_checks = ps_.deferred_rank_checks() != ranks;
         if (ps_.deferred_immediate_calls() != calls) {
-          const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained
-                                                                     : sema::AliasCallPattern::may_erase;
-          p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), kind});
-        } else if (ps_.deferred_rank_checks() != ranks) {
+          using Kind = sema::AliasCallPattern::Kind;
+          const auto kind = ps_.deferred_argument_checks() == checks ? Kind::retained : Kind::may_erase;
+          const bool class_result = ps_.deferred_class_immediate_calls() != class_calls;
           p_->alias_call_patterns_.emplace(decls_.back().entity,
-              Program::AliasCallPattern{k_, begin, ps_.pos(), sema::AliasCallPattern::rank_checks});
+              Program::AliasCallPattern{k_, begin, ps_.pos(), {kind, class_result, rank_checks}});
+        } else if (rank_checks) {
+          p_->alias_call_patterns_.emplace(decls_.back().entity,
+              Program::AliasCallPattern{k_, begin, ps_.pos(), {.rank_checks = true}});
         } else if (!s_.templates().structural_operand(*t)) {
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{
-              k_, begin, ps_.pos(), sema::AliasCallPattern::unrepresented});
+              k_, begin, ps_.pos(), {.kind = sema::AliasCallPattern::Kind::unrepresented}});
         }
         if (!ps_.expect(Tk::semi)) bad();
         return;
@@ -5645,7 +5655,9 @@ private:
       ps_.skip_attributes();
       ps_.bump();
       ps_.member_alias_type = true;
+      ps_.replayed_member_alias_type = !s_.template_scopes.empty();
       auto t = ps_.type_id();
+      ps_.replayed_member_alias_type = false;
       ps_.member_alias_type = false;
       if (!t || !member_alias(c, n, at, *t)) return bad();
       if (!ps_.expect(Tk::semi)) bad();
@@ -13213,7 +13225,7 @@ void Program::instantiate_all() {
   }
 }
 
-interp::Callee Program::function_ir(EntityId f, u32 item) {
+interp::Callee Program::function_ir(EntityId f, u32 item, bool* diagnosed_failure) {
   if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
@@ -13284,6 +13296,10 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     if (!in || in->item >= item) return c;
     if (in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
       c.unsupported = true;
+      if (diagnosed_failure)
+        *diagnosed_failure = !valid_member_declarations(in->body.diags) ||
+                             (in->failed && body_cells_[in->item] &&
+                              !valid_member_declarations(body_cells_[in->item]->diags));
       return c;
     }
     if (!instance_irs_.contains(key)) {
@@ -13325,8 +13341,10 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     irs_.emplace(k, std::move(ir));
   }
   const auto& ir = irs_.at(k);
-  if (!ir) c.unsupported = true;
-  else c.body = &ir->body;
+  if (!ir) {
+    c.unsupported = true;
+    if (diagnosed_failure && body_cells_[k]) *diagnosed_failure = !valid_member_declarations(body_cells_[k]->diags);
+  } else c.body = &ir->body;
   return c;
 }
 
