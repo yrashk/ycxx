@@ -119,7 +119,8 @@ public:
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
   // names join the lookup where [namespace.udir]/2 puts them.
-  virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
+  virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {},
+                                            bool immediate_call = false) = 0;
   virtual std::vector<ast::DeclSema> qualifier_decls(NameId, std::optional<EntityId>,
                                                      std::span<const EntityId>) { return {}; }
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
@@ -3179,6 +3180,14 @@ public:
     if (!is_type(decl.kind) || (decl.flags & decl_flag::template_)) return std::nullopt;
     return decl.type;
   }
+  // The immediate-call lookup already hid tags that share a binding scope with a function.
+  bool ambiguous_namespace_call(std::span<const ast::DeclSema> found, NameId name, u32 name_at) {
+    auto function = [](const ast::DeclSema& d) { return d.kind == ast::DeclKind::function; };
+    if (std::ranges::none_of(found, function) || std::ranges::all_of(found, function)) return false;
+    diag(name_at, Diag::ambiguous_name, name);
+    return true;
+  }
+
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {},
                 bool check_all_bases = false, bool immediate_call = false) {
@@ -3219,14 +3228,7 @@ public:
         if (d.name == n && d.enum_initializer != ConstId::none)
           return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
     auto found = q_->namespace_members(*s.ns, n, /*type_only=*/false, /*direct_only=*/false, immediate_call);
-    if (immediate_call && std::ranges::any_of(found, [](const ast::DeclSema& d) {
-          return d.kind == ast::DeclKind::function;
-        }) && std::ranges::any_of(found, [](const ast::DeclSema& d) {
-          return d.kind != ast::DeclKind::function;
-        })) {
-      diag(name_at, Diag::ambiguous_name, n);
-      return {NodeId::none, begin, end};
-    }
+    if (immediate_call && ambiguous_namespace_call(found, n, name_at)) return {NodeId::none, begin, end};
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
       return {NodeId::none, begin, end};
@@ -8100,7 +8102,7 @@ public:
   // An id-expression naming `name`, at `begin`: the innermost block-scope declaration, else the
   // namespace-scope ones. The `callee` of a call that lookup does not find is a `DepName`: the
   // call decides once it has its arguments ([temp.dep.candidate]).
-  Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false) {
+  Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false, bool immediate_default_call = false) {
     // Block scopes, innermost first: a scope's locals and the names its using-declarations
     // brought in ([namespace.udecl]) hide those of enclosing scopes ([basic.scope.hiding]);
     // using-declarations of one scope make one set.
@@ -8223,12 +8225,15 @@ public:
         found[0].storage == ast::Storage::static_)
       return static_member(current_class, found[0].entity, found[0].type, begin, end);
     bool any = !found.empty();
-    if (found.empty())
-      for (DeclId d : q_->visible_decls(name, directives())) {
+    if (found.empty()) {
+      for (DeclId d : q_->visible_decls(name, directives(), immediate_default_call)) {
         any = true;
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity != EntityId::none && !is_special(s)) found.push_back(s);  // else its item diagnosed it
       }
+      if (immediate_default_call && ambiguous_namespace_call(found, name, begin))
+        return {NodeId::none, begin, end};
+    }
     return decls_expr(std::move(found), any, name, begin, end, callee, true);
   }
 

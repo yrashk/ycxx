@@ -4493,7 +4493,9 @@ public:
         }
         return s_->template_id(n, std::move(*args), begin, pos());
       }
-      return s_->name_expr(n, begin, pos(), is(Tk::l_paren));
+      const bool callee = is(Tk::l_paren);
+      const bool immediate_default_call = callee && in_integral_template_default_ && !s_->unevaluated;
+      return s_->name_expr(n, begin, pos(), callee, immediate_default_call);
     }
     case Tk::coloncolon:
       if (!allocation_operator_ahead(1)) return qualified_id(begin);
