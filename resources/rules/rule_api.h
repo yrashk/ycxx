@@ -23,6 +23,13 @@ typedef struct ycxx_rule_capability_v1 {
   uint32_t support;
 } ycxx_rule_capability_v1;
 
+typedef struct ycxx_rule_witness_v1 {
+  const char* name;
+  int exit_status;
+  ycxx_rule_bytes_v1 out;
+  ycxx_rule_bytes_v1 err;
+} ycxx_rule_witness_v1;
+
 typedef struct ycxx_rule_host_v1 {
   uint32_t abi_version;
   size_t struct_size;
@@ -48,11 +55,24 @@ typedef struct ycxx_rule_host_v1 {
      at most 4096 bytes. The worker copies it and reports it when the entry point fails.
      Return 0 on success or -1 on an invalid, repeated or oversized diagnostic. */
   int (*diagnose)(void* context, const char* text, size_t size);
+
+  /* Check struct_size before accessing this extension. Only the classifier receives a
+     witness. It describes a normal exit and borrows up to 64 KiB of each stream through
+     the entry point's return. The streams may contain arbitrary bytes. */
+  const ycxx_rule_witness_v1* witness;
+
+  /* Only the classifier receives this callback. Supply one YCXX_RULE_*_V1 support state
+     for witness->name. Return 0 on success or -1 on an invalid or repeated export. */
+  int (*export_support)(void* context, const char* name, uint32_t support);
 } ycxx_rule_host_v1;
 
 /* Call the host from this thread before returning. Return 0 after successfully emitting
    the definition, or a nonzero rule error. */
 int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host);
+
+/* Optional. Call export_support from this thread and return 0 to classify the witness.
+   Return a nonzero rule error on failure. Only the planner may call emit. */
+int ycxx_rule_classify_v1(const ycxx_rule_host_v1* host);
 
 #ifdef __cplusplus
 }

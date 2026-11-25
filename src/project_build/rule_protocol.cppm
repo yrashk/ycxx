@@ -12,10 +12,17 @@ struct RuleAttribute {
   bool operator==(const RuleAttribute&) const = default;
 };
 
+struct RuleValueReference {
+  std::string target;
+  std::string field;
+  bool operator==(const RuleValueReference&) const = default;
+};
+
 struct RuleCapabilityBinding {
   std::string name;
   std::string package;
   std::string probe;
+  std::optional<RuleValueReference> value = std::nullopt;
   bool operator==(const RuleCapabilityBinding&) const = default;
 };
 
@@ -34,6 +41,7 @@ struct RuleDemand {
   std::vector<RuleAttribute> attributes;
   std::vector<std::string> reads;
   std::vector<RuleCapabilityBinding> capabilities = {};
+  std::optional<std::string> value_export = std::nullopt;
   bool operator==(const RuleDemand&) const = default;
 };
 
@@ -53,6 +61,15 @@ struct RuleCapabilityValue {
   std::uint32_t support;
 };
 
+inline constexpr std::size_t rule_witness_stream_limit = 64 * 1024;
+
+struct RuleWitnessReport {
+  std::string name;
+  int exit_status;
+  std::string out;
+  std::string err;
+};
+
 struct RuleWorkerRequest {
   int version = 1;
   std::string target;
@@ -61,6 +78,7 @@ struct RuleWorkerRequest {
   std::vector<RuleAttribute> attributes;
   std::vector<RuleRead> reads;
   std::optional<std::vector<RuleCapabilityValue>> capabilities = std::nullopt;
+  std::optional<RuleWitnessReport> witness = std::nullopt;
 };
 
 }  // namespace ycxx::build

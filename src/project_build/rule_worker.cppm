@@ -15,7 +15,7 @@ export namespace ycxx::build {
 // The SDK staged as an input when compiling a rule package.
 std::string_view rule_sdk_header();
 
-// Arguments name the staged library, JSON request and output definition, respectively.
+// Arguments name the staged library, JSON request and output, respectively.
 int run_rule_worker(std::span<const std::string_view> args);
 // The staged library exports the same symbol with a probe-specific witness result.
 int run_shared_probe(std::span<const std::string_view> args);
@@ -46,6 +46,13 @@ struct Capability {
   std::uint32_t support;
 };
 
+struct Witness {
+  const char* name;
+  int exit_status;
+  Bytes out;
+  Bytes err;
+};
+
 struct Host {
   std::uint32_t abi_version;
   std::size_t struct_size;
@@ -59,6 +66,8 @@ struct Host {
   const Capability* capabilities;
   std::size_t capability_count;
   int (*diagnose)(void*, const char*, std::size_t);
+  const Witness* witness;
+  int (*export_support)(void*, const char*, std::uint32_t);
 };
 
 struct Library {
@@ -92,6 +101,12 @@ std::expected<RuleWorkerRequest, std::string> load_request(const std::string& pa
   if (request->version != abi_version) return std::unexpected("unsupported rule request version");
   if (!valid_key(request->rule) || !valid_key(request->target))
     return std::unexpected("invalid rule or target name");
+  if (const auto& witness = request->witness) {
+    if (!valid_key(witness->name) || witness->exit_status < 0 || witness->exit_status > 255)
+      return std::unexpected("invalid rule witness name or exit status");
+    if (witness->out.size() > rule_witness_stream_limit || witness->err.size() > rule_witness_stream_limit)
+      return std::unexpected("rule witness stream exceeds 64 KiB");
+  }
 
   std::set<std::string_view> keys;
   for (const auto& attribute : request->attributes)
@@ -146,9 +161,11 @@ struct Invocation {
   const RuleInputs& inputs;
   std::string emitted;
   std::string diagnostic;
+  std::optional<std::uint32_t> support = std::nullopt;
   bool invalid_read = false;
   bool invalid_emit = false;
   bool invalid_diagnose = false;
+  bool invalid_support = false;
 };
 
 int attribute(void* context, const char* name, Bytes* result) noexcept {
@@ -195,7 +212,24 @@ int copy_once(std::string& output, bool& invalid, const char* text, std::size_t 
 int emit(void* context, const char* definition, std::size_t size) noexcept {
   if (!context) return -1;
   auto& invocation = *static_cast<Invocation*>(context);
+  if (invocation.request.witness) {
+    invocation.invalid_emit = true;
+    return -1;
+  }
   return copy_once(invocation.emitted, invocation.invalid_emit, definition, size, max_definition_size);
+}
+
+int export_support(void* context, const char* name, std::uint32_t support) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  const auto& witness = invocation.request.witness;
+  if (invocation.invalid_support || invocation.support || !witness ||
+      !name || witness->name != name || support > max_capability_support) {
+    invocation.invalid_support = true;
+    return -1;
+  }
+  invocation.support = support;
+  return 0;
 }
 
 int diagnose(void* context, const char* text, std::size_t size) noexcept {
@@ -224,8 +258,10 @@ int run_rule_worker(std::span<const std::string_view> args) {
     const char* detail = ::dlerror();
     return fail(detail ? detail : "cannot load rule library");
   }
-  const auto plan = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, "ycxx_rule_plan_v1"));
-  if (!plan) return fail("rule library has no ycxx_rule_plan_v1 entry point");
+  const auto& report = request->witness;
+  const char* entry = report ? "ycxx_rule_classify_v1" : "ycxx_rule_plan_v1";
+  const auto invoke = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, entry));
+  if (!invoke) return fail(std::format("rule library has no {} entry point", entry));
 
   std::vector<Capability> capabilities;
   if (request->capabilities) {
@@ -233,24 +269,33 @@ int run_rule_worker(std::span<const std::string_view> args) {
     for (const auto& capability : *request->capabilities)
       capabilities.push_back({capability.name.c_str(), capability.support});
   }
+  Witness witness{};
+  if (report)
+    witness = {report->name.c_str(), report->exit_status, borrow(report->out), borrow(report->err)};
   Invocation invocation{*request, *inputs, {}, {}};
   const Host host{abi_version, sizeof(Host), request->rule.c_str(), request->target.c_str(),
                   borrow(request->definition), &invocation, attribute, read, emit,
-                  capabilities.empty() ? nullptr : capabilities.data(), capabilities.size(), diagnose};
-  const int status = plan(&host);
+                  capabilities.empty() ? nullptr : capabilities.data(), capabilities.size(), diagnose,
+                  report ? &witness : nullptr, report ? export_support : nullptr};
+  const int status = invoke(&host);
   if (invocation.invalid_read) return fail("rule attempted an invalid or undeclared read");
+  if (report && invocation.invalid_emit) return fail("rule classifier attempted to emit a definition");
   if (invocation.invalid_emit) return fail("rule attempted an invalid, repeated or oversized definition");
   if (invocation.invalid_diagnose) return fail("rule supplied an invalid, repeated or oversized diagnostic");
+  if (invocation.invalid_support) return fail("rule classifier attempted an invalid or repeated support export");
   if (status != 0) {
     auto message = std::format("rule '{}' failed with status {}", request->rule, status);
     if (!invocation.diagnostic.empty()) message.append(": ").append(invocation.diagnostic);
     return fail(message);
   }
-  if (invocation.emitted.empty()) return fail("rule did not emit a definition");
+  if (report && !invocation.support) return fail("rule classifier did not export a support state");
+  if (!report && invocation.emitted.empty()) return fail("rule did not emit a definition");
 
+  const std::string result = report ? lsp::dump(lsp::to_json(RuleCapabilityValue{report->name, *invocation.support}))
+                                    : std::move(invocation.emitted);
   std::ofstream output(std::string(args[2]), std::ios::binary | std::ios::noreplace);
   if (!output) return fail("cannot open rule output");
-  output.write(invocation.emitted.data(), static_cast<std::streamsize>(invocation.emitted.size()));
+  output.write(result.data(), static_cast<std::streamsize>(result.size()));
   output.close();
   if (!output) return fail("cannot write rule output");
   return 0;

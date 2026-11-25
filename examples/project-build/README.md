@@ -9,8 +9,9 @@ out of the checkout and build it there.
 | [Native C++](native) | A library, source glob with an exclusion, and a declared generator |
 | [Custom rule](custom-rule) | A source-built rule package, a tracked read and a generated input |
 | [Typed capability header](typed-capabilities) | Compiler probes, a named header artifact and `if constexpr` |
+| [Package-defined probe](package-probe) | A workspace tool witness, a typed support export and incremental reuse |
 
-All three projects build a target named `app`. The resident daemon can reuse
+Each project builds a target named `app`. The resident daemon can reuse
 work from an earlier request in the same workspace.
 
 ```sh
