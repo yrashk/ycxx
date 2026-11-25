@@ -1091,6 +1091,7 @@ public:
         if (!params[i].has_default && other[i].has_default) {
           params[i].has_default = 1;
           params[i].default_ = other[i].default_;
+          params[i].rank_type_default = other[i].rank_type_default;
           merged = true;
         }
     }
@@ -1159,7 +1160,7 @@ public:
         return std::nullopt;
       }
       const auto before = diag_count();
-      auto t = substitute_alias(tmpl, *full, bindings, at);
+      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default);
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
       if (!t && !has_error_since(before) && !q_->instantiation_gave_up())
         diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
@@ -1183,11 +1184,24 @@ public:
   }
 
   std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
-                                           const Bindings& bindings, u32 at) {
+                                           const Bindings& bindings, u32 at, bool substituting_default = false) {
+    if (substituting_default && tmpl.constraints != ConstId::none &&
+        std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
+      auto t = templates();
+      bool hard_error = false;
+      auto sat = named_constraint_satisfaction(t, tmpl.constraints, bindings, /*bind_lazily=*/true, hard_error);
+      if (hard_error || !sat.value_or(true)) return std::nullopt;
+    }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
     if (pattern != AliasCallPattern::none) {
-      if (std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); }))
-        return q_->replay_alias_calls(*this, tmpl, bindings);
+      if (std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
+        const auto before = diag_count();
+        const bool saved = std::exchange(replaying_type_default, substituting_default);
+        auto type = q_->replay_alias_calls(*this, tmpl, bindings);
+        replaying_type_default = saved;
+        if (!type && substituting_default) drop_failures(before);
+        return type;
+      }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
       if (pattern == AliasCallPattern::may_erase) return std::nullopt;
     }
@@ -4229,6 +4243,7 @@ public:
   // an instantiation the arguments bound to their parameters ([temp.inst]).
   std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
   Bindings template_args;
+  bool replaying_type_default = false;
   // The template parameter `name` declares in the template parameter scopes enclosing this point,
   // whether or not a class member hides it: what [temp.local]/6 forbids redeclaring.
   const ast::TemplateParamSema* declared_template_param(NameId name) const {
@@ -4617,8 +4632,9 @@ public:
     t.call_constant = [this](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, 0);
     };
-    t.alias_type = [this](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b) {
-      return substitute_alias(alias, args, b, 0);
+    t.alias_type = [this](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b,
+                          bool substituting_default) {
+      return substitute_alias(alias, args, b, 0, substituting_default);
     };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
     t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
@@ -4635,8 +4651,9 @@ public:
     t.call_constant = [this, at](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, at);
     };
-    t.alias_type = [this, at](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b) {
-      return substitute_alias(alias, args, b, at);
+    t.alias_type = [this, at](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b,
+                            bool substituting_default) {
+      return substitute_alias(alias, args, b, at, substituting_default);
     };
     t.demand_variable = [this, at](EntityId spec, QualType type) {
       demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});

@@ -2752,6 +2752,7 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   q.type_trait_demand = q.at_point;
   const auto before = caller.diag_count();
   sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
+  s.replaying_type_default = caller.replaying_type_default;
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);

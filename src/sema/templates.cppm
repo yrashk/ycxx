@@ -272,6 +272,16 @@ public:
       if (!t2) return std::nullopt;
       return types().add_cv(*t2, cv);
     }
+    case TypeKind::deferred_alias: {
+      auto args = substitute_args(ins().seqs.elements(r.args), b);
+      if (!args) return std::nullopt;
+      // Validate the written arguments before the enclosing specialization is interned.
+      const bool dependent = std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); });
+      if (!dependent && !apply_template(r.entity, *args, /*substituting_default=*/true)) return std::nullopt;
+      auto result = substitute(r.inner, b);
+      if (!result) return std::nullopt;
+      return types().add_cv(dependent ? types().deferred_alias(r.entity, *args, *result) : *result, cv);
+    }
     case TypeKind::builtin_spec: {
       auto args = substitute_args(ins().seqs.elements(r.args), b);
       if (!args) return std::nullopt;
@@ -1067,6 +1077,7 @@ public:
       params_in(r.bound_value, out, nested);
       return;
     case TypeKind::dep_name:
+    case TypeKind::deferred_alias:
       params_in(r.inner, out, nested);
       for (const TemplateArg& a : ins().seqs.elements(r.args)) params_in(a, out, nested);
       return;
@@ -1222,6 +1233,9 @@ public:
     QualType pc = types().canonical(p), ac = types().canonical(a);
     Cv cp = Types::cv(pc), ca = Types::cv(ac);
     TypeRec pr = types().rec(pc);
+    if (pr.kind == TypeKind::deferred_alias) return deduce(types().add_cv(pr.inner, cp), a, depth, out, allow);
+    if (TypeRec ar = types().rec(ac); ar.kind == TypeKind::deferred_alias)
+      return deduce(p, types().add_cv(ar.inner, ca), depth, out, allow);
     // `typename Q::n` and dependent decltype operands are non-deduced contexts
     // ([temp.deduct.type]/5), as is a built-in's result.
     // A pack-index-specifier is one too ([temp.deduct.type]/5).
@@ -1324,6 +1338,7 @@ public:
       return deduce_list(ps, as, depth, out);
     }
     case TypeKind::pack_expansion: return deduce(pr.inner, ar.inner, depth, out);
+    case TypeKind::deferred_alias: return false;  // matched using the expanded type above
     case TypeKind::other: return false;
     }
     return false;
@@ -1467,6 +1482,7 @@ public:
         if (a.kind == TemplateArgKind::type) pack_types_in(a.type, out);
       return;
     case TypeKind::dep_name:
+    case TypeKind::deferred_alias:
       pack_types_in(r.inner, out);
       for (const TemplateArg& a : flatten(ins().seqs.elements(r.args)))
         if (a.kind == TemplateArgKind::type) pack_types_in(a.type, out);
@@ -1784,7 +1800,8 @@ public:
   // The type template `templ` names with `args`, as a template-id says it ([temp.names]): a class
   // template's specialization, an alias template's type with the arguments substituted
   // ([temp.alias]/2); none when the arguments do not fit ([temp.deduct.general]/8).
-  std::optional<QualType> apply_template(EntityId templ, std::span<const TemplateArg> written) {
+  std::optional<QualType> apply_template(EntityId templ, std::span<const TemplateArg> written,
+                                         bool substituting_default = false) {
     if (!template_decl) return std::nullopt;
     std::vector<TemplateArg> args = flatten(written);  // `TT<args>` keeps its own head's packs
     auto decl = template_decl(templ);
@@ -1802,7 +1819,7 @@ public:
     if (!full) return std::nullopt;
     if (decl->kind == ast::DeclKind::type_alias) {
       auto bindings = Bindings::of(ps.empty() ? 0 : ps[0].depth, *full);
-      if (alias_type) return alias_type(*decl, *full, bindings);
+      if (alias_type) return alias_type(*decl, *full, bindings, substituting_default);
       return substitute(decl->type, bindings);
     }
     return types().class_type(specialize_class(templ, *full));
@@ -2311,6 +2328,7 @@ public:
     switch (r.kind) {
     case TypeKind::builtin: return false;  // Builtin::dependent
     case TypeKind::class_: return all_args(w_->entities.rec(r.entity).args);
+    case TypeKind::deferred_alias: return structural_operand(r.inner) && all_args(ins().seqs.elements(r.args));
     case TypeKind::dep_spec:
     case TypeKind::builtin_spec: return all_args(ins().seqs.elements(r.args));
     case TypeKind::array: return structural_operand(r.inner) && structural_value(r.bound_value);
@@ -2419,7 +2437,7 @@ public:
   std::function<std::optional<TemplateArg>(QualType, NameId)> member_constant;
   std::function<std::optional<ConstId>(EntityId, std::span<const TemplateArg>)> concept_constant;
   std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>)> call_constant;
-  std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>, const Bindings&)> alias_type;
+  std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>, const Bindings&, bool)> alias_type;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
   std::function<std::optional<QualType>(EntityId)> variable_specialization_type;
   std::function<void(EntityId, QualType)> demand_variable;

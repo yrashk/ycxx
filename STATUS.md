@@ -2569,7 +2569,8 @@ session's.*
   count, incomplete element types need no layout, and nonarrays have rank zero. Dependent type
   operands resolve through template argument substitution and variable-template initializer replay.
   Namespace aliases replay rank arguments they discard and preserve conversions of forwarded rank
-  defaults ([meta.unary.prop.query], [temp.alias], #1082).
+  defaults. An omitted type default checks those arguments before looking up the specialization
+  ([meta.unary.prop.query], [temp.alias], [temp.arg], #1082).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private

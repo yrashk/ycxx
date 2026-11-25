@@ -596,37 +596,48 @@ public:
     const ast::TemplateParamSema* tt = s_->template_template_param(name);
     auto tmpl = tt ? std::nullopt : s_->type_template(name);
     bump();
+    const u32 ranks = deferred_rank_checks_;
     auto args = template_argument_list();
     if (!args) return std::nullopt;
     if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
     if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
     s_->unqualified_type_template_access(*tmpl, name, at);
-    return type_template_id(*tmpl, *args, at);
+    return type_template_id(*tmpl, *args, at, deferred_rank_checks_ != ranks);
   }
 
-  std::optional<QualType> type_template_id(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args, u32 at) {
+  std::optional<QualType> type_template_id(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args, u32 at,
+                                          bool written_rank_check) {
     // An alias can erase a dependent argument from the resulting type, but the written argument
     // still has to be valid when substituted ([temp.alias]).
-    if (tmpl.kind == ast::DeclKind::type_alias && std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); })) {
-      ++deferred_argument_checks_;
-      const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
-      if (pattern != sema::AliasCallPattern::none && pattern != sema::AliasCallPattern::rank_checks)
-        ++deferred_immediate_calls_;
-      // A default may already have acquired its parameter type before the aliased type
-      // substitutes it again. Replay the written use to retain that conversion as well.
-      const auto params = s_->ins().seqs.elements(tmpl.template_params);
-      const auto missing = std::span(params).subspan(std::min(args.size(), params.size()));
-      const bool rank_default = std::ranges::any_of(missing, [&](const ast::TemplateParamSema& p) {
-        return p.has_default && s_->ins().values.is<ast::VDepOp>(p.default_.value) &&
-               s_->ins().values.get<ast::VDepOp>(p.default_.value).op == ast::DepOp::array_rank;
-      });
-      if (pattern == sema::AliasCallPattern::rank_checks || rank_default) ++deferred_rank_checks_;
+    bool defer_rank_alias = false;
+    if (std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); })) {
+      bool rank_check = false;
+      if (args.size() < s_->ins().seqs.size(tmpl.template_params)) {
+        // An enclosing alias can erase a class specialization along with its omitted default.
+        const auto params = s_->ins().seqs.elements(tmpl.template_params);
+        rank_check = std::ranges::any_of(std::span(params).subspan(args.size()), [&](const ast::TemplateParamSema& p) {
+          return p.rank_type_default ||
+                 (p.has_default && s_->ins().values.is<ast::VDepOp>(p.default_.value) &&
+                  s_->ins().values.get<ast::VDepOp>(p.default_.value).op == ast::DepOp::array_rank);
+        });
+      }
+      if (tmpl.kind == ast::DeclKind::type_alias) {
+        ++deferred_argument_checks_;
+        const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
+        if (pattern != sema::AliasCallPattern::none && pattern != sema::AliasCallPattern::rank_checks)
+          ++deferred_immediate_calls_;
+        rank_check = rank_check || pattern == sema::AliasCallPattern::rank_checks;
+        defer_rank_alias = type_alias_checks_ && (rank_check || written_rank_check);
+      }
+      if (rank_check) ++deferred_rank_checks_;
     }
     // A resolved template-id used as a qualifier or type argument needs satisfaction even
     // while the surrounding grammar is deciding how to use it.
     bool constraint_failed = false;
     auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
                                       alias_constraints_enabled_ ? &constraint_failed : nullptr);
+    if (type && defer_rank_alias && !in_template_id_lookahead_)
+      type_alias_checks_->emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
     alias_constraint_failures_ += constraint_failed;
     return type;
   }
@@ -1839,6 +1850,7 @@ public:
     const bool known_qualifier = scope && extent.closed && !extent.half && kind(extent.next) == Tk::coloncolon;
     i_ += k + 1;
     bool took_closer = false;
+    const u32 ranks = deferred_rank_checks_;
     auto args = [&] {
       const TemplateIdLookahead lookahead{*this, !selected};
       return template_argument_list(nullptr, &took_closer);
@@ -1857,7 +1869,7 @@ public:
         t = tt ? s_->template_param_id(*tt, *args, 0)
             : builtin ? s_->builtin_template_id(n, *args, 0)
             : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
-                               : type_template_id(*tmpl, *args, name_at);
+                               : type_template_id(*tmpl, *args, name_at, deferred_rank_checks_ != ranks);
     }
     i_ = saved;
     half_ = saved_half;
@@ -2561,6 +2573,16 @@ public:
     return expect(Tk::greater) && ok;
   }
 
+  bool template_type_default(ast::TemplateParamSema& p) {
+    const u32 ranks = deferred_rank_checks_;
+    auto type = type_id(/*placeholder_ok=*/false, /*retain_alias_checks=*/true);
+    if (!type) return false;
+    p.has_default = 1;
+    p.rank_type_default = deferred_rank_checks_ != ranks;
+    p.default_ = s_->templates().type_arg(*type);
+    return true;
+  }
+
   std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok) {
     ast::TemplateParamSema p{};
     p.depth = depth;
@@ -2599,14 +2621,9 @@ public:
       }
       cargs.insert(cargs.begin(), s_->templates().type_arg(p.type));
       if (auto nf = s_->concept_constraint(*c, cargs, at)) s_->head_constraints.push_back(*nf);
-      if (accept(Tk::equal)) {
-        auto t = type_id();
-        if (!t) {
-          ok = false;
-          return std::nullopt;
-        }
-        p.has_default = 1;
-        p.default_ = {ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none};
+      if (accept(Tk::equal) && !template_type_default(p)) {
+        ok = false;
+        return std::nullopt;
       }
       return p;
     }
@@ -2629,14 +2646,9 @@ public:
       }
       p.kind = ast::TemplateArgKind::type;
       p.type = s_->types().template_param(depth, index);
-      if (accept(Tk::equal)) {
-        auto t = type_id();
-        if (!t) {
-          ok = false;
-          return std::nullopt;
-        }
-        p.has_default = 1;
-        p.default_ = {ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none};
+      if (accept(Tk::equal) && !template_type_default(p)) {
+        ok = false;
+        return std::nullopt;
       }
       return p;
     }
@@ -2790,8 +2802,9 @@ public:
   // A type-id ([dcl.name]): a type-specifier-seq and an optional abstract declarator.
   // A placeholder is allowed only where `placeholder_ok` says (a trailing return type,
   // [dcl.spec.auto.general]/3): not in a template argument, a cast or an alias ([dcl.spec.auto.general]/6).
-  std::optional<QualType> type_id(bool placeholder_ok = false) {
+  std::optional<QualType> type_id(bool placeholder_ok = false, bool retain_alias_checks = false) {
     const VariableTemplateInitializerScope initializer(*this, false);
+    const TypeAliasCheckScope aliases{*this, retain_alias_checks};
     DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
     if (!spec.ok) return std::nullopt;
     Declarator d = declarator(spec.type, true);
@@ -2804,6 +2817,11 @@ public:
       s_->diag(spec.begin, Diag::auto_not_allowed);
       return std::nullopt;
     }
+    // Keep alias checks on the finished type so a nondependent alias still participates in
+    // parsing and lookup through the type it denotes. A nested type-id inside a pack expansion
+    // retains its own checks in the expansion pattern.
+    for (const auto& [entity, args] : aliases.checks | std::views::reverse)
+      d.type = s_->types().deferred_alias(entity, args, d.type);
     return d.type;
   }
 
@@ -2957,7 +2975,8 @@ public:
             ok = false;
           }
         } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
-          auto t = type_id();
+          auto t = type_id(/*placeholder_ok=*/false,
+                           /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
@@ -3339,6 +3358,11 @@ public:
       u32 before = i_;
       bool failed = false;
       if (is(Tk::kw_typename)) {  // a type-requirement
+        // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
+        if (kind(1) == Tk::identifier && !qualified_ahead(1)) {
+          const u32 end = kind(2) == Tk::less ? past_template_args(2) : 2;
+          if (kind(end) == Tk::semi) bump();
+        }
         auto t = type_id();
         if (t && s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
@@ -4712,9 +4736,10 @@ public:
       // target type of a functional conversion.
       const auto diags = s_->diag_count();
       if (auto tmpl = s_->namespace_expression_type_template(*s->ns, n, name_at)) {
+        const u32 ranks = deferred_rank_checks_;
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        auto type = type_template_id(*tmpl, *args, name_at);
+        auto type = type_template_id(*tmpl, *args, name_at, deferred_rank_checks_ != ranks);
         if (!type) return {NodeId::none, begin, pos()};
         return type_conversion(*type, begin);
       }
@@ -4726,9 +4751,10 @@ public:
       bool dependent = false;
       if (auto tmpl = s_->member_template_scope(*s, n, keyword, dependent)) {
         s_->member_template_access(*s->type, tmpl->entity, n, name_at);
+        const u32 ranks = deferred_rank_checks_;
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        auto type = type_template_id(*tmpl, *args, name_at);
+        auto type = type_template_id(*tmpl, *args, name_at, deferred_rank_checks_ != ranks);
         if (!type) return {NodeId::none, begin, pos()};
         return type_conversion(*type, begin);
       }
@@ -6728,6 +6754,8 @@ private:
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
   u32 deferred_rank_checks_ = 0;
+  using TypeAliasChecks = std::vector<std::pair<ast::EntityId, std::vector<ast::TemplateArg>>>;
+  TypeAliasChecks* type_alias_checks_ = nullptr;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   struct VariableTemplateInitializerScope {
@@ -6743,6 +6771,15 @@ public:
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
+  struct TypeAliasCheckScope {
+    Parser& parser;
+    TypeAliasChecks checks;
+    TypeAliasChecks* saved = parser.type_alias_checks_;
+    TypeAliasCheckScope(Parser& parser, bool collect_here) : parser(parser) {
+      if (collect_here) parser.type_alias_checks_ = &checks;
+    }
+    ~TypeAliasCheckScope() { parser.type_alias_checks_ = saved; }
+  };
   struct TemplateIdLookahead {
     Parser& parser;
     bool saved;
