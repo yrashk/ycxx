@@ -268,10 +268,11 @@ void quote(std::string& out, std::string_view text) {
 
 void append_value(std::string& out, const Value& value);
 
-void append_record(std::string& out, const Record& fields, bool rule_arguments = false) {
+void append_record(std::string& out, const Record& fields,
+                   std::initializer_list<std::string_view> omitted = {}) {
   out += '{';
   for (const auto& [key, value] : fields) {
-    if (rule_arguments && (key == "reads" || key == "capabilities")) continue;
+    if (std::ranges::contains(omitted, key)) continue;
     out += ' ';
     quote(out, key);
     out += " = ";
@@ -326,12 +327,21 @@ void append_value(std::string& out, const Value& value) {
   }, value.data);
 }
 
+bool has_probe_bindings(const Value& value) {
+  const auto* record = std::get_if<Record>(&value.data);
+  return record && std::ranges::any_of(*record, [](const auto& binding) {
+    return std::holds_alternative<ProbeRef>(binding.second.data);
+  });
+}
+
 RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const RulePackageRef& package) {
   RuleDemand demand{decl.name, std::string(rule), package, {}, {}, {}};
-  if (package.kind == RulePackageRef::Kind::capabilities && rule == "header") {
+  const bool capability_header = package.kind == RulePackageRef::Kind::capabilities && rule == "header";
+  if (capability_header) {
     for (const auto name : {"namespace", "filename"})
       if (const auto* value = field(decl, name); value && !std::holds_alternative<std::string>(value->data))
         fail(value->location, std::format("expected a string for capability header field '{}'", name));
+    (void)require_field(decl, "capabilities");
   }
   for (const auto& [name, value] : decl.fields) {
     if (name == "reads") {
@@ -342,7 +352,7 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
         if (!paths.insert(spelling).second) fail(entry.location, "duplicate rule read path");
         demand.reads.push_back(spelling);
       }
-    } else if (name == "capabilities") {
+    } else if (name == "capabilities" && (capability_header || has_probe_bindings(value))) {
       const auto& bindings = as<Record>(value, "a record of named capability bindings");
       if (bindings.empty()) fail(value.location, "rule capabilities record is empty");
       for (const auto& [binding, entry] : bindings) {
@@ -358,7 +368,8 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
     }
   }
   std::ranges::sort(demand.capabilities, {}, &RuleCapabilityBinding::name);
-  append_record(demand.definition, decl.fields, true);
+  if (demand.capabilities.empty()) append_record(demand.definition, decl.fields, {"reads"});
+  else append_record(demand.definition, decl.fields, {"reads", "capabilities"});
   return demand;
 }
 
@@ -595,9 +606,10 @@ class Planner {
     }
     const auto& lowered = primitives_.emplace(decl.name, primitive(decl, *expansion)).first->second;
     if (inspection_ && !expansion->capability_facts.empty()) {
-      const auto* bindings = field(decl, "capabilities");
+      const auto* value = field(decl, "capabilities");
+      const auto* bindings = value ? std::get_if<Record>(&value->data) : nullptr;
       for (const auto& observation : expansion->capability_facts) {
-        const auto* binding = bindings ? field(std::get<Record>(bindings->data), observation.name) : nullptr;
+        const auto* binding = bindings ? field(*bindings, observation.name) : nullptr;
         fact(observation.kind, decl, observation.name, observation.value, observation.origin,
              binding ? binding->location : decl.location);
       }
