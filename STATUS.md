@@ -978,6 +978,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- Static x86-64 ELF links validate the canonical GNU property note for `FEATURE_1_AND` with
+  IBT and SHSTK bits. The linker intersects the masks of ordinary objects and selected archive
+  members, treating an unmarked object as zero. A zero intersection produces an executable
+  without a GNU property note or segment. A nonzero intersection is diagnosed.
+  [#1367](https://github.com/yrashk/ycxx/issues/1367) · [#1376](https://github.com/yrashk/ycxx/issues/1376)
 - An arm64 macOS link can include explicit Darwin `.a` operands (BSD `#1/<n>` names and a
   `__.SYMDEF`, `__.SYMDEF SORTED` or `_64` ranlib index first), with the system linker's
   selection rules: every ordinary object comes first, an archive serves names referenced

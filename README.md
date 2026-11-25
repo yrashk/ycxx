@@ -236,6 +236,10 @@ Resident links reread explicit archives on each request.
 [#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
 [#951](https://github.com/yrashk/ycxx/issues/951)
 
+Static x86-64 ELF links accept supported objects and selected archive members with GNU IBT and
+SHSTK properties when the inputs have no such feature in common.
+[#1367](https://github.com/yrashk/ycxx/issues/1367)
+
 For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
 `__PIC__` and `__pic__` as `2`, and `-fpic` defines them as `1`. arm64 Darwin code is always
 position independent: both are always `2`, and the PIC options change nothing, as with Clang.
