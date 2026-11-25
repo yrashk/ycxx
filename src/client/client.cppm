@@ -729,11 +729,13 @@ int cxx(std::span<const std::string_view> args) {
 
 // Project builds use the resident session so action and compiler results survive requests.
 int build(std::span<const std::string_view> args) {
-  constexpr std::string_view usage = "usage: ycxx build <target> [--watch] [--trace-engine=stream|interactive|json]";
+  constexpr std::string_view usage = "usage: ycxx build <target> [--watch] [--probe-toolchain]"
+                                     " [--trace-engine=stream|interactive|json]";
   std::string target;
   std::optional<TraceMode> requested_trace;
   std::string invalid;
   bool watch = false;
+  bool probe_toolchain = false;
   for (std::string_view arg : args) {
     if (arg == "--help") {
       std::println("{}", usage);
@@ -741,6 +743,7 @@ int build(std::span<const std::string_view> args) {
     }
     if (auto mode = trace_mode_named(arg)) requested_trace = *mode;
     else if (arg == "--watch") watch = true;
+    else if (arg == "--probe-toolchain") probe_toolchain = true;
     else if (!arg.empty() && !arg.starts_with('-') && target.empty()) target = arg;
     else if (invalid.empty()) invalid = std::format("unexpected argument '{}'\n{}", arg, usage);
   }
@@ -755,12 +758,12 @@ int build(std::span<const std::string_view> args) {
 
   daemon::ProjectBuildRequest request{.cwd = cwd_now(), .target = std::move(target),
                                       .trace = mode != TraceMode::off,
-                                      .trace_values = mode == TraceMode::interactive || mode == TraceMode::json};
+                                      .trace_values = mode == TraceMode::interactive || mode == TraceMode::json,
+                                      .watch = watch, .probe_toolchain = probe_toolchain};
   if (const char* path = std::getenv("PATH")) request.tool_path = path;
   if (request.cwd.empty()) return fail("cannot determine the working directory", 1);
   const std::string root = daemon::root_for(std::nullopt, request.cwd);
   if (watch) {
-    request.watch = true;
     return watch_builds(root, mode, [&](const WatchRun& run) -> std::expected<WatchAnswer, std::string> {
       request.trace_live = run.browsing;
       auto d = request_daemon<daemon::ProjectBuildDone>(
