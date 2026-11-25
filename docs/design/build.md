@@ -378,6 +378,21 @@ its provenance while preserving its dependencies. Schema 1 retains `facts` and
 still work. The module-provider example joins these records to compare both
 target variants. [Module-provider example](../../examples/project-build/module-providers/README.md)
 
+### Module graph in HTML (#1378)
+
+`ycxx show app --format=html > plan.html` renders the same optional graph as a
+**Module graph** section in the standalone report. Each configured translation
+unit has a panel for its declarations and imports, with physical source
+locations and import statuses. Candidate links jump to the exact declarations
+in the report. Incomplete scan notes identify the affected units. Conflicts
+link to their candidate declarations and each cyclic component links to its units.
+
+With `--against`, **Plan changes** compares the saved snapshot's semantic
+facts with the current plan. **Module graph** follows that comparison and shows
+the current plan's graph. A resolved plan with a supported native configuration
+and zero C++ translation units shows an empty graph. The section is omitted
+while rule expansion is unresolved or when no native configuration is available.
+
 ## Native rule packages (#1257)
 
 A package owns its definition and exports a host rule plugin target. A workspace
