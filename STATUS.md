@@ -3325,12 +3325,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **`decltype(e)::`** as a nested-name-specifier ([expr.prim.id.qual]): `decltype_qualifier_ahead`
   and `qualified_type_ahead` in the parser. It names a type after `typename`, as a type-specifier,
   a parameter, a template argument or a base; in a statement, a member of a dependent one is a type
-  only after `typename` ([temp.res.general]). An alias template whose type has such an operand with
+  only after `typename` ([temp.res.general]). A namespace-scope alias template whose type has such an operand with
   no representation (`typename decltype(select<T>())::type`, with a deduced return type) is read
   again when it is named with known arguments (`AliasCallPattern::unrepresented`). A class
   template's member declaration can call an earlier static member of the class, also with
   explicit template arguments: a deduced return type comes from the member's instantiation, made
-  while the class is instantiated (`members_so_far`). Namespace-scope function template signatures,
+  while the class is instantiated (`members_so_far`). That body cannot name a member declared
+  later (a later member type should be found, #1287). Member alias templates (#1285) and a
+  decltype-specifier as a mem-initializer-id (#1286) are missing. Namespace-scope function template signatures,
   variable template types and default arguments with an unrepresented operand stay dependent (#1269).
   Tests: `tests/own/templates/decltype-*`, `tests/own/inherit/decltype-base*` (#1243).
 - **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a

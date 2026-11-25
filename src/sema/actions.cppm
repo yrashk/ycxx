@@ -11951,7 +11951,11 @@ public:
       if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(selected));
       // [temp.inst]: a known return type suffices for unevaluated calls to ordinary templates.
       // Keep the existing body demand for constant-evaluation candidates and placeholder returns.
-      if (k.pattern &&
+      // A member of the current instantiation has no instantiation of its own: each specialization
+      // of its class names its own ([temp.inst]).
+      const EntityId owner = (d.flags & decl_flag::member) ? w_->entities.rec(d.entity).scope : EntityId::none;
+      const bool unbound = in_pattern() && owner != EntityId::none && types().is_dependent(types().class_type(owner));
+      if (k.pattern && !unbound &&
           (!unevaluated || (d.flags & (decl_flag::member | decl_flag::constexpr_ | decl_flag::consteval_)) ||
            types().has_placeholder(types().rec(selected_type).inner)))
         demands.push_back({selected, ast::Loc{item_, loc_base_ + callee.begin}});

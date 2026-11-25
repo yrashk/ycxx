@@ -666,6 +666,10 @@ public:
         return true;
       }
       if (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures) d.ok = false;
+      if (!d.ok && decltype_qualifier_ahead()) {  // past `decltype(e)::n`, which was diagnosed
+        for (u32 j = past_parentheses(1); j != 0; --j) bump();
+        while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
+      }
       return false;
     };
     for (;;) {

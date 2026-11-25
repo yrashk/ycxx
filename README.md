@@ -642,7 +642,8 @@ written default member initializer are value-initialized.
   bases of explicit specializations.
   [#308](https://github.com/yrashk/ycxx/issues/308) · [#1134](https://github.com/yrashk/ycxx/issues/1134)
 - `decltype(e)::` before a member type or a member, dependent or not
-  (`typename decltype(pick<Ts...>())::type`), in class members, function bodies and alias templates.
+  (`typename decltype(pick<Ts...>())::type`), in class members, function bodies and
+  namespace-scope alias templates.
   [#1243](https://github.com/yrashk/ycxx/issues/1243)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too. Ordinary block variables with an

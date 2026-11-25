@@ -2,7 +2,7 @@
 // a decltype operand: the member's deduced return type is its own instantiation's, made while the
 // class is instantiated ([dcl.spec.auto.general]/11, [temp.inst], [class.member.lookup]). (#1243)
 // EXIT: 0
-template <class T> struct ti { using type = T; };
+template <class T> struct ti { using type = T; int m = 0; };  // not empty: x86-64 returns no empty class yet (#641)
 
 template <class T> struct Own {
   static auto pick(int) { return ti<T>{}; }
@@ -43,6 +43,17 @@ template <class T> struct Partial<T, int> {
   type m = 3;
 };
 
+// Nondependent explicit arguments in the class template's definition.
+template <class T> struct Counted {
+  template <int N> static constexpr auto down() {
+    if constexpr (N == 0) return ti<T>{};
+    else return down<N - 1>();
+  }
+  template <int N> static auto value() { return T(); }
+  using type = typename decltype(down<2>())::type;
+  using direct = decltype(value<2>());
+};
+
 // An overload set of an ordinary class being defined.
 struct Plain {
   static long f(long);
@@ -56,6 +67,7 @@ static_assert(same<X::a, short> && same<X::b, short*> && same<X::c, short> && sa
 static_assert(same<X::e, long> && same<X::f, decltype(sizeof 0)> && same<X::g, short>);
 static_assert(same<Largest<char, long, int>::type, long> && same<Largest<char>::type, char>);
 static_assert(same<Partial<char, int>::type, long> && same<Partial<short, int>::type, short>);
+static_assert(same<Counted<char>::type, char> && same<Counted<char>::direct, char>);
 static_assert(same<Plain::type, long>);
 // A constraint on such a member.
 template <class T> constexpr auto select() {
@@ -65,4 +77,4 @@ template <class T> constexpr auto select() {
 template <class T> concept has_type = requires { typename decltype(select<T>())::type; };
 static_assert(has_type<int> && !has_type<char>);
 
-int main() { return Own<long>::sum() + int(Partial<char, int>{}.m) - int(sizeof(long)) - 4; }
+int main() { return Own<long>::sum() + int(Partial<char, int>{}.m) - int(sizeof(long)) - 7; }

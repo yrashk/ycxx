@@ -1961,7 +1961,9 @@ private:
   // ([class.mem.general]/8), so not while its class's members are being declared.
   bool member_body_ready(u32 definition) const {
     const u32 parent = items_->items[definition].parent;
-    return parent == items::none || items_->items[parent].kind != ItemKind::class_def ||
+    if (parent == items::none || items_->items[parent].kind != ItemKind::class_def) return true;
+    const auto cls = class_entities_.find(parent);
+    return (cls != class_entities_.end() && classes_.is_defined(cls->second)) ||
            !std::ranges::contains(running_, class_def_key(parent));
   }
   struct DestructorDeclaration {
@@ -2446,11 +2448,21 @@ public:
       return items[m].kind != ItemKind::access_spec && !p_->class_member_cells_.contains(std::pair(m, std::to_underlying(spec)));
     });
     const u32 limit = pending == items[pattern].members.end() ? items::none : *pending;
+    // A later member of that name is part of the lookup set or hides what encloses the class: the
+    // body cannot be instantiated yet.
+    const auto spelling = p_->world().ins.names.spelling(name);
+    if (std::ranges::any_of(pending, items[pattern].members.end(), [&](u32 m) {
+          return std::ranges::any_of(items[m].names, [&](const items::DeclName& n) {
+            return n.name == spelling && !(n.flags & items::name_flag::friend_);
+          });
+        }))
+      named_pending_member = true;
     const EntityId saved = std::exchange(instantiating, spec);
     auto found = members_before(pattern, limit, spec, name, type_only, functions);
     instantiating = saved;
     return found;
   }
+  bool named_pending_member = false;
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
   std::optional<u32> declaration_lookup_end;
@@ -10732,6 +10744,8 @@ public:
     bool templated = function_template || !p_->enclosing_heads(k_).empty();
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
+    if (at_->named_pending_member && !s_.has_error_since(0))
+      s_.diag(0, sema::Diag::incomplete_type, s_.types().class_type(s_.current_class));
     const bool keeps = templated && !inst_;
     // A body with generic lambdas keeps its expansions too: their specializations expand them.
     const bool keep_expansions = keeps || s_.has_generic_lambdas();
@@ -12495,6 +12509,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
     body_item = *out;
   }
   const u32 k = member != member_patterns_.end() ? body_item : outside ? *outside : def->second;
+  if (!member_body_ready(k)) return nullptr;
   // [temp.inst]/16: instantiations nested through constant evaluation are limited as the END
   // worklist's are; the limit is reported once, at the template.
   if (too_deep(instantiating_.size(), k)) return nullptr;
@@ -12906,7 +12921,8 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   }
   ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return c;
+  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second) || !member_body_ready(def->second))
+    return c;
   if (specialized_destructor && def->second < explicit_specs_.at(key)) return c;
   u32 k = def->second;
   if (!irs_.contains(k)) {
