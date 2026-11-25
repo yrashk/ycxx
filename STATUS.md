@@ -3199,8 +3199,12 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   definition checks annotated forwards, natural member and base alignment, and layout attributes
   whose effect is unresolved. Both layout consumers apply the validated value to object size,
   array stride, containing records and storage. Darwin diagnoses by-value use when the class or
-  a contained value has strengthened alignment. Variable and member alignment, wider requests,
-  and further ABI cases remain in [#303](https://github.com/yrashk/ycxx/issues/303).
+  a contained value has strengthened alignment.
+- A leading `alignas` on a non-static object member accepts requests up to 16 bytes, including
+  dependent operands replayed with the class's template arguments. An alignment request applies
+  to the field offset and containing record without changing the field's type or array bound.
+  Other placements, packs, wider requests and further ABI cases remain in
+  [#303](https://github.com/yrashk/ycxx/issues/303).
 - Tests: `tests/own/classes/s7-sizeof-class.accept.cpp` (padding, nesting, arrays, unions,
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees

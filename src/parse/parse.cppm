@@ -1768,8 +1768,10 @@ public:
   // What analysis reached, without analysing more (#170): an item's semantics and its body, if
   // analysed.
   const ast::ItemSema* analysed_item(u32 k) const { return item_cells_[k] ? &item_cells_[k]->value : nullptr; }
-  std::span<const std::pair<u32, u32>> class_alignment_specifiers(u32 item) const {
-    auto found = class_alignments_.find(item);
+  std::span<const std::pair<u32, u32>> applied_alignment_specifiers(u32 item) const {
+    if (const auto field = field_alignment_specifiers_.find(item); field != field_alignment_specifiers_.end())
+      return field->second;
+    const auto found = class_alignments_.find(item);
     if (found == class_alignments_.end()) return {};
     return found->second.specifiers;
   }
@@ -1839,9 +1841,11 @@ private:
     u32 at = 0;    // in the item, for diagnostics
     u64 natural = 0;  // once the definition's natural alignment has been computed
     std::vector<std::pair<u32, u32>> specifiers;  // the applied ranges in the region
+    bool dependent = false;  // a member's alignment is checked again when its class is instantiated
     u64 effective(u64 natural_alignment) const { return value ? value : natural_alignment; }
   };
   std::map<u32, ClassAlignment> class_alignments_;
+  std::map<u32, std::vector<std::pair<u32, u32>>> field_alignment_specifiers_;
   void validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record, std::vector<engine::Diagnostic>& diags);
   bool has_unapplied_class_layout(u32 item, const ClassContent& content) const;
   bool in_attributed_namespace(u32 item) const;
@@ -2197,7 +2201,7 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
     // The attributes immediately after the type's closing brace can still apply to
     // the type. Those within a following declarator apply to the declared name.
     // An alias can also carry such an attribute, into a declaration or an enum-base.
-    bool type_annotated = record_layout_attribute(region, item, class_alignment_specifiers(k)) ||
+    bool type_annotated = record_layout_attribute(region, item, applied_alignment_specifiers(k)) ||
                           (!definition && uncertain_alias(item, enum_definition ? item.brace_begin : item.end));
     bool annotated = type_annotated ||
         ((definition || enum_definition) && layout_attribute(region, item.brace_end, item.end));
@@ -4647,7 +4651,7 @@ private:
   }
 
   // [dcl.align]: evaluate every specifier, even when another is stricter.
-  std::optional<Program::ClassAlignment> read_class_alignment(std::vector<ast::AnnotationSema>& annotations) {
+  std::optional<Program::ClassAlignment> read_alignment(std::vector<ast::AnnotationSema>& annotations, bool field = false) {
     sema::Sema::ImmediateReferenceScope references(s_, /*allowed=*/true);
     sema::Sema::ClassAlignmentOperand operand_context(s_);
     Program::ClassAlignment alignment;
@@ -4662,7 +4666,7 @@ private:
       if (ps_.starts_type_id()) type = ps_.type_id();
       Ex e;
       if (type && (ps_.is(Tk::r_paren) || ps_.is(Tk::ellipsis))) {
-        if (ps_.is(Tk::ellipsis) || s_.types().is_dependent(*type)) {
+        if (ps_.is(Tk::ellipsis) || (!field && s_.types().is_dependent(*type))) {
           s_.diag(at, Diag::not_supported, Tk::kw_alignas);
           return std::nullopt;
         }
@@ -4682,27 +4686,31 @@ private:
         return std::nullopt;
       }
       if (!ps_.expect(Tk::r_paren)) return std::nullopt;
+      alignment.specifiers.push_back({begin, ps_.index()});
+      ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
+      if (field && s_.dependent(e)) {
+        alignment.dependent = true;
+        continue;
+      }
       const auto value = s_.types().is_integral(e.type()) ? sema::Evaluator(s_, q_).evaluate(e).value : std::nullopt;
       if (!value || !s_.ins().values.is<ast::VInt>(*value)) {
-        s_.diag(at, Diag::class_alignment_not_constant);
+        s_.diag(at, field ? Diag::field_alignment_not_constant : Diag::class_alignment_not_constant);
         return std::nullopt;
       }
       const auto bits = s_.ins().values.get<ast::VInt>(*value).bits;
       if (bits.hi != 0 || (bits.lo != 0 && !std::has_single_bit(bits.lo))) {
-        s_.diag(at, Diag::class_alignment_invalid);
+        s_.diag(at, field ? Diag::field_alignment_invalid : Diag::class_alignment_invalid);
         return std::nullopt;
       }
       // The native frame layouts on both targets support object alignment up to 16 bytes.
       if (bits.lo > 16) {
-        s_.diag(at, Diag::class_alignment_unsupported);
+        s_.diag(at, field ? Diag::field_alignment_unsupported : Diag::class_alignment_unsupported);
         return std::nullopt;
       }
       if (bits.lo > alignment.value) {
         alignment.value = u8(bits.lo);
         alignment.at = at;
       }
-      alignment.specifiers.push_back({begin, ps_.index()});
-      ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     return alignment;
   }
@@ -4714,7 +4722,7 @@ private:
     ps_.bump();
     std::vector<ast::AnnotationSema> annotations;
     ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
-    auto alignment = read_class_alignment(annotations);
+    auto alignment = read_alignment(annotations);
     if (!alignment) return bad();
     if (!ps_.is(Tk::identifier) || (ps_.kind(1) != Tk::semi && ps_.kind(1) != Tk::eof)) {
       s_.diag(alignment->at, Diag::attributes_not_allowed);
@@ -4812,7 +4820,7 @@ private:
         s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_alignas);
         return bad();
       }
-      alignment = read_class_alignment(annotations);
+      alignment = read_alignment(annotations);
       if (!alignment) return bad();
       if (!ps_.is(Tk::identifier) || ps_.kind(1) == Tk::coloncolon || ps_.kind(1) == Tk::less) {
         s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
@@ -5779,6 +5787,11 @@ private:
         return bad();
       }
     }
+    std::optional<Program::ClassAlignment> alignment;
+    if (ps_.is(Tk::kw_alignas)) {
+      alignment = read_alignment(annotations, /*field=*/true);
+      if (!alignment) return bad();
+    }
     if (!ps_.conversion_id_ahead() && !Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
                              ? Diag::not_supported
@@ -5851,6 +5864,10 @@ private:
     }
     // A member typedef ([class.mem], [dcl.typedef]): each declarator a type nested in the class.
     if (spec.is_typedef) {
+      if (alignment) {
+        s_.diag(alignment->at, Diag::attributes_not_allowed);
+        return bad();
+      }
       if (spec.mutable_at) {
         s_.diag(*spec.mutable_at, Diag::mutable_placement);
         return bad();
@@ -5863,14 +5880,18 @@ private:
       else bad();
       return;
     }
-    member_declarators(spec, c);
+    member_declarators(spec, c, /*fields_only=*/false, alignment);
     commit_introduction();
   }
 
-  void member_declarators(const DeclSpec& spec, const ast::DeclSema& c, bool fields_only = false) {
+  void member_declarators(const DeclSpec& spec, const ast::DeclSema& c, bool fields_only = false,
+                          const std::optional<Program::ClassAlignment>& alignment = std::nullopt) {
     sema::Types& types = s_.types();
+    const std::span<const std::pair<u32, u32>> applied = alignment ? std::span(alignment->specifiers)
+                                                                  : std::span<const std::pair<u32, u32>>{};
+    if (alignment) p_->field_alignment_specifiers_.try_emplace(k_, alignment->specifiers);
     const bool shared_overlap = layout_attribute(p_->region(), it_->begin, ps_.index(),
-                                                 LayoutAttributes::leading_affecting_layout, {}, "no_unique_address");
+                                                 LayoutAttributes::leading_affecting_layout, applied, "no_unique_address");
     do {
       bool conversion = ps_.conversion_id_ahead();
       if (conversion && spec.has_type) {
@@ -5917,6 +5938,14 @@ private:
         return bad();
       }
       const bool function = types.is_function(d.type);
+      if (alignment && (function || ps_.is(Tk::colon))) {
+        s_.diag(alignment->at, Diag::attributes_not_allowed);
+        return bad();
+      }
+      if (alignment && (spec.is_static || types.is_reference(d.type))) {
+        s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
+        return bad();
+      }
       if (fields_only && (function || spec.is_static)) {
         s_.diag(d.name_at, Diag::not_supported, Tk::kw_enum);
         return bad();
@@ -6030,6 +6059,19 @@ private:
       }
       if (!s_.require_complete(d.type, d.name_at)) return bad();
       if (!s_.require_concrete_object(d.type, d.name_at)) return bad();
+      u8 field_alignment = 0;
+      if (alignment && alignment->value && !alignment->dependent && !types.is_dependent(d.type)) {
+        const auto natural = s_.layout_of(d.type, /*align=*/true);
+        if (!natural) {
+          s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
+          return bad();
+        }
+        if (alignment->value < *natural) {
+          s_.diag(alignment->at, Diag::field_alignment_weak);
+          return bad();
+        }
+        if (alignment->value > *natural) field_alignment = alignment->value;
+      }
       if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
         s_.diag(d.name_at, Diag::redeclared_member, d.name);
@@ -6039,6 +6081,7 @@ private:
       sem.kind = ast::DeclKind::data_member;
       sem.type = d.type;
       sem.bit_width = bit_width;
+      sem.field_alignment = field_alignment;
       sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
@@ -9227,14 +9270,16 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member) {
         if (inspect_field_layout) {
-          out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end);
+          out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end, LayoutAttributes::affecting_layout,
+                                                        applied_alignment_specifiers(m));
           inspect_field_layout = false;
         }
         const bool no_unique_address = std::ranges::any_of(w_->ins.seqs.elements(d.attributes), [&](NodeId attr) {
           return w_->ins.names.spelling(w_->ins.ast.get<ast::Attribute>(attr).name) == "no_unique_address";
         });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address});
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address,
+                        d.field_alignment});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
@@ -9355,7 +9400,7 @@ EntityId Program::peer_automatic_primary_base(u32 item, EntityId cls, const sema
     const auto& head = items_->items[index];
     const auto& owner = w_->entities.rec(entity);
     return sema::native_virtual_class(record) && record.destructor_usable && !record.default_deleted &&
-           !record.union_ && !record.closure && !record.unapplied_layout && !record.explicit_alignment &&
+           !record.union_ && !record.closure && !record.unapplied_layout && !record.has_explicit_alignment() &&
            record.types.empty() && record.friends.empty() && owner.linkage == ast::Linkage::external &&
            owner.templ == EntityId::none && is_namespace(owner.scope) && !unnamed(namespace_path(owner.scope)) &&
            !head.template_depth && !head.specialization && !in_class(index) &&
@@ -9421,7 +9466,7 @@ EntityId Program::peer_automatic_primary_base(u32 item, EntityId cls, const sema
 bool Program::has_unapplied_class_layout(u32 item, const ClassContent& content) const {
   const auto& source = items_->items[item];
   return content.unapplied_field_layout || layout_may_be_packed(*r_, source.begin, source.brace_end) ||
-         record_layout_attribute(*r_, source, class_alignment_specifiers(item));
+         record_layout_attribute(*r_, source, applied_alignment_specifiers(item));
 }
 
 // A namespace attribute can set visibility on otherwise unannotated declarations.
@@ -9444,7 +9489,7 @@ bool Program::plain_class_template_type(EntityId cls) const {
     const bool definition = item.kind == ItemKind::class_def;
     return in_attributed_namespace(index) ||
            layout_attribute(*r_, item.begin, definition ? item.brace_begin : item.end,
-                            LayoutAttributes::any, class_alignment_specifiers(index)) ||
+                            LayoutAttributes::any, applied_alignment_specifiers(index)) ||
            (definition && layout_attribute(*r_, item.brace_end, item.end, LayoutAttributes::any));
   };
   for (EntityId e = cls; e != EntityId::none && !is_namespace(e); e = w_->entities.rec(e).scope) {
@@ -9468,7 +9513,7 @@ bool Program::plain_class_template_function(EntityId pattern, u32 definition) co
     for (u32 parent = item.parent; parent != items::none; parent = all[parent].parent)
       if (all[parent].kind == ItemKind::class_def &&
           layout_attribute(*r_, all[parent].begin, all[parent].brace_begin,
-                           LayoutAttributes::any, class_alignment_specifiers(parent)))
+                           LayoutAttributes::any, applied_alignment_specifiers(parent)))
         return true;
     return false;
   };
@@ -9569,7 +9614,7 @@ Program::TypedCastRtti Program::peer_typed_dynamic_cast(EntityId source, EntityI
 
   const auto peer_owned = [&](EntityId cls, const sema::ClassRec& record, EntityId key) {
     const auto& owner = w_->entities.rec(cls);
-    if (!record.defined || record.explicit_alignment || class_layout_uncertain(cls, record, end()) ||
+    if (!record.defined || record.has_explicit_alignment() || class_layout_uncertain(cls, record, end()) ||
         owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
         !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
         w_->ins.names.spelling(owner.name).empty() || !peer_root_vtable_visible(cls) || !asm_label(key).empty())
@@ -10031,7 +10076,7 @@ std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destru
     const auto definition = class_items_.find(std::to_underlying(owner));
     if (!record.defined || record.is_final || record.union_ || record.closure || record.is_abstract() ||
         !record.virtual_destructor || !record.destructor_usable || !record.destructor_noexcept.value_or(false) ||
-        record.explicit_alignment || record.unapplied_layout || !record.types.empty() || !record.friends.empty() ||
+        record.has_explicit_alignment() || record.unapplied_layout || !record.types.empty() || !record.friends.empty() ||
         entity.linkage != ast::Linkage::external || entity.templ != EntityId::none || !is_namespace(entity.scope) ||
         unnamed(namespace_path(entity.scope)) || w_->ins.names.spelling(entity.name).empty() ||
         definition == class_items_.end() || !peer_root_vtable_visible(owner)) return nullptr;
@@ -10247,7 +10292,7 @@ bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record,
     return found != decls_.end() && std::ranges::any_of(found->second, [&](const auto& declared) {
       const u32 item = declared.first;
       return item < point && !(declared.second.flags & sema::decl_flag::definition) &&
-             record_layout_attribute(*r_, items_->items[item], class_alignment_specifiers(item));
+             record_layout_attribute(*r_, items_->items[item], applied_alignment_specifiers(item));
     });
   };
   auto uncertain = [&](this auto&& visit, EntityId c, const sema::ClassRec& rec) -> bool {

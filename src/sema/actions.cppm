@@ -2621,7 +2621,7 @@ public:
       if (same != true) return same;
       const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
       if (!fa || !ga) return std::nullopt;
-      if (*fa != *ga) return false;
+      if (std::max(*fa, u64(f.explicit_alignment)) != std::max(*ga, u64(g.explicit_alignment))) return false;
     }
     return true;
   }
@@ -9724,7 +9724,7 @@ public:
     // establishes no other object layout or virtual emission support.
     const auto& entity = w_->entities.rec(cls);
     if (w_->target.triple != ast::x86_64_linux.triple || entity.linkage != ast::Linkage::external ||
-        record->explicit_alignment || q_->class_layout_uncertain(cls) ||
+        record->has_explicit_alignment() || q_->class_layout_uncertain(cls) ||
         (record->peer_virtual_layout != PeerVirtualLayout::root && !q_->peer_pure_dispatch(cls))) {
       diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
       return fail;
@@ -10352,6 +10352,7 @@ public:
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
+      m->align = std::max(m->align, u64(f.explicit_alignment));
       places.push_back(*m);
     }
     const bool dynamic_root = c.dynamic && !c.dynamic->primary_base;
@@ -12046,7 +12047,7 @@ public:
 
     const auto* record = class_rec(cls);
     if (!record || !record->member_declarations_valid || record->union_ || record->closure ||
-        record->layout_requires_virtual_support || record->explicit_alignment || record->unapplied_layout ||
+        record->layout_requires_virtual_support || record->has_explicit_alignment() || record->unapplied_layout ||
         !record->bases.empty() || record->fields.size() != 1 || record->user_ctors ||
         record->destructor_declaration() != EntityId::none || !record->destructor_usable) return false;
     // [except.throw]: construction from const T& in an unrelated context must also work.

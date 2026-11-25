@@ -1494,7 +1494,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     // Native layout does not apply every alignment attribute sema erases (#309, #999).
     for (EntityId c = entity.scope; c != EntityId::none;) {
       const auto& record = classes.rec(c);
-      if (uncertain_layouts.contains(c) || record.explicit_alignment) {
+      if (uncertain_layouts.contains(c) || record.has_explicit_alignment()) {
         block_virtual_emission(tu, program, *owner);
         return false;
       }

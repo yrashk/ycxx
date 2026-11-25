@@ -730,6 +730,7 @@ struct FieldRec {
   u8 bit_width = 0;
   bool mutable_ = false;
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
+  u8 explicit_alignment = 0;
 };
 
 // Classification of a defaulted copy affected by an explicit in-class definition. Deletion
@@ -901,6 +902,9 @@ struct ClassRec {
   }
 
   TrivialCopyability trivial_copyability;
+  bool has_explicit_alignment() const {
+    return explicit_alignment || std::ranges::any_of(fields, [](const FieldRec& f) { return f.explicit_alignment != 0; });
+  }
   std::optional<bool> trivially_copyable() const {
     return defined ? trivial_copyability.result() : std::nullopt;
   }

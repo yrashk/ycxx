@@ -1477,7 +1477,7 @@ struct alignas(16) A { char c; };
 int main() { alignas(8) char b[3]; return (alignof(A) == 16 && sizeof(A) == 16 && sizeof b == 3) ? 0 : 1; }
 '''
 status = 'partial'
-note = 'concrete class-head requests up to 16 bytes on ordinary namespace-scope classes and structs, with their effect on layout and storage. Member and variable alignment remain open.'
+note = 'Ordinary namespace-scope class heads and leading non-static object-member alignments up to 16 bytes affect layout and storage. Dependent member requests are evaluated at class instantiation. Variable alignment and packs remain open.'
 issues = [303]
 
 [[feature]]
