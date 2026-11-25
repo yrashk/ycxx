@@ -1,0 +1,11 @@
+generate "target_header" {
+    tool = "/bin/sh"
+    args = [input("script"), target_triple(), input("score"), output("header")]
+    inputs = { script = "generate-header.sh", score = "score.txt" }
+    outputs = { header = "build_target.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("target_header", "header")]
+}

@@ -69,6 +69,18 @@ add_test(NAME daemon.project_build COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/p
 
 add_test(NAME daemon.project_build_watch COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_build_watch.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_targets
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_targets.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_action_target
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_action_target.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_link_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_link_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
+
+add_test(NAME daemon.project_foreign_make
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_foreign_make.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_runtime_assets
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_runtime_assets.py $<TARGET_FILE:ycxxc>)
 
@@ -89,6 +101,9 @@ add_test(NAME daemon.project_package_probe
 
 add_test(NAME daemon.project_shader_bundle
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_shader_bundle.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_generated_inventory
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_generated_inventory.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_shader_reflection
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_shader_reflection.py $<TARGET_FILE:ycxxc>)

@@ -31,6 +31,7 @@ struct RuleObservation {
   Fp128 invocation;
   std::vector<RuleProbeSnapshot> projections = {};
   std::optional<Fp128> witness = std::nullopt;
+  std::optional<Fp128> planning = std::nullopt;  // producer graph of the generated planning inputs
 };
 
 struct RuleSnapshot {
@@ -43,9 +44,11 @@ struct RuleSnapshot {
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
-// package inputs and declared reads before using the stored expansions.
-std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target);
-void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot);
+// package inputs, declared reads and planning inputs before using the stored expansions.
+std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
+                                              std::string_view native_triple = {});
+void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot,
+                         std::string_view native_triple = {});
 
 }  // namespace ycxx::build
 
@@ -70,12 +73,17 @@ Fd open_directory(int parent, const char* name, bool create) {
   return Fd(::openat(parent, name, directory_flags));
 }
 
-Fd snapshot_directory(const std::filesystem::path& cwd, bool create) {
+Fd snapshot_directory(const std::filesystem::path& cwd, std::string_view native_triple, bool create) {
   const Fd root(::open(cwd.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   if (!root) return Fd();
   const auto state = open_directory(root.value, ".ycxx", create);
   if (!state) return Fd();
-  return open_directory(state.value, "rules", create);
+  if (native_triple.empty()) return open_directory(state.value, "rules", create);
+  const auto targets = open_directory(state.value, "targets", create);
+  if (!targets) return Fd();
+  const auto target = open_directory(targets.value, std::string(native_triple).c_str(), create);
+  if (!target) return Fd();
+  return open_directory(target.value, "rules", create);
 }
 
 std::string hex(Fp128 fp) { return std::format("{:016x}{:016x}", fp.lo, fp.hi); }
@@ -174,6 +182,8 @@ struct StoredRule {
   std::optional<std::string> value_export = std::nullopt;
   std::optional<std::string> witness = std::nullopt;
   std::optional<std::vector<RuleFactReference>> facts = std::nullopt;
+  std::optional<std::vector<RulePlanInput>> plan_inputs = std::nullopt;
+  std::optional<std::string> planning = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -212,8 +222,9 @@ StoredProbe store_probe(const RuleProbeSnapshot& probe) {
 
 }  // namespace
 
-std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target) {
-  const auto dir = snapshot_directory(cwd, false);
+std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
+                                              std::string_view native_triple) {
+  const auto dir = snapshot_directory(cwd, native_triple, false);
   if (!dir) return std::nullopt;
   const auto name = entry_name(target);
   const auto text = read_text(dir.value, name.c_str());
@@ -239,10 +250,15 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     };
     if (item.capabilities) demand.capabilities = std::move(*item.capabilities);
     if (item.facts) demand.facts = std::move(*item.facts);
+    if (item.plan_inputs) demand.plan_inputs = std::move(*item.plan_inputs);
     demand.value_export = std::move(item.value_export);
     const auto witness = item.witness ? decode_fp(*item.witness) : std::nullopt;
     if (item.witness.has_value() != witness.has_value() ||
         demand.value_export.has_value() != witness.has_value()) return std::nullopt;
+    const auto planning = item.planning ? decode_fp(*item.planning) : std::nullopt;
+    const bool has_plan_inputs = !demand.plan_inputs.empty();
+    if (item.planning.has_value() != planning.has_value() ||
+        has_plan_inputs != planning.has_value()) return std::nullopt;
     std::vector<RuleProbeSnapshot> projections;
     if (item.projections)
       for (auto& projection : *item.projections) {
@@ -253,11 +269,12 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     const bool compiler_bindings = std::ranges::any_of(demand.capabilities, [](const auto& binding) {
       return !binding.value;
     });
-    const auto facts = demand.capabilities.size() + demand.facts.size() + (demand.value_export ? 1 : 0);
+    const auto facts = demand.capabilities.size() + demand.facts.size() + demand.plan_inputs.size() +
+                       (demand.value_export ? 1 : 0);
     if ((compiler_bindings && projections.empty()) ||
         (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
       return std::nullopt;
-    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness});
+    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness, planning});
     result.expansions.push_back({std::move(demand), std::move(item.definition),
                                  item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
@@ -267,14 +284,17 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
   return result;
 }
 
-void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot) {
+void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot,
+                         std::string_view native_triple) {
   if (snapshot.expansions.size() != snapshot.observations.size()) return;
   SnapshotFile saved{snapshot_version, std::string(target), {}, {}};
   for (std::size_t i = 0; i < snapshot.expansions.size(); ++i) {
     const auto& expansion = snapshot.expansions[i];
     const auto& observed = snapshot.observations[i];
     const auto& demand = expansion.demand;
-    if (demand != observed.demand || expansion.definition.empty()) return;
+    const bool has_plan_inputs = !demand.plan_inputs.empty();
+    if (demand != observed.demand || expansion.definition.empty() ||
+        has_plan_inputs != observed.planning.has_value()) return;
     StoredRule rule{
         demand.target, demand.rule, demand.package.target, demand.package.kind == RulePackageRef::Kind::standard,
         demand.definition, demand.attributes, demand.reads, expansion.definition,
@@ -289,6 +309,10 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     if (!demand.facts.empty()) rule.facts = demand.facts;
     rule.value_export = demand.value_export;
     if (observed.witness) rule.witness = hex(*observed.witness);
+    if (observed.planning) {
+      rule.plan_inputs = demand.plan_inputs;
+      rule.planning = hex(*observed.planning);
+    }
     saved.rules.push_back(std::move(rule));
   }
   if (!snapshot.probes.empty()) {
@@ -298,7 +322,7 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
   const auto text = lsp::dump(lsp::to_json(saved));
   if (text.size() > max_snapshot_size) return;
 
-  const auto dir = snapshot_directory(cwd, true);
+  const auto dir = snapshot_directory(cwd, native_triple, true);
   if (!dir) return;
   const auto name = entry_name(target);
   if (read_text(dir.value, name.c_str()) != text) store(dir.value, name.c_str(), text);

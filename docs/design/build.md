@@ -50,6 +50,54 @@ their rule. The first runner uses an explicit host executable and a private
 working directory. The coordinator rechecks the executable fingerprint before admitting a result. Support for outer toolchain envelopes follows #1254
 and #1259.
 
+### Generated static archives (#1339)
+
+A C++ library can export an ordered list of static archives from named
+generator outputs. An executable can also declare its own list.
+
+```text
+cpp.library "codec" {
+    public_link_inputs = [artifact("codec_archive", "archive")]
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["codec"]
+}
+```
+
+The standard C++ rule forwards these fields in the declaration it emits.
+The workspace planner resolves the artifact edges and the coordinator uses
+the existing action receipts to supply the archive bytes to the native linker.
+All source objects precede the archives. The executable's `link_inputs` come
+first, followed by library inputs. A library precedes its dependencies and a
+shared dependency follows all its consumers. Among eligible libraries, the
+planner uses the order in which the declared dependency lists first reach
+them. Each library contributes its list once. Repeated artifact references in
+a list stay at their declared positions.
+
+The link uses indexed GNU archives on x86-64 Linux and Darwin archives on
+arm64 macOS. Linux archive links require objects without ELF COMDAT groups.
+The existing linker coverage is tracked in [#388](https://github.com/yrashk/ycxx/issues/388).
+
+`ycxx show` reports the resolved archive sequence as `link-input` facts. A
+transitive entry identifies the library that declared it and points to its
+original artifact reference in `build.ycxx`.
+
+### A Make-based C library (#1341)
+
+The [foreign Make example](../../examples/project-build/foreign-make) uses a
+source-built C++ rule package to read a declared file inventory. Each entry
+names a file relative to the Makefile's directory. The rule emits one Make
+action that stages the Makefile and the listed files in the same layout. The
+`archive` output is an ordinary generated artifact inherited through
+`public_link_inputs`. Read-only inspection shows the staged paths, the Make
+command, and the library that exports the archive.
+
+The rule declares its compiler and archiver as `tool_inputs`. Changes to
+either executable can rerun Make while equal archive bytes reuse the native
+link. [#1343](https://github.com/yrashk/ycxx/issues/1343)
+
 ## Build definitions and tracked values
 
 The initial grammar is declarative (#1253). A target carries its rule name,
@@ -77,6 +125,15 @@ as one successful result. The runner owns process lifecycle and diagnostics.
 The caller owns cache admission and materialization. A crash, cancellation
 or failed command produces no reusable successful result. The first runner
 can return owned bytes, before deciding on durable artifact storage.
+
+Generators can name helper executables through a record such as
+`tool_inputs = { cc = "/usr/bin/cc", ar = "/usr/bin/ar" }`. Each helper's name,
+declared absolute path, canonical pathname, and executable content fingerprint
+enter the ordinary action receipt identity. The declaration observes the
+helper at its host path. The direct tool still gets the declared arguments
+and environment. Watch reobserves both spellings, and `ycxx show` reports
+the current canonical path and fingerprint or the reason it is unavailable.
+[#1343](https://github.com/yrashk/ycxx/issues/1343)
 
 Keep subprocess execution outside ordinary reevaluation. A query returns
 pending action demands to the build coordinator. The coordinator deduplicates
@@ -139,9 +196,27 @@ edit can change its SPIR-V without relinking the application. A structured
 reflection query can keep downstream bindings green if its relevant fields
 stay equal.
 
-Modules, host and target variants, richer link propagation and a foreign build
-adapter grow coverage after the first witness (#1259). Package acquisition and
-version solving sit outside the build.
+Project builds accept the standalone compiler's native target triples (#1345).
+Pass `--target=<triple>` to `build`, `build --watch`, and `show` to select the
+same variant. Explicit variants keep their executable, runtime assets, virtual
+generated inputs and rule snapshot under `.ycxx/targets/<triple>/`. The host
+default uses the original paths directly under `.ycxx/`. Rule packages and
+external actions run on the host and share receipts when their declared inputs
+match. An external action that supplies a linker input must produce an archive
+for the selected target.
+
+An action can opt into that selection by placing `target_triple()` in its
+`args` (#1347). The planner supplies one canonical argv word and the tool
+executes on the host. The default request supplies the host triple. The
+resolved word enters the action key, so requests with the same resolved argv
+and inputs can reuse its receipt. Generated planning inputs and rule witnesses
+resolve the argument with the same target. Typed witness values have a
+separate identity per triple. Read-only inspection shows the argument and its
+manifest location. Value traces show the resolved argv position and origin.
+`host_action` package recipes build the rule package for the host.
+
+Modules, declared host and target toolchains, and broader project layouts grow
+coverage in #1259. Package acquisition and version solving sit outside the build.
 
 ## Shader bundles and runtime assets (#1258)
 
@@ -297,6 +372,33 @@ package compiles on demand through the same host-action bootstrap and
 registers its rules through the same worker contract. The kernel supplies
 native compiler queries and external actions to either provider. The
 standard package also provides the unqualified `generate` rule.
+
+### Generated planning inputs (#1335)
+
+```text
+shaders.bundle "scene" {
+    inventory = "inventory"
+    plan_inputs = { inventory = artifact("shader_inventory", "list") }
+}
+```
+
+A workspace rule can bind `plan_inputs` names to public generator outputs.
+An input has a single logical name and cannot share a name with an ordinary
+`reads` entry. The isolated worker uses `read` with that name and receives
+the selected receipt's bytes. The artifact is available to planning before
+the rule emits its declarations. The same generator and receipt serve any
+ordinary artifact consumers. The planner rejects cycles across planning,
+artifact and value edges.
+
+The worker's request depends on the named input bytes. When a generator
+runs and produces equal bytes, the existing worker result stays reusable.
+For inspection and watch, the admitted expansion records the selected output
+and its producer graph's recipe, tool and declared input identity separately.
+`ycxx show` verifies the captured graph before reporting the provenance of an
+expansion. A stale graph becomes unresolved until a build supplies a current
+receipt. Watch follows the generator graph even if it fails or returns an
+invalid inventory. Publication keeps the previous assets until planning,
+the ordinary actions and the native build succeed.
 
 ## Compiler capability observations
 

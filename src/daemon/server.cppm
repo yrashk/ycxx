@@ -19,6 +19,7 @@
 export module ycxx.daemon:server;
 
 import std;
+import ycxx.ast;
 import ycxx.build.plan;
 import ycxx.build.project;
 import ycxx.compile;
@@ -540,6 +541,11 @@ class Server {
   // applies batches as a request's tick would). Ends unanswered on a hang-up or the stop, which
   // shuts it down like an LSP session.
   void serve_await_change(int fd, const AwaitChange& r) {
+    const ast::Target* native_target = nullptr;
+    if (r.project && r.project->target_triple) {
+      native_target = ast::target_for_triple(*r.project->target_triple);
+      if (!native_target) return;
+    }
     const auto revision = [&] {
       std::lock_guard g(stats_mu_);
       return stats_.revision;
@@ -558,7 +564,7 @@ class Server {
     std::vector<std::string> paths = table_.present_keys();
     const auto observe_project = [&] {
       (void)session();
-      return build_->watch_state(r.project->cwd, r.project->target, r.project->tool_path);
+      return build_->watch_state(r.project->cwd, r.project->target, r.project->tool_path, native_target);
     };
     bool plan_changed = false;
     if (r.project) {
@@ -599,14 +605,26 @@ class Server {
       send(fd, Kind::project_build_done, ProjectBuildDone{1, {}, {"invalid workspace or target name"}, 0});
       return;
     }
+    const ast::Target* native_target = nullptr;
+    if (r.target_triple) {
+      native_target = ast::target_for_triple(*r.target_triple);
+      if (!native_target) {
+        send(fd, Kind::project_build_done, ProjectBuildDone{
+            1, {}, {std::format("unsupported target '{}'", *r.target_triple)}, 0});
+        return;
+      }
+    }
     auto& sess = session();
     auto mode = compile::Trace::off;
     if (r.trace) mode = r.trace_live ? compile::Trace::live : r.trace_values ? compile::Trace::values : compile::Trace::events;
-    auto traced = trace_for(fd, mode, "build " + r.target);
+    auto label = "build " + r.target;
+    if (native_target) label += std::format(" --target={}", native_target->triple);
+    auto traced = trace_for(fd, mode, std::move(label));
     std::optional<WatchedProject> watched;
     if (r.watch) {
-      const auto observed = build_->watch_state(*cwd, r.target, r.tool_path);
+      const auto observed = build_->watch_state(*cwd, r.target, r.tool_path, native_target);
       watched = WatchedProject{*cwd, r.target, observed.stamp, r.tool_path};
+      if (native_target) watched->target_triple.emplace(native_target->triple);
     }
     std::optional<std::uint64_t> started_at;
     auto refresh = [&] {
@@ -634,7 +652,8 @@ class Server {
       if (traced && !cancelled()) traced->pump(), traced->flush_client();
     };
     auto report = build_->run(*cwd, r.target, r.tool_path, r.watch, r.probe_toolchain,
-                              refresh, cancelled, apply, publish, tick, traced ? traced->tracer() : nullptr);
+                              refresh, cancelled, apply, publish, tick, traced ? traced->tracer() : nullptr,
+                              native_target);
     if (watched && report.watch_stamp) watched->stamp = *report.watch_stamp;
     if (traced) {
       traced->finish();

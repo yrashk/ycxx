@@ -3197,6 +3197,22 @@ each request. Linux uses the native freestanding compiler and linker.
 The manifest identifies the daemon scope before the first build creates `.ycxx`,
 including when the workspace is nested in a checkout (#1305).
 
+`ycxx build <target> --target=<triple>` selects the standalone compiler and
+linker's native x86-64 Linux or arm64 Darwin target (#1345). An explicit
+selection publishes under `.ycxx/targets/<triple>/` and scopes generated-file
+overlays, rule snapshots, runtime assets and watch state to that configuration.
+Source-built rule packages and declared tools execute on the host. Their
+resident receipts can be shared across target configurations.
+
+In project action arguments, `target_triple()` resolves to one canonical
+argument word for the selected compiler target, including the host default
+(#1347). That word enters the action receipt key. The same resolved words and
+inputs can share a receipt across default and explicit requests. The planner
+also resolves it in generated planning inputs and rule witnesses. Rule value
+exports and their consumers are scoped by triple. Package bootstrap recipes
+continue to describe host builds. Inspection shows the argument source and
+the action trace shows its position and resolved word.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
@@ -3214,6 +3230,8 @@ the observation. It continues after a failed run.
 (#1256). It shows verbatim source, resolved facts with their declaration
 locations, or a semantic diff against a saved JSON snapshot. The HTML report
 includes the resolved plan and its definition.
+Use the same `--target` option to read the chosen variant and its target
+provenance. The trace carries the compiler target for the request.
 
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
@@ -3262,6 +3280,44 @@ record moves with the assets, so the next successful build can retire removed
 or renamed outputs while preserving unrelated files. Failed staging or exchange
 preserves the last good asset set. Trace events report publication separately
 from tool execution. [#1329](https://github.com/yrashk/ycxx/issues/1329)
+
+A source-built rule can use `plan_inputs` to read a generated artifact while
+planning its declarations. The coordinator stages the selected bytes from
+the ordinary action receipt, and equal bytes reuse the worker result. Watch
+observes the producer graph, while read-only inspection validates its inputs
+and shows the selected receipt provenance. The shader example uses this to
+add and remove modules from a generated inventory. [#1335](https://github.com/yrashk/ycxx/issues/1335)
+
+Planning can compose cached rule results before validating the expanded
+prefix. Cache misses reobserve the prefix before launching tools and again
+before admitting their receipts. Staging follows the requested producers'
+ordinary artifact dependencies, and validation retains the full planning
+graph. Edits during a producer run discard its superseded result and retry
+without replacing published outputs. [#1337](https://github.com/yrashk/ycxx/issues/1337)
+
+On x86-64 Linux and arm64 macOS, `cpp.library` can export generated static
+archives through `public_link_inputs` and `cpp.executable` can name direct
+`link_inputs`. The planner orders libraries before their dependencies and
+keeps explicit repetitions in the archive lists. The native linker reads
+archive bytes from the ordinary action receipts. A changed archive runs the
+link with reusable translation units, and equal bytes retain the link.
+Inspection shows the declaring library, archive order, and artifact reference.
+Watch preserves the last successful executable if the archive cannot be linked.
+[#1339](https://github.com/yrashk/ycxx/issues/1339)
+
+The foreign Make example builds its adapter as a C++ rule package. The worker
+reads an explicit file inventory and emits one action that runs Make on the
+staged C project. The ordinary named archive output enters the existing native
+link through a library. File edits reuse the rule expansion, equal archive bytes
+reuse the link, and a failed Make keeps the last good executable under watch.
+[#1341](https://github.com/yrashk/ycxx/issues/1341)
+
+Generated actions can declare named helper executables with `tool_inputs`.
+Their absolute spellings, canonical paths, and content fingerprints enter
+the action receipt key. Watch observes helper edits and symlink retargets.
+Inspection reports current helper identity or availability without launching
+the action. The Make adapter uses these declarations for its C compiler and
+archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.

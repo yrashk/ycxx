@@ -34,9 +34,9 @@ struct ActionOutput {
 };
 
 struct ActionArg {
-  enum class Kind : std::uint8_t { literal, input, output };
+  enum class Kind : std::uint8_t { literal, input, output, target_triple };
   Kind kind = Kind::literal;
-  std::string value;  // a literal argument or the name of a declared input or output
+  std::string value;  // an argument word or the name of a declared input or output
 };
 
 struct Action {
@@ -124,7 +124,7 @@ std::expected<Command, std::string> prepare(const Action& action, std::span<cons
 
   Command cmd{{action.tool}, {}};
   for (const auto& arg : action.args) {
-    if (arg.kind == ActionArg::Kind::literal) {
+    if (arg.kind == ActionArg::Kind::literal || arg.kind == ActionArg::Kind::target_triple) {
       if (arg.value.contains('\0')) return std::unexpected("action argument contains NUL");
       cmd.args.push_back(arg.value);
       continue;

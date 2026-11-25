@@ -20,8 +20,13 @@ struct RuntimeAssetOutput {
   const Artifact& artifact;
 };
 
+// The project request supplies a canonical triple for an explicit target.
+std::filesystem::path project_state_path(const std::filesystem::path& workspace,
+                                         std::string_view native_triple = {});
+
 std::expected<std::filesystem::path, std::string> build_directory(
-    const std::filesystem::path& workspace, std::string_view name, std::string_view child = {});
+    const std::filesystem::path& workspace, std::string_view name, std::string_view child = {},
+    std::string_view native_triple = {});
 
 class PreparedPublication {
  public:
@@ -30,7 +35,8 @@ class PreparedPublication {
 
   static std::expected<PreparedPublication, std::string> stage(
       const std::filesystem::path& workspace, std::string_view target,
-      std::span<const RuntimeAssetOutput> assets, std::span<const std::uint8_t> image);
+      std::span<const RuntimeAssetOutput> assets, std::span<const std::uint8_t> image,
+      std::string_view native_triple = {});
   // A successful result indicates whether a new asset generation was installed.
   std::expected<bool, std::string> commit() &&;
 
@@ -303,21 +309,22 @@ struct AssetStage {
 
 std::expected<std::optional<AssetStage>, std::string> stage_assets(const fs::path& workspace,
                                                                  std::string_view target,
-                                                                 std::span<const RuntimeAssetOutput> assets) {
-  const auto state_path = workspace / ".ycxx" / "asset-manifests" / target;
+                                                                 std::span<const RuntimeAssetOutput> assets,
+                                                                 std::string_view native_triple) {
+  const auto state_path = project_state_path(workspace, native_triple) / "asset-manifests" / target;
   if (assets.empty()) {
     // Ordinary builds need no asset state. An empty plan still retires a managed set.
     std::error_code ec;
     if (fs::symlink_status(state_path, ec).type() == fs::file_type::not_found) return std::nullopt;
   }
-  auto parent = build_directory(workspace, "assets");
+  auto parent = build_directory(workspace, "assets", {}, native_triple);
   if (!parent) return std::unexpected(std::move(parent.error()));
   const auto live = *parent / target;
   auto previous = read_directory(live);
   if (!previous) return std::unexpected(std::move(previous.error()));
   auto entries = *previous ? directory_entries(live) : std::vector<fs::path>{};
   if (!entries) return std::unexpected(std::move(entries.error()));
-  auto manifests = build_directory(workspace, "asset-manifests", target);
+  auto manifests = build_directory(workspace, "asset-manifests", target, native_triple);
   if (!manifests) return std::unexpected(std::move(manifests.error()));
   auto ownership = find_ownership(*manifests, *entries);
   if (!ownership) return std::unexpected(std::move(ownership.error()));
@@ -437,10 +444,17 @@ std::expected<std::optional<ExecutableStage>, std::string> stage_executable(
 
 using namespace publication_detail;
 
+fs::path project_state_path(const fs::path& workspace, std::string_view native_triple) {
+  auto state = workspace / ".ycxx";
+  if (!native_triple.empty()) state = state / "targets" / native_triple;
+  return state;
+}
+
 std::expected<fs::path, std::string> build_directory(const fs::path& workspace, std::string_view name,
-                                                   std::string_view child) {
+                                                   std::string_view child, std::string_view native_triple) {
   fs::path path = workspace;
-  for (const auto part : {std::string_view(".ycxx"), name, child}) {
+  const auto targets = native_triple.empty() ? std::string_view{} : std::string_view("targets");
+  for (const auto part : {std::string_view(".ycxx"), targets, native_triple, name, child}) {
     if (part.empty()) continue;
     path /= part;
     std::error_code ec;
@@ -511,11 +525,12 @@ PreparedPublication::PreparedPublication(PreparedPublication&&) noexcept = defau
 PreparedPublication::~PreparedPublication() = default;
 
 std::expected<PreparedPublication, std::string> PreparedPublication::stage(
-    const fs::path& workspace, std::string_view target, std::span<const RuntimeAssetOutput> assets, Bytes image) {
-  auto generation = stage_assets(workspace, target, assets);
-  if (!generation) return std::unexpected(std::move(generation.error()));
-  auto directory = build_directory(workspace, "out");
+    const fs::path& workspace, std::string_view target, std::span<const RuntimeAssetOutput> assets, Bytes image,
+    std::string_view native_triple) {
+  auto directory = build_directory(workspace, "out", {}, native_triple);
   if (!directory) return std::unexpected(std::move(directory.error()));
+  auto generation = stage_assets(workspace, target, assets, native_triple);
+  if (!generation) return std::unexpected(std::move(generation.error()));
   auto executable = stage_executable(*directory, target, image);
   if (!executable) return std::unexpected(std::move(executable.error()));
   return PreparedPublication(std::make_unique<State>(std::move(*generation), std::move(*executable)));

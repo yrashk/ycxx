@@ -96,8 +96,8 @@ private:
 };
 
 // The disk, the editor's open buffers over it (daemon design §6.1), or the disk with the
-// build's generated files under a reserved virtual directory.
-enum class View : u8 { disk, editor, build };
+// build's generated files under a reserved virtual directory for its output scope.
+enum class View : u8 { disk, editor, build, explicit_target_build };
 
 // The configuration of a translation unit's preprocessing (§B1.1's root): search paths,
 // command-line macros and the view. Its fingerprint keys every region a session caches.

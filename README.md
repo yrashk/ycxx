@@ -37,6 +37,12 @@ The resident engine builds executable targets from C++ source groups and declare
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
 Use `ycxx build app --watch` to rebuild after workspace edits.
+Use `ycxx build app --target=arm64-apple-darwin` or
+`--target=x86_64-pc-linux-gnu` for a separate native output under
+`.ycxx/targets/<triple>/out/app`. Pass the same option to `ycxx show app` to
+inspect that variant.
+Use `target_triple()` in a declared action's `args` to pass the selected triple
+to a host tool that generates a target-specific input.
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
@@ -49,9 +55,14 @@ A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
-owned names. The reflection
+owned names. The shader bundle plans its modules from a generated inventory
+using a named `plan_inputs` binding. The reflection
 example also uses a compiled shader's descriptor layout to generate `constexpr`
 C++ bindings. Shader edits with the same layout reuse the native executable.
+Libraries can pass ordered generated static archives through their dependencies.
+The native link reuses equal archive bytes. A source-built example rule wraps
+a Make-based C library as one build action and links its archive into the app.
+Generated actions can track the executable bytes of declared helper tools.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.

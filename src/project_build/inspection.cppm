@@ -2,6 +2,7 @@
 export module ycxx.build.inspection;
 
 import std;
+import ycxx.ast;
 import ycxx.build.inspection_html;
 import ycxx.build.inspection_model;
 import ycxx.build.plan;
@@ -14,7 +15,8 @@ enum class InspectionFormat { text, json, source, html };
 
 std::expected<std::string, std::string> show_project(
     const std::filesystem::path& cwd, std::string_view target, InspectionFormat format,
-    const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against = std::nullopt);
+    const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against = std::nullopt,
+    const ast::Target* selected_target = nullptr);
 
 }  // namespace ycxx::build
 
@@ -118,12 +120,13 @@ std::string diff_text(const PlanComparison& diff) {
 
 std::expected<std::string, std::string> show_project(
     const std::filesystem::path& cwd, std::string_view target, InspectionFormat format,
-    const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against) {
+    const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against,
+    const ast::Target* selected_target) {
   if (format == InspectionFormat::source) {
     if (against) return std::unexpected("--against requires text, JSON, or HTML output");
     return read_text(cwd / "build.ycxx", "build definition");
   }
-  auto inspected = inspect_built_project(cwd, target, toolchain);
+  auto inspected = inspect_built_project(cwd, target, toolchain, selected_target);
   if (!inspected) return std::unexpected(inspected.error());
 
   if (against) {
