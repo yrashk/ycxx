@@ -1,0 +1,120 @@
+// ACTION: syntax
+--- main.cpp
+#include "dial.h"
+
+constexpr int run() {
+    Adjusted dial;
+    return read(dial);
+}
+
+static_assert(run() == 14);
+--- dial.h
+struct Dial {
+    constexpr virtual int value(int sample = 4) const { return sample; }
+};
+
+struct Adjusted : public Dial {
+    constexpr int value(int sample) const override { return sample + 10; }
+};
+
+constexpr int read(const Dial& dial) { return dial.value(); }
+=== edit
+--- main.cpp
+#include "dial.h"
+
+constexpr int run() {
+    Adjusted dial;
+    return read(dial);
+}
+
+static_assert(run() == 14); //! error
+--- dial.h
+struct Dial {
+    constexpr virtual int value(int sample = 4) const { return sample; }
+};
+
+struct Adjusted : public Dial {
+    constexpr int value(int sample) const override { return sample + 11; }
+};
+
+constexpr int read(const Dial& dial) { return dial.value(); }
+=== edit
+--- main.cpp
+#include "dial.h"
+
+constexpr int run() {
+    Adjusted dial;
+    return read(dial);
+}
+
+static_assert(run() == 14); //! error
+--- dial.h
+struct Dial {
+    constexpr virtual int value(int sample = 4) const { return sample; }
+};
+
+struct Adjusted : public Dial {
+    int value(int sample) const override { return sample + 10; }
+};
+
+constexpr int read(const Dial& dial) { return dial.value(); }
+=== edit
+--- main.cpp
+#include "dial.h"
+
+constexpr int run() {
+    Adjusted dial;
+    return read(dial);
+}
+
+static_assert(run() == 14);
+--- dial.h
+struct Dial {
+    constexpr virtual int value(int sample = 4) const { return sample; }
+};
+
+struct Adjusted : public Dial {
+    constexpr int value(int sample) const override { return sample + 10; }
+};
+
+constexpr int read(const Dial& dial) { return dial.value(); }
+=== edit
+--- main.cpp
+#include "dial.h"
+
+constexpr int run() {
+    Adjusted dial;
+    return read(dial);
+}
+
+static_assert(run() == 14); //! error
+--- dial.h
+struct Dial {
+    constexpr virtual int value(int sample = 5) const { return sample; }
+};
+
+struct Adjusted : public Dial {
+    constexpr int value(int sample) const override { return sample + 10; }
+};
+
+constexpr int read(const Dial& dial) { return dial.value(); }
+=== edit
+--- main.cpp
+#include "dial.h"
+
+constexpr int run() {
+    Adjusted dial;
+    return read(dial);
+}
+
+static_assert(run() == 14);
+--- dial.h
+struct Dial {
+    constexpr virtual int value(int sample = 4) const { return sample; }
+};
+
+struct Adjusted : public Dial {
+    constexpr int value(int sample) const override { return sample + 10; }
+};
+
+constexpr int read(const Dial& dial) { return dial.value(); }
