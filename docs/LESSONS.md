@@ -494,6 +494,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
     filter moves the rows under it (#636's one P1).
   - Learned on #635 and #636.
+- **Trace the signal and its wakeup separately when a PTY resize hangs under ThreadSanitizer.**
+  `TIOCSWINSZ` succeeded and the browser got `SIGWINCH` while blocked in `select`. The handler
+  wrote to the self-pipe only after keyboard input woke the browser again.
+  - Do: follow the PTY request, signal delivery, and self-pipe read and write with `strace -f`.
+    Reuse the browser's terminal code and PTY harness in a small instrumented probe. A standalone
+    selector without the browser's clipboard path passed even though the integration test hung.
+  - Learned on #1375.
 - **Show a terminal UI's change as pictures, rendered from a pty.** Polishing the trace browser's
   layout (#1119) needed screenshots at fixed sizes, before and after, for the user to steer.
   - Do: run the program under Python's `pty.fork` with `TIOCSWINSZ` set, send keys with pauses,
