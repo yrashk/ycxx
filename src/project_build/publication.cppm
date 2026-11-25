@@ -45,7 +45,7 @@ class PreparedPublication {
 namespace ycxx::build {
 namespace fs = std::filesystem;
 
-namespace {
+namespace publication_detail {
 
 std::string display(const fs::path& path) { return path.display_string(); }
 std::error_code posix_error() { return {errno, std::system_category()}; }
@@ -345,7 +345,9 @@ std::expected<std::optional<ExecutableStage>, std::string> stage_executable(
   return result;
 }
 
-}  // namespace
+}  // namespace publication_detail
+
+using namespace publication_detail;
 
 std::expected<fs::path, std::string> build_directory(const fs::path& workspace, std::string_view name,
                                                    std::string_view child) {
