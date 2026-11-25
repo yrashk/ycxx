@@ -2126,6 +2126,7 @@ private:
   struct MemberExceptionPattern {
     std::vector<u32> calls;
     std::vector<sema::Expansion> expansions;
+    bool dependent_type_traits = false;
   };
   std::map<EntityId, MemberException> member_exceptions_;
   std::map<u32, std::optional<MemberExceptionPattern>> member_exception_patterns_;
@@ -2933,9 +2934,25 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
   if (cls != EntityId::none) source.completing_class = cls;
-  sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
-  if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
+  const auto pattern = p_->member_exception_patterns_.find(item);
+  if (pattern != p_->member_exception_patterns_.end()) {
     if (!pattern->second) return std::nullopt;
+    if (pattern->second->dependent_type_traits) source.type_trait_demand = source.at_point;
+  }
+  // Errors in this instantiation are outside the immediate context of substitution
+  // ([temp.deduct.general]). Preserve their original locations even inside a requirement.
+  std::vector<engine::Diagnostic> instantiation_diags;
+  struct PublishInstantiationDiagnostics {
+    std::vector<engine::Diagnostic>& diagnostics;
+    std::vector<engine::Diagnostic>& destination;
+    ~PublishInstantiationDiagnostics() {
+      for (engine::Diagnostic& diagnostic : diagnostics)
+        if (!std::ranges::contains(destination, diagnostic)) destination.push_back(std::move(diagnostic));
+    }
+  } publish{instantiation_diags, p_->end_diags_};
+  auto& diagnostics = source.type_trait_demand ? instantiation_diags : caller.diagnostics();
+  sema::Sema replay(p_->world(), caller.builder(), source, diagnostics, p_->id(item), 0);
+  if (pattern != p_->member_exception_patterns_.end()) {
     source.instantiation_calls = pattern->second->calls;
     replay.expansions_override = &pattern->second->expansions;
   }
@@ -10499,6 +10516,7 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
     AtItem source(*this, item, false);
     source.completing_class = cls;
     sema::Sema replay(*w_, b, source, out.diags, id(item), 0);
+    replay.exception_type_traits = sema::Sema::ExceptionTypeTraits::checking_pattern;
     replay.current_class = cls;
     replay.current_function = member.entity;
     replay.this_type = this_type(*decl);
@@ -10525,7 +10543,9 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
       member_exception_patterns_.emplace(item, std::nullopt);
       continue;
     }
-    member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
+    member_exception_patterns_.emplace(item, MemberExceptionPattern{
+        std::move(replay.dependent_calls), std::move(replay.expansions),
+        replay.exception_type_traits == sema::Sema::ExceptionTypeTraits::dependent});
     out.demands.insert(out.demands.end(), replay.demands.begin(), replay.demands.end());
   }
 }
@@ -10543,6 +10563,7 @@ void Program::check_function_exception_pattern(EntityId entity, std::vector<ast:
   const u32 item_begin = items_->items[item].begin;
   AtItem source(*this, item, false);
   sema::Sema replay(*w_, caller.builder(), source, caller.diagnostics(), id(item), 0);
+  replay.exception_type_traits = sema::Sema::ExceptionTypeTraits::checking_pattern;
   replay.current_function = entity;
   replay.template_scopes = enclosing_heads(item);
   replay.template_scopes.push_back(std::move(head));
@@ -10567,7 +10588,9 @@ void Program::check_function_exception_pattern(EntityId entity, std::vector<ast:
     member_exception_patterns_.emplace(item, std::nullopt);
     return;
   }
-  member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
+  member_exception_patterns_.emplace(item, MemberExceptionPattern{
+      std::move(replay.dependent_calls), std::move(replay.expansions),
+      replay.exception_type_traits == sema::Sema::ExceptionTypeTraits::dependent});
   caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
 }
 
