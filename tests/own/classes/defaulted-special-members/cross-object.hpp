@@ -30,6 +30,13 @@ struct MayThrow {
   long a;
 };
 
+// [class.copy.ctor]: a volatile scalar does not make the copy nontrivial.
+struct Volatile {
+  Volatile(int v) : x(v) {}
+  Volatile(const Volatile&) = default;
+  volatile int x;
+};
+
 struct CopyOnly { CopyOnly(const CopyOnly&) = default; int x; char c; };
 struct DefaultAndCopy { DefaultAndCopy() = default; DefaultAndCopy(const DefaultAndCopy&) = default; int x; char c; };
 struct DefaultAndOther { DefaultAndOther() = default; DefaultAndOther(int); int x; char c; };
@@ -37,18 +44,20 @@ struct MoveOnly { MoveOnly(MoveOnly&&) = default; int x; char c; };
 struct DeletedCopy { DeletedCopy() = default; DeletedCopy(const DeletedCopy&) = delete; int x; char c; };
 struct Assigned { Assigned& operator=(Assigned&&) = default; int x; char c; };
 class Private { public: Private() = default; Private(const Private&) = default; private: int x; char c; };
+struct VolatileMember { VolatileMember() = default; VolatileMember(const VolatileMember&) = default; volatile int x; char c; };
 struct Initialized { Initialized() = default; int x = 1; char c; };
 struct Member { Member() = default; DefaultAndOther m; char c; };
 template <class T> struct Templated { Templated(const Templated&) = default; ~Templated() = default; T x; char c; };
 
 template <class T> struct After : T { char last; };
 
-constexpr int layouts = 10;
+constexpr int layouts = 11;
 static int layout(int i) {
   const int sizes[layouts] = {
       sizeof(After<CopyOnly>), sizeof(After<DefaultAndCopy>), sizeof(After<DefaultAndOther>), sizeof(After<MoveOnly>),
       sizeof(After<DeletedCopy>), sizeof(After<Assigned>), sizeof(After<Private>), sizeof(After<Initialized>),
-      sizeof(After<Member>), sizeof(After<Templated<int>>)};
+      sizeof(After<Member>), sizeof(After<Templated<int>>),
+      sizeof(After<VolatileMember>)};
   return sizes[i];
 }
 
@@ -57,3 +66,4 @@ Triple peer_swap(Triple t);
 Indirect peer_next(Indirect i);
 int peer_sum(Indirect i);
 long peer_first(MayThrow m, long b);
+Volatile peer_volatile(Volatile v);

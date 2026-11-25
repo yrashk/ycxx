@@ -11227,7 +11227,7 @@ Program::Classified Program::classify_special_member(u32 item, EntityId cls, con
     const auto r = types.rec(t);
     if (r.kind == sema::TypeKind::reference)
       return assignment || initialization || (!move && r.rvalue_ref) ? deleted : trivial;
-    if (types.is_dependent(t) || sema::Types::is_volatile(t)) return unsupported;
+    if (types.is_dependent(t)) return unsupported;
     const bool is_const = sema::Types::is_const(t);
     if (!types.is_class(t)) {
       if ((assignment || initialization) && is_const) return deleted;

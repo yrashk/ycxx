@@ -20,5 +20,6 @@ int main() {
   MayThrow m;
   m.a = 4;
   if (peer_first(m, 2) != 42) return 23;
+  if (peer_volatile(Volatile(6)).x != 7) return 24;
   return peer_sum(i) == 11 ? 0 : 22;
 }

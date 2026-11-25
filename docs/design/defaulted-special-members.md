@@ -22,7 +22,8 @@ default-initialized. The class itself is still incomplete. The result is one of 
   mutable object, or a const-qualified assignment operator. A deleted move constructor or move
   assignment operator is not a candidate
   ([[over.match.funcs.general]](https://eel.is/c++draft/over.match.funcs.general));
-- **trivial**: every subobject's operation is, and the class is not polymorphic. Uses lower to the
+- **trivial**: every subobject's operation is, and the class is not polymorphic. A volatile scalar
+  member does not matter ([class.copy.ctor]/11). Uses lower to the
   representation copy, `DefaultInit` or `ValueInit`;
 - **nontrivial**: uses call the function;
 - **unsupported**: a subobject's operation met a limit of ycxx. A use is diagnosed, and native

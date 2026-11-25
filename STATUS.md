@@ -1557,7 +1557,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
     constructors are not user-provided: C++11's on arm64 macOS, C++03's on x86-64 Linux (public
     members, no bases). Tests compare both with Clang.
   - Not yet: local classes, defaulting outside the class, a virtual assignment operator, member
-    pointers and volatile members in assignment.
+    pointers in assignment.
   [Design](docs/design/defaulted-special-members.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
 - An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
   available implicit move constructor for scalar fields and class fields with proven nonthrowing

@@ -154,6 +154,23 @@ static_assert(!made_from<ConstMove, ConstMove>);
 struct ConstAssign { ConstAssign& operator=(const ConstAssign&) const = default; };
 static_assert(!assigned_from<const ConstAssign&, const ConstAssign&>);
 
+// A volatile scalar member does not make an operation nontrivial or deleted ([class.copy.ctor]/11).
+struct VolatileScalar {
+  VolatileScalar() = default;
+  VolatileScalar(const VolatileScalar&) = default;
+  VolatileScalar& operator=(const VolatileScalar&) = default;
+  volatile int x;
+};
+static_assert(__is_trivially_copyable(VolatileScalar));
+static_assert(default_made<VolatileScalar> && made_from<VolatileScalar, const VolatileScalar&>);
+static_assert(assigned_from<VolatileScalar&, const VolatileScalar&>);
+// A volatile class member has no copy constructor that takes it.
+struct VolatileClass {
+  VolatileClass(const VolatileClass&) = default;
+  volatile Plain p;
+};
+static_assert(!made_from<VolatileClass, const VolatileClass&>);
+
 // Variant members ([class.default.ctor], [class.copy.ctor]).
 union TrivialUnion {
   TrivialUnion() = default;
