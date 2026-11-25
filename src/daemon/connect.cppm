@@ -32,6 +32,8 @@ struct Failure {
 // `on_trace` gets the request's trace batches as they arrive, when it asked for them (#245).
 std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r,
                                                       const std::function<void(TraceBatch&&)>& on_trace = {});
+std::expected<ProjectBuildDone, Failure> request_project_build(
+    Connection& c, const ProjectBuildRequest& r, const std::function<void(TraceBatch&&)>& on_trace = {});
 // Attaches to the daemon's traces (#245); then `next_trace` reads them, one batch at a time,
 // nothing once the daemon has gone. `live`: batches as the requests run (#939).
 std::expected<void, std::string> watch_traces(Connection& c, bool values, bool live = false);
@@ -151,6 +153,26 @@ std::expected<compile::Done, Failure> request_compile(Connection& c, const compi
   auto d = decode<compile::Done>(*f);
   if (!d) return std::unexpected(Failure{"malformed answer", false});
   return std::move(*d);
+}
+
+std::expected<ProjectBuildDone, Failure> request_project_build(
+    Connection& c, const ProjectBuildRequest& r, const std::function<void(TraceBatch&&)>& on_trace) {
+  if (!send(c.fd.get(), Kind::project_build, r))
+    return std::unexpected(Failure{"cannot send the build request", true});
+  for (;;) {
+    auto f = receive(c.fd.get());
+    if (!f) return std::unexpected(Failure{std::format("the daemon closed the connection: {}", f.error()), true});
+    if (f->kind == Kind::trace) {
+      auto batch = decode<TraceBatch>(*f);
+      if (!batch) return std::unexpected(Failure{"malformed trace", false});
+      if (on_trace) on_trace(std::move(*batch));
+      continue;
+    }
+    if (f->kind != Kind::project_build_done) return std::unexpected(Failure{"unexpected build answer", false});
+    auto done = decode<ProjectBuildDone>(*f);
+    if (!done) return std::unexpected(Failure{"malformed build answer", false});
+    return std::move(*done);
+  }
 }
 
 std::expected<void, std::string> watch_traces(Connection& c, bool values, bool live) {

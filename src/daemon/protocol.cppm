@@ -13,8 +13,8 @@ import :posix;
 export namespace ycxx::daemon {
 
 enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch,
-                                  await_change, changed, watching };
-inline constexpr Kind last_kind = Kind::watching;
+                                  await_change, changed, watching, project_build, project_build_done };
+inline constexpr Kind last_kind = Kind::project_build_done;
 
 struct Hello {
   std::uint64_t build_hash = 0;
@@ -79,6 +79,18 @@ struct Changed {
 struct WatchedFiles {
   std::vector<std::string> paths;  // absolute, existing files builds have read
 };
+struct ProjectBuildRequest {
+  std::string cwd;
+  std::string target;
+  bool trace = false;
+  bool trace_values = false;
+};
+struct ProjectBuildDone {
+  int status = 0;
+  std::string output;
+  std::vector<std::string> diagnostics;
+  std::size_t actions_executed = 0;
+};
 struct StatusRequest {};
 struct ShutdownRequest {};
 struct Bye {};
@@ -140,6 +152,8 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<compile::Request>(h);
   engine::fold_schema<compile::Done>(h);
   engine::fold_schema<TraceBatch>(h);
+  engine::fold_schema<ProjectBuildRequest>(h);
+  engine::fold_schema<ProjectBuildDone>(h);
   engine::fold_schema<WatchRequest>(h);
   engine::fold_schema<Changed>(h);
   engine::fold_schema<WatchedFiles>(h);

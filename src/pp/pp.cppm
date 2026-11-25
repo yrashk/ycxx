@@ -127,6 +127,16 @@ struct [[=engine::input{engine::Durability::editor}]] Buffer {
   using Value = std::optional<std::string>;
 };
 engine::provided<std::optional<std::string>> no_buffer(PathId);
+
+// A generated path in the build view. Read and negative include probes record the
+// individual artifact. The build coordinator sets these inputs only at quiescence.
+struct [[=engine::input{engine::Durability::low}]] GeneratedFile {
+  using Key = PathId;
+  using Value = std::optional<std::string>;
+  static std::string show(const Value& v) { return FileContent::show(v); }
+};
+engine::provided<std::optional<std::string>> no_generated_file(PathId);
+
 // A provider of `FileContent` that reads the disk, for a `Db` with no daemon behind it.
 engine::provided<std::optional<std::string>> read_disk(PathId p);
 
@@ -137,6 +147,11 @@ struct Source {
   std::string cwd;
   Config config;
 };
+// Read a path in the source's view. In the build view cwd is the workspace root and
+// `.ycxx/virtual/` within it is reserved for generated contents.
+const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name);
+const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name);
+
 // The configuration's target is a pointer to a known target: a `Source` is fingerprinted by the
 // configuration's fingerprint and stored with the target's triple.
 void hash_into(Hasher& h, const Source& s) { h.bytes(s.path).uint(u8(0)).bytes(s.cwd).uint(u8(0)).fp(s.config.fingerprint()); }
@@ -170,7 +185,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (auto target = ast::target_for_triple(engine::deserialize<std::string>(in))) s.config.target = target;
   else in.fail();
   const auto view = engine::deserialize<std::uint64_t>(in);
-  if (view > std::to_underlying(View::editor)) in.fail();
+  if (view > std::to_underlying(View::build)) in.fail();
   s.config.view = static_cast<View>(view);
   s.config.template_depth = static_cast<std::uint32_t>(engine::deserialize<std::uint64_t>(in));
   const auto calls = engine::deserialize<std::uint64_t>(in);
@@ -250,26 +265,28 @@ Paths& paths() {
   return p;
 }
 
-// Inside `Pp`: every file read is a `FileContent` fetch, relative paths against the source's
-// working directory, so the cell records each one (negatives included). In the editor view an
-// open buffer comes first (§6.1); a disk-view read never fetches a `Buffer`, so no disk-view cell
-// takes the `editor` durability.
+PathId source_path(const Source& source, std::string_view name) {
+  std::filesystem::path path(name);
+  if (path.is_relative() && !source.cwd.empty()) path = std::filesystem::path(source.cwd) / path;
+  return path_id(path.lexically_normal().generic_native_encoded_string());
+}
+
+bool is_generated_path(const Source& source, PathId id) {
+  if (source.config.view != View::build) return false;
+  const auto root = (std::filesystem::path(source.cwd) / ".ycxx/virtual").lexically_normal();
+  const std::string prefix = root.generic_native_encoded_string() + '/';
+  return path_of(id).starts_with(prefix);
+}
+
+// Each attempted include records the input that answered it, including misses.
 class EngineHost final : public Host {
  public:
-  EngineHost(engine::Ctx& cx, std::string_view cwd, View view) : cx_(&cx), cwd_(cwd), view_(view) {}
-  std::optional<std::string> read(const std::string& path) override {
-    std::filesystem::path p(path);
-    if (p.is_relative() && !cwd_.empty()) p = std::filesystem::path(cwd_) / p;
-    const PathId id = path_id(p.lexically_normal().generic_native_encoded_string());
-    if (view_ == View::editor)
-      if (const auto& open = cx_->fetch<Buffer>(id)) return *open;
-    return cx_->fetch<FileContent>(id);
-  }
+  EngineHost(engine::Ctx& cx, const Source& source) : cx_(cx), source_(source) {}
+  std::optional<std::string> read(const std::string& path) override { return source_content(cx_, source_, path); }
 
  private:
-  engine::Ctx* cx_;
-  std::string_view cwd_;
-  View view_;
+  engine::Ctx& cx_;
+  const Source& source_;
 };
 
 // Points a session's files at a host for a scope, starting and ending with a new generation, so
@@ -408,6 +425,24 @@ engine::provided<std::optional<std::string>> read_disk(PathId p) {
 }
 
 engine::provided<std::optional<std::string>> no_buffer(PathId) { return {std::nullopt, engine::Durability::editor}; }
+
+engine::provided<std::optional<std::string>> no_generated_file(PathId) { return {std::nullopt, engine::Durability::low}; }
+
+const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name) {
+  const PathId id = source_path(source, name);
+  if (source.config.view == View::editor)
+    if (const auto& open = cx.fetch<Buffer>(id)) return open;
+  if (is_generated_path(source, id)) return cx.fetch<GeneratedFile>(id);
+  return cx.fetch<FileContent>(id);
+}
+
+const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name) {
+  const PathId id = source_path(source, name);
+  if (source.config.view == View::editor)
+    if (const auto* open = db.peek<Buffer>(id); open && *open) return &**open;
+  const auto* content = is_generated_path(source, id) ? db.peek<GeneratedFile>(id) : db.peek<FileContent>(id);
+  return content && *content ? &**content : nullptr;
+}
 
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path) {
   FileId main = s.files.id(path);
@@ -557,16 +592,16 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
 engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
   const Source& src = cx.fetch<SourceOf>(file);
   Session& s = session_for(src.config);
-  EngineHost host(cx, src.cwd, src.config.view);
-  // The editor view reads the unit's own text through the view too (§6.1), so a keystroke in it
-  // changes an `editor` input, never the `low` `FileText` (which it leaves unset). A unit the view
-  // cannot read is empty: its driver reports that before asking.
-  std::string own;
-  if (src.config.view == View::editor) own = host.read(src.path).value_or(std::string());
+  EngineHost host(cx, src);
+  // The editor and build views read the main file through their path inputs too. A unit the
+  // view cannot read is empty here: its request checks readability before fetching Pp.
+  std::string_view text;
+  if (src.config.view == View::disk) text = cx.fetch<FileText>(file);
+  else if (const auto& own = source_content(cx, src, src.path)) text = *own;
   Preprocessed p = [&] {
     std::lock_guard g(s.mutex);
     HostScope scope(s.files, host);
-    Preprocessed result = preprocess(s, src.config.view == View::editor ? std::string_view(own) : cx.fetch<FileText>(file), src.path);
+    Preprocessed result = preprocess(s, text, src.path);
     // Trace the errors at the same physical positions as the compiler's diagnostics (#404).
     struct FileLines {
       u32 size = 0;
