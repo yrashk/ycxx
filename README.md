@@ -681,9 +681,14 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template or a partial
   specialization, including an alias-selected dependent base, a value-dependent template argument
-  (`B<T::value>`, `conditional_t<!bool(B1::value) || sizeof...(Bn) == 0, B1, …>`) and qualified
-  lookup of its static members, and the bases of explicit specializations.
+  (`B<T::value>`, `conditional_t<!bool(B1::value) || sizeof...(Bn) == 0, B1, …>`), a
+  decltype-specifier (`decltype(select<T>())`) and qualified lookup of its static members, and the
+  bases of explicit specializations.
   [#308](https://github.com/yrashk/ycxx/issues/308) · [#1134](https://github.com/yrashk/ycxx/issues/1134)
+- `decltype(e)::` before a member type or a member, dependent or not
+  (`typename decltype(pick<Ts...>())::type`), in class members, function bodies and
+  namespace-scope alias templates.
+  [#1243](https://github.com/yrashk/ycxx/issues/1243)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too. Ordinary block variables with an
   `= expression` initializer can use `Concept auto` with a prior unqualified type concept.

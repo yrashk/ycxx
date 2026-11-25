@@ -3429,6 +3429,22 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   again with the arguments bound (`instantiate_base`). A pack expansion of such an argument
   (`PS<T::k...>`) and the same template-id outside a base (`BC<!T::value>::value` in a member) need
   #209's representation (#308).
+  A base can be a decltype-specifier, or a type named through one (`decltype(e)::type`). A dependent
+  one is parsed again for each specialization (`instantiate_base`). A class type's own
+  cv-qualifiers are ignored; written ones are rejected ([class.derived.general]/2) (#1243).
+- **`decltype(e)::`** as a nested-name-specifier ([expr.prim.id.qual]): `decltype_qualifier_ahead`
+  and `qualified_type_ahead` in the parser. It names a type after `typename`, as a type-specifier,
+  a parameter, a template argument or a base; in a statement, a member of a dependent one is a type
+  only after `typename` ([temp.res.general]). A namespace-scope alias template whose type has such an operand with
+  no representation (`typename decltype(select<T>())::type`, with a deduced return type) is read
+  again when it is named with known arguments (`AliasCallPattern::unrepresented`). A class
+  template's member declaration can call an earlier static member of the class, also with
+  explicit template arguments: a deduced return type comes from the member's instantiation, made
+  while the class is instantiated (`members_so_far`). That body cannot name a member declared
+  later (a later member type should be found, #1287). Member alias templates (#1285) and a
+  decltype-specifier as a mem-initializer-id (#1286) are missing. Namespace-scope function template signatures,
+  variable template types and default arguments with an unrepresented operand stay dependent (#1269).
+  Tests: `tests/own/templates/decltype-*`, `tests/own/inherit/decltype-base*` (#1243).
 - **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
   type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
   are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and

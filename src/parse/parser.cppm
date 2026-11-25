@@ -343,7 +343,7 @@ public:
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
     }
-    if (statement && is(Tk::kw_typename) && qualified_ahead(1)) {
+    if (statement && is(Tk::kw_typename) && qualified_type_ahead(1)) {
       const bool saved_half = qualified_half_;
       auto q = qualified_type(1);
       qualified_half_ = saved_half;
@@ -373,8 +373,8 @@ public:
         }
       }
     }
-    if (starts_decl_specifier(kind())) return true;
-    if (qualified_ahead()) {
+    if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return true;
+    if (qualified_type_ahead()) {
       bool failed_qualifier = false;
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false, &failed_qualifier);
       if (failed_qualifier) return true;  // let the declaration diagnose the qualifier
@@ -482,6 +482,16 @@ public:
     if (kind(start + 1) == Tk::coloncolon) return true;
     return kind(start + 1) == Tk::less && kind(past_template_args(start + 1)) == Tk::coloncolon;
   }
+
+  // Whether a nested-name-specifier starts here with a decltype-specifier, `decltype(e)::`
+  // ([expr.prim.id.qual]). A declarator-id's does not ([dcl.meaning.general]/4), so it is not a
+  // `qualified_ahead`.
+  bool decltype_qualifier_ahead(u32 start = 0) const {
+    return kind(start) == Tk::kw_decltype && kind(start + 1) == Tk::l_paren &&
+           kind(past_parentheses(start + 1)) == Tk::coloncolon;
+  }
+  // Whether the qualified name of a type can start here.
+  bool qualified_type_ahead(u32 start = 0) { return qualified_ahead(start) || decltype_qualifier_ahead(start); }
 
   // A ptr-operator can start with a nested-name-specifier. Find its `*` before doing lookup, so
   // an invalid owner still consumes the operator rather than looking like a declarator-id.
@@ -624,7 +634,7 @@ public:
       if (tmpl.kind == ast::DeclKind::type_alias) {
         ++deferred_argument_checks_;
         const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
-        if (pattern != sema::AliasCallPattern::none && pattern != sema::AliasCallPattern::rank_checks)
+        if (pattern == sema::AliasCallPattern::retained || pattern == sema::AliasCallPattern::may_erase)
           ++deferred_immediate_calls_;
         rank_check = rank_check || pattern == sema::AliasCallPattern::rank_checks;
         defer_rank_alias = type_alias_checks_ && (rank_check || written_rank_check);
@@ -664,6 +674,24 @@ public:
     auto once = [&](bool& flag, Tk k) {
       if (flag) s_->diag(pos(), Diag::duplicate_specifier, k);
       flag = true;
+    };
+    // A qualified type name here, taken as the type specifier.
+    auto qualified_specifier = [&] {
+      const auto diags = s_->diag_count();
+      const auto alias_failures = alias_constraint_failures_;
+      if (auto q = qualified_type(0, true);
+          q && (in_type_id || kind(q->second) != Tk::l_paren || function_pointer_declarator_ahead(q->second) ||
+                (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
+        cls = q->first;
+        take_qualified(q->second);
+        return true;
+      }
+      if (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures) d.ok = false;
+      if (!d.ok && decltype_qualifier_ahead()) {  // past `decltype(e)::n`, which was diagnosed
+        for (u32 j = past_parentheses(1); j != 0; --j) bump();
+        while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
+      }
+      return false;
     };
     for (;;) {
       // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
@@ -752,6 +780,10 @@ public:
           d.ok = false;
           goto done;
         }
+        if (decltype_qualifier_ahead()) {  // `decltype(e)::type` ([dcl.type.simple])
+          if (qualified_specifier()) continue;
+          goto done;
+        }
         cls = decltype_expression_type();
         if (!cls) {
           d.ok = false;
@@ -808,9 +840,11 @@ public:
         u32 at = pos();
         bump();
         const auto alias_failures = alias_constraint_failures_;
-        auto q = qualified_ahead() ? qualified_type(0, true) : std::nullopt;
+        const auto diags = s_->diag_count();
+        auto q = qualified_type_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
-          if (alias_constraint_failures_ == alias_failures) s_->diag(at, Diag::expected_type_specifier);
+          if (alias_constraint_failures_ == alias_failures && (q || !s_->has_error_since(diags)))
+            s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
           goto done;
         }
@@ -918,17 +952,7 @@ public:
           }
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
-            const auto diags = s_->diag_count();
-            const auto alias_failures = alias_constraint_failures_;
-            if (auto q = qualified_type(0, true);
-                q && (in_type_id || kind(q->second) != Tk::l_paren ||
-                      function_pointer_declarator_ahead(q->second) ||
-                      (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
-              cls = q->first;
-              take_qualified(q->second);
-              continue;
-            }
-            if (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures) d.ok = false;
+            if (qualified_specifier()) continue;
             goto done;
           }
           if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
@@ -1714,15 +1738,22 @@ public:
     const auto alias_failures = alias_constraint_failures_;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
+      // A lookahead's diagnostics are the committed reading's to give.
+      const bool selected = checked || check_injected_access || member_pointer || committed_failure || committed_type;
       u32 saved = i_;
       const bool saved_half = half_;
+      const std::size_t diags = s_->diag_count();
       i_ += j;
       auto t = decltype_expression_type();
       bool closed = is(Tk::coloncolon);
       j = i_ - saved + 1;
       i_ = saved;
       half_ = saved_half;
-      if (!t || !closed) return std::nullopt;
+      if (!selected) s_->truncate_diags(diags);
+      if (!t || !closed) {
+        if (failed_qualifier) *failed_qualifier = true;
+        return std::nullopt;
+      }
       s = sema::Sema::Scope{std::nullopt, *t};
     } else if (kind(j) == Tk::coloncolon) {
       s = sema::Sema::global_scope();
@@ -1998,17 +2029,20 @@ public:
       u32 after_type = first + 1;
       if (constrained_auto_ahead(first)) {
         ++after_type;
-      } else if (k == Tk::kw_typename && qualified_ahead(after_type)) {
+      } else if (k == Tk::kw_typename && qualified_type_ahead(after_type)) {
         const bool saved_half = qualified_half_;
         auto q = qualified_type(after_type);
         qualified_half_ = saved_half;
         if (!q) return true;  // diagnose a bad typename-specifier in the declaration
         after_type += q->second;
       } else if (!simple_type_keyword(k)) {
-        if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
-        if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
-          auto q = qualified_type(first);  // `N::S`, `C::E`, `::S`
+        const bool computed = decltype_qualifier_ahead(first);
+        if (k == Tk::r_paren || k == Tk::ellipsis || (starts_decl_specifier(k) && !computed)) return true;
+        if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon || computed) {
+          auto q = qualified_type(first);  // `N::S`, `C::E`, `::S`, `decltype(e)::S`
           if (!q) return false;
+          // A member of a dependent class is no type without `typename` in a block ([temp.res.general]/5).
+          if (s_->in_function_body && s_->types().kind(q->first) == sema::TypeKind::dep_name) return false;
           after_type = first + q->second;
         } else if (k == Tk::identifier && next == Tk::less && s_->names_type_template(name_of(tok(first)))) {
           after_type = past_template_args(first + 1);
@@ -3075,10 +3109,10 @@ public:
   bool starts_type_id(bool template_argument = false) {
     if (transform_trait_ahead()) return true;
     if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren) return function_type_argument_ahead();
-    if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
+    if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
-    if (qualified_ahead()) {
+    if (qualified_type_ahead()) {
       bool failed_qualifier = false;
       bool terminal_template_id = false;
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
@@ -4282,7 +4316,7 @@ public:
       bump();
       const auto diags = s_->diag_count();
       const auto alias_failures = alias_constraint_failures_;
-      auto type = qualified_ahead()
+      auto type = qualified_type_ahead()
           ? qualified_type(0, /*checked=*/true, /*type_only=*/false, nullptr, nullptr,
                            /*template_argument=*/false, /*conversion=*/true)
           : std::nullopt;
@@ -4686,6 +4720,7 @@ public:
     std::vector<TypeQualifier> type_qualifiers;
     std::optional<u32> committed_failure;
     std::optional<u32> ambiguous_namespace;
+    const auto diags = s_->diag_count();
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
                          QualifierLookup::ordinary, /*check_injected_access=*/false, &type_qualifiers,
                          /*failed_qualifier=*/nullptr, &committed_failure, &ambiguous_namespace);
@@ -4700,7 +4735,12 @@ public:
     std::string_view suffix;
     if (s && s->ns && kind(next) == Tk::kw_operator) suffix = punctuator_operator_suffix(next + 1);
     if (!s || (suffix.empty() && !lookup_id_ahead(next))) {
-      s_->diag(begin, Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+      if (!decltype_qualifier_ahead()) {
+        s_->diag(begin, Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+      } else {
+        if (!s_->has_error_since(diags)) s_->diag(begin, Diag::not_a_namespace, s_->no_name());
+        for (u32 j = past_parentheses(1); j != 0; --j) bump();
+      }
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
       return {NodeId::none, begin, pos()};
     }
