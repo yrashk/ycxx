@@ -434,7 +434,9 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
 [#190](https://github.com/yrashk/ycxx/issues/190)
 
 Ordinary named namespace-scope classes and structs support class-head `alignas` requests up to
-16 bytes. The alignment applies to layout and storage on both targets. [#303](https://github.com/yrashk/ycxx/issues/303)
+16 bytes. Non-static object members support leading `alignas` in the same range, including
+dependent requests evaluated during class instantiation. The alignment applies to layout and
+storage on both targets. [#303](https://github.com/yrashk/ycxx/issues/303)
 
 Both targets accept nonempty standalone unnamed enum definitions at namespace scope, including
 fixed underlying types and definitions inside `extern "C"` blocks.
@@ -945,7 +947,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 non-template class is a member class: defined in its class, or declared there (`class failure;`) and
 defined later, also out of class (`class O::I : public B { … };`), with members defined as
 `O::I::f`. Its members find the enclosing classes' types, static members and enumerators, and it
-can have virtual functions. Nested classes of class templates are not supported yet.
+can have virtual functions. Class templates and their specializations support in-class definitions
+of non-template member classes. An implicit instantiation checks the member definition when a use
+requires the member class to be complete.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
 
 **Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of

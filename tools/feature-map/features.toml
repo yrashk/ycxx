@@ -1477,7 +1477,7 @@ struct alignas(16) A { char c; };
 int main() { alignas(8) char b[3]; return (alignof(A) == 16 && sizeof(A) == 16 && sizeof b == 3) ? 0 : 1; }
 '''
 status = 'partial'
-note = 'concrete class-head requests up to 16 bytes on ordinary namespace-scope classes and structs, with their effect on layout and storage. Member and variable alignment remain open.'
+note = 'Ordinary namespace-scope class heads and leading non-static object-member alignments up to 16 bytes affect layout and storage. Dependent member requests are evaluated at class instantiation. Variable alignment and packs remain open.'
 issues = [303]
 
 [[feature]]
@@ -1593,7 +1593,7 @@ std = 'C++98'
 detect = '''\b(?:class|struct)\s+\w+\s*(?:final\s*)?[:{][^{}]*\b(?:class|struct)\s+\w+\s*[:{]'''
 status = 'partial'
 issues = [306, 1187]
-note = 'Nested classes of ordinary classes: in-class and out-of-class definitions, member class declarations, enclosing-class lookup, both targets. Nested classes of class templates remain (#1187).'
+note = 'Ordinary classes support in-class and out-of-class member definitions. Class templates and their specializations support in-class definitions of non-template member classes with enclosing-class lookup. Out-of-class definitions for templated owners remain (#1187).'
 probe = '''
 struct S { struct In { int w; }; In i; };
 int main() { S s{{3}}; S::In j{4}; return s.i.w + j.w - 7; }
