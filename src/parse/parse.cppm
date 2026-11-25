@@ -12638,7 +12638,8 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
   AtItem q(*this, item, false);
   q.at_point = point;
   sema::Sema s(*w_, b, q, sink, id(item), 0);
-  if (named_nested_class(item)) {
+  const bool member_class = named_nested_class(item);
+  if (member_class) {
     // The base-clause is in the owner's scope. The owner can still be declaring
     // members if a later by-value field is what requires this class to be complete.
     q.instantiating = w_->entities.rec(specialization).scope;
@@ -12672,6 +12673,7 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
     base = dependent ? complete_base_class(s, *substituted, pattern.begin, /*allow_polymorphic=*/true) : std::optional(w_->types.class_of(type));
   if (q.observed_class_assertion_failure) failed_class_assertions_.insert(specialization);
   else if (q.observed_type_trait_failure) failed_type_trait_instantiations_.insert(specialization);
+  else if (member_class && !base && s.has_error_since(0)) failed_member_class_instantiations_.insert(specialization);
   for (engine::Diagnostic& d : sink) {
     if (sema::is_type_trait_failure(d.id)) failed_type_trait_instantiations_.insert(specialization);
     if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
