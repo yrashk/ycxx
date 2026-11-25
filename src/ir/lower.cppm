@@ -56,7 +56,7 @@ export struct TypeLayout {
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
-  bool sysv_empty_argument = false;  // a call-trivial empty record classified as NO_CLASS
+  bool sysv_empty_record = false;  // a call-trivial empty record classified as NO_CLASS
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
   bool calls_abi_uncertain = false;  // records whose non-triviality for calls is not established
   bool layout_uncertain = false;     // records whose source layout directives are not applied
@@ -493,7 +493,7 @@ class Lowering {
         if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
         if (!config_.sysv_amd64 && object.contains_explicit_alignment)
           return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
-        if (ignored(object, byval && !result)) {  // the parameter still has an object in this frame
+        if (omits_class_transport(object)) {  // the parameter or result still has an object in this frame
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
           continue;
@@ -963,7 +963,8 @@ class Lowering {
                         : "an immediate virtual call reached native lowering");
       case Op::call:
       case Op::call_ind: {
-        bool ind = nd.op == Op::call_ind;
+        const bool ind = nd.op == Op::call_ind;
+        const bool fixed_direct = !ind && !(nd.flags & bit(Flag::variadic));
         std::vector<ValueId> ops{in(n, 0)};
         auto l1ops = f_.operands_of(n);
         if (ind) ops.push_back(in(n, 1));
@@ -1003,9 +1004,8 @@ class Lowering {
             if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
             if (!config_.sysv_amd64 && object.contains_explicit_alignment)
               return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
-            const bool fixed_direct_argument = class_arg && !class_result && !ind && !(nd.flags & bit(Flag::variadic));
-            // The argument expression has already produced its object. Omit only its transport.
-            if (ignored(object, fixed_direct_argument)) continue;
+            // L1 already has an object for the argument or result. Omit only its transport.
+            if (omits_class_transport(object, fixed_direct)) continue;
           }
           if (class_result) {
             result_pieces = class_pieces(c);
@@ -1352,10 +1352,10 @@ class Lowering {
     return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
            ((!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
-  // Darwin omits empty call-trivial arguments and results (#116). System V classifies this
-  // empty argument as NO_CLASS; its result convention is separate (#641).
-  bool ignored(const TypeLayout& l, bool sysv_argument) const {
-    if (config_.sysv_amd64) return sysv_argument && l.sysv_empty_argument;
+  // Darwin omits empty call-trivial arguments and results (#116). System V transports no
+  // value for a NO_CLASS record in a fixed direct call or its definition (#641).
+  bool omits_class_transport(const TypeLayout& l, bool fixed_direct = true) const {
+    if (config_.sysv_amd64) return fixed_direct && l.sysv_empty_record;
     return l.kind == TypeKind::record && l.trivial_calls && l.empty;
   }
   // An ABI-local class object. AAPCS64 rounds it up to permit full-word accesses.
