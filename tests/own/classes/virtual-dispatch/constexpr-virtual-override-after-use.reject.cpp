@@ -2,7 +2,7 @@
 struct Base {
     virtual constexpr int value() const { return 1; }
 };
-constexpr int read(const Base& base) { return base.value(); }
+constexpr int read(const Base& base) { return base.value(); } //! error[gcc]
 struct Late : public Base {
     constexpr int value() const override;
 };

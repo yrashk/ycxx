@@ -5,7 +5,7 @@ struct Base {
 struct Derived : public Base {
     constexpr int value() const override { return 2; }
 };
-constexpr int read(const Base& base) { return base.value(); }
+constexpr int read(const Base& base) { return base.value(); } //! error[gcc]
 constexpr int test(bool flag) {
     if (!flag) return 0;
     const Base* saved = nullptr;

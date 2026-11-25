@@ -5,7 +5,7 @@ struct Base {
 struct Other : public Base {
     int value() const override { return 3; }
 };
-constexpr int read(const Base& base) { return base.value(); }
+constexpr int read(const Base& base) { return base.value(); } //! error[gcc]
 constexpr int test(bool flag) {
     if (!flag) return 0;
     Other other;
