@@ -1,4 +1,4 @@
-"""Check project module graphs in JSON, HTML and plan comparisons (#1363, #1378, #1383)."""
+"""Check project module graphs and comparisons in JSON and HTML (#1363, #1378, #1383, #1390)."""
 
 from collections import Counter
 from copy import deepcopy
@@ -29,12 +29,14 @@ STATUS = {
     'external or unresolved': 'external_or_unresolved',
 }
 UNSAFE_SOURCE = 'x<&>.cc'
+UNSAFE_SNAPSHOT_SITE = '<script data-module-probe="1">&\'saved\'</script>'
 
 
 class HTMLElement:
-    def __init__(self, tag, attributes):
+    def __init__(self, tag, attributes, parent):
         self.tag = tag
         self.attrs = dict(attributes)
+        self.parent = parent
         self.descendants = []
         self.text = []
 
@@ -55,7 +57,7 @@ class PlanHTML(HTMLParser):
         self.close()
 
     def handle_starttag(self, tag, attrs):
-        node = HTMLElement(tag, attrs)
+        node = HTMLElement(tag, attrs, self.open[-1] if self.open else None)
         self.elements.append(node)
         for parent in self.open:
             parent.descendants.append(node)
@@ -116,6 +118,102 @@ def candidate_links(entry, declarations):
                    for ref in candidate_refs(entry, declarations))
 
 
+def has_class(node, name):
+    return name in node.attrs.get('class', '').split()
+
+
+def change_group(panel, title):
+    heading, = (node for node in panel.descendants
+                if node.tag == 'h3' and node.visible().strip() == title)
+    return heading.parent
+
+
+def change_side(row, side):
+    columns = [node for node in row.descendants if has_class(node, 'module-side') and has_class(node, side)]
+    assert len(columns) <= 1, (side, row.visible())
+    if columns:
+        assert contains_words(columns[0], side), columns[0].visible()
+    return columns[0] if columns else None
+
+
+def check_candidate_sites(block, entry, declarations, *, linked):
+    expected_links = candidate_links(entry, declarations) if linked else Counter()
+    assert module_links(block, 'declaration') == expected_links, (entry, block.visible())
+    links = {node.attrs.get('href'): node for node in block.descendants if node.tag == 'a'}
+    for ref in candidate_refs(entry, declarations):
+        href = '#' + directive_anchor('declaration', *ref)
+        location = site(declarations[ref]['location'])
+        assert location in (links[href] if linked else block).visible(), (entry, location, block.visible())
+
+
+def check_changed_side(block, kind, entry, graph, *, linked):
+    units, declarations = graph
+    if not linked:
+        assert not any(node.tag == 'a' for node in block.descendants), block.visible()
+    if kind == 'imports':
+        assert contains_words(block, entry['status']), (entry, block.visible())
+        href = '#' + directive_anchor('import', entry['unit_id'], entry['directive_index'])
+        location = site(entry['location'])
+        assert location in block.visible(), (entry, block.visible())
+        if linked:
+            link, = (node for node in block.descendants if node.tag == 'a' and node.attrs.get('href') == href)
+            assert location in link.visible(), (entry, link.visible())
+    if kind in ('imports', 'conflicts'):
+        check_candidate_sites(block, entry, declarations, linked=linked)
+    if kind == 'units':
+        assert contains_words(block, entry['scan']), (entry, block.visible())
+    if kind in ('units', 'cycles'):
+        members = [entry['id']] if kind == 'units' else entry
+        assert module_links(block, 'unit') == Counter(f'#module-unit-{unit}' for unit in members if linked)
+        for unit in members:
+            assert units[unit]['source'] in block.visible(), (unit, block.visible())
+
+
+def check_module_delta_html(document, before, after, changes):
+    panel = document.section('module-changes', 'Module changes')
+    if changes.get('matching') == 'legacy_source_only':
+        assert contains_words(panel, 'matched by source path'), panel.visible()
+    if changes.get('unavailable'):
+        assert contains_words(panel, 'Module comparison unavailable'), panel.visible()
+        assert 'No semantic module changes.' not in panel.visible()
+        assert not any(has_class(node, 'module-change') for node in panel.descendants)
+        return panel
+
+    groups = {'imports': 'Import changes', 'units': 'Translation unit changes',
+              'conflicts': 'Provider conflict changes', 'cycles': 'Cycle changes'}
+    if not (changes.get('completeness') or any(changes[kind] for kind in groups)):
+        assert 'No semantic module changes.' in panel.visible(), panel.visible()
+        assert not any(has_class(node, 'module-change') for node in panel.descendants)
+        return panel
+
+    assert 'No semantic module changes.' not in panel.visible(), panel.visible()
+    expected_count = sum(len(changes[kind]) for kind in groups) + int('completeness' in changes)
+    assert sum(has_class(node, 'module-change') for node in panel.descendants) == expected_count
+    old, new = index_graph(before['module_graph']), index_graph(after['module_graph'])
+    for kind, title in groups.items():
+        if not changes[kind]:
+            continue
+        group = change_group(panel, title)
+        rows = [node for node in group.descendants if has_class(node, 'module-change')]
+        assert len(rows) == len(changes[kind]), (kind, [row.visible() for row in rows], changes[kind])
+        for row, change in zip(rows, changes[kind]):
+            assert contains_words(row, change['change']), (change, row.visible())
+            if kind in ('imports', 'conflicts'):
+                assert (change.get('after') or change['before'])['name'] in row.visible(), (change, row.visible())
+            for side, graph in (('before', old), ('after', new)):
+                block, entry = change_side(row, side), change.get(side)
+                assert (block is None) == (entry is None), (change, row.visible())
+                if entry is not None:
+                    check_changed_side(block, kind, entry, graph, linked=side == 'after')
+    if 'completeness' in changes:
+        complete = change_group(panel, 'Scan completeness')
+        for side in ('before', 'after'):
+            expected = 'Complete' if changes['completeness'][side] else 'Incomplete'
+            block = change_side(complete, side)
+            assert block is not None and contains_words(block, expected), (side, complete.visible())
+    return panel
+
+
 def check_graph_html(document, graph):
     section = document.section('module-graph', 'Module graph')
     assert graph['native_target'] in section.visible(), graph['native_target']
@@ -151,12 +249,7 @@ def check_graph_html(document, graph):
             assert contains_words(record, spelling), (entry, record.visible())
             if kind == 'import':
                 assert contains_words(record, entry['status']), (entry, record.visible())
-                assert module_links(record, 'declaration') == candidate_links(entry, declarations), entry
-                links = {node.attrs['href']: node.visible() for node in record.descendants
-                         if node.tag == 'a' and node.attrs.get('href', '').startswith('#module-declaration-')}
-                for candidate in candidate_refs(entry, declarations):
-                    href = '#' + directive_anchor('declaration', *candidate)
-                    assert site(declarations[candidate]['location']) in links[href], (entry, links)
+                check_candidate_sites(record, entry, declarations, linked=True)
 
     if graph['conflicts']:
         rows = notice_rows(section, 'Provider conflicts')
@@ -181,6 +274,8 @@ def show_html(ycxx, scope, env, journal, triple, plan, *args):
         check_graph_html(document, plan['module_graph'])
     else:
         assert not document.sections('module-graph'), 'HTML showed a graph for an unresolved plan'
+    if '--against' not in args:
+        assert not document.sections('module-changes'), 'HTML showed changes without a baseline'
     return document
 
 
@@ -297,10 +392,27 @@ def check_provider_reuse(summary, events):
     assert {event['outcome'] for event in semantic} <= {'reused', 'verified', 'durable'}, semantic
 
 
-def compare(ycxx, scope, env, journal, triple, before):
+def save_comparison(scope, before):
     snapshot = scope.parent / 'graph-comparison.json'
     snapshot.write_text(json.dumps(before), encoding='utf-8')
-    return show(ycxx, scope, env, journal, triple, '--against', str(snapshot))
+    return snapshot
+
+
+def compare(ycxx, scope, env, journal, triple, before):
+    return show(ycxx, scope, env, journal, triple, '--against', str(save_comparison(scope, before)))
+
+
+def compare_html(ycxx, scope, env, journal, triple, before, after, diff):
+    snapshot = save_comparison(scope, before)
+    saved = snapshot.read_bytes(), snapshot.stat().st_mtime_ns
+    document = show_html(ycxx, scope, env, journal, triple, after, '--against', str(snapshot))
+    assert (snapshot.read_bytes(), snapshot.stat().st_mtime_ns) == saved, 'comparison changed the snapshot'
+    document.section('changes', 'Plan changes')
+    if 'module_changes' in diff:
+        check_module_delta_html(document, before, after, diff['module_changes'])
+    else:
+        assert not document.sections('module-changes'), 'legacy plan without a graph showed module changes'
+    return document
 
 
 def check_module_changes(diff, *, metadata=None, **groups):
@@ -351,10 +463,11 @@ def check_invalid_graph(ycxx, scope, env, journal, plan):
     snapshot = scope.parent / 'invalid-module-graph.json'
     snapshot.write_text(json.dumps(invalid), encoding='utf-8')
     before = state(scope), journal_contents(journal)
-    result = run_client(ycxx, scope, env, 'show', 'app', f'--target={LINUX}', '--format=json',
-                        '--against', str(snapshot))
-    assert result.returncode != 0 and 'saved module graph' in result.stderr.lower(), result
-    assert (state(scope), journal_contents(journal)) == before, 'comparison wrote state or ran a tool'
+    for format_ in ('json', 'html'):
+        result = run_client(ycxx, scope, env, 'show', 'app', f'--target={LINUX}', f'--format={format_}',
+                            '--against', str(snapshot))
+        assert result.returncode != 0 and 'saved module graph' in result.stderr.lower(), result
+        assert (state(scope), journal_contents(journal)) == before, 'comparison wrote state or ran a tool'
 
 
 def unit_for_source(graph, source):
@@ -374,13 +487,50 @@ def check_target_comparison(ycxx, scope, env, journal, linux, darwin):
     diff = compare(ycxx, scope, env, journal, DARWIN, linux)
     check_module_changes(diff, **platform_changes(old, new))
 
+    document = compare_html(ycxx, scope, env, journal, DARWIN, linux, darwin, diff)
+
     without_graph = {key: value for key, value in linux.items() if key != 'module_graph'}
     legacy = compare(ycxx, scope, env, journal, DARWIN, without_graph)
     assert legacy == {key: value for key, value in diff.items() if key != 'module_changes'}, legacy
+    legacy_document = compare_html(ycxx, scope, env, journal, DARWIN, without_graph, darwin, legacy)
+    assert legacy_document.section('changes', 'Plan changes').visible() == document.section(
+        'changes', 'Plan changes').visible()
     legacy = legacy_graph(linux)
-    check_module_changes(compare(ycxx, scope, env, journal, DARWIN, legacy),
-                         metadata={'matching': 'legacy_source_only'},
+    legacy_diff = compare(ycxx, scope, env, journal, DARWIN, legacy)
+    check_module_changes(legacy_diff, metadata={'matching': 'legacy_source_only'},
                          **platform_changes(legacy['module_graph'], new))
+    compare_html(ycxx, scope, env, journal, DARWIN, legacy, darwin, legacy_diff)
+
+
+def check_diamond_html(ycxx, scope, env, journal):
+    arms = ('left.cc', 'right.cc')
+    for arm in arms:
+        replace_source(scope, arm, SOURCES[arm].replace('import beam.bottom;', f'import {CHOICE};'))
+    linux = renumber_graph(show(ycxx, scope, env, journal, LINUX))
+    darwin = show(ycxx, scope, env, journal, DARWIN)
+    old, new = linux['module_graph'], darwin['module_graph']
+
+    def imports_from(plan):
+        return {edge['location']['path']: edge for edge in plan['imports'] if edge['name'] == CHOICE}
+
+    before, after = imports_from(old), imports_from(new)
+    assert before.keys() == after.keys() == {'main.cc', *arms}, (before, after)
+    diff = compare(ycxx, scope, env, journal, DARWIN, linux)
+    check_module_changes(
+        diff,
+        units=[('changed', unit_for_source(old, name), unit_for_source(new, name)) for name in CHOICES.values()],
+        imports=[('changed', before[arm], after[arm]) for arm in before],
+    )
+    compare_html(ycxx, scope, env, journal, DARWIN, linux, darwin, diff)
+
+    # Changing a saved site preserves provider identity but exercises the old-side HTML join.
+    original_provider = unit_for_source(old, CHOICES[LINUX])['declarations'][0]
+    original_provider['location']['path'] = UNSAFE_SNAPSHOT_SITE
+    document = compare_html(ycxx, scope, env, journal, DARWIN, linux, darwin, diff)
+    assert UNSAFE_SNAPSHOT_SITE not in document.document
+    assert not any(node.attrs.get('data-module-probe') == '1' for node in document.elements)
+    for arm in arms:
+        replace_source(scope, arm, SOURCES[arm])
 
 
 def check_partial_comparison(ycxx, scope, env, journal, complete, partial, source, *, added=False):
@@ -398,8 +548,10 @@ def check_partial_comparison(ycxx, scope, env, journal, complete, partial, sourc
         assert after['status'] == partial_status.get(before['status'], before['status']), (before, after)
         if before['status'] != after['status']:
             imports.append(('changed', before, after))
-    check_module_changes(compare(ycxx, scope, env, journal, LINUX, complete), units=units, imports=imports,
+    diff = compare(ycxx, scope, env, journal, LINUX, complete)
+    check_module_changes(diff, units=units, imports=imports,
                          metadata={'completeness': {'change': 'changed', 'before': True, 'after': False}})
+    compare_html(ycxx, scope, env, journal, LINUX, complete, partial, diff)
 
 
 def check_conflict_and_cycle_comparison(ycxx, scope, env, journal, before):
@@ -426,16 +578,28 @@ def check_conflict_and_cycle_comparison(ycxx, scope, env, journal, before):
     removed_cycle, = (cycle for cycle in old['cycles'] if cycle == [removed['unit_id']])
     reciprocal_imports = {unit_for_source(new, source)['id'] for source in ('left.cc', 'duplicate_a.cc')}
     unblocked_cycle, = (cycle for cycle in new['cycles'] if set(cycle) == reciprocal_imports)
+    diff = compare(ycxx, scope, env, journal, LINUX, before)
     check_module_changes(
-        compare(ycxx, scope, env, journal, LINUX, before),
+        diff,
         units=[('changed', unit_for_source(old, 'duplicate_z.cc'), unit_for_source(new, 'duplicate_z.cc'))],
         imports=[('changed', first, second) for first, second in zip(old_duplicate, new_duplicate)]
         + [('added', None, added), ('removed', removed, None)],
         conflicts=[('removed', conflict, None)],
         cycles=[('added', None, added_cycle), ('added', None, unblocked_cycle), ('removed', removed_cycle, None)],
     )
+    compare_html(ycxx, scope, env, journal, LINUX, before, after, diff)
     for source in edits:
         replace_source(scope, source, SOURCES[source])
+    reverse = compare(ycxx, scope, env, journal, LINUX, after)
+    check_module_changes(
+        reverse,
+        units=[('changed', unit_for_source(new, 'duplicate_z.cc'), unit_for_source(old, 'duplicate_z.cc'))],
+        imports=[('changed', second, first) for first, second in zip(old_duplicate, new_duplicate)]
+        + [('removed', added, None), ('added', None, removed)],
+        conflicts=[('added', None, conflict)],
+        cycles=[('removed', added_cycle, None), ('removed', unblocked_cycle, None), ('added', None, removed_cycle)],
+    )
+    compare_html(ycxx, scope, env, journal, LINUX, after, before, reverse)
 
 
 def check_edits(ycxx, scope, env, journal, before):
@@ -469,6 +633,7 @@ def check_edits(ycxx, scope, env, journal, before):
     diff = show(ycxx, scope, env, journal, LINUX, '--against', str(current_snapshot))
     assert diff['changes'] == [], diff
     check_module_changes(diff)
+    compare_html(ycxx, scope, env, journal, LINUX, before, moved, diff)
     summary, events = build(ycxx, scope, env, LINUX, 'moving an import only updates its provenance')
     check_provider_reuse(summary, events)
 
@@ -514,6 +679,7 @@ def check_project(ycxx, scope, env, journal):
     show_html(ycxx, scope, env, journal, DARWIN, darwin)
     assert show(ycxx, scope, env, journal, LINUX) == before
     check_target_comparison(ycxx, scope, env, journal, before, darwin)
+    check_diamond_html(ycxx, scope, env, journal)
 
     check_edits(ycxx, scope, env, journal, before)
     complete = show(ycxx, scope, env, journal, LINUX)
@@ -617,9 +783,12 @@ cpp.executable "app" {{ sources = ["main.cc"] deps = ["again", "left", "right"] 
 
     diff = compare(ycxx, scope, env, journal, LINUX, plan)
     check_module_changes(diff)
-    legacy = compare(ycxx, scope, env, journal, LINUX, legacy_graph(plan))
-    assert legacy['changes'] == diff['changes'], legacy
-    check_module_changes(legacy, metadata={'unavailable': 'ambiguous_legacy_configuration'})
+    compare_html(ycxx, scope, env, journal, LINUX, plan, reordered_plan, diff)
+    legacy = legacy_graph(plan)
+    legacy_diff = compare(ycxx, scope, env, journal, LINUX, legacy)
+    assert legacy_diff['changes'] == diff['changes'], legacy_diff
+    check_module_changes(legacy_diff, metadata={'unavailable': 'ambiguous_legacy_configuration'})
+    compare_html(ycxx, scope, env, journal, LINUX, legacy, reordered_plan, legacy_diff)
 
     replace_source(scope, 'build.ycxx', reordered.replace('"left-include"', '"left-include/"'))
     build(ycxx, scope, env, LINUX, 'add a trailing separator to an include directory')
@@ -644,6 +813,9 @@ def check_empty_graph(ycxx, scope, env, journal):
     assert unit['source'] == 'main.cc' and graph['complete'] and not declarations, graph
     assert graph['imports'] == graph['conflicts'] == graph['cycles'] == [], graph
     show_html(ycxx, scope, env, journal, None, plan)
+    diff = compare(ycxx, scope, env, journal, None, plan)
+    check_module_changes(diff)
+    compare_html(ycxx, scope, env, journal, None, plan, plan, diff)
 
 
 def main():
