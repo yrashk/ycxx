@@ -18,9 +18,9 @@ from runtime_dir import runtime_root
 
 
 class Watch:
-    def __init__(self, ycxx, scope, env):
+    def __init__(self, ycxx, scope, env, *args):
         self.process = subprocess.Popen(
-            [ycxx, 'build', 'app', '--watch', '--trace-engine=json'],
+            [ycxx, 'build', 'app', '--watch', '--trace-engine=json', *args],
             cwd=scope, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             text=True, encoding='utf-8',
         )

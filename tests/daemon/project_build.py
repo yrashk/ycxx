@@ -62,8 +62,8 @@ cpp.executable "app" {{
     (scope / 'schema.txt').write_text('7\n')
 
 
-def traced_build(ycxx, scope, env, label, *, succeeds=True):
-    p = run_client(ycxx, scope, env, 'build', 'app', '--trace-engine=json')
+def traced_build(ycxx, scope, env, label, *args, succeeds=True, output='.ycxx/out/app'):
+    p = run_client(ycxx, scope, env, 'build', 'app', '--trace-engine=json', *args)
     assert (p.returncode == 0) == succeeds, (label, p.returncode, p.stderr[-5000:])
     try:
         records = [json.loads(line) for line in p.stderr.splitlines() if line.strip()]
@@ -75,7 +75,7 @@ def traced_build(ycxx, scope, env, label, *, succeeds=True):
     assert type(summary.get('actions_executed')) is int, (label, summary)
     assert isinstance(summary.get('diagnostics'), list), (label, summary)
     if succeeds:
-        assert (scope / summary['output']).resolve() == scope / '.ycxx' / 'out' / 'app', (label, summary)
+        assert (scope / summary['output']).resolve() == scope / output, (label, summary)
     return summary, records
 
 
