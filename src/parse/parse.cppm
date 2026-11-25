@@ -1518,8 +1518,11 @@ public:
   bool use_member(EntityId e, MemberDemand demand, bool unevaluated) {
     auto it = lazy_members_.find(std::to_underlying(e));
     if (it == lazy_members_.end() || (unevaluated && it->second.dependent_layout)) return true;
-    if (!used_member(e)) used_members_.push_back(e);
+    retain_member(e);
     return member_value(e, demand);
+  }
+  void retain_member(EntityId e) {
+    if (!used_member(e)) used_members_.push_back(e);
   }
   bool used_member(EntityId e) const { return std::ranges::contains(used_members_, e); }
   std::optional<std::size_t> member_initializer_index(EntityId e) const {
@@ -13202,7 +13205,8 @@ void Program::instantiate_all() {
       }
       if (const auto i = member_initializer_index(e); i && member_initializers_[*i].type_only) {
         member_initializers_[*i].type_only = false;
-        use_member(e);
+        // This initializer was already evaluated. Emitting its storage has no new semantic point.
+        retain_member(e);
         promoted_initializers.push_back(*i);
       }
       // A closure's callable address can survive folding even when its owner's storage does not.
