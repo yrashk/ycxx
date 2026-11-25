@@ -90,7 +90,7 @@ def check_tools(records, *expected, fragment=None):
     if fragment is not None:
         witness, = (row for row in records if row['tool'] == 'spirv-cross')
         assert witness['module'] == digest(fragment), witness
-        assert Path(witness['path']).parts[:2] == ('artifacts', 'module'), witness
+        assert Path(witness['path']).parts[:3] == ('inputs', 'artifacts', 'module'), witness
 
 
 def check_bundle(scope, target='app'):
