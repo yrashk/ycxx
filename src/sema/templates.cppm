@@ -1885,7 +1885,14 @@ public:
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
     if (needs_class_value_check(a.type, t, a.value)) {
-      if (types().canonical(Types::unqualified(a.type)) != t || !structural_class_parameter(t)) return std::nullopt;
+      if (!structural_class_parameter(t)) return std::nullopt;
+      if (ins().values.is<ast::VDepCall>(a.value)) {
+        const auto result = ins().values.get<ast::VDepCall>(a.value).result_type;
+        // The expression is still value-dependent. The call retains its own nominal
+        // result type for the conversion when an alias use demands the argument.
+        return types().is_class(result) ? std::optional(value_arg(t, a.value)) : std::nullopt;
+      }
+      if (types().canonical(Types::unqualified(a.type)) != t) return std::nullopt;
       // A direct reference to another class parameter retains its known type until substitution.
       if (ins().values.is<ast::VDepParam>(a.value) &&
           ins().values.get<ast::VDepParam>(a.value).depth != dependent_depth)
@@ -2307,7 +2314,7 @@ private:
     if (!args) return std::nullopt;
     if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
       call.args = ins().intern_seq(std::span<const TemplateArg>(*args));
-      return value_arg(types().builtin(Builtin::dependent), ins().intern_value(call));
+      return value_arg(call.result_type, ins().intern_value(call));
     }
     return call_constant ? call_constant(call.callee, *args) : std::nullopt;
   }
