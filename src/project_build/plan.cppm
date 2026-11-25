@@ -48,7 +48,7 @@ std::expected<PlanInspection, std::string> inspect_project(const std::filesystem
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
-    const std::filesystem::path& cwd, std::string_view package, std::string_view sdk_header);
+    const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header);
 
 }  // namespace ycxx::build
 
@@ -56,6 +56,23 @@ namespace ycxx::build {
 namespace {
 
 namespace fs = std::filesystem;
+
+constexpr char standard_manifest[] = {
+#embed "../../resources/rules/standard/build.ycxx"
+    , 0};
+constexpr char standard_source[] = {
+#embed "../../resources/rules/standard/rules.cc"
+    , 0};
+const RulePackageRef standard_package{RulePackageRef::Kind::standard, "standard/rules"};
+
+struct EmbeddedInput {
+  std::string_view path;
+  std::string_view contents;
+};
+
+constexpr EmbeddedInput standard_inputs[] = {
+    {"rules.cc", {standard_source, sizeof(standard_source) - 1}},
+};
 
 std::string path_text(const fs::path& path) {
   return path.generic_native_encoded_string();
@@ -257,7 +274,7 @@ void append_value(std::string& out, const Value& value) {
   }, value.data);
 }
 
-RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const std::string& package) {
+RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const RulePackageRef& package) {
   RuleDemand demand{decl.name, std::string(rule), package, {}, {}, {}};
   append_record(demand.definition, decl.fields, true);
   for (const auto& [name, value] : decl.fields) {
@@ -277,7 +294,33 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const std:
   return demand;
 }
 
-TargetDecl primitive(const TargetDecl& original, const RuleExpansion& expansion) {
+enum class Primitive { unknown, executable, library, generator, host_action };
+
+struct LoweredTarget {
+  TargetDecl declaration;
+  Primitive kind;
+};
+
+struct ResolvedTarget {
+  const TargetDecl& declaration;
+  Primitive kind;
+};
+
+Primitive emitted_kind(std::string_view kind) {
+  if (kind == "native.executable") return Primitive::executable;
+  if (kind == "native.library") return Primitive::library;
+  if (kind == "action.generate") return Primitive::generator;
+  return Primitive::unknown;
+}
+
+Primitive legacy_kind(std::string_view kind) {
+  if (kind == "cpp.executable") return Primitive::executable;
+  if (kind == "cpp.library") return Primitive::library;
+  if (kind == "generate") return Primitive::generator;
+  return Primitive::unknown;
+}
+
+LoweredTarget primitive(const TargetDecl& original, const RuleExpansion& expansion) {
   auto parsed = parse_manifest(expansion.definition);
   if (!parsed)
     fail(original.location, std::format("invalid expansion for '{}': {}", original.name, parsed.error().message));
@@ -285,12 +328,12 @@ TargetDecl primitive(const TargetDecl& original, const RuleExpansion& expansion)
       parsed->targets.front().name != original.name)
     fail(original.location, std::format("rule must emit one declaration named '{}'", original.name));
   auto decl = std::move(parsed->targets.front());
-  if (decl.kind == "native.executable") decl.kind = "cpp.executable";
-  else if (decl.kind == "native.library") decl.kind = "cpp.library";
-  else if (decl.kind == "action.generate") decl.kind = "generate";
-  else fail(original.location, std::format("rule emitted unsupported primitive '{}'", decl.kind));
+  const auto kind = emitted_kind(decl.kind);
+  if (kind == Primitive::unknown)
+    fail(original.location, std::format("rule emitted unsupported primitive '{}'", decl.kind));
   decl.location = original.location;
-  return decl;
+  decl.kind = original.kind;
+  return {std::move(decl), kind};
 }
 
 class Planner {
@@ -300,26 +343,28 @@ class Planner {
       : cwd_(cwd), watch_(watch), inspection_(inspection), expansions_(expansions) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
     for (const auto& imported : manifest.plugins)
-      prefixes_.emplace(imported.alias, path_text(relative_path(imported.package, imported.location)));
+      prefixes_.emplace(imported.alias, RulePackageRef{
+          RulePackageRef::Kind::workspace, path_text(relative_path(imported.package, imported.location))});
   }
 
   ProjectPlan run(std::string_view target) {
-    const auto& root = find(target, {});
-    if (inspection_ && root.kind == "generate") {
+    const auto [root, kind] = find(target, {});
+    if (inspection_ && kind == Primitive::generator) {
       resolve_generator(root);
       return std::move(plan_);
     }
-    if (root.kind != "cpp.executable" && !(inspection_ && root.kind == "cpp.library"))
+    if (kind != Primitive::executable && !(inspection_ && kind == Primitive::library))
       fail(root.location, "build requires a cpp.executable target");
     cxx_target(root);
-    if (root.kind == "cpp.executable" && plan_.sources.empty()) fail(root.location, "build has no C++ source files");
+    if (kind == Primitive::executable && plan_.sources.empty()) fail(root.location, "build has no C++ source files");
     return std::move(plan_);
   }
 
-  RulePackagePlan package(std::string_view target, std::string_view sdk_header) {
-    const auto& decl = find(target, {});
-    if (decl.kind != "host_action") fail(decl.location, "rule package target must be a host_action");
-    auto plan = generator(decl, sdk_header);
+  RulePackagePlan package(std::string_view target, std::string_view sdk_header,
+                          std::span<const EmbeddedInput> embedded = {}) {
+    const auto [decl, kind] = find(target, {});
+    if (kind != Primitive::host_action) fail(decl.location, "rule package target must be a host_action");
+    auto plan = generator(decl, sdk_header, embedded);
     if (plan.action.outputs.size() != 1 || plan.action.outputs.front().name != "plugin")
       fail(decl.location, "rule package must declare exactly one output named 'plugin'");
     return {std::move(plan.action), std::move(plan.inputs), std::move(plan.tool_fingerprint)};
@@ -345,27 +390,44 @@ class Planner {
     watch_->paths.insert(path_text(normalized));
   }
 
-  const TargetDecl& find(std::string_view name, SourceLocation at) {
+  ResolvedTarget find(std::string_view name, SourceLocation at) {
     if (!basename(name)) fail(at, std::format("invalid target name '{}'", name));
     const auto match = declarations_.find(name);
     if (match == declarations_.end()) fail(at, std::format("unknown target '{}'", name));
     const auto& decl = *match->second;
+    if (const auto resolved = primitives_.find(name); resolved != primitives_.end())
+      return {resolved->second.declaration, resolved->second.kind};
+    if (emitted_kind(decl.kind) != Primitive::unknown)
+      fail(decl.location, std::format("primitive '{}' can only be emitted by a rule", decl.kind));
+    if (decl.kind == "host_action") return {decl, Primitive::host_action};
+
     const auto dot = decl.kind.find('.');
-    if (dot == std::string::npos) return decl;
-    const auto prefix = prefixes_.find(std::string_view(decl.kind).substr(0, dot));
-    if (prefix == prefixes_.end()) return decl;
-    if (const auto resolved = primitives_.find(name); resolved != primitives_.end()) return resolved->second;
+    std::string_view rule = decl.kind;
+    const RulePackageRef* package = nullptr;
+    if (dot != std::string::npos) {
+      const auto alias = rule.substr(0, dot);
+      rule = rule.substr(dot + 1);
+      if (const auto supplied = prefixes_.find(alias); supplied != prefixes_.end())
+        package = &supplied->second;
+      else if (expansions_ && alias == "cpp")
+        package = &standard_package;
+    } else if (expansions_ && decl.kind == "generate") {
+      package = &standard_package;
+    }
+    // Read-only callers still interpret the conventional declarations without a worker.
+    if (!package) return {decl, expansions_ ? Primitive::unknown : legacy_kind(decl.kind)};
     if (!expansions_)
       fail(decl.location, std::format("plugin rule '{}' requires rule expansion", decl.kind));
-    const auto suffix = std::string_view(decl.kind).substr(dot + 1);
-    if (suffix.empty()) fail(decl.location, "missing imported rule name");
-    auto demand = rule_demand(decl, suffix, prefix->second);
+    if (rule.empty()) fail(decl.location, "missing imported rule name");
+    auto demand = rule_demand(decl, rule, *package);
     const auto expansion = std::ranges::find(*expansions_, demand, &RuleExpansion::demand);
     if (expansion == expansions_->end()) throw demand;
-    return primitives_.emplace(decl.name, primitive(decl, *expansion)).first->second;
+    const auto& lowered = primitives_.emplace(decl.name, primitive(decl, *expansion)).first->second;
+    return {lowered.declaration, lowered.kind};
   }
 
-  GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt) {
+  GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt,
+                          std::span<const EmbeddedInput> embedded = {}) {
     check_fields(decl, {"tool", "args", "inputs", "outputs", "environment"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     GeneratorPlan plan;
@@ -417,6 +479,11 @@ class Planner {
         Artifact artifact;
         if (inspection_) {
           fact("input", decl, name, staged, "declared in inputs", value.location);
+        } else if (!embedded.empty()) {
+          const auto entry = std::ranges::find(embedded, staged, &EmbeddedInput::path);
+          if (entry == embedded.end())
+            fail(value.location, std::format("rule package has no embedded input '{}'", staged));
+          artifact.bytes.assign(entry->contents.begin(), entry->contents.end());
         } else {
           observe(cwd_ / path);
           const auto input_status = regular_file(cwd_ / path, value.location);
@@ -482,8 +549,8 @@ class Planner {
   }
 
   std::string artifact(const ArtifactRef& ref, SourceLocation at) {
-    const auto& decl = find(ref.target, at);
-    if (decl.kind != "generate") fail(at, "artifact references require a generate target");
+    const auto [decl, kind] = find(ref.target, at);
+    if (kind != Primitive::generator) fail(at, "artifact references require a generate target");
     const auto& outputs = resolve_generator(decl).action.outputs;
     const auto output = std::ranges::find(outputs, ref.output, &ActionOutput::name);
     if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", ref.target, ref.output));
@@ -522,8 +589,8 @@ class Planner {
     if (const auto* deps = field(decl, "deps")) {
       std::size_t position = 0;
       for (const auto& value : as<List>(*deps, "a list of dependencies")) {
-        const auto& dep = find(as<std::string>(value, "a library target name"), value.location);
-        if (dep.kind != "cpp.library") fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
+        const auto [dep, kind] = find(as<std::string>(value, "a library target name"), value.location);
+        if (kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
         if (inspection_) fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
         ++position;
         const auto& inherited = cxx_target(dep);
@@ -589,8 +656,8 @@ class Planner {
   PlanInspection* inspection_;
   std::optional<std::span<const RuleExpansion>> expansions_;
   std::map<std::string, const TargetDecl*, std::less<>> declarations_;
-  std::map<std::string, std::string, std::less<>> prefixes_;
-  std::map<std::string, TargetDecl, std::less<>> primitives_;
+  std::map<std::string, RulePackageRef, std::less<>> prefixes_;
+  std::map<std::string, LoweredTarget, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
   std::set<std::string> active_;
   std::map<std::string, TargetIncludes> finished_;
@@ -655,20 +722,28 @@ std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rule
 }
 
 std::expected<RulePackagePlan, std::string> plan_rule_package(
-    const fs::path& cwd, std::string_view package, std::string_view sdk_header) {
+    const fs::path& cwd, const RulePackageRef& package, std::string_view sdk_header) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
   try {
-    const auto target = relative_path(package, {});
+    const auto lower = [&](const fs::path& directory, std::string_view target, std::string_view text,
+                           std::span<const EmbeddedInput> inputs) {
+      auto manifest = parse_manifest(text);
+      if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
+      return Planner(directory, *manifest, nullptr, nullptr).package(target, sdk_header, inputs);
+    };
+    if (package.kind == RulePackageRef::Kind::standard) {
+      if (package.target != standard_package.target) fail({}, "unknown standard rule package");
+      return lower(root, "rules", {standard_manifest, sizeof(standard_manifest) - 1}, standard_inputs);
+    }
+    const auto target = relative_path(package.target, {});
     const auto directory = root / target.parent_path();
     const auto path = directory / "build.ycxx";
     (void)regular_file(path, {});
-    auto manifest = parse_manifest(read_file(path, {}));
-    if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
-    return Planner(directory, *manifest, nullptr, nullptr).package(path_text(target.filename()), sdk_header);
+    return lower(directory, path_text(target.filename()), read_file(path, {}), {});
   } catch (PlanningError& error) {
-    return std::unexpected(std::format("rule package '{}': {}", package, error.message));
+    return std::unexpected(std::format("rule package '{}': {}", package.target, error.message));
   }
 }
 

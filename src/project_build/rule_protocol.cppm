@@ -11,10 +11,17 @@ struct RuleAttribute {
   bool operator==(const RuleAttribute&) const = default;
 };
 
+struct RulePackageRef {
+  enum class Kind : std::uint8_t { workspace, standard };
+  Kind kind = Kind::workspace;
+  std::string target;
+  bool operator==(const RulePackageRef&) const = default;
+};
+
 struct RuleDemand {
   std::string target;
   std::string rule;
-  std::string package;
+  RulePackageRef package;
   std::string definition;  // normalized record of the rule arguments
   std::vector<RuleAttribute> attributes;
   std::vector<std::string> reads;
