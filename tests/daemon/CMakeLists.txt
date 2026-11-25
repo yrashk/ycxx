@@ -83,3 +83,6 @@ add_test(NAME daemon.project_capability_header
 
 add_test(NAME daemon.project_package_probe
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_package_probe.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_shader_bundle
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_shader_bundle.py $<TARGET_FILE:ycxxc>)
