@@ -41,6 +41,8 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 `--target=x86_64-pc-linux-gnu` for a separate native output under
 `.ycxx/targets/<triple>/out/app`. Pass the same option to `ycxx show app` to
 inspect that variant.
+Use `target_triple()` in a declared action's `args` to pass the selected triple
+to a host tool that generates a target-specific input.
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots

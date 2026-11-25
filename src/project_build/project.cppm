@@ -248,7 +248,17 @@ struct [[=engine::input{engine::Durability::low}]] PreparedBuild {
 };
 
 Fp128 action_key(const GeneratorPlan& generator, const std::vector<ActionInput>& inputs) {
-  return fingerprint(std::tie(generator.action, inputs, generator.tool_fingerprint));
+  const auto& action = generator.action;
+  const auto key = [&](const Action& recipe) {
+    return fingerprint(std::tie(recipe, inputs, generator.tool_fingerprint));
+  };
+  if (!std::ranges::contains(action.args, ActionArg::Kind::target_triple, &ActionArg::kind)) return key(action);
+
+  // The argv word determines the receipt. Keep its provenance on the plan for traces.
+  auto recipe = action;
+  for (auto& arg : recipe.args)
+    if (arg.kind == ActionArg::Kind::target_triple) arg.kind = ActionArg::Kind::literal;
+  return key(recipe);
 }
 
 Fp128 action_key(const GeneratorPlan& generator) {
@@ -496,6 +506,7 @@ struct PreparedProject {
   ProjectPlan plan;
   RuleSnapshot rules;
   std::optional<Fp128> attempt_watch;
+  std::string_view native_triple;
 };
 
 struct ProjectedRuleArguments {
@@ -609,8 +620,8 @@ std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
     const RunRuleAction& run, const RunRulePackage& run_package, const RunRuleWitness& run_witness,
     const AdmitRuleValue& admit_value, const UseRuleCompiler& use_compiler,
-    const ResolveRuleArguments& resolve_arguments, PreparedProject& prepared, bool watch, bool& superseded,
-    std::string_view native_triple) {
+    const ResolveRuleArguments& resolve_arguments, PreparedProject& prepared, bool watch, bool& superseded) {
+  const auto native_triple = prepared.native_triple;
   std::vector<RuleDemand> deferred;
   std::optional<RuleDemand> next;
   for (;;) {
@@ -676,7 +687,7 @@ std::expected<void, std::string> prepare_project(
     std::optional<RuleInputPlan> planning_plan;
     std::optional<Fp128> planning_stamp;
     if (!demand.plan_inputs.empty()) {
-      auto captured = plan_rule_inputs(cwd, demand, prepared.rules.expansions);
+      auto captured = plan_rule_inputs(cwd, demand, prepared.rules.expansions, native_triple);
       if (!captured) return std::unexpected(std::move(captured.error()));
       planning_stamp = fingerprint(*captured);
       planning_plan = std::move(*captured);
@@ -694,7 +705,7 @@ std::expected<void, std::string> prepare_project(
             return current_projection(cwd, toolchain, profile);
           })) return false;
       if (!planning_stamp) return true;
-      const auto current_inputs = plan_rule_inputs(cwd, demand, prepared.rules.expansions);
+      const auto current_inputs = plan_rule_inputs(cwd, demand, prepared.rules.expansions, native_triple);
       return current_inputs && fingerprint(*current_inputs) == *planning_stamp;
     };
     if (planning_plan) {
@@ -733,7 +744,7 @@ std::expected<void, std::string> prepare_project(
           pending.push_back(expansion);
         prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
       }
-      auto witness_plan = plan_rule_witness(cwd, expansion, prepared.rules.expansions);
+      auto witness_plan = plan_rule_witness(cwd, expansion, prepared.rules.expansions, native_triple);
       if (!witness_plan) {
         if (planning_plan && !current_invocation()) return changed_rule_inputs();
         return std::unexpected(std::move(witness_plan.error()));
@@ -750,7 +761,7 @@ std::expected<void, std::string> prepare_project(
       witness_key = witness_stamp(plan);
       const auto current_witness = [&] {
         if (!current_invocation()) return false;
-        const auto current = plan_rule_witness(cwd, expansion, prepared.rules.expansions);
+        const auto current = plan_rule_witness(cwd, expansion, prepared.rules.expansions, native_triple);
         const auto* recipe = current ? std::get_if<RuleWitnessPlan>(&*current) : nullptr;
         return recipe && witness_stamp(*recipe) == *witness_key;
       };
@@ -805,7 +816,7 @@ using ObservedPackageStamps = std::map<std::pair<RulePackageRef::Kind, std::stri
 
 bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record,
                   const RuleExpansion& expansion, std::span<const RuleExpansion> upstream,
-                  ObservedPackageStamps& packages) {
+                  ObservedPackageStamps& packages, std::string_view native_triple) {
   const auto& ref = record.demand.package;
   const auto [cached, inserted] = packages.try_emplace({ref.kind, ref.target});
   if (inserted)
@@ -818,11 +829,11 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
         return current_projection(cwd, toolchain, profile);
       })) return false;
   if (record.planning) {
-    const auto planning = plan_rule_inputs(cwd, record.demand, upstream);
+    const auto planning = plan_rule_inputs(cwd, record.demand, upstream, native_triple);
     if (!planning || fingerprint(*planning) != *record.planning) return false;
   }
   if (!record.witness) return true;
-  const auto witness = plan_rule_witness(cwd, expansion, upstream);
+  const auto witness = plan_rule_witness(cwd, expansion, upstream, native_triple);
   const auto* recipe = witness ? std::get_if<RuleWitnessPlan>(&*witness) : nullptr;
   return recipe && witness_stamp(*recipe) == *record.witness;
 }
@@ -832,17 +843,16 @@ bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const Pr
   ObservedPackageStamps packages;
   for (std::size_t i = 0; i < prepared.rules.observations.size(); ++i)
     if (!current_rule(cwd, toolchain, prepared.rules.observations[i], prepared.rules.expansions[i],
-                      std::span(prepared.rules.expansions).first(i), packages))
+                      std::span(prepared.rules.expansions).first(i), packages, prepared.native_triple))
       return false;
   return true;
 }
 
 std::optional<ProjectPlan> observe_project(
-    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared,
-    std::string_view native_triple) {
+    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
   if (!current_rules(cwd, toolchain, prepared)) return std::nullopt;
   std::optional<Fp128> definition;
-  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition, nullptr, native_triple);
+  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition, nullptr, prepared.native_triple);
   if (!attempt || definition != prepared.manifest) return std::nullopt;
   if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
   return std::nullopt;
@@ -904,7 +914,7 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   const auto observe_planning = [&](const RuleDemand& demand) -> std::optional<Fp128> {
     if (demand.plan_inputs.empty()) return std::nullopt;
     std::vector<std::string> input_paths;
-    const auto plan = plan_rule_inputs(cwd, demand, current, &input_paths);
+    const auto plan = plan_rule_inputs(cwd, demand, current, native_triple, &input_paths);
     paths.append_range(std::move(input_paths));
     if (!plan) {
       observations.push_back(fingerprint128(plan.error()));
@@ -916,7 +926,7 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   };
   const auto observe_witness = [&](const RuleExpansion& expansion) -> std::optional<Fp128> {
     std::vector<std::string> witnessed_paths;
-    const auto plan = plan_rule_witness(cwd, expansion, current, &witnessed_paths);
+    const auto plan = plan_rule_witness(cwd, expansion, current, native_triple, &witnessed_paths);
     paths.append_range(std::move(witnessed_paths));
     if (!plan) {
       observations.push_back(fingerprint128(plan.error()));
@@ -973,7 +983,7 @@ std::expected<PlanInspection, std::string> inspect_built_project(
   if (snapshot) {
     ObservedPackageStamps packages;
     for (std::size_t i = 0; i < snapshot->observations.size(); ++i) {
-      if (current_rule(cwd, toolchain, snapshot->observations[i], snapshot->expansions[i], current, packages))
+      if (current_rule(cwd, toolchain, snapshot->observations[i], snapshot->expansions[i], current, packages, native_triple))
         current.push_back(std::move(snapshot->expansions[i]));
     }
   }
@@ -1053,9 +1063,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   const auto output = state_path / "out" / target;
   const auto key = fingerprint128(native(output));
   const std::string workspace_path = native(cwd);
-  const auto workspace = fingerprint128(workspace_path);
-  // Native overlays have one active plan per workspace and target configuration. Host
-  // rule values and action receipts still describe the same workspace across variants.
+  // Native overlays have one active plan per workspace and target configuration.
   const auto native_workspace_path = native(state_path);
   const auto native_workspace = fingerprint128(native_workspace_path);
   const RuleToolchain toolchain{executable_, worker_build_, tool_path};
@@ -1068,6 +1076,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   const auto* host_target = pp::native_target;
   if (!host_target) return fail("project building is unavailable on this host");
   const auto* native_target = selected_target ? selected_target : host_target;
+  // A witness can now observe different inputs for different target triples. Its
+  // logical export is scoped by triple, while action receipts still key actual inputs.
+  const auto value_scope = fingerprint(std::tie(workspace_path, native_target->triple));
   if (tracer) {
     engine::TraceEvent event;
     event.id = session_.db().reserve_trace_id();
@@ -1123,7 +1134,14 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       const bool witness_exit = kind == "RuleWitness" && result.completion == ActionCompletion::exited;
       event.outcome = result.exit_status == 0 || witness_exit ? engine::Outcome::executed : engine::Outcome::failed;
       event.end = std::chrono::steady_clock::now();
-      if (witness_exit && tracer->values()) event.value = std::format("exit status {}", result.exit_status);
+      if (tracer->values()) {
+        if (witness_exit) event.value = std::format("exit status {}", result.exit_status);
+        for (const auto& [index, arg] : std::views::enumerate(action.args)) {
+          if (arg.kind != ActionArg::Kind::target_triple) continue;
+          if (!event.value.empty()) event.value += '\n';
+          event.value += std::format("args[{}]: target_triple() = {}", index, arg.value);
+        }
+      }
       if (event.outcome == engine::Outcome::failed)
         event.errors = timeout.count() == 0 ? result.err : result.err.substr(0, 4096);
       tracer->event(std::move(event));
@@ -1175,7 +1193,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return evidence;
   };
   const AdmitRuleValue admit_value = [&](std::string_view producer, std::string_view field, RuleValueRecord record) {
-    const auto id = rule_value_key(workspace, producer, field);
+    const auto id = rule_value_key(value_scope, producer, field);
     if (const auto* prior = session_.db().peek<RuleValueReceipt>(id); prior && *prior &&
         (**prior).receipt == record.receipt && (**prior).value == record.value &&
         (**prior).origin == record.origin) return;
@@ -1277,7 +1295,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         return entry.kind == "value-export" && entry.name == ref.field;
       });
       if (fact == producer->capability_facts.end()) return false;
-      values.push_back({name, rule_value_key(workspace, ref.target, ref.field), structured});
+      values.push_back({name, rule_value_key(value_scope, ref.target, ref.field), structured});
       result.facts.push_back({structured ? "fact-input" : "capability-input", demand.target, name,
                               fact->value, fact->origin});
       return true;
@@ -1299,7 +1317,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         return std::unexpected(std::format("missing value '{}.{}'", binding.value.target, binding.value.field));
 
     if (!values.empty()) {
-      const auto consumer = fingerprint(std::tie(workspace, demand.target));
+      const auto consumer = fingerprint(std::tie(value_scope, demand.target));
       const auto* prior = session_.db().peek<RuleValueBindings>(consumer);
       if (!prior || fingerprint(*prior) != fingerprint(values))
         apply(AdmitRuleInput<RuleValueBindings>{consumer, std::move(values)});
@@ -1388,6 +1406,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     refresh();
     superseded = false;
     PreparedProject planned;
+    planned.native_triple = native_triple;
     planned.manifest = manifest_stamp(cwd);
     measured.clear();
     const UseRuleCompiler use_compiler = [&](const RulePackageRef& package, const RulePackagePlan& plan,
@@ -1414,7 +1433,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       else if (!cancelled() && !superseded) report.diagnostics.push_back(std::move(measured.error()));
     };
     auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, admit_value,
-                                    use_compiler, resolve_arguments, planned, watch, superseded, native_triple);
+                                    use_compiler, resolve_arguments, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
     if (superseded || !current_rules(cwd, toolchain, planned)) continue;
     write_rule_snapshot(cwd, target, planned.rules, native_triple);
@@ -1457,7 +1476,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             inputs = staged;
           }
           auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
-          const auto observed = observe_project(cwd, target, toolchain, planned, native_triple);
+          const auto observed = observe_project(cwd, target, toolchain, planned);
           if (!observed) break;
           const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
           if (current == observed->generators.end()) break;
@@ -1503,7 +1522,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (cancelled()) return fail("build cancelled");
-      const auto observed = observe_project(cwd, target, toolchain, planned, native_triple);
+      const auto observed = observe_project(cwd, target, toolchain, planned);
       if (!observed || fingerprint(*observed) != plan_id) break;
       if (demand->image.empty()) {
         if (!publish(before, [] {})) break;
