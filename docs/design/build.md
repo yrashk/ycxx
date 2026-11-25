@@ -307,3 +307,43 @@ The trace shows the probes and their named projections. Read-only inspection
 revalidates the observation inputs before showing a cached expansion and its
 probe and compiler provenance. Watch reobserves both the package and its
 declared compiler inputs. [#1290](https://github.com/yrashk/ycxx/issues/1290)
+
+## Package-defined observations
+
+A provider can export a support state for a tool it knows how to check.
+
+```text
+use plugin("tools/codec/rules") as codec
+use plugin("builtin:capabilities") as capabilities
+
+codec.profile "wire" {
+    tool = "/opt/codec/bin/check"
+    reads = ["profiles/wire.cfg"]
+}
+
+capabilities.header "config" {
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+```
+
+A referenced rule emits an `action.observe` declaration with one `export`
+name, a tool, optional arguments, staged inputs and environment. The coordinator
+runs the declared witness outside the query epoch. For a normal exit, it gives
+the same isolated worker generation the named export, exit status and bounded
+stdout and stderr. The optional SDK classifier supplies a single support state.
+A normal nonzero exit can support a classification. Setup failures, signals,
+timeouts, oversized evidence and invalid classifier replies fail the build
+without admitting a typed value. Declared inputs and the provider are observed
+even on a failed attempt.
+
+The result has a stable address made from the workspace, producer target and
+export name. The receipt tracks the action and provider generation separately.
+The consumer's argument query fetches the export and receives only its typed
+state. A receipt change with an equal state cuts off downstream work on the
+same query cell. Read-only inspection validates the provider and witness inputs
+before reading admitted provenance. Watch reobserves those same dependencies.
+Existing `probe(package, id)` bindings continue to select a compiler observation
+from the shipped catalogue.
+
+The independent Astra design review identified the stable export address and
+separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)
