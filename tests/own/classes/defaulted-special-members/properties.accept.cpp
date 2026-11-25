@@ -46,6 +46,23 @@ struct Written {
 };
 static_assert(noexcept(Written(value<const Written&>())) && !noexcept(Written(value<Written>())));
 
+// So is a trivial member's, and it counts in the specification of a class that uses it.
+struct MayThrow {
+  MayThrow();
+  MayThrow(const MayThrow&) noexcept(false) = default;
+  MayThrow& operator=(const MayThrow&) noexcept(false) = default;
+  int x;
+};
+static_assert(!noexcept(MayThrow(value<const MayThrow&>())) && !noexcept(value<MayThrow&>() = value<const MayThrow&>()));
+struct HasMayThrow {
+  HasMayThrow(const HasMayThrow&) = default;
+  HasMayThrow& operator=(const HasMayThrow&) = default;
+  MayThrow m[2];
+};
+static_assert(!noexcept(HasMayThrow(value<const HasMayThrow&>())));
+static_assert(!noexcept(value<HasMayThrow&>() = value<const HasMayThrow&>()));
+static_assert(__is_trivially_copyable(MayThrow));
+
 // A subobject's destructor does not contribute to a constructor's specification.
 struct ThrowingEnd {
   ThrowingEnd() noexcept;

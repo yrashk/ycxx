@@ -23,6 +23,13 @@ struct Indirect {
   int pad;
 };
 
+// Trivial for calls, though its copy is called for its exception specification.
+struct MayThrow {
+  MayThrow() = default;
+  MayThrow(const MayThrow&) noexcept(false) = default;
+  long a;
+};
+
 struct CopyOnly { CopyOnly(const CopyOnly&) = default; int x; char c; };
 struct DefaultAndCopy { DefaultAndCopy() = default; DefaultAndCopy(const DefaultAndCopy&) = default; int x; char c; };
 struct DefaultAndOther { DefaultAndOther() = default; DefaultAndOther(int); int x; char c; };
@@ -49,3 +56,4 @@ int peer_layout(int i);
 Triple peer_swap(Triple t);
 Indirect peer_next(Indirect i);
 int peer_sum(Indirect i);
+long peer_first(MayThrow m, long b);

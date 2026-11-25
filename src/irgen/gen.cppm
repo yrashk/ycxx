@@ -2771,7 +2771,8 @@ class Gen {
   // promoted type); the left is loaded once, converted to it, and the result converted back.
   Place assign(At a) {
     auto s = get<ast::Assign>(a);
-    if (cls(s.info.type) == TypeClass::record) return assign_class(a);
+    // An array is assigned as a whole only in a defaulted or implicit assignment operator's definition.
+    if (cls(s.info.type) == TypeClass::record || s.op == ast::AssignOp::trivial_class_copy) return assign_class(a);
     ValueId v = rvalue(child(a, s.rhs));
     At rhs = child(a, s.rhs);
     Place p = lvalue(child(a, s.lhs));

@@ -36,10 +36,11 @@ subobject types.
 
 ## Definitions
 
-A nontrivial member is implicitly defined where something uses it. `required_members` finds the
-use and synthesizes the body: the bases, then the members, each from the corresponding subobject,
-direct-initialized, so a constructor template taking anything does not see the derived object. An
-array is initialized or assigned element by element. Analysis of a specialization's definition is
+A nontrivial member, the destructor included, is implicitly defined where something uses it.
+`required_members` finds the use and synthesizes the body: the bases, then the members, each from
+the corresponding subobject, direct-initialized, so a constructor template taking anything does not
+see the derived object. An array is initialized or assigned element by element, or as a whole when
+the operation overload resolution selects for its elements is trivial. Analysis of a specialization's definition is
 at the end of the unit, since its arguments may be declared after the template. Definitions are
 `constexpr`, and weak unless the class is local to the unit.
 
@@ -51,6 +52,16 @@ Value-initialization zero-initializes first.
 A written `noexcept` is the specification. Without one, `defaulted_nonthrowing` decides it where a
 `noexcept` expression asks, from the definition's expressions ([except.spec]). A constructor's does
 not include its subobjects' destructors. The function's type is not changed.
+
+A trivial member whose specification is potentially-throwing (a written `noexcept(false)`, or a
+definition that uses such a member) is called instead of lowered (`MemberDeclRec::trivial_call`),
+so that `noexcept` sees it. It stays trivial for the ABI.
+
+## Implicit moves
+
+ycxx uses an implicit copy where an implicit move would move a subobject by a constructor of its own
+([#244](https://github.com/yrashk/ycxx/issues/244)). A defaulted move over such a subobject, and an
+implicit move of a class with a defaulted copy, are unsupported, not copies.
 
 ## Layout
 

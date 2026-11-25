@@ -1381,7 +1381,7 @@ public:
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::vector<engine::Diagnostic>* class_diags = nullptr,
                        sema::Sema* closure_context = nullptr, std::optional<u32> point = std::nullopt);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move);
-  void defaulted_assignments(EntityId cls, sema::ClassRec& rec, std::optional<u32> point);
+  void defaulted_assignments(u32 item, EntityId cls, sema::ClassRec& rec, std::optional<u32> point);
   sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t, bool move = false);
   Ex copy_constructor_root(sema::Sema& sm, EntityId cls, const ast::DeclSema& decl, bool move);
@@ -1395,6 +1395,7 @@ public:
            (entity.kind == sema::EntityKind::function && w_->ins.names.spelling(entity.name) == "operator=");
   }
   std::optional<bool> defaulted_nonthrowing(EntityId f);
+  bool synthesized_assignment(EntityId f) const { return copy_assignments_.contains(f); }
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
   // with the function's cv-qualifiers.
@@ -1823,9 +1824,14 @@ private:
   // item of this unit (#156).
   std::map<u32, DeclId> member_decls_;
   sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
-  sema::CopyState classify_special_member(u32 item, EntityId cls, const sema::ClassRec& rec, EntityId function,
-                                          SpecialMember kind, bool const_source, std::optional<u32> point);
+  struct Classified {
+    sema::CopyState state;
+    bool calls = false;  // a trivial subobject operation is a call (`MemberDeclRec::trivial_call`)
+  };
+  Classified classify_special_member(u32 item, EntityId cls, const sema::ClassRec& rec, EntityId function,
+                                     SpecialMember kind, bool const_source, std::optional<u32> point);
   bool copy_takes_const(const sema::ClassRec& rec, bool assignment) const;
+  bool calls_trivial_member(const sema::ClassRec& rec, const ast::DeclSema& decl, bool calls) const;
   void defaulted_constructors(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit_copy, std::optional<u32> point);
   // An enumerator initializer can synchronously instantiate another enum definition.
   struct DefiningEnum {
@@ -1901,6 +1907,7 @@ private:
     sema::CopyAssignment state;
     std::optional<ast::BodySema> body = std::nullopt;
     std::vector<sema::Demand> demands{};
+    bool calls = false;  // trivial, but its definition calls a subobject's operator
     bool checking = false;
     bool emitted = false;
   };
@@ -1914,6 +1921,7 @@ private:
     bool emitted = false;
   };
   std::map<EntityId, DefaultedConstructor> defaulted_constructors_;
+  std::map<EntityId, Synthesized> defaulted_destructors_;  // nontrivial ones nothing uses yet
   std::map<EntityId, std::optional<bool>> defaulted_nonthrowing_;  // by special member; none while it is decided
   const Result<ast::BodySema>& defaulted_constructor_body(DefaultedConstructor& constructor);
   std::unique_ptr<sema::Questions> synthesis_questions(EntityId cls, u32 item);
@@ -11169,8 +11177,8 @@ bool Program::copy_takes_const(const sema::ClassRec& rec, bool assignment) const
 // What the definition of `function`, a special member of `cls` of kind `kind`, is ([class.default.ctor],
 // [class.copy.ctor], [class.copy.assign]): overload resolution selects each subobject's operation
 // from the class's context. Deletion is the language's; `unsupported` is a limit of ycxx.
-sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const sema::ClassRec& rec, EntityId function,
-                                                 SpecialMember kind, bool const_source, std::optional<u32> point) {
+Program::Classified Program::classify_special_member(u32 item, EntityId cls, const sema::ClassRec& rec, EntityId function,
+                                                     SpecialMember kind, bool const_source, std::optional<u32> point) {
   using enum sema::CopyState;
   using enum SpecialMember;
   auto& types = w_->types;
@@ -11181,6 +11189,8 @@ sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const s
   std::vector<engine::Diagnostic> diags;
   AtItem q(*this, item, false);
   if (point) q.at_point = *point;
+  else q.own_class_complete = true;  // its nested classes are, whatever the order of its members
+  bool calls = false;
   sema::Sema sm(*w_, b, q, diags, id(item), 0);
   sm.current_class = cls;
   sm.current_function = function;
@@ -11221,6 +11231,14 @@ sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const s
     }
     const auto* leaf = classes_.find(types.class_of(t));
     if (!leaf || !leaf->defined) return unsupported;
+    if (kind == move_constructor && classes_.implicit_move_differs(types.class_of(t))) return unsupported;
+    // A call of a trivial member of the subobject's class.
+    const auto trivial_member = [&](EntityId f) {
+      const auto m = std::ranges::find(leaf->members, f, &sema::MemberDeclRec::entity);
+      if (m == leaf->members.end() || !m->trivial_call) return false;
+      calls = true;
+      return true;
+    };
     const auto destination = base && leaf->polymorphic ? sema::ConstructorDestination::polymorphic_base
                                                        : sema::ConstructorDestination::object;
     const std::size_t before = diags.size();
@@ -11246,8 +11264,11 @@ sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const s
     if (!assignment && !sm.check_destructor_access(t, 0, Diag::object_unusable_destructor, base)) return deleted;
     if (assignment) {
       const auto assigned = sm.as<ast::Assign>(result);
-      return assigned && assigned->op == ast::AssignOp::trivial_class_copy ? trivial : nontrivial;
+      const auto call = sm.as<ast::AssignmentCall>(result);
+      return (assigned && assigned->op == ast::AssignOp::trivial_class_copy) || (call && trivial_member(call->function))
+                 ? trivial : nontrivial;
     }
+    if (const auto call = sm.as<ast::CtorCall>(result); call && trivial_member(call->ctor)) return trivial;
     if (initialization) return sm.as<ast::DefaultInit>(result) ? trivial : nontrivial;
     const auto conversion = sm.as<ast::ImplicitConversion>(result);
     return conversion && conversion->conversion == ast::ConversionKind::lvalue_to_rvalue ? trivial : nontrivial;
@@ -11259,7 +11280,7 @@ sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const s
   if (rec.union_) {
     // A variant member with a nontrivial operation deletes it. A default constructor ignores the
     // others' when one has a default member initializer, and const members unless all are.
-    if (initialization && std::ranges::any_of(rec.fields, initialized)) return std::max(state, nontrivial);
+    if (initialization && std::ranges::any_of(rec.fields, initialized)) return {std::max(state, nontrivial)};
     bool all_const = !rec.fields.empty();
     for (const sema::FieldRec& f : rec.fields) {
       const QualType element = types.canonical(types.innermost_array_element(f.type));
@@ -11268,7 +11289,7 @@ sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const s
       const auto s = inspect(f.type, false, f.mutable_);
       state = std::max(state, s == nontrivial ? deleted : s);
     }
-    return initialization && all_const ? deleted : state;
+    return {initialization && all_const ? deleted : state};
   }
   for (const sema::FieldRec& f : rec.fields) {
     if (!initialization || !initialized(f)) {
@@ -11279,7 +11300,15 @@ sema::CopyState Program::classify_special_member(u32 item, EntityId cls, const s
     if (types.is_class(types.innermost_array_element(f.type)) &&
         !sm.check_destructor_access(f.type, 0, Diag::object_unusable_destructor)) state = deleted;
   }
-  return state;
+  return {state, calls};
+}
+
+// Whether a trivial defaulted member of `rec` declared as `decl` is called for its exception
+// specification ([expr.unary.noexcept]): the written one may be potentially-throwing, or an
+// operation its definition `calls` is.
+bool Program::calls_trivial_member(const sema::ClassRec& rec, const ast::DeclSema& decl, bool calls) const {
+  if (rec.union_) return false;
+  return decl.has_written_noexcept ? !w_->types.rec(decl.type).fn_noexcept : calls;
 }
 
 // Each constructor of the completed class `cls` defaulted on its first declaration
@@ -11313,22 +11342,34 @@ void Program::defaulted_constructors(u32 item, EntityId cls, sema::ClassRec& rec
       mismatch = sema::Types::is_volatile(source) ||
                  (const_source && (kind == move_constructor || !copy_takes_const(rec, false)));
     }
-    m.defaulted = mismatch ? deleted : classify_special_member(member_item, cls, rec, m.entity, kind, const_source, point);
+    const Classified found = mismatch ? Classified{deleted}
+                                      : classify_special_member(item, cls, rec, m.entity, kind, const_source, point);
+    m.defaulted = found.state;
     m.is_deleted = m.defaulted == deleted;
+    auto decl = member_declaration(m.entity, cls);
+    m.trivial_call = m.defaulted == trivial && decl && calls_trivial_member(rec, *decl, found.calls);
     if (initialization) rec.trivial_defaulted_default_ctor = m.defaulted == trivial;
     else if (kind == copy_constructor && rec.defaulted_copy != nontrivial) rec.defaulted_copy = m.defaulted;
-    if (m.defaulted != nontrivial) continue;
-    auto decl = member_declaration(m.entity, cls);
-    if (!decl) continue;
+    if (!decl || (m.defaulted != nontrivial && !m.trivial_call)) continue;
     decl->flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
     defaulted_constructors_.insert_or_assign(m.entity, DefaultedConstructor{{member_item, *decl, kind}});
   }
-  if (!implicit_copy || dependent || rec.closure) return;
+  if (!implicit_copy || dependent) return;
   const auto depends_on_defaulting = [&](QualType t) { return classes_.defaulted_copy_of(t) != ordinary; };
   if (std::ranges::none_of(rec.bases, [&](const sema::BaseRec& b) { return depends_on_defaulting(types.class_type(b.cls)); }) &&
       std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) { return depends_on_defaulting(f.type); })) return;
-  rec.defaulted_copy_const = copy_takes_const(rec, false);
-  rec.defaulted_copy = classify_special_member(item, cls, rec, EntityId::none, copy_constructor, rec.defaulted_copy_const, point);
+  if (rec.closure) {  // its captures were copied where it is defined
+    rec.defaulted_copy = trivial;
+    for (const sema::FieldRec& f : rec.fields) {
+      if (types.is_reference(f.type)) continue;
+      const auto [captured_nontrivial, captured_deleted] = classes_.copy_of(f.type);
+      rec.defaulted_copy = std::max(rec.defaulted_copy, captured_deleted ? deleted : captured_nontrivial ? nontrivial : trivial);
+    }
+  } else {
+    rec.defaulted_copy_const = copy_takes_const(rec, false);
+    rec.defaulted_copy =
+        classify_special_member(item, cls, rec, EntityId::none, copy_constructor, rec.defaulted_copy_const, point).state;
+  }
   rec.copy_deleted = rec.defaulted_copy == deleted;
 }
 
@@ -11705,7 +11746,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
         d->type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, false);
         special_member_exception_types_[user_dtor->entity] = d->type;
       }
-      synth_.push_back({item, *d, SpecialMember::destructor});
+      defaulted_destructors_.emplace(d->entity, Synthesized{item, *d, SpecialMember::destructor});
     }
   }
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
@@ -11775,11 +11816,12 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
         !provided_assignment(true) && one_access && (rec.fields.empty() || !data_in_bases)
       : std::ranges::none_of(rec.members, provided_constructor) && rec.bases.empty() &&
         std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return rec.access_of(f.entity) == ast::Access::public_; });
-  rec.pod = !rec.layout_requires_virtual_support && rec.destructor == EntityId::none && pod_definition &&
+  rec.pod = !rec.layout_requires_virtual_support && (rec.destructor == EntityId::none || (user_dtor && user_dtor->is_deleted)) &&
+            pod_definition &&
             !provided_assignment(false) && std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); });
-  defaulted_assignments(cls, rec, point);
+  defaulted_assignments(item, cls, rec, point);
   if (!user_copy_assignment) declare_copy_assignment(item, cls, rec, deletes_implicit_copy);
   return implicit_move;
 }
@@ -11865,7 +11907,7 @@ void Program::prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& r
 
 // Each assignment operator of the completed class `cls` defaulted on its first declaration
 // ([dcl.fct.def.default], [class.copy.assign]).
-void Program::defaulted_assignments(EntityId cls, sema::ClassRec& rec, std::optional<u32> point) {
+void Program::defaulted_assignments(u32 item, EntityId cls, sema::ClassRec& rec, std::optional<u32> point) {
   using sema::CopyAssignment;
   using enum SpecialMember;
   auto& types = w_->types;
@@ -11886,9 +11928,9 @@ void Program::defaulted_assignments(EntityId cls, sema::ClassRec& rec, std::opti
       const QualType t = types.canonical(types.innermost_array_element(f.type));
       return !types.is_class(t) && !types.is_reference(t) && sema::Types::is_const(t);
     });
-    const auto state = mismatch ? sema::CopyState::deleted
-                                : classify_special_member(member_item, cls, rec, m.entity, kind, const_source, point);
-    switch (state) {
+    const Classified found = mismatch ? Classified{sema::CopyState::deleted}
+                                      : classify_special_member(item, cls, rec, m.entity, kind, const_source, point);
+    switch (found.state) {
     case sema::CopyState::trivial: m.copy_assignment = CopyAssignment::trivial; break;
     case sema::CopyState::nontrivial: m.copy_assignment = CopyAssignment::memberwise; break;
     case sema::CopyState::deleted: m.copy_assignment = const_member ? CopyAssignment::const_member : CopyAssignment::deleted; break;
@@ -11900,7 +11942,10 @@ void Program::defaulted_assignments(EntityId cls, sema::ClassRec& rec, std::opti
     ast::ParamSema param{EntityId::none, *parameter, w_->ins.names.intern("other"), NodeId::none, 0};
     d->params = w_->ins.intern_seq(std::span<const ast::ParamSema>(&param, 1));
     d->flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
-    copy_assignments_.insert_or_assign(m.entity, PendingCopyAssignment{{member_item, *d, kind}, m.copy_assignment});
+    m.trivial_call = m.copy_assignment == CopyAssignment::trivial && calls_trivial_member(rec, *d, found.calls);
+    PendingCopyAssignment pending{{member_item, *d, kind}, m.copy_assignment};
+    pending.calls = found.calls && !rec.union_;
+    copy_assignments_.insert_or_assign(m.entity, std::move(pending));
   }
 }
 
@@ -12032,22 +12077,38 @@ sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
   };
 
   bool ok = true;
-  if (copy.state == CopyAssignment::trivial) {
+  if (copy.state == CopyAssignment::trivial && !copy.calls) {
     const auto info = destination.info;
     ok = append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy,
                                    {destination.id, 0}, {source.id, 0}, info.type}, 0, 0, info));
   } else {
-    // [class.copy.assign]/12: the direct bases, then the members; an array element by element.
+    // [class.copy.assign]/12: the direct bases, then the members; an array element by element, or
+    // as a whole when its elements' assignment is trivial.
+    const auto element_of = [&](Ex array, sema::u64 i, bool xvalue, QualType t) {
+      const QualType index = w_->types.builtin(sema::Builtin::int_);
+      const Ex at = sm.literal(index, w_->values.integer(index, i), ast::ValueCategory::prvalue, 0, 0);
+      const Ex element = sm.subscript(array, at, 0, 0);
+      return xvalue ? sm.static_cast_to(element, w_->types.rvalue_ref(element.ok() ? element.type() : t), 0) : element;
+    };
     const auto assign = [&](this const auto& self_, Ex to, Ex from, QualType t) -> bool {
       if (!w_->types.is_array(t)) return append(sm.assign(sema::Sema::AsgOp::assign, to, from, 0));
-      const sema::TypeRec array = w_->types.rec(w_->types.canonical(t));
-      const QualType index = w_->types.builtin(sema::Builtin::int_);
-      for (sema::u64 i = 0; i < array.bound; ++i) {
-        const Ex at = sm.literal(index, w_->values.integer(index, i), ast::ValueCategory::prvalue, 0, 0);
-        Ex element = sm.subscript(from, at, 0, 0);
-        if (move) element = sm.static_cast_to(element, w_->types.rvalue_ref(array.inner), 0);
-        if (!self_(sm.subscript(to, at, 0, 0), element, array.inner)) return false;
+      Ex first = to, source_first = from;
+      QualType element = w_->types.canonical(t);
+      while (w_->types.is_array(element)) {
+        element = w_->types.canonical(w_->types.rec(element).inner);
+        first = element_of(first, 0, false, element);
+        source_first = element_of(source_first, 0, move, element);
       }
+      const Ex probe = sm.assign(sema::Sema::AsgOp::assign, first, source_first, 0);
+      if (!probe.ok()) return false;
+      const auto assigned = sm.as<ast::Assign>(probe);
+      if (!w_->types.is_class(element) || (assigned && assigned->op == ast::AssignOp::trivial_class_copy)) {
+        const ast::ExprInfo info{t, ast::ValueCategory::lvalue, 0};
+        return append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy, {to.id, 0}, {from.id, 0}, t}, 0, 0, info));
+      }
+      const sema::TypeRec array = w_->types.rec(w_->types.canonical(t));
+      for (sema::u64 i = 0; i < array.bound; ++i)
+        if (!self_(element_of(to, i, false, array.inner), element_of(from, i, move, array.inner), array.inner)) return false;
       return true;
     };
     const auto& record = classes_.rec(cls);
@@ -12318,8 +12379,22 @@ void Program::complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec) 
 Ex Program::copy_from(sema::Sema& sm, Ex src, QualType t, bool move) {
   if (w_->types.is_class(t)) return sm.construct(t, {src}, 0, 0);
   if (!w_->types.is_array(t)) return sm.convert(src, t, 0);
-  if (!classes_.copy_of(t).first && !(move && classes_.move_nontrivial(t)))
-    return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
+  // An array as a whole when the operation its elements select is trivial.
+  const QualType element_type = w_->types.canonical(w_->types.innermost_array_element(t));
+  bool whole = true;
+  if (w_->types.is_class(element_type)) {
+    const QualType zero = w_->types.builtin(sema::Builtin::int_);
+    Ex first = src;
+    for (QualType a = t; w_->types.is_array(a); a = w_->types.canonical(w_->types.rec(a).inner)) {
+      first = sm.subscript(first, sm.literal(zero, w_->values.integer(zero, 0), ast::ValueCategory::prvalue, 0, 0), 0, 0);
+      if (move && first.ok()) first = sm.static_cast_to(first, w_->types.rvalue_ref(first.type()), 0);
+    }
+    const Ex probe = sm.construct(sema::Types::unqualified(element_type), {first}, 0, 0);
+    if (!probe.ok()) return probe;
+    const auto conversion = sm.as<ast::ImplicitConversion>(probe);
+    whole = conversion && conversion->conversion == ast::ConversionKind::lvalue_to_rvalue;
+  }
+  if (whole) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));
   sema::TypeRec r = w_->types.rec(t);
   std::vector<Ex> elems;
   QualType index = w_->types.builtin(sema::Builtin::int_);
@@ -12895,10 +12970,21 @@ void Program::instantiate_all() {
   // What a body requires, besides what its cell demanded: every member function of a class
   // template specialization it names, a constructor or destructor it runs included
   // ([temp.inst]/4), found by walking its tree.
+  // The definition of a nontrivial defaulted destructor that something uses.
+  const auto required_destructor = [&](EntityId e) {
+    if (auto destructor = defaulted_destructors_.extract(e); !destructor.empty()) synth_.push_back(destructor.mapped());
+  };
   auto required_members = [&](NodeId root, ItemId at) {
     std::vector<EntityId> refs;
     references(root, refs);
+    // A constructor can destroy the members it has initialized ([except.ctor]).
+    if (root != NodeId::none && w_->ins.ast.is<ast::Compound>(root))
+      for (ast::Child c : w_->ins.ast.children(w_->ins.ast.get<ast::Compound>(root).stmts))
+        if (w_->ins.ast.is<ast::MemberInit>(c.id))
+          if (const EntityId d = classes_.destructor_of(w_->ins.ast.get<ast::MemberInit>(c.id).type); d != EntityId::none)
+            refs.push_back(d);
     for (EntityId e : refs) {
+      required_destructor(e);
       if (auto assign = copy_assignments_.find(e); assign != copy_assignments_.end() && assign->second.body &&
           !assign->second.emitted) {
         assign->second.emitted = true;
@@ -12951,6 +13037,7 @@ void Program::instantiate_all() {
             QualType t = d.type;
             while (w_->types.is_array(t)) t = w_->types.rec(t).inner;
             EntityId dtor = w_->types.is_class(t) ? classes_.destructor_of(t) : EntityId::none;
+            required_destructor(dtor);
             if (member_patterns_.contains(std::to_underlying(dtor)) && !defaulted_special_member(dtor))
               work.push_back({dtor, ast::Loc{id(k), 0}});
           }

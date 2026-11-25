@@ -729,6 +729,9 @@ struct MemberDeclRec {
   CopyAssignment copy_assignment = CopyAssignment::none;
   bool explicit_defaulted_assignment = false;
   CopyState defaulted = CopyState::ordinary;  // a constructor defaulted on its first declaration
+  // A trivial defaulted member that is called, not lowered to a representation copy: its exception
+  // specification, or that of an operation its definition calls, is potentially-throwing.
+  bool trivial_call = false;
   bool is_virtual = false;
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
@@ -1175,6 +1178,23 @@ public:
     if (!c) return false;
     return c->move_usable ? c->move_nontrivial : c->copy_nontrivial();
   }
+  // Whether the implicit move constructor of `c` is not the copy that ycxx uses for it: a subobject
+  // is moved by a constructor of its own (#244). False when `c` declares a move constructor.
+  bool implicit_move_differs(EntityId c) const {
+    const ClassRec* r = find(c);
+    if (!r || !r->move_usable || declared_move(c, *r)) return false;
+    const auto moved = [&](QualType t) {
+      t = types_->canonical(types_->innermost_array_element(t));
+      const TypeRec type = types_->rec(t);
+      const ClassRec* sub = type.kind == TypeKind::class_ ? find(type.entity) : nullptr;
+      if (!sub) return false;
+      if (const MemberDeclRec* m = declared_move(type.entity, *sub))
+        return !m->is_deleted && !(m->defaulted == CopyState::trivial && !sub->copy_nontrivial());
+      return implicit_move_differs(type.entity);
+    };
+    return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return moved(types_->class_type(b.cls)); }) ||
+           std::ranges::any_of(r->fields, [&](const FieldRec& f) { return moved(f.type); });
+  }
   // Whether a `t` can be neither copied nor moved: its copy constructor deleted and no move
   // constructor usable; for an array, its elements'.
   bool unmovable(QualType t) const {
@@ -1197,6 +1217,16 @@ public:
   }
 
 private:
+  const MemberDeclRec* declared_move(EntityId c, const ClassRec& r) const {
+    const auto m = std::ranges::find_if(r.members, [&](const MemberDeclRec& m) {
+      if (!m.is_ctor || m.is_template) return false;
+      const auto params = types_->rec(m.type).params;
+      if (params.empty() || !types_->is_reference(params.front())) return false;
+      return types_->rec(params.front()).rvalue_ref &&
+             Types::unqualified(types_->canonical(types_->referee(params.front()))) == types_->class_type(c);
+    });
+    return m == r.members.end() ? nullptr : &*m;
+  }
   ast::Interners* ins_;
   Types* types_;
   std::map<u32, bool> class_keys_;  // whether the parsed class-key names a union

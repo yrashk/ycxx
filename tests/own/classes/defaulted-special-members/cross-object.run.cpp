@@ -17,5 +17,8 @@ int main() {
   // One copy for the argument and one for the result.
   Indirect n = peer_next(i);
   if (n.c.v != 7 || n.pad != 6 || i.c.v != 5) return 21;
+  MayThrow m;
+  m.a = 4;
+  if (peer_first(m, 2) != 42) return 23;
   return peer_sum(i) == 11 ? 0 : 22;
 }

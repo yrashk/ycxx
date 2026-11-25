@@ -6712,6 +6712,7 @@ public:
       }
     }
     const auto copy_assignment = d->copy_assignment;
+    const bool representation_copy = copy_assignment == CopyAssignment::trivial && !d->trivial_call;
     if (copy_assignment != CopyAssignment::none) {
       QualType ct = types().class_type(bound.cls);
       if (!usable_copy_assignment(copy_assignment, ct, paren_at)) return fail;
@@ -6720,7 +6721,7 @@ public:
         diag(paren_at, Diag::unsupported_copy_assignment, ct);
         return fail;
       }
-      if ((copy_assignment != CopyAssignment::trivial || !assignment_notation) &&
+      if ((!representation_copy || !assignment_notation) &&
           !usable_copy_assignment(q_->require_copy_assignment(d->entity), ct, paren_at)) return fail;
     }
     EntityId fe = k.entity;
@@ -6766,7 +6767,7 @@ public:
       return fail;
     }
     Ex o = *object;
-    if (assignment_notation && copy_assignment == CopyAssignment::trivial) {
+    if (assignment_notation && representation_copy) {
       // The chosen reference argument already designates the source object. Assignment does not
       // initialize a new class value, even when the copy constructor is deleted.
       return node(ast::Assign{info, ast::AssignOp::trivial_class_copy, at(o, begin), children->front(), info.type},
@@ -7397,12 +7398,13 @@ public:
     }
     const Candidate& k = cands[*chosen];
     // The state of the selected constructor when it is defaulted on its first declaration.
-    const CopyState defaulted = [&] {
-      if (k.entity == EntityId::none || k.pattern) return CopyState::ordinary;
-      const auto m = std::ranges::find(cr->members, k.entity, &MemberDeclRec::entity);
-      return m == cr->members.end() ? CopyState::ordinary : m->defaulted;
-    }();
+    const MemberDeclRec* selected_member = nullptr;
+    if (k.entity != EntityId::none && !k.pattern)
+      if (const auto m = std::ranges::find(cr->members, k.entity, &MemberDeclRec::entity); m != cr->members.end())
+        selected_member = &*m;
+    const CopyState defaulted = selected_member ? selected_member->defaulted : CopyState::ordinary;
     const bool defaulted_copy = defaulted != CopyState::ordinary && k.entity != cr->defaulted_default_ctor;
+    const bool trivial_call = selected_member && selected_member->trivial_call;
     if (destination == ConstructorDestination::delegation) {
       if (k.entity == current_function) {
         diag(begin, Diag::delegating_constructor_cycle);
@@ -7440,7 +7442,7 @@ public:
         diag(begin, Diag::defaulted_default_delegation);
         return fail;
       }
-      if (defaulted == CopyState::trivial) {
+      if (defaulted == CopyState::trivial && !trivial_call) {
         ExprInfo info{ut, ValueCategory::prvalue, 0};
         // [dcl.init.general]: value-initialization zero-initializes before the trivial constructor.
         if (form == Construction::default_init) return node(ast::DefaultInit{info}, begin, end, info);
@@ -7453,11 +7455,16 @@ public:
     if (!require_concrete_parameters(fr, begin)) return fail;
     const bool implicit_copy = k.entity == EntityId::none && !fr.params.empty() && !types().rec(fr.params[0]).rvalue_ref;
     const CopyState copy = defaulted_copy ? defaulted : implicit_copy ? cr->defaulted_copy : CopyState::ordinary;
-    if (copy == CopyState::unsupported) {
+    // The implicit copy of an rvalue stands in for an implicit move that would call a subobject's
+    // own move constructor (#244).
+    const bool stands_for_move = (implicit_copy || (k.entity == cr->copy_ctor && !selected_member)) &&
+        cr->defaulted_copy != CopyState::ordinary && classes().implicit_move_differs(c) &&
+        args[0].cat() != ValueCategory::lvalue && object_cv(args[0].type()) == Cv::none;
+    if (copy == CopyState::unsupported || stands_for_move) {
       diag(begin, Diag::defaulted_copy_unsupported, ut);
       return fail;
     }
-    if (copy == CopyState::trivial) {
+    if (copy == CopyState::trivial && !trivial_call) {
       Ex src = bind_reference(args[0], fr.params[0], args[0].begin);
       return src.ok() ? convert_node(src, ast::ConversionKind::lvalue_to_rvalue, ut) : fail;
     }
