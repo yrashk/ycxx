@@ -329,8 +329,8 @@ capabilities.header "config" {
 A referenced rule emits an `action.observe` declaration with one `export`
 name, a tool, optional arguments, staged inputs and environment. The coordinator
 runs the declared witness outside the query epoch. For a normal exit, it gives
-the same isolated worker generation the named export, exit status and bounded
-stdout and stderr. The optional SDK classifier supplies a single support state.
+the same isolated worker generation the named export, exit status, and up to
+64 KiB each of stdout and stderr. The optional SDK classifier supplies a single support state.
 A normal nonzero exit can support a classification. Setup failures, signals,
 timeouts, oversized evidence and invalid classifier replies fail the build
 without admitting a typed value. Declared inputs and the provider are observed

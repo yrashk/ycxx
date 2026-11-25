@@ -138,6 +138,7 @@ struct RuleValueRecord {
   Fp128 receipt;
   std::string origin;
 };
+// The stable export cell depends on the whole receipt and returns only its support state.
 struct [[=engine::input{engine::Durability::low}]] RuleValueReceipt {
   using Key = Fp128;
   using Value = std::optional<RuleValueRecord>;
@@ -813,7 +814,8 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     const auto known = session_.run<RuleWitnessResult>(id, poll, nullptr, tracer);
     if (!known || cancelled()) return std::unexpected("build cancelled");
     if (*known) return **known;
-    auto result = run_action("RuleWitness", label, plan.action, plan.inputs, std::chrono::seconds(10), 64 * 1024);
+    auto result = run_action("RuleWitness", label, plan.action, plan.inputs, std::chrono::seconds(10),
+                             rule_witness_stream_limit);
     if (cancelled()) return std::unexpected("build cancelled");
     if (!still_current()) {
       superseded = true;

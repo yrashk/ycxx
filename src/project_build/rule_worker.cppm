@@ -32,7 +32,6 @@ constexpr char sdk_header[] = {
 constexpr std::size_t max_request_size = 8 * 1024 * 1024;
 constexpr std::size_t max_definition_size = 1024 * 1024;
 constexpr std::size_t max_diagnostic_size = 4096;
-constexpr std::size_t max_witness_stream_size = 64 * 1024;
 constexpr std::uint32_t abi_version = 1;
 constexpr std::uint32_t max_capability_support = 2;  // YCXX_RULE_INDETERMINATE_V1
 
@@ -105,7 +104,7 @@ std::expected<RuleWorkerRequest, std::string> load_request(const std::string& pa
   if (const auto& witness = request->witness) {
     if (!valid_key(witness->name) || witness->exit_status < 0 || witness->exit_status > 255)
       return std::unexpected("invalid rule witness name or exit status");
-    if (witness->out.size() > max_witness_stream_size || witness->err.size() > max_witness_stream_size)
+    if (witness->out.size() > rule_witness_stream_limit || witness->err.size() > rule_witness_stream_limit)
       return std::unexpected("rule witness stream exceeds 64 KiB");
   }
 

@@ -61,6 +61,8 @@ struct RuleCapabilityValue {
   std::uint32_t support;
 };
 
+inline constexpr std::size_t rule_witness_stream_limit = 64 * 1024;
+
 struct RuleWitnessReport {
   std::string name;
   int exit_status;
