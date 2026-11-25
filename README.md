@@ -49,7 +49,8 @@ A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
-owned names. The reflection
+owned names. The shader bundle plans its modules from a generated inventory
+using a named `plan_inputs` binding. The reflection
 example also uses a compiled shader's descriptor layout to generate `constexpr`
 C++ bindings. Shader edits with the same layout reuse the native executable.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)

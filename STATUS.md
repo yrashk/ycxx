@@ -3256,6 +3256,13 @@ or renamed outputs while preserving unrelated files. Failed staging or exchange
 preserves the last good asset set. Trace events report publication separately
 from tool execution. [#1329](https://github.com/yrashk/ycxx/issues/1329)
 
+A source-built rule can use `plan_inputs` to read a generated artifact while
+planning its declarations. The coordinator stages the selected bytes from
+the ordinary action receipt, and equal bytes reuse the worker result. Watch
+observes the producer graph, while read-only inspection validates its inputs
+and shows the selected receipt provenance. The shader example uses this to
+add and remove modules from a generated inventory. [#1335](https://github.com/yrashk/ycxx/issues/1335)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without

@@ -160,7 +160,7 @@ def check_builds(ycxx, scope, env):
     executable = scope / '.ycxx/out/app'
     bundle = scope / BUNDLE
     _, events = traced_build(ycxx, scope, env, 'cold shader bundle')
-    check_external_actions(events, 'scene', 'release_note', *(compile_key(name) for name in SHADERS))
+    check_external_actions(events, 'scene', 'release_note', 'shader_inventory', *(compile_key(name) for name in SHADERS))
     assert 'executed' in tu_outcomes(events, 'main.cc') and action_keys(events, 'Link'), 'cold native build did not run'
     installed = publication(executable)
     check_bundle(scope)
