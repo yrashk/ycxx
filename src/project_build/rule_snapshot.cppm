@@ -31,6 +31,7 @@ struct RuleObservation {
   Fp128 invocation;
   std::vector<RuleProbeSnapshot> projections = {};
   std::optional<Fp128> witness = std::nullopt;
+  std::optional<Fp128> planning = std::nullopt;  // producer graph of the generated planning inputs
 };
 
 struct RuleSnapshot {
@@ -43,7 +44,7 @@ struct RuleSnapshot {
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
-// package inputs and declared reads before using the stored expansions.
+// package inputs, declared reads and planning inputs before using the stored expansions.
 std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target);
 void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot);
 
@@ -174,6 +175,8 @@ struct StoredRule {
   std::optional<std::string> value_export = std::nullopt;
   std::optional<std::string> witness = std::nullopt;
   std::optional<std::vector<RuleFactReference>> facts = std::nullopt;
+  std::optional<std::vector<RulePlanInput>> plan_inputs = std::nullopt;
+  std::optional<std::string> planning = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -239,10 +242,15 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     };
     if (item.capabilities) demand.capabilities = std::move(*item.capabilities);
     if (item.facts) demand.facts = std::move(*item.facts);
+    if (item.plan_inputs) demand.plan_inputs = std::move(*item.plan_inputs);
     demand.value_export = std::move(item.value_export);
     const auto witness = item.witness ? decode_fp(*item.witness) : std::nullopt;
     if (item.witness.has_value() != witness.has_value() ||
         demand.value_export.has_value() != witness.has_value()) return std::nullopt;
+    const auto planning = item.planning ? decode_fp(*item.planning) : std::nullopt;
+    const bool has_plan_inputs = !demand.plan_inputs.empty();
+    if (item.planning.has_value() != planning.has_value() ||
+        has_plan_inputs != planning.has_value()) return std::nullopt;
     std::vector<RuleProbeSnapshot> projections;
     if (item.projections)
       for (auto& projection : *item.projections) {
@@ -253,11 +261,12 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     const bool compiler_bindings = std::ranges::any_of(demand.capabilities, [](const auto& binding) {
       return !binding.value;
     });
-    const auto facts = demand.capabilities.size() + demand.facts.size() + (demand.value_export ? 1 : 0);
+    const auto facts = demand.capabilities.size() + demand.facts.size() + demand.plan_inputs.size() +
+                       (demand.value_export ? 1 : 0);
     if ((compiler_bindings && projections.empty()) ||
         (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
       return std::nullopt;
-    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness});
+    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness, planning});
     result.expansions.push_back({std::move(demand), std::move(item.definition),
                                  item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
@@ -274,7 +283,9 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     const auto& expansion = snapshot.expansions[i];
     const auto& observed = snapshot.observations[i];
     const auto& demand = expansion.demand;
-    if (demand != observed.demand || expansion.definition.empty()) return;
+    const bool has_plan_inputs = !demand.plan_inputs.empty();
+    if (demand != observed.demand || expansion.definition.empty() ||
+        has_plan_inputs != observed.planning.has_value()) return;
     StoredRule rule{
         demand.target, demand.rule, demand.package.target, demand.package.kind == RulePackageRef::Kind::standard,
         demand.definition, demand.attributes, demand.reads, expansion.definition,
@@ -289,6 +300,10 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     if (!demand.facts.empty()) rule.facts = demand.facts;
     rule.value_export = demand.value_export;
     if (observed.witness) rule.witness = hex(*observed.witness);
+    if (observed.planning) {
+      rule.plan_inputs = demand.plan_inputs;
+      rule.planning = hex(*observed.planning);
+    }
     saved.rules.push_back(std::move(rule));
   }
   if (!snapshot.probes.empty()) {

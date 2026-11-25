@@ -24,6 +24,13 @@ struct RuleFactReference {
   bool operator==(const RuleFactReference&) const = default;
 };
 
+struct RulePlanInput {
+  std::string name;
+  std::string target;
+  std::string output;
+  bool operator==(const RulePlanInput&) const = default;
+};
+
 struct RuleCapabilityBinding {
   std::string name;
   std::string package;
@@ -49,6 +56,7 @@ struct RuleDemand {
   std::vector<RuleCapabilityBinding> capabilities = {};
   std::optional<std::string> value_export = std::nullopt;
   std::vector<RuleFactReference> facts = {};
+  std::vector<RulePlanInput> plan_inputs = {};
   bool operator==(const RuleDemand&) const = default;
 };
 
