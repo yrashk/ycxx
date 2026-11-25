@@ -1176,6 +1176,15 @@ public:
     }
     return path;
   }
+  // Whether an earlier member of a class that contains item `j` is being analysed: `j`, a friend
+  // declaration or a nested class's member, is read once that member is, with its class.
+  bool after_running_member(u32 j) const {
+    for (u32 p = items_->items[j].parent; p != items::none && items_->items[p].kind == ItemKind::class_def;
+         p = items_->items[p].parent)
+      if (std::ranges::any_of(running_, [&](u32 r) { return r < j && r > p && items_->items[r].parent == p && last_member(r) < j; }))
+        return true;
+    return false;
+  }
   // Analyses the items up to `point` that may declare `e`, those that declare its name, so that
   // what `declared` recorded of it there does not depend on which items other cells analysed
   // first (§A1, #947). With every earlier item analysed (`analyze_all`) it analyses nothing.
@@ -1192,7 +1201,8 @@ public:
     for (auto [j, k] : named(name)) {
       if (j > point) break;
       if (j < scanned || std::ranges::contains(running_, j)) continue;
-      if (Program::passes(*ix_, Probe::declares, path, j, k)) settle(j);
+      // An item is read only where it can declare `e`, so a group depends on no other (#947).
+      if (Program::passes(*ix_, Probe::declares, path, j, k) && !after_running_member(j)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
   }
@@ -2069,6 +2079,15 @@ private:
       return key < items_->items.size() && (key == parent || items_->items[key].parent == parent);
     });
   }
+  // Whether the body at `definition` can be analysed: a member's body is a complete-class context
+  // ([class.mem.general]/8), so not while its class's members are being declared.
+  bool member_body_ready(u32 definition) const {
+    const u32 parent = items_->items[definition].parent;
+    if (parent == items::none || items_->items[parent].kind != ItemKind::class_def) return true;
+    const auto cls = class_entities_.find(parent);
+    return (cls != class_entities_.end() && classes_.is_defined(cls->second)) ||
+           !std::ranges::contains(running_, class_def_key(parent));
+  }
   struct DestructorDeclaration {
     u32 at;
     std::optional<bool> nonthrowing;  // a written exception specification, if present
@@ -2543,6 +2562,30 @@ public:
     }
     return r;
   }
+  // The same for the members analysed so far of a class template specialization being instantiated.
+  std::optional<ast::DeclSema> members_so_far(EntityId spec, ast::NameId name, bool type_only,
+                                              std::vector<ast::DeclSema>* functions) {
+    const u32 pattern = p_->class_patterns_.at(std::to_underlying(spec));
+    const auto& items = p_->items().items;
+    const auto pending = std::ranges::find_if(items[pattern].members, [&](u32 m) {
+      return items[m].kind != ItemKind::access_spec && !p_->class_member_cells_.contains(std::pair(m, std::to_underlying(spec)));
+    });
+    const u32 limit = pending == items[pattern].members.end() ? items::none : *pending;
+    // A later member of that name is part of the lookup set or hides what encloses the class: the
+    // body cannot be instantiated yet.
+    const auto spelling = p_->world().ins.names.spelling(name);
+    if (std::ranges::any_of(pending, items[pattern].members.end(), [&](u32 m) {
+          return std::ranges::any_of(items[m].names, [&](const items::DeclName& n) {
+            return n.name == spelling && !(n.flags & items::name_flag::friend_);
+          });
+        }))
+      named_pending_member = true;
+    const EntityId saved = std::exchange(instantiating, spec);
+    auto found = members_before(pattern, limit, spec, name, type_only, functions);
+    instantiating = saved;
+    return found;
+  }
+  bool named_pending_member = false;
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
   std::optional<u32> declaration_lookup_end;
@@ -3223,9 +3266,12 @@ public:
   std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
     return sema::Evaluator(s, *this).evaluate(call).value;
   }
-  std::optional<ast::DeclSema> earlier_member(ast::NameId, bool, std::vector<ast::DeclSema>*) override {
-    return std::nullopt;
+  // In a member's body instantiated while its class is, for a deduced return type: the members
+  // declared so far.
+  std::optional<ast::DeclSema> earlier_member(ast::NameId name, bool type_only, std::vector<ast::DeclSema>* functions) override {
+    return instantiating_class ? at_.members_so_far(*instantiating_class, name, type_only, functions) : std::nullopt;
   }
+  std::optional<EntityId> instantiating_class;  // the class of the member, not complete yet
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
@@ -3606,6 +3652,9 @@ private:
         } else if (ps_.deferred_rank_checks() != ranks) {
           p_->alias_call_patterns_.emplace(decls_.back().entity,
               Program::AliasCallPattern{k_, begin, ps_.pos(), sema::AliasCallPattern::rank_checks});
+        } else if (!s_.templates().structural_operand(*t)) {
+          p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{
+              k_, begin, ps_.pos(), sema::AliasCallPattern::unrepresented});
         }
         if (!ps_.expect(Tk::semi)) bad();
         return;
@@ -5123,8 +5172,8 @@ private:
       else if (ps_.accept(Tk::kw_protected)) access = ast::Access::protected_;
       else if (ps_.accept(Tk::kw_private)) access = ast::Access::private_;
       u32 at = ps_.pos();
-      if (template_ && !ps_.is(Tk::identifier) && !ps_.is(Tk::coloncolon)) {
-        s_.diag(at, Diag::not_supported, ps_.kind());  // computed base types and other base forms (#308)
+      if (template_ && !ps_.is(Tk::identifier) && !ps_.is(Tk::coloncolon) && !ps_.is(Tk::kw_decltype)) {
+        s_.diag(at, Diag::not_supported, ps_.kind());  // pack-index-specifiers and other base forms (#308)
         return false;
       }
       u32 deferred = ps_.deferred_argument_checks();
@@ -5168,7 +5217,12 @@ private:
       }
       const bool single_base = bases.empty() && !ps_.is(Tk::comma);
       if (!complete_base_class(s_, spec.type, at, single_base)) return false;
-      if (sema::Types::cv(spec.type) != sema::Cv::none) {
+      // A written cv-qualifier is no class-or-decltype; its type's cv is ignored ([class.derived.general]/2).
+      const auto written_cv = [&](u32 token) {
+        const Tk k = p_->region().tokens[it_->begin + token].kind;
+        return k == Tk::kw_const || k == Tk::kw_volatile;
+      };
+      if (written_cv(at) || written_cv(ps_.pos() - 1)) {
         s_.diag(at, Diag::base_not_class, spec.type);
         return false;
       }
@@ -10933,6 +10987,8 @@ public:
       if (f->flags & sema::decl_flag::member) {
         s_.current_class = scope;
         s_.this_type = p_->this_type(*f);
+        if (inst_ && p_->classes_instantiating_.contains(std::to_underlying(s_.current_class)))
+          static_cast<AtInstantiation&>(*q_).instantiating_class = s_.current_class;
         scope = p_->world().entities.rec(scope).scope;
       } else if (f->flags & sema::decl_flag::friend_) {
         // [class.mem.general]: the body is a complete-class context even though the
@@ -11011,6 +11067,8 @@ public:
     bool templated = function_template || !p_->enclosing_heads(k_).empty();
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
+    if (at_->named_pending_member && !s_.has_error_since(0))
+      s_.diag(0, sema::Diag::incomplete_type, s_.types().class_type(s_.current_class));
     const bool keeps = templated && !inst_;
     // A body with generic lambdas keeps its expansions too: their specializations expand them.
     const bool keep_expansions = keeps || s_.has_generic_lambdas();
@@ -12927,6 +12985,12 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
       }
       class_member_cells_.emplace(cell_key, std::move(cell));
       class_member_order_.push_back(cell_key);
+      // A later member can name a static member function whose return type only its own
+      // instantiation tells ([dcl.spec.auto.general]/11); other members wait for the whole class.
+      for (const ast::DeclSema& d : w_->ins.seqs.elements(class_member_sema(m, spec).decls))
+        if (d.entity != EntityId::none && d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::static_) &&
+            !(d.flags & (sema::decl_flag::friend_ | sema::decl_flag::template_)) && w_->types.has_placeholder(d.type))
+          member_patterns_.emplace(std::to_underlying(d.entity), MemberOf{m, spec});
     }
     const auto& member = class_member_cells_.at(cell_key);
     member_declarations_valid &= valid_member_declarations(member.diags);
@@ -13088,6 +13152,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
     body_item = *out;
   }
   const u32 k = member != member_patterns_.end() ? body_item : outside ? *outside : def->second;
+  if (!member_body_ready(k)) return nullptr;
   // [temp.inst]/16: instantiations nested through constant evaluation are limited as the END
   // worklist's are; the limit is reported once, at the template.
   if (too_deep(instantiating_.size(), k)) return nullptr;
@@ -13611,7 +13676,8 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   }
   ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return c;
+  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second) || !member_body_ready(def->second))
+    return c;
   if (specialized_destructor && def->second < explicit_specs_.at(key)) return c;
   u32 k = def->second;
   if (!irs_.contains(k)) {
@@ -13877,7 +13943,8 @@ std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
   }
   ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return std::nullopt;
+  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second) || !member_body_ready(def->second))
+    return std::nullopt;
   const Result<ast::BodySema>& body = analyze_body(def->second);
   if (!body.value.deduced) return std::nullopt;
   return body.value.deduced_type;

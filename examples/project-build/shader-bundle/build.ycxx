@@ -7,7 +7,14 @@ shaders.bundle "scene" {
     python = "/usr/bin/python3"
 }
 
+generate "release_note" {
+    tool = "/bin/sh"
+    args = ["-c", "printf '%s\\n' \"$1\" > \"$2\"", "release-note",
+            "Scene bundle entries contain a shader name and hexadecimal SPIR-V.", output("note")]
+    outputs = { note = "release-note.txt" }
+}
+
 cpp.executable "app" {
     sources = ["main.cc"]
-    runtime_assets = [artifact("scene", "bundle")]
+    runtime_assets = [artifact("scene", "bundle"), artifact("release_note", "note")]
 }
