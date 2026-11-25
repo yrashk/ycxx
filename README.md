@@ -35,6 +35,7 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
+Use `ycxx build app --watch` to rebuild after workspace edits.
 [Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
