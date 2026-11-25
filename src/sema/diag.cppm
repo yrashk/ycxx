@@ -41,6 +41,7 @@ enum class Diag : std::uint32_t {
   extraneous_brace [[=message{Severity::error, "a '}' that closes nothing"}]],
   operator_member_only [[=message{Severity::error, "'{0:n}' must be a member function"}]],
   operator_arity [[=message{Severity::error, "'{0:n}' has the wrong number of parameters"}]],
+  operator_postfix_parameter [[=message{Severity::error, "the second parameter of '{0:n}' must have type 'int'"}]],
   operator_needs_class [[=message{Severity::error, "'{0:n}' needs a parameter of class or enumeration type"}]],
   operator_static [[=message{Severity::error, "'{0:n}' cannot be a static member function"}]],
   conversion_decl_type [[=message{Severity::error, "a conversion function cannot specify a separate return type"}]],

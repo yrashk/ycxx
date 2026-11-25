@@ -316,6 +316,7 @@ inline constexpr u8 unrepresented_value = 4;  // this expression has no usable C
 inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs function body replay
 inline constexpr u8 type_dependent = 16;  // the producer proved dependence even without a structural type
 inline constexpr u8 dependent_integral_arithmetic = 32;  // integral arithmetic depending on value parameters
+inline constexpr u8 structural_projection = 64;  // a class parameter field in a member alias argument
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -3290,6 +3291,7 @@ public:
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
     if (!record || !record->virtual_layout_unsupported) return true;
+    if (record->polymorphic && !record->member_declarations_valid) return true;  // diagnosed at the member
     diag(at, Diag::virtual_layout, t);
     return false;
   }
@@ -3442,14 +3444,27 @@ public:
   }
 
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at,
-            std::optional<NameId> qualifier = {}) {
+            std::optional<NameId> qualifier = {}, bool retain_class_parameter = false) {
     u32 begin = object.begin;
     Ex fail{NodeId::none, begin, end};
     if (!object.ok()) return fail;
+    QualType ct = object.type();
+    std::optional<ConstId> parameter;
+    bool class_parameter = false;
+    if (retain_class_parameter && !arrow && !qualifier && types().is_class(ct) && !types().is_dependent(ct)) {
+      Ex base = object;
+      while (auto p = as<ast::Paren>(base)) base.id = p->operand.id;
+      if (auto lit = as<ast::Literal>(base); lit && ins().values.is<ast::VDepParam>(lit->value) &&
+          ins().values.get<ast::VDepParam>(lit->value).depth != dependent_depth) {
+        parameter = lit->value;
+      }
+      auto decl = as<ast::DeclRef>(base);
+      class_parameter = parameter || (decl && w_->entities.rec(decl->entity).kind == EntityKind::template_parameter_object);
+    }
     // A member of the current instantiation or of an unknown specialization is looked up when the
     // template is instantiated ([temp.dep.expr]/5).
-    if (dependent(object)) return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
-    QualType ct = object.type();
+    if (dependent(object) && !parameter)
+      return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (arrow) {
       object = rvalue(object);
       if (!types().is_pointer(object.type()) || !types().is_class(types().pointee(object.type()))) {
@@ -3478,6 +3493,8 @@ public:
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
       return fail;
     }
+    if (parameter && !found->field)
+      return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (found->ambiguous) {
       diag(name_at, Diag::ambiguous_member, name, Types::unqualified(ct));
       return fail;
@@ -3533,7 +3550,12 @@ public:
       return fail;
     }
     ValueCategory cat = ref || arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
-    ExprInfo info{t, cat, 0, f.bit_width};
+    ExprInfo info{t, cat, class_parameter ? expr_flag::structural_projection : u8{0}, f.bit_width};
+    if (parameter) {
+      info.flags |= expr_flag::dependent;
+      ConstId value = ins().intern_value(ast::VDepField{c, f.entity, types().canonical(f.type), *parameter});
+      return node(ast::Literal{info, value}, begin, end, info);
+    }
     return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, ref ? 1u : 0u, at(object, begin)}, begin, end, info);
   }
 
@@ -6688,7 +6710,9 @@ public:
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
     const bool immediate_virtual = d->is_virtual && d->is_consteval;
-    if (unevaluated == 0) {
+    // A pattern's own member: its specializations have the tables ([temp.dep.type]).
+    const bool pattern_member = d->is_virtual && types().is_dependent(types().class_type(w_->entities.rec(d->entity).scope));
+    if (unevaluated == 0 && !pattern_member) {
       if (immediate_virtual) {
         if (!dynamic_owner || !object || assignment_notation) {
           diag(paren_at, Diag::virtual_immediate_call);
@@ -6813,6 +6837,9 @@ public:
                                        begin, end, info));
     }
     if (virtual_slot) {
+      // A virtual function that is not pure is odr-used ([basic.def.odr]): a specialization's is instantiated.
+      if (!d->is_pure && w_->entities.rec(w_->entities.rec(d->entity).scope).templ != EntityId::none)
+        demands.push_back({d->entity, ast::Loc{item_, loc_base_ + begin}});
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
       // in-place insert after a one-element vector as writing past its allocation (#748).
       // Without the bug: `std::vector<QualType> parameters{o.type()};` and
@@ -10511,14 +10538,14 @@ public:
   };
 
   // Rank direct ordinary binary candidates in operand order. This subset compares
-  // exact class and integral arguments, including integral conversions by value.
+  // exact class and arithmetic arguments, including arithmetic conversions by value.
   OrdinaryOperatorChoice ordinary_binary_choice(NameId name, std::span<const Ex> operands,
                                                  std::span<const ast::DeclSema> nonmembers) {
     const NameId conversion = ins().names.intern(lex::conversion_function_name);
     for (const Ex& operand : operands) {
       const QualType type = types().referee(operand.type());
       if (operand.info.bit_width || Types::is_volatile(types().canonical(type))) return {};
-      if (types().is_integral(type)) continue;
+      if (types().is_arithmetic(type)) continue;
       if (!types().is_class(type)) return {};
       const EntityId entity = types().class_of(type);
       const auto& owner = w_->entities.rec(entity);
@@ -10541,7 +10568,7 @@ public:
       if (types().is_class(source) && !same_type) return Ics{};
       // Pointer qualification and conversions that bind a reference to a temporary
       // of a different type need additional sequence ordering.
-      if ((!same_type && !types().is_integral(target)) ||
+      if ((!same_type && !types().is_arithmetic(target)) ||
           Types::is_volatile(types().canonical(target)) ||
           (types().is_reference(parameter) && !same_type))
         return std::nullopt;
@@ -10627,16 +10654,33 @@ public:
     bool member_only_failure = false;
     const bool binary = operands.size() == 2 && std::ranges::contains(binary_spellings, op);
     QualType lt = types().referee(operands[0].type());
-    const bool unary_minus = operands.size() == 1 && op == "-" && types().is_class(lt);
-    std::vector<ast::DeclSema> unary_friends;
-    AdlAssociations unary_associations;
-    if (unary_minus) {
-      unary_associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
-      for_each_associated_friend(unary_associations, name, /*at_instantiation=*/false, [&](const ast::DeclSema& d) {
-        if (types().rec(d.type).params.size() == 1) unary_friends.push_back(d);
-      });
+    // [temp.dep.candidate]: an operand that was dependent also finds what is associated with its
+    // type at the point of instantiation.
+    const bool instantiated = !binary && q_->dependent_call(op_at);
+    bool unary_friends = false;
+    if (operands.size() == 1 && types().is_class(lt))
+      for (const bool at_instantiation : {false, true}) {
+        if (at_instantiation && !instantiated) continue;
+        const auto associations = adl_associations(operands, at_instantiation, /*ordinary_call=*/!at_instantiation);
+        for_each_associated_friend(associations, name, at_instantiation, [&](const ast::DeclSema& d) {
+          unary_friends |= types().rec(d.type).params.size() == 1;
+        });
+      }
+    // Compound assignment: rank member and non-member candidates together where
+    // `ordinary_binary_choice` models their conversions. Elsewhere the member comes first (#219).
+    std::optional<ast::DeclSema> compound_choice;
+    if (operands.size() == 2 && !binary && types().is_class(lt) && !member_functions(types().class_of(lt), name).empty()) {
+      auto nonmembers = ordinary_operator_nonmembers(name);
+      add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/false);
+      if (instantiated) add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/true);
+      const auto choice = nonmembers.empty() ? OrdinaryOperatorChoice{} : ordinary_binary_choice(name, operands, nonmembers);
+      if (choice.ambiguous) {
+        diag(op_at, Diag::ambiguous_call, name);
+        return Ex{NodeId::none, begin, end};
+      }
+      if (choice.nonmember) compound_choice = *choice.nonmember;
     }
-    if (types().is_class(lt) && unary_friends.empty())
+    if (types().is_class(lt) && !unary_friends && !compound_choice)
       if (const ClassRec* c = class_rec(types().class_of(lt));
           c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
         Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
@@ -10658,13 +10702,13 @@ public:
           if (!member_only_failure) truncate_diags(n);
         }
       }
-    const bool enum_only = binary && std::ranges::none_of(operands, [&](const Ex& operand) {
+    const bool enum_only = std::ranges::none_of(operands, [&](const Ex& operand) {
       return types().is_class(types().referee(operand.type()));
     });
     auto set = ordinary_operator_nonmembers(name);
-    auto add = [&](const ast::DeclSema& d) { add_operator_nonmember(set, d); };
-    for (const ast::DeclSema& d : unary_friends) add(d);
-    if (binary) {
+    if (compound_choice) {
+      set.assign(1, *compound_choice);
+    } else if (binary) {
       add_operator_adl(set, name, operands, /*at_instantiation=*/false);
       const bool ordinary_classes = !enum_only && std::ranges::all_of(operands, [&](const Ex& operand) {
         const QualType type = types().referee(operand.type());
@@ -10674,20 +10718,11 @@ public:
       });
       if (ordinary_classes && q_->dependent_call(op_at))
         add_operator_adl(set, name, operands, /*at_instantiation=*/true);
-    } else if (!unary_friends.empty()) {
-      for (EntityId ns : unary_associations.namespaces)
-        for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
     } else {
-      for (const Ex& o : operands)
-        if (auto ns = associated_namespace(o.type())) {
-          if (ref_qualified_member) {
-            for (const ast::DeclSema& d : q_->adl_functions(*ns, name, /*at_instantiation=*/false)) add(d);
-          } else {
-            for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
-          }
-        }
+      add_operator_adl(set, name, operands, /*at_instantiation=*/false);
+      if (instantiated) add_operator_adl(set, name, operands, /*at_instantiation=*/true);
     }
-    if (!unary_friends.empty()) {
+    if (unary_friends) {
       auto found = find_member(types().class_of(lt), name);
       if (found && found->ambiguous) {
         diag(op_at, Diag::ambiguous_member, name, Types::unqualified(lt));
@@ -10697,6 +10732,7 @@ public:
         Ics rank;
         QualType target;
         const ast::DeclSema* nonmember;
+        bool is_template;
       };
       std::vector<UnaryCandidate> viable;
       Ex object = operands.front();
@@ -10714,8 +10750,9 @@ public:
         }
         return t.specialization_type(pattern, *args);
       };
-      bool unsupported = false;
+      bool nonmember_resolution = false;
       bool ambiguous_base = false;
+      bool member_viable = false;
       if (found && found->member && found->member->is_function) {
         const bool rvalue = object.cat() != ValueCategory::lvalue;
         const QualType target = types().class_type(found->owner);
@@ -10733,12 +10770,12 @@ public:
           auto fn = types().rec(function_type);
           Ics rank = implicit_object_rank(fn, object_cv(lt), rvalue);
           if (!rank.viable || !fn.params.empty()) continue;
-          unsupported |= candidate->is_template;
+          member_viable = true;
           if (depth) {
             rank.rank = 2;  // derived-to-base conversion
             rank.base_depth = depth;
           }
-          viable.push_back({rank, target, nullptr});
+          viable.push_back({rank, target, nullptr, candidate->is_template});
         }
       }
       for (const auto& candidate : set) {
@@ -10772,42 +10809,56 @@ public:
         }
         const auto rank = ics(object, parameter);
         if (!rank.viable) continue;
-        unsupported |= is_template || rank.rank >= Ics::user_defined;
-        viable.push_back({rank, target, &candidate});
+        nonmember_resolution |= is_template || rank.rank >= Ics::user_defined;
+        viable.push_back({rank, target, &candidate, is_template});
       }
-      if (unsupported || (ambiguous_base && std::ranges::none_of(viable, [](const UnaryCandidate& c) {
-            return c.rank.rank == 0;
-          }))) {
+      // The call below ranks non-member candidates alone, whatever their conversions and templates.
+      const bool nonmembers_only = nonmember_resolution && !member_viable && !ambiguous_base;
+      if (ambiguous_base && std::ranges::none_of(viable, [](const UnaryCandidate& c) { return c.rank.rank == 0; })) {
         diag(op_at, Diag::ref_qualified_operator_candidates);
         return Ex{NodeId::none, begin, end};
       }
       if (viable.empty()) return std::nullopt;
-      auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
-        if (left.rank.base_depth && right.rank.base_depth &&
-            types().class_of(left.target) != types().class_of(right.target)) {
-          if (base_depth(left.target, right.target)) return true;
-          if (base_depth(right.target, left.target)) return false;
-          return left.rank.ref && right.rank.ref && left.rank.to_rvalue && right.rank.to_rvalue &&
-                 left.rank.rvalue_ref && !right.rank.rvalue_ref;
+      if (!nonmembers_only) {
+        auto better_conversion = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
+          if (left.rank.base_depth && right.rank.base_depth &&
+              types().class_of(left.target) != types().class_of(right.target)) {
+            if (base_depth(left.target, right.target)) return true;
+            if (base_depth(right.target, left.target)) return false;
+            return left.rank.ref && right.rank.ref && left.rank.to_rvalue && right.rank.to_rvalue &&
+                   left.rank.rvalue_ref && !right.rank.rvalue_ref;
+          }
+          return left.rank < right.rank;
+        };
+        // [over.match.best.general]/2: then a non-template before a template specialization.
+        auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
+          return better_conversion(left, right) ||
+                 (!left.is_template && right.is_template && !better_conversion(right, left));
+        };
+        auto winner = viable.begin();
+        for (auto candidate = std::next(winner); candidate != viable.end(); ++candidate)
+          if (better(*candidate, *winner)) winner = candidate;
+        auto undecided = [&](const UnaryCandidate& candidate) {
+          return &candidate != &*winner && !better(*winner, candidate);
+        };
+        if (winner->is_template && std::ranges::any_of(viable, [&](const UnaryCandidate& candidate) {
+              return candidate.is_template && undecided(candidate);
+            })) {
+          diag(op_at, Diag::ref_qualified_operator_candidates);  // partial ordering with a member template
+          return Ex{NodeId::none, begin, end};
         }
-        return left.rank < right.rank;
-      };
-      auto winner = viable.begin();
-      for (auto candidate = std::next(winner); candidate != viable.end(); ++candidate)
-        if (better(*candidate, *winner)) winner = candidate;
-      if (std::ranges::any_of(viable, [&](const UnaryCandidate& candidate) {
-            return &candidate != &*winner && !better(*winner, candidate);
-          })) {
-        diag(op_at, Diag::ambiguous_call, name);
-        return Ex{NodeId::none, begin, end};
+        if (std::ranges::any_of(viable, undecided)) {
+          diag(op_at, Diag::ambiguous_call, name);
+          return Ex{NodeId::none, begin, end};
+        }
+        if (!winner->nonmember) {
+          Ex access = member(object, false, name, object.end, op_at, op_at);
+          Ex result = access.ok() ? call(access, {}, end, op_at) : access;
+          return Ex{result.id, begin, end, result.info};
+        }
+        const auto selected = *winner->nonmember;
+        set.assign(1, selected);
       }
-      if (!winner->nonmember) {
-        Ex access = member(object, false, name, object.end, op_at, op_at);
-        Ex result = access.ok() ? call(access, {}, end, op_at) : access;
-        return Ex{result.id, begin, end, result.info};
-      }
-      const auto selected = *winner->nonmember;
-      set.assign(1, selected);
     }
     const auto call_nonmember = [&]() {
       ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
@@ -10832,28 +10883,29 @@ public:
       return Ex{result.id, begin, end, result.info};
     }
     if (set.empty()) return ref_qualified_member;
-    if (binary && ref_qualified_member && q_->dependent_call(op_at)) {
+    if (ref_qualified_member && (!binary || q_->dependent_call(op_at))) {
       const auto member_call = as<ast::MemberCall>(*ref_qualified_member);
       if (member_call) {
         const auto& member = w_->entities.rec(member_call->function);
         const auto fn = types().rec(member.type);
-        if (member.scope == types().class_of(lt) && fn.params.size() == 1 &&
-            fn.fn_ref == ast::RefQual::lvalue && operands[0].cat() == ValueCategory::lvalue) {
-          const auto receiver = types().lvalue_ref(types().add_cv(types().class_type(member.scope), fn.fn_cv));
-          const auto member_receiver = ics(operands[0], receiver);
-          const auto member_argument = ics(operands[1], fn.params[0]);
+        const bool lvalue = operands[0].cat() == ValueCategory::lvalue;
+        if (member.scope == types().class_of(lt) && fn.params.size() + 1 == operands.size() &&
+            (binary ? fn.fn_ref == ast::RefQual::lvalue && lvalue : (fn.fn_ref == ast::RefQual::lvalue) == lvalue)) {
+          const auto object = types().add_cv(types().class_type(member.scope), fn.fn_cv);
+          std::vector<Ics> member_ranks{ics(operands[0], lvalue ? types().lvalue_ref(object) : types().rvalue_ref(object))};
+          if (operands.size() == 2) member_ranks.push_back(ics(operands[1], fn.params[0]));
           // Keep the existing joint-ranking diagnostic unless the member dominates
           // every viable ordinary non-member candidate.
-          if (member_receiver.viable && member_argument.viable &&
+          if (std::ranges::all_of(member_ranks, &Ics::viable) &&
               std::ranges::all_of(set, [&](const ast::DeclSema& candidate) {
                 if (candidate.flags & decl_flag::template_) return false;
                 const auto free_fn = types().rec(candidate.type);
-                if (free_fn.params.size() != 2) return false;
-                const auto free_receiver = ics(operands[0], free_fn.params[0]);
-                const auto free_argument = ics(operands[1], free_fn.params[1]);
-                if (!free_receiver.viable || !free_argument.viable) return true;
-                return !(free_receiver < member_receiver) && !(free_argument < member_argument) &&
-                       (member_receiver < free_receiver || member_argument < free_argument);
+                if (free_fn.variadic) return false;
+                if (free_fn.params.size() != operands.size()) return true;  // another arity of the operator
+                std::vector<Ics> free_ranks;
+                for (std::size_t i = 0; i < operands.size(); ++i) free_ranks.push_back(ics(operands[i], free_fn.params[i]));
+                return !std::ranges::all_of(free_ranks, &Ics::viable) ||
+                       better_conversions(member_ranks, free_ranks).value_or(false);
               }))
             return ref_qualified_member;
         }
@@ -10969,15 +11021,16 @@ public:
     using enum ast::UnaryOp;
     if (!e.ok()) return {NodeId::none, begin, end};
     if (dependent(e)) {
+      const bool type_dependent = has_proven_dependent_type(e);
+      if (type_dependent) dependent_calls.push_back(op_at);
       if (op == not_) {
         const u8 flags = expr_flag::dependent | (e.info.flags & expr_flag::deferred_decay_copy);
         ExprInfo info{builtin(Builtin::dependent), ValueCategory::prvalue, flags};
         return node(ast::Unary{info, op, at(e, begin)}, begin, end, info);
       }
-      // [temp.dep.expr]: for a genuinely type-dependent operand, even selecting the increment
-      // operator can require replay. The result need not have the operand's type.
-      const bool increment = op == pre_inc || op == pre_dec || op == post_inc || op == post_dec;
-      const u8 flags = increment && has_proven_dependent_type(e) ? expr_flag::type_dependent : 0;
+      // [temp.dep.expr]: for a genuinely type-dependent operand, even selecting the operator can
+      // require replay. The result need not have the operand's type.
+      const u8 flags = type_dependent ? expr_flag::type_dependent : 0;
       return dependent_node({e}, begin, end, std::nullopt, ValueCategory::prvalue, flags);
     }
     static constexpr std::string_view unary_spellings[] = {"+", "-", "!", "~", "*", "&", "++", "--", "", ""};
@@ -11448,9 +11501,7 @@ public:
   // in charge when other candidate or conversion kinds may affect the result.
   std::optional<Ex> ranked_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
     const std::array operand_types{types().referee(l.type()), types().referee(r.type())};
-    if ((!types().is_class(operand_types[0]) && !types().is_class(operand_types[1])) ||
-        q_->dependent_call(op_at))
-      return std::nullopt;
+    if (!types().is_class(operand_types[0]) && !types().is_class(operand_types[1])) return std::nullopt;
     const std::array operands{l, r};
     const NameId conversion = ins().names.intern(lex::conversion_function_name);
     std::array<EntityId, 2> owners{EntityId::none, EntityId::none};
@@ -11470,6 +11521,7 @@ public:
       owners[i] = owner;
     }
 
+    const bool instantiated = q_->dependent_call(op_at);  // [temp.dep.candidate]
     // The complete ordinary relational candidate set is a separate ranking case.
     // Check declarations, including those for which a call would fail.
     if (op != BinOp::spaceship) {
@@ -11478,6 +11530,7 @@ public:
       if (owners[0] != EntityId::none && find_member(owners[0], ordinary)) return std::nullopt;
       auto nonmembers = ordinary_operator_nonmembers(ordinary);
       add_operator_adl(nonmembers, ordinary, operands, /*at_instantiation=*/false);
+      if (instantiated) add_operator_adl(nonmembers, ordinary, operands, /*at_instantiation=*/true);
       if (!nonmembers.empty()) return std::nullopt;
     }
 
@@ -11506,6 +11559,7 @@ public:
     const NameId name = ins().names.intern("operator<=>");
     auto nonmembers = ordinary_operator_nonmembers(name);
     add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/false);
+    if (instantiated) add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/true);
     std::vector<Ranked> viable;
     for (std::size_t first = 0; first < operands.size(); ++first) {
       const std::size_t second = 1 - first;
@@ -11633,7 +11687,12 @@ public:
   Ex assign(AsgOp op, Ex l, Ex r, u32 op_at) {
     u32 begin = l.begin, end = r.end;
     if (!l.ok() || !r.ok()) return {NodeId::none, begin, end};
-    if (dependent(l) || dependent(r)) return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue);
+    if (dependent(l) || dependent(r)) {
+      if (op == AsgOp::assign || (!has_proven_dependent_type(l) && !has_proven_dependent_type(r)))
+        return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue);
+      dependent_calls.push_back(op_at);
+      return dependent_node({l, r}, begin, end, std::nullopt, ValueCategory::lvalue, expr_flag::type_dependent);
+    }
     if (op == AsgOp::assign && types().is_class(l.type())) {
       NameId name = ins().names.intern("operator=");
       Ex callee = member(l, false, name, l.end, op_at, op_at);
@@ -11741,8 +11800,81 @@ public:
     return node(ast::Throw{info, at(value, begin)}, begin, end, info);
   }
 
+  // Retain a typed integral operand without reading a named object. The conditional's
+  // substitution and the concrete evaluator each read only the chosen alternative.
+  std::optional<TemplateArg> structural_conditional_operand(Ex e) {
+    while (auto p = as<ast::Paren>(e)) e.id = p->operand.id;
+    const QualType type = types().canonical(e.type());
+    if (auto lit = as<ast::Literal>(e)) {
+      const auto& values = ins().values;
+      if (values.is<ast::VInt>(lit->value) || values.is<ast::VDepField>(lit->value) ||
+          values.is<ast::VDepConditional>(lit->value) ||
+          (values.is<ast::VDepParam>(lit->value) && values.get<ast::VDepParam>(lit->value).depth != dependent_depth))
+        return TemplateArg{TemplateArgKind::value, type, lit->value};
+    }
+    if (auto decl = as<ast::DeclRef>(e); decl && !decl->reference && !dependent(e)) {
+      ConstId value = ins().intern_value(ast::VEntity{decl->entity});
+      return TemplateArg{TemplateArgKind::value, type, value};
+    }
+    if (auto unary = as<ast::Unary>(e);
+        unary && (unary->op == ast::UnaryOp::plus || unary->op == ast::UnaryOp::minus)) {
+      if (auto lit = as<ast::Literal>({unary->operand.id}); lit && ins().values.is<ast::VInt>(lit->value)) {
+        auto bits = ast::int_bits(ins(), lit->value);
+        if (unary->op == ast::UnaryOp::minus) bits = ast::wide::neg(bits);
+        return TemplateArg{TemplateArgKind::value, type, w_->values.integer(type, bits)};
+      }
+    }
+    return std::nullopt;
+  }
+
+  Ex structural_conditional(Ex cond, Ex t, Ex f, u32 q_at) {
+    const u32 begin = cond.begin, end = f.end;
+    const bool is_dependent = dependent(cond) || dependent(t) || dependent(f);
+    const QualType left = types().canonical(t.type()), right = types().canonical(f.type());
+    const QualType a = Types::unqualified(left), b = Types::unqualified(right);
+    const Cv left_cv = Types::cv(left), right_cv = Types::cv(right);
+    const bool left_to_right = cv_within(left_cv, right_cv);
+    const bool glvalue = t.glvalue() && t.cat() == f.cat() && a == b &&
+                         (left_to_right || cv_within(right_cv, left_cv));
+    if (glvalue && (t.info.bit_width || f.info.bit_width)) {
+      diag(q_at, Diag::bit_field_conditional);
+      return {NodeId::none, begin, end};
+    }
+    QualType result = a == b ? a : integral_common_type(t, f);
+    if (glvalue) result = left_to_right ? right : left;
+    ExprInfo info{result, glvalue ? t.cat() : ValueCategory::prvalue, expr_flag::structural_projection};
+    if (is_dependent) {
+      const auto c = structural_conditional_operand(cond);
+      const auto x = structural_conditional_operand(t), y = structural_conditional_operand(f);
+      if (!c || !x || !y) {
+        diag(q_at, Diag::not_supported, lex::Tk::question);
+        return {NodeId::none, begin, end};
+      }
+      const std::array operands{*c, *x, *y};
+      const auto value = ins().intern_value(ast::VDepConditional{result, b_->seq(std::span<const TemplateArg>(operands))});
+      info.flags |= expr_flag::dependent;
+      return node(ast::Literal{info, value}, begin, end, info);
+    }
+
+    // Form the ordinary conversions without folding an unchosen static constant reference.
+    auto load = [&](Ex e) {
+      return e.glvalue() ? convert_node(e, ast::ConversionKind::lvalue_to_rvalue, object_unqualified(e.type())) : e;
+    };
+    Ex c = load(cond);
+    if (!types().is(c.type(), Builtin::bool_)) c = arithmetic_conversion(c, builtin(Builtin::bool_));
+    if (glvalue) {
+      if (left != result) t = convert_node(t, ast::ConversionKind::qualification, result, t.cat());
+      if (right != result) f = convert_node(f, ast::ConversionKind::qualification, result, f.cat());
+    } else {
+      t = load(t);
+      f = load(f);
+      if (a != b) arithmetic_conversions(t, f);
+    }
+    return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
+  }
+
   // [expr.cond]
-  Ex conditional(Ex cond, Ex t, Ex f, u32 q_at) {
+  Ex conditional(Ex cond, Ex t, Ex f, u32 q_at, bool retain_class_parameter = false) {
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
     auto throws = [&](Ex arm) {
@@ -11759,6 +11891,11 @@ public:
       if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
+    if (retain_class_parameter &&
+        ((cond.info.flags | t.info.flags | f.info.flags) & expr_flag::structural_projection) &&
+        types().is_integral(cond.type()) && types().is_integral(t.type()) && types().is_integral(f.type()))
+      return structural_conditional(cond, t, f, q_at);
+
     if (dependent(cond) || dependent(t) || dependent(f)) {
       if (has_proven_dependent_type(cond) || has_proven_dependent_type(t) || has_proven_dependent_type(f))
         return dependent_node({cond, t, f}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);
@@ -12065,14 +12202,6 @@ public:
     EntityId s = w_->entities.rec(entity).scope;
     while (s != EntityId::none && w_->entities.rec(s).kind != EntityKind::namespace_) s = w_->entities.rec(s).scope;
     return s;
-  }
-
-  // The namespace found by the existing operator lookup.
-  std::optional<EntityId> associated_namespace(QualType t) {
-    TypeRec r = types().rec(t);
-    while (r.kind == TypeKind::pointer || r.kind == TypeKind::array || r.kind == TypeKind::reference) r = types().rec(r.inner);
-    if (r.kind != TypeKind::class_ && r.kind != TypeKind::enum_) return std::nullopt;
-    return enclosing_namespace(r.entity);
   }
 
   struct AdlAssociations {

@@ -1,0 +1,60 @@
+// ACTION: syntax
+// #317: field order and the named aggregate's guard change the selected scalar arguments.
+--- main.cpp
+#include "value.h"
+
+template<long, long> struct Ratio;
+
+template<Value V> struct Project {
+  using type = Ratio<(V.ok ? V.num : 0), (V.ok ? V.den : 1)>;
+};
+
+using Named = Project<named>::type;
+using Positional = Project<Value{-4, 3, true}>::type;
+
+#include "expected.h"
+static_assert(__is_same(Named, ExpectedNamed));
+static_assert(__is_same(Positional, ExpectedPositional));
+--- value.h
+struct Value {
+  long num;
+  long den;
+  bool ok;
+};
+constexpr Value named{-4, 3, true};
+--- expected.h
+using ExpectedNamed = Ratio<-4, 3>;
+using ExpectedPositional = Ratio<-4, 3>;
+=== edit
+--- value.h
+struct Value {
+  long den;
+  long num;
+  bool ok;
+};
+constexpr Value named{-4, 3, true};
+--- expected.h
+using ExpectedNamed = Ratio<3, -4>;
+using ExpectedPositional = Ratio<3, -4>;
+=== edit
+--- value.h
+struct Value {
+  long den;
+  long num;
+  bool ok;
+};
+constexpr Value named{-4, 3, false};
+--- expected.h
+using ExpectedNamed = Ratio<0, 1>;
+using ExpectedPositional = Ratio<3, -4>;
+=== edit
+--- value.h
+struct Value {
+  long num;
+  long den;
+  bool ok;
+};
+constexpr Value named{-4, 3, true};
+--- expected.h
+using ExpectedNamed = Ratio<-4, 3>;
+using ExpectedPositional = Ratio<-4, 3>;

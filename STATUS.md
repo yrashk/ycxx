@@ -2853,8 +2853,16 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
-- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
-  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
+- The unary operators `+ - ! ~ * &`, prefix `++` and `--`, and the compound assignments find
+  hidden friends by ADL, on class and enumeration operands and, for a dependent operand, at the
+  point of instantiation (#1178). With no class operand only a candidate with an enumeration
+  parameter matching its operand takes part ([over.match.oper]/3). Unary operators rank the
+  conversions of hidden friends, other nonmembers and members together, a non-template before a
+  template. Compound assignments do
+  so where `ordinary_binary_choice` models the conversions; elsewhere the member is tried first
+  (#219). A postfix friend can be declared, and called in function notation only (#219). Access
+  and deletion are checked for the selected operator. Overloaded compound assignment is not yet
+  sequenced right to left (#1275). A friend function of a nested class is not supported (#1277).
 - **Friends in class templates** ([temp.friend], `templated_friend` in parse.cppm, #259): an
   unqualified friend function definition in a namespace-scope class template (or partial
   specialization) declares, for each specialization, an inline function of the namespace with
@@ -2896,11 +2904,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   chooses. Protected is checked as private until base classes exist.
 - C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
   class templates, private member operator wording, and elaborated types in member parameters
-  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
-  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
-  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Non-defining
+  friend function templates are [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
   trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
-  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
+  and deleted friends of class templates and friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
@@ -3191,12 +3198,38 @@ and reports external tool execution between workspace query attempts.
 `ycxx build --watch` uses the compiler watch loop and live trace browser
 (#1263). The daemon watches native compiler inputs and reobserves the project
 plan between runs for changes to the definition, generator inputs, and glob
-matches. It continues after a failed run.
+matches. Rule package source, compiler discovery and declared reads also enter
+the observation. It continues after a failed run.
 
-The initial build accepts a fixed host toolchain and explicit generator inputs.
-It checks host tool identity before admitting a receipt, and compares the resolved
-plan again before publishing. Rule packages, richer project configurations and
-resolved plan inspection are tracked under #1256, #1257 and #1259.
+`ycxx show <target>` uses the same resolver without executing any actions
+(#1256). It shows verbatim source, resolved facts with their declaration
+locations, or a semantic diff against a saved JSON snapshot. The HTML report
+includes the resolved plan and its definition.
+
+The standard C++ and generator rule declarations use a compiled rule package.
+`use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
+bundled and workspace packages use the same worker. `cxx()` in a package recipe
+tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
+selects one compiler. Package compilation and worker execution appear in the
+build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
+when inserting a prefix into a temporary string.
+
+`ycxx build app --probe-toolchain` measures the actual compiler selected for each
+demanded `cxx()` package. The named observations distinguish support, rejection and
+inconclusive evidence across target reporting, dialects, headers, language and
+library features, objects, executable links, and shared-library compile, link and
+load. The resident engine reuses typed receipts for unchanged inputs. Read-only
+inspection shows the admitted observations and their provenance. [#1289](https://github.com/yrashk/ycxx/issues/1289)
+
+The optional `builtin:capabilities` rule package consumes declared
+`probe(package, id)` bindings and emits a named C++ header artifact. The worker
+receives typed support states through the same ABI as workspace packages. A
+reprobe with the same states keeps the generated bytes and uses the existing
+worker, generator, and compiler results. The plan and trace retain the query
+and profile behind each binding. [#1290](https://github.com/yrashk/ycxx/issues/1290)
+The coordinator uses a named probe-receipt admission callback to avoid a GCC 16
+module error when boxing nested lambdas.
 
 ## The engine trace (#245, 2026-11-19)
 
@@ -3644,8 +3677,21 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 - Tests: `tests/own/classes/virtual-dispatch` (13 run tests from the spec, two with Clang peers)
   on macOS; `unit.linux_virtual_dispatch` links the same tests with GCC and Clang on Linux
   (with `-fno-exceptions`: local unwind cleanups around throwing calls are #1104/#648's).
-- Not yet: class templates with virtual members, local and internal-linkage classes,
-  non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
+- Class template specializations are dynamic classes too (#1153): implicit ones from
+  `Program::instantiate_class` (primary and partial patterns), explicit ones as ordinary classes
+  with a key function. `complete_virtual_members` and `pure_final_overriders` serve both class
+  definitions and instantiations; a pattern itself has no layout, is never abstract, and leaves
+  `override`, return types and noexcept conditions to its specializations when its base is
+  written there (`may_override_dependent_base`, `validate_override`). `instantiating_bases_` gives
+  a specialization's members its substituted base while they are analysed.
+- An implicit specialization has no key function: its table, RTTI and the members of its slots are
+  weak. `instantiate_all` requires the slots' definitions only when the unit emits a constructor
+  or destructor that installs the table, or a key function that owns it ([temp.inst]). Synthesized
+  constructors and destructors of dynamic classes are walked and emitted where something uses
+  them (`Program::emitted_on_use`).
+  [[temp.inst]](https://eel.is/c++draft/temp.inst) · [#1153](https://github.com/yrashk/ycxx/issues/1153)
+- Not yet: specializations for TU-local types (blocked in `dynamic_member`, #1155), classes nested
+  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
   #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
   virtual bases (#310); follow-ups are listed in #309.
   [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)
@@ -3750,6 +3796,13 @@ cover the body boundary, key changes, and restoration. [#1248](https://github.co
   The fixtures cover named and braced values, specialization identity, direct address and
   mutable-field rejection in `tests/own/templates/`. Floating-point arguments, richer
   structural forms and the remaining dependent and visibility cases stay in #317.
+
+Ordinary member aliases can project a structural parameter's public integral fields into
+scalar template arguments. A guarded conditional uses its typed selected operand, so the
+result selects the same specialization as the corresponding literal. The resident fixtures
+check field-order and named-guard edits against cold compilation. General member alias
+template replay and record-valued immediate calls remain in #317. The separate dependent
+static operand in the pinned libycxx ratio header stays in #209.
 
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 

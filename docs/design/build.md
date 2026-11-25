@@ -142,3 +142,168 @@ stay equal.
 Modules, host and target variants, richer link propagation and a foreign build
 adapter grow coverage after the first witness (#1259). Package acquisition and
 version solving sit outside the build.
+
+## Resolved plan inspection (#1256)
+
+`ycxx show app` reports the targets and facts the planner reached. Each source,
+include directory, dependency, tool, argument and output has an origin in
+`build.ycxx`. A generated source shows its producer and output name. A glob
+match shows the expression that selected it. The source format returns the
+original definition. The JSON format is a versioned snapshot, and the HTML
+format can be opened without a server.
+
+Save a snapshot with `ycxx show app --format=json > before.json`. Compare it
+with this checkout using `ycxx show app --against before.json`. The comparison
+uses fact kind, owner and name for identity and resolved values for equality.
+Locations and descriptions explain changes without causing changes when lines
+move. Ordered requirements use their position for identity. A new glob match
+is visible even when the manifest text is identical.
+
+Inspection reuses the build definition resolver and lists directory entries.
+It reads recently admitted rule expansions and verifies the package and declared
+read observations. A rule with no current expansion appears as unresolved.
+Source output always reads the authored definition directly. Inspection runs no
+tools and reports generator inputs and tools by their planned paths.
+
+## Native rule packages (#1257)
+
+A package owns its definition and exports a host rule plugin target. A workspace
+imports that target under a local alias.
+
+```text
+use plugin("tools/wire-rules/rules") as wire
+
+wire.generator "wire_files" {
+    schema = "schema.txt"
+    reads = ["settings.txt"]
+}
+```
+
+```text
+# tools/wire-rules/build.ycxx
+host_action "rules" {
+    tool = cxx()
+    args = ["-fPIC", "-shared", "-Iinputs/sdk",
+            input("source"), "-o", output("plugin")]
+    inputs = { source = "rule.cc" }
+    outputs = { plugin = "rules.so" }
+}
+```
+
+The planner returns a request when it reaches a custom declaration. The
+coordinator builds the package using the selected host C++ toolchain, stages
+the resulting shared library, and invokes a worker. Both steps use the
+declared action runner. The package definition declares the bootstrap host
+action and its shared-library output directly. The action gets the versioned
+SDK header through its staged inputs.
+
+`cxx()` tries the current ycxx driver, then looks for `c++`, `clang++`, and `g++`
+on the invoking client's `PATH`. It stops at the first successful compile and
+link. The trace records each attempted compiler, and unchanged requests reuse
+the winning package action. Use `tool = cxx("clang++")` or an absolute path inside
+`cxx(...)` to pin the compiler. A pin tries one compiler. `native_args` supplies
+extra flags for the native invocation. A successful compile followed by a load
+or rule error reports that error from the selected package.
+
+The worker loads the library in its own process and passes a versioned C ABI
+record to its entry point. The SDK exposes attributes as strings and declared
+file observations as byte ranges. It also supplies the normalized argument
+record for rules that pass structured fields on to a primitive. Missing files
+and empty files are different observations. A rule emits one native
+executable, native library, or external action declaration. The workspace
+planner validates that primitive and supplies the compiler and scheduler.
+A worker failure produces diagnostics
+before the coordinator can admit a successful result.
+
+The bootstrap action key includes the SDK, source and header inputs, host
+compiler identity, and build arguments. The worker action key includes the
+library bytes, invocation, and declared observations. Prepared declarations
+are revalidated against the current inputs. Equivalent expanded generator
+actions keep their own keys when the shared library changes. The worker
+process bounds crash effects, and cacheable rules use the SDK for their
+workspace observations.
+
+`cpp` is a conventional import alias. `use plugin("tools/other-cpp/rules") as cpp`
+binds the same declarations to a workspace package. The standard source
+package compiles on demand through the same host-action bootstrap and
+registers its rules through the same worker contract. The kernel supplies
+native compiler queries and external actions to either provider. The
+standard package also provides the unqualified `generate` rule.
+
+## Compiler capability observations
+
+```sh
+ycxx build app --probe-toolchain --trace-engine=interactive
+ycxx show app --format=html > build-plan.html
+```
+
+The probe request measures the compiler that successfully built each demanded
+`cxx()` package. It uses the same interface for native ycxx, PATH fallback, and a
+pinned host compiler. Ordinary builds measure the probes their rules declare. The inspector reads
+admitted observations and checks that their profile and inputs still match.
+
+A package can set `probe_flags = ["-std=c++23"]` to measure features in a
+selected mode while retaining separate exact-mode probes. Use an absolute
+`--sysroot=` path or a configured target flag to describe those choices. The
+probe sees the package's declared environment. Optional `probe_inputs` names
+additional local files or directories for a wrapper or a custom toolchain.
+Relative `probe_inputs` paths are relative to the package definition. The
+flags control the probe invocation and the package's `args` control its build.
+
+Each named observation has a phase and a witness. The matrix measures the
+unconfigured driver target, exact C++ modes, header inclusion, representative
+features, configured and named cross-target objects, hosted and freestanding
+links, a hosted executable run, and shared-library compile, link and load. Linked artifact checks
+validate the architecture, format and kind. The load action runs only when
+the shared artifact matches the host target and calls the test entry point.
+
+The result is `supported`, `unsupported` or `indeterminate`, with the
+available evidence. A compiler rejection and a cancelled, timed-out or
+unverifiable result are different observations. A time-budget result remains
+an observation of that profile. A launch or loader setup failure can retry.
+The key includes the versioned
+probe recipe, compiler identity, profile, declared environment, and the
+observed compiler, include and library search inputs. The coordinator stages
+commands outside the query engine and records typed results from an unchanged
+input sample. Repeating the request on the same resident profile reuses those
+results. [#1289](https://github.com/yrashk/ycxx/issues/1289)
+
+## Typed capability headers
+
+```text
+use plugin("builtin:capabilities") as capabilities
+
+capabilities.header "profile" {
+    namespace = "project::compiler"
+    filename = "compiler_profile.hh"
+    capabilities = {
+        filesystem = probe("tools/host/rules", "header.filesystem")
+        native_objects = probe("builtin:cpp", "object.default")
+    }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("profile", "header")]
+}
+```
+
+Each `probe(package, id)` demands a named observation from the compiler that
+builds that package. A workspace package is addressed by its relative target
+path. `builtin:cpp` selects the shipped C++ package. The optional
+`builtin:capabilities` package is built and invoked through the ordinary rule
+worker. A regular build measures the explicitly demanded probes. The
+`--probe-toolchain` flag still requests the full matrix for the selected packages.
+
+The rule worker receives a borrowed array of names and typed support states.
+Probe identity, profile, and diagnostics stay with the engine and inspection.
+Equivalent projected states keep the worker and generated artifact reusable
+across a reprobe. The header package validates names, emits facts in name order,
+and exports the header as a named artifact. The generated enum preserves
+`supported`, `unsupported` and `indeterminate`. Its `available<State>` variable
+template is a C++ constant expression usable in `if constexpr` and constraints.
+
+The trace shows the probes and their named projections. Read-only inspection
+revalidates the observation inputs before showing a cached expansion and its
+probe and compiler provenance. Watch reobserves both the package and its
+declared compiler inputs. [#1290](https://github.com/yrashk/ycxx/issues/1290)

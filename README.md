@@ -37,6 +37,14 @@ The resident engine builds executable targets from C++ source groups and declare
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
 Use `ycxx build app --watch` to rebuild after workspace edits.
+The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
+`use plugin("tools/custom/rules") as cpp`.
+`ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
+can be compared with the checkout and rendered as a standalone HTML report.
+`ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
+observations with `ycxx show app`.
+Import `builtin:capabilities` to project selected observations into a generated
+C++ header with `constexpr` values.
 [Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
@@ -53,7 +61,9 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
-units. [#317](https://github.com/yrashk/ycxx/issues/317)
+units. A class template's ordinary member alias can use those fields directly or in a
+guarded integral argument such as `V.ok ? V.num : 0`.
+[#317](https://github.com/yrashk/ycxx/issues/317)
 
 An explicitly specialized class can name a flat structural argument directly, as in
 `template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
@@ -474,8 +484,8 @@ written default member initializer are value-initialized.
   Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
-  nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
-  argument-dependent lookup.
+  nonmember candidates at instantiation. Unary operators, prefix increment and compound
+  assignments can find hidden friends by argument-dependent lookup.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -888,15 +898,16 @@ defined later, also out of class (`class O::I : public B { … };`), with member
 can have virtual functions. Nested classes of class templates are not supported yet.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
 
-**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary non-template classes with
-external linkage and single public nonvirtual inheritance can declare virtual functions, virtual
-destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
+**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
+class templates with external linkage and single public nonvirtual inheritance can declare virtual
+functions, virtual destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
 implicit or written constructors, copied and destroyed; virtual calls dispatch to the final
 overrider, and calls during construction and destruction use the class being built or torn down.
 Virtual members can be defined out of class. The unit defining the key function emits the vtable
 and RTTI, and classes without one get weak tables where they are constructed or destroyed. The objects link and interoperate
-with Clang and GCC objects. Class templates with virtual members, internal-linkage and local
-classes, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
+with Clang and GCC objects. A class template can have polymorphic, dependent bases, and each
+specialization's table and virtual members are weak, instantiated where the table is used.
+Internal-linkage and local classes, specializations for them, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
 yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·
 [#1154](https://github.com/yrashk/ycxx/issues/1154) · [#1155](https://github.com/yrashk/ycxx/issues/1155)
 

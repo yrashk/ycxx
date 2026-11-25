@@ -51,11 +51,14 @@ struct NamedArtifact {
   Artifact contents;
 };
 
+enum class ActionCompletion { exited, signalled, cancelled, timed_out, setup_failed, output_failed };
+
 struct ActionResult {
   int exit_status = 0;
   std::string out;
   std::string err;
   std::vector<NamedArtifact> outputs;
+  ActionCompletion completion = ActionCompletion::exited;
 };
 
 // Runs a tool in a private working directory within the caller's existing scratch root. The
@@ -76,8 +79,8 @@ std::string os_error(std::string_view operation, int error) {
   return std::format("{}: {}", operation, ::strerror(error));
 }
 
-ActionResult failed(std::string message) {
-  return {.exit_status = 1, .out = {}, .err = std::move(message), .outputs = {}};
+ActionResult failed(std::string message, ActionCompletion completion = ActionCompletion::setup_failed) {
+  return {.exit_status = 1, .out = {}, .err = std::move(message), .outputs = {}, .completion = completion};
 }
 
 bool valid_path(std::string_view text) {
@@ -288,7 +291,7 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
                      const fs::path& scratch_root, std::inplace_stop_token stop) {
   auto cmd = prepare(action, inputs);
   if (!cmd) return failed(std::move(cmd.error()));
-  if (stop.stop_requested()) return failed("action cancelled");
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
 
   std::error_code ec;
   auto root = fs::absolute(scratch_root, ec);
@@ -302,19 +305,21 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
   const Fd outputs{::openat(cwd.value, "outputs", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
   if (outputs.value < 0) return failed(os_error("cannot open action output directory", errno));
 
-  if (stop.stop_requested()) return failed("action cancelled");
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
   auto child = spawn(scratch.path, *cmd);
   if (!child) return failed(std::move(child.error()));
   auto status = wait_for(*child, stop);
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
   if (!status) return failed(std::move(status.error()));
-  if (stop.stop_requested()) return failed("action cancelled");
 
   auto out = read_log(cwd.value, ".stdout");
-  if (!out) return failed(std::move(out.error()));
+  if (!out) return failed(std::move(out.error()), ActionCompletion::output_failed);
   auto err = read_log(cwd.value, ".stderr");
-  if (!err) return failed(std::move(err.error()));
-  const int code = WIFEXITED(*status) ? WEXITSTATUS(*status) : 128 + WTERMSIG(*status);
-  ActionResult result{code, std::move(*out), std::move(*err), {}};
+  if (!err) return failed(std::move(err.error()), ActionCompletion::output_failed);
+  const bool exited = WIFEXITED(*status);
+  const int code = exited ? WEXITSTATUS(*status) : 128 + WTERMSIG(*status);
+  ActionResult result{code, std::move(*out), std::move(*err), {},
+                      exited ? ActionCompletion::exited : ActionCompletion::signalled};
   if (code != 0) return result;
 
   std::vector<NamedArtifact> artifacts;
@@ -325,13 +330,14 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
       file = std::unexpected("action output aliases another declared output: " + output.filename);
     if (!file) {
       result.exit_status = 1;
+      result.completion = ActionCompletion::output_failed;
       if (!result.err.empty() && result.err.back() != '\n') result.err.push_back('\n');
       result.err += file.error();
       return result;
     }
     artifacts.push_back({output.name, std::move(file->contents)});
   }
-  if (stop.stop_requested()) return failed("action cancelled");
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
   result.outputs = std::move(artifacts);
   return result;
 }

@@ -72,6 +72,7 @@ struct WatchedProject {
   std::string cwd;
   std::string target;
   Fp128 stamp;
+  std::optional<std::string> tool_path = std::nullopt;
 };
 struct AwaitChange {
   std::uint64_t since = 0;     // the revision the last build started from (`Report::started_at`)
@@ -91,7 +92,10 @@ struct ProjectBuildRequest {
   bool trace = false;
   bool trace_values = false;
   bool watch = false;
+  bool probe_toolchain = false;
   bool trace_live = false;
+  // The invoking client's PATH. An empty value is one component relative to cwd.
+  std::optional<std::string> tool_path = std::nullopt;
 };
 struct ProjectBuildDone {
   int status = 0;
