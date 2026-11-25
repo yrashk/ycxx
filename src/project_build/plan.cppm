@@ -5,6 +5,7 @@ import std;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
 import ycxx.build.manifest;
+import ycxx.build.rule_protocol;
 import ycxx.hash;
 
 export namespace ycxx::build {
@@ -31,6 +32,12 @@ struct ProjectWatchState {
   std::vector<std::string> paths;
 };
 
+struct RulePackagePlan {
+  Action action;
+  std::vector<ActionInput> inputs;
+  std::string tool_fingerprint;
+};
+
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
                            std::string_view filename);
 std::expected<ProjectPlan, std::string> plan_project(const std::filesystem::path& cwd, std::string_view target);
@@ -38,6 +45,10 @@ std::expected<ProjectPlan, std::string> plan_project(const std::filesystem::path
 // probes are tracked separately by the daemon's file table.
 ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target);
 std::expected<PlanInspection, std::string> inspect_project(const std::filesystem::path& cwd, std::string_view target);
+std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
+    const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
+std::expected<RulePackagePlan, std::string> plan_rule_package(
+    const std::filesystem::path& cwd, std::string_view package, std::string_view sdk_header);
 
 }  // namespace ycxx::build
 
@@ -176,11 +187,120 @@ std::string glob_origin(const Glob& glob) {
   return text;
 }
 
+// Normalize arguments with the manifest grammar so a rule can pass structured fields through.
+void quote(std::string& out, std::string_view text) {
+  out += '"';
+  for (const char c : text) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: out += c; break;
+    }
+  }
+  out += '"';
+}
+
+void append_value(std::string& out, const Value& value);
+
+void append_record(std::string& out, const Record& fields, bool omit_reads = false) {
+  out += '{';
+  for (const auto& [key, value] : fields) {
+    if (omit_reads && key == "reads") continue;
+    out += ' ';
+    quote(out, key);
+    out += " = ";
+    append_value(out, value);
+  }
+  out += " }";
+}
+
+void append_value(std::string& out, const Value& value) {
+  std::visit([&]<class T>(const T& data) {
+    if constexpr (std::same_as<T, std::string>) {
+      quote(out, data);
+    } else if constexpr (std::same_as<T, List>) {
+      out += '[';
+      for (std::size_t i = 0; i < data.size(); ++i) {
+        if (i != 0) out += ", ";
+        append_value(out, data[i]);
+      }
+      out += ']';
+    } else if constexpr (std::same_as<T, Record>) {
+      append_record(out, data);
+    } else if constexpr (std::same_as<T, Glob>) {
+      out += "glob(";
+      quote(out, data.pattern);
+      if (!data.exclusions.empty()) {
+        out += ", exclude = [";
+        for (std::size_t i = 0; i < data.exclusions.size(); ++i) {
+          if (i != 0) out += ", ";
+          quote(out, data.exclusions[i]);
+        }
+        out += ']';
+      }
+      out += ')';
+    } else if constexpr (std::same_as<T, ArtifactRef>) {
+      out += "artifact(";
+      quote(out, data.target);
+      out += ", ";
+      quote(out, data.output);
+      out += ')';
+    } else {
+      if constexpr (std::same_as<T, InputArg>) out += "input(";
+      else out += "output(";
+      quote(out, data.name);
+      out += ')';
+    }
+  }, value.data);
+}
+
+RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const std::string& package) {
+  RuleDemand demand{decl.name, std::string(rule), package, {}, {}, {}};
+  append_record(demand.definition, decl.fields, true);
+  for (const auto& [name, value] : decl.fields) {
+    if (name == "reads") {
+      std::set<std::string> paths;
+      for (const auto& entry : as<List>(value, "a list of rule read paths")) {
+        const auto path = relative_path(as<std::string>(entry, "a rule read path"), entry.location);
+        const auto spelling = path_text(path);
+        if (!paths.insert(spelling).second) fail(entry.location, "duplicate rule read path");
+        demand.reads.push_back(spelling);
+      }
+    } else if (const auto* text = std::get_if<std::string>(&value.data)) {
+      if (name.empty()) fail(value.location, "rule attribute name is empty");
+      demand.attributes.push_back({name, *text});
+    }
+  }
+  return demand;
+}
+
+TargetDecl primitive(const TargetDecl& original, const RuleExpansion& expansion) {
+  auto parsed = parse_manifest(expansion.definition);
+  if (!parsed)
+    fail(original.location, std::format("invalid expansion for '{}': {}", original.name, parsed.error().message));
+  if (!parsed->plugins.empty() || parsed->targets.size() != 1 ||
+      parsed->targets.front().name != original.name)
+    fail(original.location, std::format("rule must emit one declaration named '{}'", original.name));
+  auto decl = std::move(parsed->targets.front());
+  if (decl.kind == "native.executable") decl.kind = "cpp.executable";
+  else if (decl.kind == "native.library") decl.kind = "cpp.library";
+  else if (decl.kind == "action.generate") decl.kind = "generate";
+  else fail(original.location, std::format("rule emitted unsupported primitive '{}'", decl.kind));
+  decl.location = original.location;
+  return decl;
+}
+
 class Planner {
  public:
-  Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch, PlanInspection* inspection)
-      : cwd_(cwd), watch_(watch), inspection_(inspection) {
+  Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch, PlanInspection* inspection,
+          std::optional<std::span<const RuleExpansion>> expansions = std::nullopt)
+      : cwd_(cwd), watch_(watch), inspection_(inspection), expansions_(expansions) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
+    for (const auto& imported : manifest.plugins)
+      prefixes_.emplace(imported.alias, path_text(relative_path(imported.package, imported.location)));
   }
 
   ProjectPlan run(std::string_view target) {
@@ -194,6 +314,15 @@ class Planner {
     cxx_target(root);
     if (root.kind == "cpp.executable" && plan_.sources.empty()) fail(root.location, "build has no C++ source files");
     return std::move(plan_);
+  }
+
+  RulePackagePlan package(std::string_view target, std::string_view sdk_header) {
+    const auto& decl = find(target, {});
+    if (decl.kind != "host_action") fail(decl.location, "rule package target must be a host_action");
+    auto plan = generator(decl, sdk_header);
+    if (plan.action.outputs.size() != 1 || plan.action.outputs.front().name != "plugin")
+      fail(decl.location, "rule package must declare exactly one output named 'plugin'");
+    return {std::move(plan.action), std::move(plan.inputs), std::move(plan.tool_fingerprint)};
   }
 
  private:
@@ -216,14 +345,27 @@ class Planner {
     watch_->paths.insert(path_text(normalized));
   }
 
-  const TargetDecl& find(std::string_view name, SourceLocation at) const {
+  const TargetDecl& find(std::string_view name, SourceLocation at) {
     if (!basename(name)) fail(at, std::format("invalid target name '{}'", name));
     const auto match = declarations_.find(name);
     if (match == declarations_.end()) fail(at, std::format("unknown target '{}'", name));
-    return *match->second;
+    const auto& decl = *match->second;
+    const auto dot = decl.kind.find('.');
+    if (dot == std::string::npos) return decl;
+    const auto prefix = prefixes_.find(std::string_view(decl.kind).substr(0, dot));
+    if (prefix == prefixes_.end()) return decl;
+    if (const auto resolved = primitives_.find(name); resolved != primitives_.end()) return resolved->second;
+    if (!expansions_)
+      fail(decl.location, std::format("plugin rule '{}' requires rule expansion", decl.kind));
+    const auto suffix = std::string_view(decl.kind).substr(dot + 1);
+    if (suffix.empty()) fail(decl.location, "missing imported rule name");
+    auto demand = rule_demand(decl, suffix, prefix->second);
+    const auto expansion = std::ranges::find(*expansions_, demand, &RuleExpansion::demand);
+    if (expansion == expansions_->end()) throw demand;
+    return primitives_.emplace(decl.name, primitive(decl, *expansion)).first->second;
   }
 
-  GeneratorPlan generator(const TargetDecl& decl) {
+  GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt) {
     check_fields(decl, {"tool", "args", "inputs", "outputs"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     GeneratorPlan plan;
@@ -249,9 +391,16 @@ class Planner {
     }
 
     std::set<std::string> input_paths;
+    if (sdk_header) {
+      std::string sdk_path = "sdk/ycxx_rule_api.h";
+      input_paths.insert(sdk_path);
+      plan.inputs.push_back({"ycxx_rule_api.h", std::move(sdk_path),
+                             {{sdk_header->begin(), sdk_header->end()}, false}});
+    }
     if (const auto* entries = field(decl, "inputs")) {
       for (const auto& [name, value] : as<Record>(*entries, "a record of named inputs")) {
         if (name.empty()) fail(value.location, "input name is empty");
+        if (sdk_header && name == "ycxx_rule_api.h") fail(value.location, "rule SDK input name is reserved");
         const auto path = relative_path(as<std::string>(value, "an input path"), value.location);
         const auto staged = path_text(path);
         if (!input_paths.insert(staged).second) fail(value.location, "duplicate staged input path");
@@ -428,7 +577,10 @@ class Planner {
   const fs::path& cwd_;
   WatchObservations* watch_;
   PlanInspection* inspection_;
+  std::optional<std::span<const RuleExpansion>> expansions_;
   std::map<std::string, const TargetDecl*, std::less<>> declarations_;
+  std::map<std::string, std::string, std::less<>> prefixes_;
+  std::map<std::string, TargetDecl, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
   std::set<std::string> active_;
   std::map<std::string, TargetIncludes> finished_;
@@ -436,7 +588,8 @@ class Planner {
 };
 
 std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::string_view target,
-                                                   WatchObservations* watch, PlanInspection* inspection = nullptr) {
+                                                   WatchObservations* watch, PlanInspection* inspection = nullptr,
+                                                   std::optional<std::span<const RuleExpansion>> expansions = std::nullopt) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
@@ -449,7 +602,7 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
     auto manifest = parse_manifest(text);
     if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
     if (inspection) inspection->definition = std::move(text);
-    return Planner(root, *manifest, watch, inspection).run(target);
+    return Planner(root, *manifest, watch, inspection, expansions).run(target);
   } catch (PlanningError& error) {
     return std::unexpected(std::move(error.message));
   }
@@ -478,6 +631,35 @@ std::expected<PlanInspection, std::string> inspect_project(const fs::path& cwd, 
   auto plan = read_project(cwd, target, nullptr, &inspection);
   if (!plan) return std::unexpected(std::move(plan.error()));
   return inspection;
+}
+
+std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
+    const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions) {
+  try {
+    auto plan = read_project(cwd, target, nullptr, nullptr, expansions);
+    if (!plan) return std::unexpected(std::move(plan.error()));
+    return std::variant<ProjectPlan, RuleDemand>(std::move(*plan));
+  } catch (RuleDemand& demand) {
+    return std::variant<ProjectPlan, RuleDemand>(std::move(demand));
+  }
+}
+
+std::expected<RulePackagePlan, std::string> plan_rule_package(
+    const fs::path& cwd, std::string_view package, std::string_view sdk_header) {
+  std::error_code ec;
+  const auto root = fs::absolute(cwd, ec).lexically_normal();
+  if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
+  try {
+    const auto target = relative_path(package, {});
+    const auto directory = root / target.parent_path();
+    const auto path = directory / "build.ycxx";
+    (void)regular_file(path, {});
+    auto manifest = parse_manifest(read_file(path, {}));
+    if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
+    return Planner(directory, *manifest, nullptr, nullptr).package(path_text(target.filename()), sdk_header);
+  } catch (PlanningError& error) {
+    return std::unexpected(std::format("rule package '{}': {}", package, error.message));
+  }
 }
 
 }  // namespace ycxx::build
