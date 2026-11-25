@@ -108,8 +108,7 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
 
 def write_package(package, tool, *, reject_native=False):
     link_mode = '-dynamiclib' if sys.platform == 'darwin' else '-shared'
-    native_args = ('    native_args = ["--ycxx-test-reject-native-rule", input("source"), '
-                   '"-o", output("plugin")]\n') if reject_native else ''
+    native_args = '    native_args = ["--ycxx-test-reject-native-rule"]\n' if reject_native else ''
     (package / 'build.ycxx').write_text(f'''\
 host_action "rules" {{
     tool = {tool}
