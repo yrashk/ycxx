@@ -40,6 +40,27 @@ cpp.executable "app" { deps = ["wire"] }
         "located artifact reference independent of file existence");
 }
 
+void tool_selectors() {
+  const auto manifest = parse_manifest(R"(host_action "default" { tool = cxx() }
+host_action "named" { tool = cxx("clang++") }
+host_action "absolute" { tool = cxx("/opt/host tools/c++") }
+)");
+  const std::array<std::optional<std::string_view>, 3> expected{
+      std::nullopt, "clang++", "/opt/host tools/c++"};
+  check(manifest && manifest->targets.size() == expected.size(), "host compiler selectors parse");
+  if (!manifest || manifest->targets.size() != expected.size()) return;
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    const auto& fields = manifest->targets[i].fields;
+    const auto* tool = fields.size() == 1 ? std::get_if<CxxTool>(&fields[0].second.data) : nullptr;
+    check(tool && tool->compiler == expected[i], "compiler selector preserves the optional spelling");
+  }
+
+  const auto empty = parse_manifest(R"(host_action "rules" { tool = cxx("") })");
+  check(!empty && empty.error().message.contains("empty compiler selector"), "reject an empty compiler name");
+  check(!parse_manifest(R"(host_action "rules" { tool = cxx("a", "b") })"), "reject more than one compiler");
+  check(!parse_manifest(R"(host_action "rules" { tool = cxx(clang) })"), "require a quoted compiler string");
+}
+
 void diagnostics() {
   const auto other_name = parse_manifest("a \"pkg\" {}\nb \"pkg\" {}");
   check(!other_name && other_name.error().location.line == 2 &&
@@ -101,6 +122,7 @@ void glob_observations() {
 
 int main() {
   declarations();
+  tool_selectors();
   diagnostics();
   glob_observations();
   return ycxx::unit::result("build manifest");

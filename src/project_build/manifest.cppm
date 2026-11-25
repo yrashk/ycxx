@@ -33,13 +33,17 @@ struct OutputArg {
   std::string name;
 };
 
+struct CxxTool {
+  std::optional<std::string> compiler;
+};
+
 struct Value;
 using List = std::vector<Value>;
 using Record = std::vector<std::pair<std::string, Value>>;
 
 struct Value {
   SourceLocation location;
-  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg> data;
+  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool> data;
 };
 
 struct TargetDecl {
@@ -301,6 +305,15 @@ class Parser {
       expect(')');
       if (target.empty() || output.empty()) fail(at, "empty artifact target or output");
       return {at, ArtifactRef{std::move(target), std::move(output)}};
+    }
+    if (name == "cxx") {
+      expect('(');
+      if (consume(')')) return {at, CxxTool{}};
+      const auto compiler_at = next_location();
+      auto compiler = string();
+      if (compiler.empty()) fail(compiler_at, "empty compiler selector");
+      expect(')');
+      return {at, CxxTool{std::move(compiler)}};
     }
     if (name == "input" || name == "output") {
       expect('(');

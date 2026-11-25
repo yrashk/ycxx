@@ -265,6 +265,10 @@ void append_value(std::string& out, const Value& value) {
       out += ", ";
       quote(out, data.output);
       out += ')';
+    } else if constexpr (std::same_as<T, CxxTool>) {
+      out += "cxx(";
+      if (data.compiler) quote(out, *data.compiler);
+      out += ')';
     } else {
       if constexpr (std::same_as<T, InputArg>) out += "input(";
       else out += "output(";
