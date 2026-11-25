@@ -7,7 +7,9 @@ artifact. The application uses its `constexpr` value as a template argument.
 ```sh
 ycxx build app --trace-engine=json
 ycxx build app --trace-engine=json
-./.ycxx/out/app; printf 'status=%s\n' "$?"
+status=0
+.ycxx/out/app || status=$?
+printf 'status=%s\n' "$status"
 ycxx show app --format=html > plan.html
 ```
 
