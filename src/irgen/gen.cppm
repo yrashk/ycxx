@@ -1257,14 +1257,15 @@ class Gen {
 
   // A temporary ([class.temporary]): initialized from a prvalue, ended with the full-expression
   // or, when a reference it is bound to extends it, with that reference's scope.
-  Place materialize(At a) {
+  Place materialize(At a, bool select_class = false) {
+    Position here(*this, a.offset);
     auto m = get<ast::Materialize>(a);
     if (m.extended == 1 && (selecting_initializer_ || branches_ > 0))
       unsupported(a, "requiring lifetime extension in a conditional operand or class initializer selection");
     At v = child(a, m.operand);
     bool zeroed = value_initializes(v);
     Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
-    initialize(p, v, zeroed);
+    initialize(p, v, zeroed, select_class);
     begin_lifetime(p);
     Ending end{p, m.destructor, ir::Storage::temporary};
     if (m.extended == 1) scopes_.back().push_back(end);
@@ -1911,7 +1912,8 @@ class Gen {
       source.push_back({type, value, facts_.integer(type).width});
     };
     if (cls(from_type) == TypeClass::record) {
-      const Place from = lvalue(operand);
+      const Place from = is<ast::Materialize>(operand)
+          ? materialize(operand, /*select_class=*/true) : lvalue(operand);
       const auto owner = facts_.class_entity(from_type);
       for (uint32_t i = 0; const auto field = facts_.field_type(owner, i); ++i)
         add_field(*field, load(subobject(from, ir::Step::field, i, *field)));

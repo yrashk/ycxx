@@ -10193,7 +10193,10 @@ public:
     }
     if (types().is_class(element)) {
       const auto* record = class_rec(types().class_of(element));
-      if (record && record->trivially_copyable() == false) {
+      // Virtual functions and a nontrivial destructor disprove copyability even
+      // for a record whose other special-member facts are incomplete ([class.prop]).
+      if (record && (record->polymorphic || record->destructor != EntityId::none ||
+                     record->trivially_copyable() == false)) {
         diag(at_, Diag::bit_cast_nontrivial, element);
         return false;
       }
@@ -10267,8 +10270,9 @@ public:
     }
     const QualType type = types().is_class(destination) || destination_dependent
         ? destination : Types::unqualified(types().canonical(destination));
-    const u8 flags = deferred ? u8(expr_flag::dependent |
-                                  (source.info.flags & expr_flag::deferred_decay_copy)) : u8{0};
+    u8 flags = 0;
+    if (deferred) flags = expr_flag::dependent | (source.info.flags & expr_flag::deferred_decay_copy);
+    if (destination_dependent) flags |= expr_flag::type_dependent;
     const ExprInfo info{type, ValueCategory::prvalue, flags};
     return node(ast::BitCast{info, destination, at(source, begin), type_at - begin, supported}, begin, end, info);
   }
