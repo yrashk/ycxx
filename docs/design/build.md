@@ -50,6 +50,40 @@ their rule. The first runner uses an explicit host executable and a private
 working directory. The coordinator rechecks the executable fingerprint before admitting a result. Support for outer toolchain envelopes follows #1254
 and #1259.
 
+### Generated static archives (#1339)
+
+A C++ library can export an ordered list of static archives from named
+generator outputs. An executable can also declare its own list.
+
+```text
+cpp.library "codec" {
+    public_link_inputs = [artifact("codec_archive", "archive")]
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["codec"]
+}
+```
+
+The standard C++ rule forwards these fields in the declaration it emits.
+The workspace planner resolves the artifact edges and the coordinator uses
+the existing action receipts to supply the archive bytes to the native linker.
+All source objects precede the archives. The executable's `link_inputs` come
+first, followed by library inputs. A library precedes its dependencies and a
+shared dependency follows all its consumers. Among eligible libraries, the
+planner uses the order in which the declared dependency lists first reach
+them. Each library contributes its list once. Repeated artifact references in
+a list stay at their declared positions.
+
+The link uses indexed GNU archives on x86-64 Linux and Darwin archives on
+arm64 macOS. Linux archive links require objects without ELF COMDAT groups.
+The existing linker coverage is tracked in [#388](https://github.com/yrashk/ycxx/issues/388).
+
+`ycxx show` reports the resolved archive sequence as `link-input` facts. A
+transitive entry identifies the library that declared it and points to its
+original artifact reference in `build.ycxx`.
+
 ## Build definitions and tracked values
 
 The initial grammar is declarative (#1253). A target carries its rule name,

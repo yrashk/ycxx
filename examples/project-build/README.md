@@ -7,6 +7,7 @@ out of the checkout and build it there.
 | Project | What to try |
 | --- | --- |
 | [Native C++](native) | Watch a generator input change and inspect the library dependency and source glob. |
+| [Generated archive](generated-archive) | Follow a generated archive through a library dependency and watch an archive edit relink the app. |
 | [Custom rule](custom-rule) | Compare a whitespace edit and a digit edit in a retry limit read by a workspace plugin. |
 | [Typed capability header](typed-capabilities) | Inspect the compiler's `<filesystem>` probe and run the app that uses its generated constant. |
 | [Package-defined probe](package-probe) | Edit a codec profile and trace how a plugin classifies shell output as a typed support state. |

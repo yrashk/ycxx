@@ -3270,6 +3270,16 @@ ordinary artifact dependencies, and validation retains the full planning
 graph. Edits during a producer run discard its superseded result and retry
 without replacing published outputs. [#1337](https://github.com/yrashk/ycxx/issues/1337)
 
+On x86-64 Linux and arm64 macOS, `cpp.library` can export generated static
+archives through `public_link_inputs` and `cpp.executable` can name direct
+`link_inputs`. The planner orders libraries before their dependencies and
+keeps explicit repetitions in the archive lists. The native linker reads
+archive bytes from the ordinary action receipts. A changed archive runs the
+link with reusable translation units, and equal bytes retain the link.
+Inspection shows the declaring library, archive order, and artifact reference.
+Watch preserves the last successful executable if the archive cannot be linked.
+[#1339](https://github.com/yrashk/ycxx/issues/1339)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without

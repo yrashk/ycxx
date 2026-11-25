@@ -1,0 +1,30 @@
+generate "bonus_object" {
+    tool = "/usr/bin/c++"
+    args = ["-O2", "-ffreestanding", "-fno-stack-protector", "-c",
+            input("source"), "-o", output("object")]
+    inputs = { source = "archive_bonus.cc" }
+    outputs = { object = "archive_bonus.o" }
+}
+
+generate "bonus_archive" {
+    tool = "/usr/bin/ar"
+    args = ["rcs", output("archive"), input("object")]
+    environment = { ZERO_AR_DATE = "1" }
+    inputs = { object = artifact("bonus_object", "object") }
+    outputs = { archive = "libbonus.a" }
+}
+
+cpp.library "bonus" {
+    sources = ["bonus.cc"]
+    public_link_inputs = [artifact("bonus_archive", "archive")]
+}
+
+cpp.library "score" {
+    sources = ["score.cc"]
+    deps = ["bonus"]
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["score"]
+}
