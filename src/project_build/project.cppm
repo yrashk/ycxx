@@ -209,12 +209,64 @@ struct [[=engine::input{engine::Durability::low}]] PreparedBuild {
   using Value = std::optional<Prepared>;
 };
 
+Fp128 action_key(const GeneratorPlan& generator, const std::vector<ActionInput>& inputs) {
+  return fingerprint(std::tie(generator.action, inputs, generator.tool_fingerprint));
+}
+
 Fp128 action_key(const GeneratorPlan& generator) {
-  return fingerprint(std::tie(generator.action, generator.inputs, generator.tool_fingerprint));
+  return action_key(generator, generator.inputs);
+}
+
+using ActionOutputs = std::vector<NamedArtifact>;
+
+template<class Lookup>
+bool append_artifact_inputs(const GeneratorPlan& generator, Lookup lookup, std::vector<ActionInput>& inputs) {
+  for (const auto& edge : generator.artifact_inputs) {
+    const auto* outputs = lookup(edge.producer);
+    if (!outputs) return false;
+    inputs.push_back({edge.name, edge.path, (*outputs)[edge.output].contents});
+  }
+  return true;
+}
+
+struct ActionResolution {
+  std::vector<std::optional<Fp128>> keys;
+  std::vector<std::size_t> pending;
+};
+
+template<class Lookup>
+ActionResolution resolve_actions(const ProjectPlan& plan, Lookup lookup) {
+  const auto count = plan.generators.size();
+  ActionResolution result{std::vector<std::optional<Fp128>>(count), {}};
+  std::vector<const ActionOutputs*> outputs(count, nullptr);
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto& generator = plan.generators[i];
+    Fp128 key;
+    if (generator.artifact_inputs.empty()) {
+      key = action_key(generator);
+    } else {
+      auto inputs = generator.inputs;
+      if (!append_artifact_inputs(generator, [&](std::size_t dep) { return outputs[dep]; }, inputs))
+        continue;
+      key = action_key(generator, inputs);
+    }
+    result.keys[i] = key;
+    outputs[i] = lookup(key);
+    if (!outputs[i]) result.pending.push_back(i);
+  }
+  return result;
+}
+
+Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<Fp128>>& keys) {
+  std::vector<std::pair<std::string_view, Fp128>> generated;
+  for (std::size_t i = 0; i < plan.generators.size(); ++i)
+    if (plan.generators[i].native_outputs) generated.emplace_back(plan.generators[i].name, *keys[i]);
+  return fingerprint(std::tie(plan.sources, generated));
 }
 
 struct Demand {
-  std::vector<std::size_t> pending;
+  ActionResolution actions;
+  Fp128 native_plan;
   bool prepare = false;
   std::vector<std::uint8_t> image;
   std::vector<std::string> errors;
@@ -227,12 +279,15 @@ struct WorkspaceBuild {
   static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
     const auto& snapshot = cx.fetch<WorkspacePlan>(key);
     const auto& plan = snapshot.resolved;
-    Demand demand;
-    for (std::size_t i = 0; i < plan.generators.size(); ++i)
-      if (!cx.fetch<ActionReceipt>(action_key(plan.generators[i]))) demand.pending.push_back(i);
-    if (!demand.pending.empty()) co_return demand;
+    Demand demand{};
+    demand.actions = resolve_actions(plan, [&](Fp128 action) -> const ActionOutputs* {
+      const auto& receipt = cx.fetch<ActionReceipt>(action);
+      return receipt ? &*receipt : nullptr;
+    });
+    if (!demand.actions.pending.empty()) co_return demand;
+    demand.native_plan = native_plan_key(plan, demand.actions.keys);
     const auto& prepared = cx.fetch<PreparedBuild>(snapshot.workspace);
-    if (!prepared || prepared->output != key || prepared->plan != fingerprint(plan)) {
+    if (!prepared || prepared->output != key || prepared->plan != demand.native_plan) {
       demand.prepare = true;
       co_return demand;
     }
@@ -270,9 +325,11 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   return session.request(std::move(build));
 }
 
-std::expected<fs::path, std::string> build_directory(const fs::path& workspace, std::string_view name) {
+std::expected<fs::path, std::string> build_directory(const fs::path& workspace, std::string_view name,
+                                                    std::string_view child = {}) {
   fs::path path = workspace;
-  for (const auto part : {std::string_view(".ycxx"), name}) {
+  for (const auto part : {std::string_view(".ycxx"), name, child}) {
+    if (part.empty()) continue;
     path /= part;
     std::error_code ec;
     auto status = fs::symlink_status(path, ec);
@@ -286,39 +343,56 @@ std::expected<fs::path, std::string> build_directory(const fs::path& workspace, 
   return path;
 }
 
-struct Scratch {
-  fs::path path;
-  ~Scratch() {
+struct StagedOutputs {
+  struct File {
+    fs::path temporary;
+    fs::path destination;
+  };
+  std::vector<File> files;
+
+  ~StagedOutputs() {
+    for (const auto& file : files) {
+      std::error_code ec;
+      fs::remove_all(file.temporary.parent_path(), ec);
+    }
+  }
+
+  std::optional<std::string> stage(const fs::path& output, std::span<const std::uint8_t> bytes, bool executable) {
+    using enum fs::perms;
     std::error_code ec;
-    fs::remove_all(path, ec);
+    const auto existing = fs::symlink_status(output, ec);
+    if (fs::is_directory(existing))
+      return std::format("expected a build output file at '{}'", native(output));
+    if (fs::is_regular_file(existing) && ((existing.permissions() & owner_exec) != none) == executable) {
+      std::ifstream file(output, std::ios::binary);
+      if (file && std::ranges::equal(std::span(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
+                                     std::ranges::subrange(std::istreambuf_iterator<char>(file),
+                                                           std::istreambuf_iterator<char>()))) return std::nullopt;
+    }
+    auto path = native(output.parent_path() / ".publish-XXXXXX");
+    if (!::mkdtemp(path.data())) return "cannot create temporary build output directory";
+    const auto& staged = files.emplace_back(fs::path(path) / "data", output);
+    std::ofstream file(staged.temporary, std::ios::binary | std::ios::noreplace);
+    if (!bytes.empty())
+      file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    file.close();
+    if (!file) return std::format("cannot write build output '{}'", native(output));
+    auto permissions = owner_read | owner_write | group_read | others_read;
+    if (executable) permissions |= owner_exec | group_exec | others_exec;
+    fs::permissions(staged.temporary, permissions, fs::perm_options::replace, ec);
+    if (ec) return std::format("cannot set permissions for '{}': {}", native(output), ec.message());
+    return std::nullopt;
+  }
+
+  std::optional<std::string> publish() const {
+    for (const auto& file : files) {
+      std::error_code ec;
+      fs::rename(file.temporary, file.destination, ec);
+      if (ec) return std::format("cannot publish '{}': {}", native(file.destination), ec.message());
+    }
+    return std::nullopt;
   }
 };
-
-std::optional<std::string> install(const fs::path& output, std::span<const std::uint8_t> image) {
-  std::error_code ec;
-  const auto existing = fs::symlink_status(output, ec);
-  if (fs::is_regular_file(existing) && (existing.permissions() & fs::perms::owner_exec) != fs::perms::none) {
-    std::ifstream file(output, std::ios::binary);
-    if (file && std::ranges::equal(std::span(reinterpret_cast<const char*>(image.data()), image.size()),
-                                   std::ranges::subrange(std::istreambuf_iterator<char>(file),
-                                                         std::istreambuf_iterator<char>()))) return std::nullopt;
-  }
-  auto path = native(output.parent_path() / ".publish-XXXXXX");
-  if (!::mkdtemp(path.data())) return "cannot create temporary build output directory";
-  const Scratch scratch{fs::path(path)};
-  const fs::path temporary = scratch.path / "image";
-  std::ofstream file(temporary, std::ios::binary | std::ios::noreplace);
-  file.write(reinterpret_cast<const char*>(image.data()), static_cast<std::streamsize>(image.size()));
-  file.close();
-  if (!file) return "cannot write executable";
-  using enum fs::perms;
-  fs::permissions(temporary, owner_read | owner_write | owner_exec | group_read | group_exec | others_read | others_exec,
-                  fs::perm_options::replace, ec);
-  if (ec) return std::format("cannot set executable permissions: {}", ec.message());
-  fs::rename(temporary, output, ec);
-  if (ec) return std::format("cannot publish executable: {}", ec.message());
-  return std::nullopt;
-}
 
 struct RuleInvocation {
   RuleWorkerRequest request;
@@ -1059,6 +1133,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   };
 
   std::vector<RulePackageRef> measured;
+  const auto receipt = [&](Fp128 id) -> const ActionOutputs* {
+    const auto* entry = session_.db().peek<ActionReceipt>(id);
+    return entry && *entry ? &**entry : nullptr;
+  };
   while (!cancelled()) {
     refresh();
     superseded = false;
@@ -1107,19 +1185,32 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       tick();
       if (!demand) return fail("build cancelled");
 
-      if (!demand->pending.empty()) {
+      const auto output_at = [&](std::size_t index) -> const ActionOutputs* {
+        const auto& id = demand->actions.keys[index];
+        return id ? receipt(*id) : nullptr;
+      };
+      if (!demand->actions.pending.empty()) {
         std::set<Fp128> attempted;
-        for (const auto index : demand->pending) {
+        for (const auto index : demand->actions.pending) {
           if (cancelled()) return fail("build cancelled");
           const auto& generator = plan.generators[index];
-          const auto id = action_key(generator);
+          const auto id = *demand->actions.keys[index];
           // Two targets in a plan can describe the same execution.
           if (!attempted.insert(id).second) continue;
-          auto result = run_action("ExternalAction", generator.name, generator.action, generator.inputs);
+          std::vector<ActionInput> staged;
+          std::span<const ActionInput> inputs = generator.inputs;
+          if (!generator.artifact_inputs.empty()) {
+            staged = generator.inputs;
+            if (!append_artifact_inputs(generator, output_at, staged)) break;
+            inputs = staged;
+          }
+          auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
           const auto observed = observe_project(cwd, target, toolchain, planned);
-          if (!observed || std::ranges::none_of(observed->generators, [&](const auto& current) {
-                return current.name == generator.name && action_key(current) == id;
-              })) break;
+          if (!observed) break;
+          const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
+          if (current == observed->generators.end()) break;
+          const auto at = static_cast<std::size_t>(current - observed->generators.begin());
+          if (resolve_actions(*observed, receipt).keys[at] != id) break;
           if (result.exit_status != 0) {
             report.status = result.exit_status;
             report.diagnostics.push_back(std::format("generator '{}': {}", generator.name,
@@ -1135,11 +1226,13 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (demand->prepare) {
         const auto request = register_native(session_, workspace_path, target, plan);
         std::map<std::string, std::string> generated;
-        for (const auto& generator : plan.generators) {
-          const auto& receipt = *session_.db().peek<ActionReceipt>(action_key(generator));
+        for (std::size_t index = 0; index < plan.generators.size(); ++index) {
+          const auto& generator = plan.generators[index];
+          if (!generator.native_outputs) continue;
+          const auto& outputs = *output_at(index);
           for (std::size_t i = 0; i < generator.action.outputs.size(); ++i) {
             const auto& output = generator.action.outputs[i];
-            const auto& bytes = (*receipt)[i].contents.bytes;
+            const auto& bytes = outputs[i].contents.bytes;
             generated.emplace(generated_path(cwd, generator.name, output.filename),
                               std::string(bytes.begin(), bytes.end()));
           }
@@ -1149,7 +1242,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           for (const auto& path : previous)
             if (!generated.contains(path)) session_.set_generated(path, std::nullopt);
           for (const auto& [path, bytes] : generated) session_.set_generated(path, bytes);
-          db.set<PreparedBuild>(workspace, Prepared{key, plan_id, request});
+          db.set<PreparedBuild>(workspace, Prepared{key, demand->native_plan, request});
         });
         previous.clear();
         for (const auto& [path, bytes] : generated) previous.insert(path);
@@ -1168,8 +1261,26 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
       std::optional<std::string> error;
       if (!publish(before, [&] {
-            if (auto directory = build_directory(cwd, "out")) error = install(output, demand->image);
-            else error = std::move(directory.error());
+            const auto directory = build_directory(cwd, "out");
+            if (!directory) {
+              error = directory.error();
+              return;
+            }
+            StagedOutputs staged;
+            if ((error = staged.stage(output, demand->image, true))) return;
+            if (!plan.runtime_assets.empty()) {
+              const auto assets = build_directory(cwd, "assets", target);
+              if (!assets) {
+                error = assets.error();
+                return;
+              }
+              for (const auto& asset : plan.runtime_assets) {
+                const auto& artifact = (*output_at(asset.producer))[asset.output].contents;
+                const auto& name = plan.generators[asset.producer].action.outputs[asset.output].filename;
+                if ((error = staged.stage(*assets / name, artifact.bytes, artifact.executable))) return;
+              }
+            }
+            error = staged.publish();
           })) break;
       if (error) return fail(std::move(*error));
       report.output = native(output);
