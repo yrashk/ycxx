@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 
-from project_build import action_keys, env_for, run_client, traced_build, tu_outcomes
+from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
 from project_inspection import check_location, fact
 from project_shader_bundle import (
@@ -33,6 +34,16 @@ generate "cycle_inventory" {
     args = ["-c", "cat \"$1\" > \"$2\"", "cycle", input("bundle"), output("list")]
     inputs = { bundle = artifact("scene", "bundle") }
     outputs = { list = "cycle-inventory.txt" }
+}
+'''
+
+WIRE_CONFIG = r'''
+generate "wire_config" {
+    tool = "/bin/sh"
+    args = ["-c", "cat \"$1\" > \"$2\" && printf 'enabled\\n' > \"$3\"", "profile",
+            input("source"), output("mode"), output("witness")]
+    inputs = { source = "wire.cfg" }
+    outputs = { mode = "profile.cfg", witness = "witness.cfg" }
 }
 '''
 
@@ -227,6 +238,60 @@ def check_cycles(ycxx, workspace, env):
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
 
+def check_typed_witness(ycxx, scope, env):
+    sample = Path(__file__).resolve().parents[2] / 'examples/project-build/package-probe'
+    shutil.copytree(sample, scope)
+    manifest = scope / 'build.ycxx'
+    definition = manifest.read_text(encoding='utf-8').replace('reads = ["wire.cfg", "rules/check-mode.sh"]', '''\
+reads = ["rules/check-mode.sh"]
+    plan_inputs = { mode = artifact("wire_config", "mode") }''') + WIRE_CONFIG
+    manifest.write_text(definition, encoding='utf-8')
+
+    # The planner uses ordinary and generated reads. The observer gets a different
+    # named output from the same receipt, with equal bytes across config edits.
+    rule = scope / 'rules/codec.cc'
+    source = rule.read_text(encoding='utf-8').replace('data = "wire.cfg"', 'data = artifact("wire_config", "witness")')
+    source = source.replace('    return host->emit(', '''\
+    ycxx_rule_bytes_v1 script{}, mode{};
+    if (host->read(host->context, "rules/check-mode.sh", &script) != 1 || !starts_with(script, "#!/bin/sh") ||
+        host->read(host->context, "mode", &mode) != 1 || mode.size == 0) return 1;
+    return host->emit(''')
+    source = source.replace('    return host->export_support(', '''\
+    ycxx_rule_bytes_v1 mode{};
+    if (host->read(host->context, "mode", &mode) != 1) return 1;
+    if (starts_with(mode, "disabled\\n")) support = YCXX_RULE_UNSUPPORTED_V1;
+    return host->export_support(''')
+    rule.write_text(source, encoding='utf-8')
+    try:
+        previous_receipt = None
+        for text, state, status in (('enabled\n', 'supported', 0), ('disabled\n', 'unsupported', 10)):
+            (scope / 'wire.cfg').write_text(text, encoding='utf-8')
+            _, events = traced_build(ycxx, scope, env, f'generated witness {state}')
+            check_external_actions(events, 'config', 'wire_config')
+            assert action_keys(events, 'RuleWitness') == (['wire.fast-mode'] if previous_receipt is None else []), events
+            assert action_keys(events, 'RuleClassifier') == ['wire.fast-mode'], events
+            check_program(scope / NATIVE, status)
+            shown = run_client(ycxx, scope, env, 'show', 'app', '--format=json')
+            shown.check_returncode()
+            plan = json.loads(shown.stdout)
+            fact(plan, 'plan-input', 'wire', '.ycxx/virtual/wire_config/profile.cfg')
+            origin = fact(plan, 'value-export', 'wire', state)['origin']
+            receipt = re.search(r'witness exit 0 · receipt ([0-9a-f]{32})', origin)
+            assert receipt and receipt[1] != previous_receipt, origin
+            previous_receipt = receipt[1]
+            fact(plan, 'capability-input', 'config', state)
+
+        cycle = definition.replace('source = "wire.cfg"', 'source = artifact("config", "header")')
+        replace_source(scope, 'build.ycxx', cycle)
+        summary, events = traced_build(ycxx, scope, env, 'planning and typed value cycle', succeeds=False)
+        assert any('planning input dependency cycle' in item and 'config' in item
+                   for item in summary['diagnostics']), summary
+        check_external_actions(events)
+        check_program(scope / NATIVE, 10)
+    finally:
+        run_client(ycxx, scope, env, 'ctl', 'shutdown')
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     with (
@@ -241,6 +306,7 @@ def main():
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
         check_cycles(ycxx, workspace, env)
+        check_typed_witness(ycxx, workspace / 'typed-witness', env)
 
 
 if __name__ == '__main__':
