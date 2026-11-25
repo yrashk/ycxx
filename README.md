@@ -10,11 +10,12 @@ tool), recompute only what that change can affect.
 
 ## Watch mode demo
 
-Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows one function through
-L1 IR, lowered L2 IR, and emitted ARM64 instructions, then shows compiler errors and their fixes.
-The final Linux x86-64 self-check uses the freestanding support in [#380](https://github.com/yrashk/ycxx/pull/380).
+Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows a function through
+L1 IR, lowered L2 IR, and codegen byte and relocation counts. A source error shows its file,
+line and column. After recovery, objdump shows the emitted x86-64 instructions and the Linux
+executable passes its self-check.
 
-![Vim and ycxx watch mode showing live rebuilds, L1 and L2 IR, and ARM64 assembly](docs/media/ycxx-watch-ir-codegen.gif)
+![Vim and ycxx watch mode showing a live error and recovery, L1 and L2 IR, and x86-64 instructions](docs/media/ycxx-watch-ir-codegen.gif)
 
 [View the GIF at full size](docs/media/ycxx-watch-ir-codegen.gif)
 
