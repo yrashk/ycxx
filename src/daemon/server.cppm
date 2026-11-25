@@ -1024,7 +1024,7 @@ class Server {
       session_ = std::make_unique<pipeline::Session>(*pool_, o_.build_checkpoint);
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
       session_->set_reader([this](const std::string& path) { return table_.read(path); });
-      build_ = std::make_unique<build::Coordinator>(*session_);
+      build_ = std::make_unique<build::Coordinator>(*session_, executable_path(), build_hash());
     });
     return *session_;
   }

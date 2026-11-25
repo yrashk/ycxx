@@ -70,3 +70,5 @@ add_test(NAME daemon.project_build COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/p
 add_test(NAME daemon.project_build_watch COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_build_watch.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_inspection COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_inspection.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_rule_package COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_rule_package.py $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})

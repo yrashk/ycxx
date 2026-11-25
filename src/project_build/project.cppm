@@ -10,8 +10,11 @@ import std;
 import ycxx.ast;
 import ycxx.build.action;
 import ycxx.build.plan;
+import ycxx.build.rule_protocol;
+import ycxx.build.rule_worker;
 import ycxx.engine;
 import ycxx.hash;
+import ycxx.lsp;
 import ycxx.pipeline;
 import ycxx.pp;
 
@@ -26,7 +29,7 @@ struct ProjectReport {
 
 class Coordinator {
  public:
-  explicit Coordinator(pipeline::Session& session);
+  Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build);
 
   ProjectReport run(const std::filesystem::path& cwd, const std::string& target,
                     const std::function<void()>& refresh, const std::function<bool()>& cancelled,
@@ -36,6 +39,8 @@ class Coordinator {
 
  private:
   pipeline::Session& session_;
+  std::string executable_;
+  std::uint64_t worker_build_;
   std::mutex mutex_;
   std::map<std::string, std::set<std::string>> generated_paths_;
 };
@@ -58,6 +63,13 @@ struct [[=engine::input{engine::Durability::low}]] WorkspacePlan {
 struct [[=engine::input{engine::Durability::low}]] ActionReceipt {
   using Key = Fp128;
   using Value = std::optional<std::vector<NamedArtifact>>;
+};
+struct RuleActionResult {
+  using Key = Fp128;
+  using Value = ActionReceipt::Value;
+  static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
+    co_return cx.fetch<ActionReceipt>(key);
+  }
 };
 struct Prepared {
   Fp128 output;
@@ -180,9 +192,129 @@ std::optional<std::string> install(const fs::path& output, std::span<const std::
   return std::nullopt;
 }
 
+struct RuleInvocation {
+  RuleWorkerRequest request;
+  std::vector<ActionInput> reads;
+};
+
+Artifact text_artifact(std::string_view text) {
+  return {std::vector<std::uint8_t>(text.begin(), text.end()), false};
+}
+
+std::expected<RuleInvocation, std::string> rule_invocation(const fs::path& cwd, const RuleDemand& demand) {
+  RuleInvocation invocation{
+      .request = {.target = demand.target, .rule = demand.rule, .definition = demand.definition,
+                  .attributes = demand.attributes, .reads = {}},
+      .reads = {}};
+  for (const auto& path : demand.reads) {
+    std::error_code ec;
+    const auto input = cwd / path;
+    const auto status = fs::status(input, ec);
+    if (status.type() == fs::file_type::not_found) {
+      invocation.request.reads.push_back({path, std::nullopt});
+      continue;
+    }
+    if (ec || !fs::is_regular_file(status))
+      return std::unexpected(std::format("cannot read rule input '{}'", path));
+    std::ifstream stream(input, std::ios::binary);
+    if (!stream) return std::unexpected(std::format("cannot read rule input '{}'", path));
+    const std::string bytes{std::istreambuf_iterator<char>(stream), {}};
+    if (stream.bad()) return std::unexpected(std::format("cannot read rule input '{}'", path));
+    auto staged = std::format("reads/{}", invocation.reads.size());
+    invocation.request.reads.push_back({path, std::format("inputs/{}", staged)});
+    invocation.reads.push_back({staged, staged, text_artifact(bytes)});
+  }
+  return invocation;
+}
+
+Fp128 package_key(const RulePackagePlan& plan) {
+  return fingerprint(std::tie(plan.action, plan.inputs, plan.tool_fingerprint));
+}
+
+Fp128 observation_key(const RuleInvocation& invocation) {
+  return fingerprint(std::tie(invocation.request, invocation.reads));
+}
+
+struct RuleObservation {
+  RuleDemand demand;
+  Fp128 package;
+  Fp128 invocation;
+};
+struct PreparedProject {
+  ProjectPlan plan;
+  std::vector<RuleExpansion> expansions;
+  std::vector<RuleObservation> observations;
+};
+
+using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
+    std::string_view, std::string_view, const Action&, std::span<const ActionInput>, Fp128,
+    const std::function<bool()>&)>;
+
+std::expected<PreparedProject, std::string> prepare_project(
+    const fs::path& cwd, std::string_view target, const std::string& executable,
+    std::uint64_t worker_build, const RunRuleAction& run) {
+  PreparedProject prepared;
+  for (;;) {
+    auto attempt = plan_with_rules(cwd, target, prepared.expansions);
+    if (!attempt) return std::unexpected(attempt.error());
+    if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) {
+      prepared.plan = std::move(*plan);
+      return prepared;
+    }
+    auto& demand = std::get<RuleDemand>(*attempt);
+    if (std::ranges::any_of(prepared.expansions, [&](const auto& entry) { return entry.demand == demand; }))
+      return std::unexpected(std::format("rule '{}' did not resolve its declaration", demand.target));
+    if (executable.empty()) return std::unexpected("cannot locate the rule worker executable");
+
+    auto package = plan_rule_package(cwd, demand.package, rule_sdk_header());
+    if (!package) return std::unexpected(package.error());
+    const auto library_key = package_key(*package);
+    auto built = run("RulePackage", demand.package, package->action, package->inputs, library_key, [&] {
+      const auto current = plan_rule_package(cwd, demand.package, rule_sdk_header());
+      return current && package_key(*current) == library_key;
+    });
+    if (!built) return std::unexpected(built.error());
+
+    auto observation = rule_invocation(cwd, demand);
+    if (!observation) return std::unexpected(observation.error());
+    const auto invocation_key = observation_key(*observation);
+    const auto request = lsp::dump(lsp::to_json(observation->request));
+    using enum ActionArg::Kind;
+    const Action worker{
+        .tool = executable,
+        .args = {{literal, "--internal-rule-worker"}, {input, "library"}, {input, "request"}, {output, "plan"}},
+        .environment = {},
+        .outputs = {{"plan", "plan.ycxx"}}};
+    auto inputs = std::move(observation->reads);
+    inputs.push_back({"library", "package/rules.so", std::move(built->front().contents)});
+    inputs.push_back({"request", "request.json", text_artifact(request)});
+    const Fp128 worker_key = fingerprint(std::tie(worker, inputs, worker_build));
+    auto lowered = run("RuleWorker", demand.target, worker, inputs, worker_key, [] { return true; });
+    if (!lowered) return std::unexpected(lowered.error());
+    const auto& fragment = lowered->front().contents.bytes;
+    prepared.observations.push_back({demand, library_key, invocation_key});
+    prepared.expansions.push_back({std::move(demand), std::string(fragment.begin(), fragment.end())});
+  }
+}
+
+std::optional<ProjectPlan> observe_project(
+    const fs::path& cwd, std::string_view target, const PreparedProject& prepared) {
+  for (const auto& record : prepared.observations) {
+    const auto package = plan_rule_package(cwd, record.demand.package, rule_sdk_header());
+    if (!package || package_key(*package) != record.package) return std::nullopt;
+    const auto observed = rule_invocation(cwd, record.demand);
+    if (!observed || observation_key(*observed) != record.invocation) return std::nullopt;
+  }
+  auto attempt = plan_with_rules(cwd, target, prepared.expansions);
+  if (!attempt) return std::nullopt;
+  if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
+  return std::nullopt;
+}
+
 }  // namespace
 
-Coordinator::Coordinator(pipeline::Session& session) : session_(session) {
+Coordinator::Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build)
+    : session_(session), executable_(std::move(executable)), worker_build_(worker_build) {
   using enum engine::Durability;
   session_.db().set_provider<ActionReceipt>([](const Fp128&) -> engine::provided<ActionReceipt::Value> {
     return {std::nullopt, low};
@@ -209,66 +341,90 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return report;
   };
 
+  const auto poll = [&] {
+    tick();
+    return cancelled();
+  };
+  const auto run_action = [&](std::string_view kind, std::string_view label, const Action& action,
+                              std::span<const ActionInput> inputs) -> ActionResult {
+    const auto scratch = build_directory(cwd, "jobs");
+    if (!scratch) return {1, {}, scratch.error(), {}};
+    std::inplace_stop_source stop;
+    std::jthread monitor([&](std::stop_token finished) {
+      while (!finished.stop_requested()) {
+        if (cancelled()) {
+          stop.request_stop();
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    });
+    ++report.actions_executed;
+    engine::TraceEvent event;
+    if (tracer) {
+      event.id = session_.db().reserve_trace_id();
+      event.kind = kind;
+      event.key = label;
+      event.start = event.end = std::chrono::steady_clock::now();
+      if (tracer->starts()) tracer->started(event);
+    }
+    tick();
+    auto result = execute(action, inputs, *scratch, stop.get_token());
+    monitor.request_stop();
+    monitor.join();
+    if (tracer) {
+      event.outcome = result.exit_status == 0 ? engine::Outcome::executed : engine::Outcome::failed;
+      event.end = std::chrono::steady_clock::now();
+      if (result.exit_status != 0) event.errors = result.err;
+      tracer->event(std::move(event));
+    }
+    tick();
+    return result;
+  };
+  const RunRuleAction run_rule = [&](std::string_view kind, std::string_view label, const Action& action,
+                                   std::span<const ActionInput> inputs, Fp128 id,
+                                   const std::function<bool()>& still_current)
+      -> std::expected<std::vector<NamedArtifact>, std::string> {
+    auto known = session_.run<RuleActionResult>(id, poll, nullptr, tracer);
+    if (!known || cancelled()) return std::unexpected("build cancelled");
+    if (*known) return std::move(**known);
+    auto result = run_action(kind, label, action, inputs);
+    if (!still_current()) return std::unexpected(std::format("{} '{}' changed during execution", kind, label));
+    if (result.exit_status != 0)
+      return std::unexpected(std::format("{} '{}': {}", kind, label,
+          result.err.empty() ? std::format("exit status {}", result.exit_status) : result.err));
+    if (!result.err.empty()) report.diagnostics.push_back(std::move(result.err));
+    apply([&](engine::Db& db) { db.set<ActionReceipt>(id, result.outputs); });
+    return std::move(result.outputs);
+  };
+
   const auto* native_target = pp::native_target;
   if (!native_target) return fail("project building is unavailable on this host");
   while (!cancelled()) {
     refresh();
-    auto plan = plan_project(cwd, target);
-    if (!plan) return fail(plan.error());
-    const Fp128 plan_id = fingerprint(*plan);
+    auto planned = prepare_project(cwd, target, executable_, worker_build_, run_rule);
+    if (!planned) return fail(planned.error());
+    const ProjectPlan& plan = planned->plan;
+    const Fp128 plan_id = fingerprint(plan);
     if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id)
-      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{workspace, *plan}); });
+      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{workspace, plan}); });
 
     for (;;) {
       const auto before = session_.db().revision();
-      auto demand = session_.run<WorkspaceBuild>(key, [&] {
-        tick();
-        return cancelled();
-      }, nullptr, tracer);
+      auto demand = session_.run<WorkspaceBuild>(key, poll, nullptr, tracer);
       tick();
       if (!demand) return fail("build cancelled");
 
       if (!demand->pending.empty()) {
-        const auto scratch = build_directory(cwd, "jobs");
-        if (!scratch) return fail(scratch.error());
         std::set<Fp128> attempted;
         for (const auto index : demand->pending) {
           if (cancelled()) return fail("build cancelled");
-          const auto& generator = plan->generators[index];
+          const auto& generator = plan.generators[index];
           const auto id = action_key(generator);
           // Two targets in a plan can describe the same execution.
           if (!attempted.insert(id).second) continue;
-          std::inplace_stop_source stop;
-          std::jthread monitor([&](std::stop_token finished) {
-            while (!finished.stop_requested()) {
-              if (cancelled()) {
-                stop.request_stop();
-                return;
-              }
-              std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-          });
-          ++report.actions_executed;
-          engine::TraceEvent event;
-          if (tracer) {
-            event.id = session_.db().reserve_trace_id();
-            event.kind = "ExternalAction";
-            event.key = generator.name;
-            event.start = event.end = std::chrono::steady_clock::now();
-            if (tracer->starts()) tracer->started(event);
-          }
-          tick();
-          auto result = execute(generator.action, generator.inputs, *scratch, stop.get_token());
-          monitor.request_stop();
-          monitor.join();
-          if (tracer) {
-            event.outcome = result.exit_status == 0 ? engine::Outcome::executed : engine::Outcome::failed;
-            event.end = std::chrono::steady_clock::now();
-            if (result.exit_status != 0) event.errors = result.err;
-            tracer->event(std::move(event));
-          }
-          tick();
-          const auto observed = plan_project(cwd, target);
+          auto result = run_action("ExternalAction", generator.name, generator.action, generator.inputs);
+          const auto observed = observe_project(cwd, target, *planned);
           if (!observed || std::ranges::none_of(observed->generators, [&](const auto& current) {
                 return current.name == generator.name && action_key(current) == id;
               })) break;
@@ -285,9 +441,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (demand->prepare) {
-        const auto request = register_native(session_, workspace_path, target, *plan);
+        const auto request = register_native(session_, workspace_path, target, plan);
         std::map<std::string, std::string> generated;
-        for (const auto& generator : plan->generators) {
+        for (const auto& generator : plan.generators) {
           const auto& receipt = *session_.db().peek<ActionReceipt>(action_key(generator));
           for (std::size_t i = 0; i < generator.action.outputs.size(); ++i) {
             const auto& output = generator.action.outputs[i];
@@ -309,7 +465,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (cancelled()) return fail("build cancelled");
-      const auto observed = plan_project(cwd, target);
+      const auto observed = observe_project(cwd, target, *planned);
       if (!observed || fingerprint(*observed) != plan_id) break;
       if (demand->image.empty()) {
         if (!publish(before, [] {})) break;
