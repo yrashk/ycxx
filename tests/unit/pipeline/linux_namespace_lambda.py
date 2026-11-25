@@ -59,7 +59,11 @@ def main():
         const_symbols = symbols('constinit.o')
         assert const_symbols.get('triple') == 'LOCAL' and const_symbols.get('other') == 'LOCAL', const_symbols
         assert const_symbols.get('_ZNK6tripleMUliE_clEi') == 'LOCAL', const_symbols
-        assert const_symbols.get('_ZN6tripleMUliE_8__invokeEi') == 'LOCAL', const_symbols
+        # A member that nothing refers to has no code, as Clang has it (#338).
+        assert '_ZN6tripleMUliE_8__invokeEi' not in const_symbols, const_symbols
+        assert '_ZNK5otherMUliE_clEi' not in const_symbols, const_symbols
+        compile('-c', 'invoker.cpp')
+        assert any(name.endswith('8__invokeEi') and bind == 'LOCAL' for name, bind in symbols('invoker.o').items()), symbols('invoker.o')
         compile('-c', 'constinit.cpp', '-o', 'darwin.o', flags=('--target=arm64-apple-darwin',))
         assert (scope / 'darwin.o').read_bytes().startswith(bytes.fromhex('cffaedfe'))
 
@@ -117,7 +121,8 @@ def main():
             assert '_ZNK1fMUliE_clEi' not in symbols('warm.o')
             edit.write_text('static auto h{[](int x){return x+3;}};\n' + edit.read_text())
             check_edit('g', 12)
-            assert symbols('warm.o').get('_ZNK1hMUliE_clEi') == 'LOCAL'
+            assert symbols('warm.o').get('h') == 'LOCAL'
+            assert '_ZNK1hMUliE_clEi' not in symbols('warm.o')
             assert daemon_status()['pid'] == pid
         finally:
             run([ycxx, 'ctl', 'shutdown'], env=base)
