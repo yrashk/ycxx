@@ -396,7 +396,6 @@ draft/temp/temp.names-1.reject.cpp errors elsewhere: preprocessing directives ar
 draft/temp/temp.names-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/temp/temp.names-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.names-5.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.over-2.accept.cpp 'template' not supported yet
 draft/temp/temp.over.link-4.accept.cpp 'template' not supported yet
 draft/temp/temp.param-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.param-11.reject.cpp errors elsewhere: 'template' not supported yet

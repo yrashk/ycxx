@@ -47,6 +47,10 @@ Templates can take values of named flat aggregates with public integral fields a
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. [#317](https://github.com/yrashk/ycxx/issues/317)
 
+An explicitly specialized class can name a flat structural argument directly, as in
+`template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
+selects the same specialization. [#1248](https://github.com/yrashk/ycxx/issues/1248)
+
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
 [#340](https://github.com/yrashk/ycxx/issues/340)
@@ -98,6 +102,10 @@ pack-index-specifiers `T...[I]` select a type from a pack ([#297](https://github
 the expression form `t...[I]` is not done yet). Concrete constant template arguments can use braced conversions such as
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
+
+Fixed reference and single-pointer arguments can deduce through a unique most-derived
+base that matches a named class-template parameter.
+[#1144](https://github.com/yrashk/ycxx/issues/1144)
 
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
