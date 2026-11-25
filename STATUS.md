@@ -3533,7 +3533,7 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   a parameter, a template argument or a base; in a statement, a member of a dependent one is a type
   only after `typename` ([temp.res.general]). A namespace-scope alias template whose type has such an operand with
   no representation (`typename decltype(select<T>())::type`, with a deduced return type) is read
-  again when it is named with known arguments (`AliasCallPattern::unrepresented`). A class
+  again when it is named with known arguments (`AliasCallPattern::Kind::unrepresented`). A class
   template's member declaration can call an earlier static member of the class, also with
   explicit template arguments: a deduced return type comes from the member's instantiation, made
   while the class is instantiated (`members_so_far`). That body cannot name a member declared
@@ -3942,9 +3942,20 @@ cover the body boundary, key changes, and restoration. [#1248](https://github.co
 Ordinary member aliases can project a structural parameter's public integral fields into
 scalar template arguments. A guarded conditional uses its typed selected operand, so the
 result selects the same specialization as the corresponding literal. The resident fixtures
-check field-order and named-guard edits against cold compilation. General member alias
-template replay and record-valued immediate calls remain in #317. The separate dependent
-static operand in the pinned libycxx ratio header stays in #209.
+check field-order and named-guard edits against cold compilation.
+
+An alias can use `Box<detail::make<T, U>()>` when the immediate call returns a named
+flat structural aggregate with public integral fields. Partial alias replay keeps the
+qualified producer and its type arguments until the value is needed. Evaluation uses
+the selected producer specialization and canonicalizes the result with equivalent
+named and braced records. The resident fixture checks producer and specialization edits
+against cold compilation. The Linux x86-64 ELF tests check the shared argument spelling
+with GCC and Clang.
+
+General member alias template replay remains in #317. Argument erasure during alias
+substitution is tracked in #1311 and namespace-qualified explicit specialization
+syntax in #1261. The pinned libycxx ratio header first reaches the separate named
+static argument tracked in #1301 and #209.
 
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 

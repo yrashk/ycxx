@@ -733,6 +733,8 @@ class Mangler {
   std::expected<std::string, std::string> expression(ast::ConstId v) {
     if (in_.values.is<ast::VDepCall>(v)) {
       const auto& call = in_.values.get<ast::VDepCall>(v);
+      if (in_.types.is<ast::TClass>(call.result_type))
+        return std::unexpected("a class-valued dependent call in a template argument");
       const auto operands = in_.seqs.elements(call.args);
       if (operands.empty() || operands.front().kind == ast::TemplateArgKind::type) {
         const auto name = classes_ ? classes_(call.callee) : ClassName{};
