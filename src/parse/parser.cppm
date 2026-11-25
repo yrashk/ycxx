@@ -656,9 +656,9 @@ public:
     // A resolved template-id used as a qualifier or type argument needs satisfaction even
     // while the surrounding grammar is deciding how to use it.
     bool constraint_failed = false;
+    const bool replay_partial_alias = namespace_alias_type || replayed_member_alias_type || s_->replaying_alias_type_arguments;
     auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
-                                      alias_constraints_enabled_ ? &constraint_failed : nullptr,
-                                      namespace_alias_type || replayed_member_alias_type || replaying_alias_type_arguments);
+                                      alias_constraints_enabled_ ? &constraint_failed : nullptr, replay_partial_alias);
     if (type && defer_alias && !in_template_id_lookahead_)
       type_alias_checks_->checks.emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
     alias_constraint_failures_ += constraint_failed;
@@ -6898,7 +6898,6 @@ public:
   bool substituting_partial_arguments = false;
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool namespace_alias_type = false;  // the namespace alias instantiation reparses this type-id
-  bool replaying_alias_type_arguments = false;
   bool member_alias_type = false;  // the class instantiation reparses this type-id
   bool replayed_member_alias_type = false;  // an ordinary member alias in a class template
 private:

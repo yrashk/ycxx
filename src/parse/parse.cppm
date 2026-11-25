@@ -2869,13 +2869,13 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   const auto before = caller.diag_count();
   sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
   s.replaying_type_default = caller.replaying_type_default;
+  s.replaying_alias_type_arguments = pattern.call.qualified_type_arguments;
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
   ps.set_questions(q);
   ps.seek(item.begin + pattern.begin);
   ps.namespace_alias_type = pattern.call.class_result;
-  ps.replaying_alias_type_arguments = pattern.call.qualified_type_arguments;
   // Substitution stops at an invalid argument before a later argument can instantiate a class.
   ps.substituting_partial_arguments = pattern.call.qualified_type_arguments;
   try {

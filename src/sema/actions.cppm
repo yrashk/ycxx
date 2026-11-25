@@ -2837,9 +2837,17 @@ public:
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
       if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
-      // Bound to a type that has no members, it names no scope ([basic.lookup.qual]/1).
+      // A partially replayed alias can bind this parameter to a type that still needs substitution.
       if (auto a = bound_arg(*p)) {
-        if (!types().is_class(a->type) && !types().is_enum(a->type)) return std::nullopt;
+        if (!types().is_class(a->type) && !types().is_enum(a->type)) {
+          if (!replaying_alias_type_arguments || !types().is_dependent(a->type)) return std::nullopt;
+          // These type forms cannot name a scope even when their components are dependent.
+          switch (types().kind(a->type)) {
+          case TypeKind::pointer: case TypeKind::member_pointer: case TypeKind::reference:
+          case TypeKind::array: case TypeKind::function: return std::nullopt;
+          default: break;
+          }
+        }
         return Scope{std::nullopt, a->type};
       }
       return Scope{std::nullopt, p->type};
@@ -4375,6 +4383,7 @@ public:
   std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
   Bindings template_args;
   bool replaying_type_default = false;
+  bool replaying_alias_type_arguments = false;
   // The template parameter `name` declares in the template parameter scopes enclosing this point,
   // whether or not a class member hides it: what [temp.local]/6 forbids redeclaring.
   const ast::TemplateParamSema* declared_template_param(NameId name) const {
