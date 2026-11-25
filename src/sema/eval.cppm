@@ -184,10 +184,19 @@ private:
         return {lit->value, 0, true};
       return {};
     }
-    const auto receiver = direct_local_receiver(e);
-    const auto ordinary_virtual = s_->as<ast::VirtualMemberCall>(e);
-    const bool virtual_receiver = s_->as<ast::ImmediateVirtualCall>(e).has_value() ||
-                                  (ordinary_virtual && ordinary_virtual->function != EntityId::none);
+    NodeId object_pointer = NodeId::none;
+    bool virtual_receiver = false;
+    if (const auto member = s_->as<ast::MemberCall>(e)) object_pointer = member->object.id;
+    if (const auto call = s_->as<ast::ImmediateVirtualCall>(e)) {
+      object_pointer = call->object.id;
+      virtual_receiver = true;
+    }
+    if (const auto call = s_->as<ast::VirtualMemberCall>(e);
+        call && in.seqs.at(call->selection, 0).function != EntityId::none) {
+      object_pointer = call->object.id;
+      virtual_receiver = true;
+    }
+    const auto receiver = direct_local_receiver(object_pointer);
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
@@ -521,12 +530,7 @@ private:
 
   // An ordinary dot call passes the address of its receiver. Import only that named
   // local, without evaluating its declaration or allocating slots for unrelated locals.
-  std::optional<u32> direct_local_receiver(Ex expression) {
-    NodeId object_pointer = NodeId::none;
-    if (const auto member = s_->as<ast::MemberCall>(expression)) object_pointer = member->object.id;
-    if (const auto call = s_->as<ast::ImmediateVirtualCall>(expression)) object_pointer = call->object.id;
-    if (const auto call = s_->as<ast::VirtualMemberCall>(expression); call && call->function != EntityId::none)
-      object_pointer = call->object.id;
+  std::optional<u32> direct_local_receiver(NodeId object_pointer) {
     if (object_pointer == NodeId::none) return std::nullopt;
     const auto pointer = s_->as<ast::Unary>({object_pointer});
     if (!pointer || pointer->op != ast::UnaryOp::address_of) return std::nullopt;

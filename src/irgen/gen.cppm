@@ -2482,10 +2482,11 @@ class Gen {
   // Itanium ABI §3.2.4: the address point sits at offset zero in this root subobject.
   std::optional<ValueId> virtual_member_call(At a) {
     const auto c = get<ast::VirtualMemberCall>(a);
+    const auto selection = in_.seqs.at(c.selection, 0);
     if constexpr (F::evaluating_constants) {
-      if (c.function != ast::EntityId::none && c.info.category == ast::ValueCategory::prvalue &&
-          !class_prvalue(c.info) && !facts_.ellipsis_after(c.function))
-        return evaluated_virtual_call(a, c.info, c.function, c.object, c.args, ir::VirtualCallKind::ordinary);
+      if (selection.function != ast::EntityId::none && c.info.category == ast::ValueCategory::prvalue &&
+          !class_prvalue(c.info) && !facts_.ellipsis_after(selection.function))
+        return evaluated_virtual_call(a, c.info, selection.function, c.object, c.args, ir::VirtualCallKind::ordinary);
     }
     if (fn_.thunk) unsupported(a, "in constant evaluation");
     const ValueId receiver = rvalue(child(a, c.object));
@@ -2493,7 +2494,7 @@ class Gen {
     const auto receiver_type = facts_.pointer_to(table_type);
     const ValueId vptr = pure(ir::Op::ptr_cast, receiver_type, {receiver}, {word(ty(receiver_type))});
     const ValueId table = load({vptr, table_type});
-    const ValueId index = int_constant(facts_.ptrdiff_type(), c.slot);
+    const ValueId index = int_constant(facts_.ptrdiff_type(), selection.slot);
     const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.callee))});
     std::vector<ValueId> args{load({slot, c.callee}), receiver};
     // Records by value need the by-value bits and result object of `member_call`; sema admits
