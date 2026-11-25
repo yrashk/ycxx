@@ -1927,6 +1927,7 @@ private:
   std::map<std::pair<u32, u32>, Result<ast::ItemSema>> class_member_cells_;  // by (member item, specialization)
   std::set<u32> classes_instantiating_;
   std::set<u32> classes_instantiated_;  // by specialization: instantiated in this unit
+  std::set<EntityId> failed_member_class_instantiations_;  // diagnosed while replaying the definition
   // A class can be blocked by its own assertion or one in a required class.
   std::set<EntityId> failed_class_assertions_;
   std::set<u32> items_with_failed_assertion_dependencies_;
@@ -2454,7 +2455,8 @@ public:
   bool type_trait_instantiation_failed(EntityId e) override {
     const bool failed_assertion = p_->failed_class_assertions_.contains(e);
     observed_class_assertion_failure |= failed_assertion;
-    const bool failed = failed_assertion || p_->failed_type_trait_instantiations_.contains(e);
+    const bool failed = failed_assertion || p_->failed_type_trait_instantiations_.contains(e) ||
+                        p_->failed_member_class_instantiations_.contains(e);
     observed_type_trait_failure |= failed;
     return failed;
   }
@@ -12718,7 +12720,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
 const sema::ClassRec* Program::instantiate_member_class(EntityId cls, u32 point) {
   const u32 key = std::to_underlying(cls);
   if (failed_class_assertions_.contains(cls) || failed_type_trait_instantiations_.contains(cls) ||
-      classes_instantiating_.contains(key)) return nullptr;
+      failed_member_class_instantiations_.contains(cls) || classes_instantiating_.contains(key)) return nullptr;
   const u32 k = class_patterns_.at(key);
   if (point <= last_member(k)) return nullptr;
   if (classes_instantiated_.contains(key)) return classes_.find(cls);
@@ -12790,8 +12792,11 @@ const sema::ClassRec* Program::replay_class(EntityId spec, u32 k, u32 point,
     failed_class_assertions_.insert(spec);
     return nullptr;
   }
+  if (named_nested_class(k) && !member_declarations_valid) {
+    failed_member_class_instantiations_.insert(spec);
+    return nullptr;
+  }
   classes_instantiated_.insert(key);
-  if (named_nested_class(k) && !member_declarations_valid) return nullptr;
   for (const ast::MemberRec& m : c.members)
     if (const auto kind = w_->entities.rec(m.entity).kind; kind != sema::EntityKind::data_member && kind != sema::EntityKind::class_)
       member_patterns_.emplace(std::to_underlying(m.entity), MemberOf{index(m.decl.item), spec});
