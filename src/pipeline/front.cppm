@@ -1697,10 +1697,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     // An implicit instantiation is defined in every unit that uses it ([temp.inst]). A dynamic
     // class's are also named by its weak table, wherever the members are written.
     const auto* dynamic_owner = entity.kind == sema::EntityKind::function_template ? nullptr : classes.find(entity.scope);
-    const bool dynamic_specialization = dynamic_owner && dynamic_owner->dynamic && entity.templ == EntityId::none &&
+    // A constructor template's specializations install the table too.
+    const bool dynamic_specialization = dynamic_owner && dynamic_owner->dynamic &&
                                         (in->decl.is_virtual || entity.kind != sema::EntityKind::function);
     if (dynamic_specialization) {
-      definition.coalesced = true;
+      definition.coalesced = std::ranges::none_of(entity.args, [&](const ast::TemplateArg& a) {
+        return names_tu_local(program, a, true);
+      }) && std::ranges::none_of(entity.args, [&](const ast::TemplateArg& a) {
+        return a.kind == ast::TemplateArgKind::type && internal_type(a.type);
+      });
       if (!dynamic_member(tu.functions.size() - 1)) return tu;
     } else if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&

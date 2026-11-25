@@ -3578,8 +3578,21 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 - Tests: `tests/own/classes/virtual-dispatch` (13 run tests from the spec, two with Clang peers)
   on macOS; `unit.linux_virtual_dispatch` links the same tests with GCC and Clang on Linux
   (with `-fno-exceptions`: local unwind cleanups around throwing calls are #1104/#648's).
-- Not yet: class templates with virtual members, local and internal-linkage classes,
-  non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
+- Class template specializations are dynamic classes too (#1153): implicit ones from
+  `Program::instantiate_class` (primary and partial patterns), explicit ones as ordinary classes
+  with a key function. `complete_virtual_members` and `pure_final_overriders` serve both class
+  definitions and instantiations; a pattern itself has no layout, is never abstract, and leaves
+  `override`, return types and noexcept conditions to its specializations when its base is
+  written there (`may_override_dependent_base`, `validate_override`). `instantiating_bases_` gives
+  a specialization's members its substituted base while they are analysed.
+- An implicit specialization has no key function: its table, RTTI and the members of its slots are
+  weak. `instantiate_all` requires the slots' definitions only when the unit emits a constructor
+  or destructor that installs the table, or a key function that owns it ([temp.inst]). Synthesized
+  constructors and destructors of dynamic classes are walked and emitted where something uses
+  them (`Program::emitted_on_use`).
+  [[temp.inst]](https://eel.is/c++draft/temp.inst) · [#1153](https://github.com/yrashk/ycxx/issues/1153)
+- Not yet: specializations for TU-local types (blocked in `dynamic_member`, #1155), classes nested
+  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
   #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
   virtual bases (#310); follow-ups are listed in #309.
   [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)

@@ -857,15 +857,16 @@ defined later, also out of class (`class O::I : public B { … };`), with member
 can have virtual functions. Nested classes of class templates are not supported yet.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
 
-**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary non-template classes with
-external linkage and single public nonvirtual inheritance can declare virtual functions, virtual
-destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
+**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
+class templates with external linkage and single public nonvirtual inheritance can declare virtual
+functions, virtual destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
 implicit or written constructors, copied and destroyed; virtual calls dispatch to the final
 overrider, and calls during construction and destruction use the class being built or torn down.
 Virtual members can be defined out of class. The unit defining the key function emits the vtable
 and RTTI, and classes without one get weak tables where they are constructed or destroyed. The objects link and interoperate
-with Clang and GCC objects. Class templates with virtual members, internal-linkage and local
-classes, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
+with Clang and GCC objects. A class template can have polymorphic, dependent bases, and each
+specialization's table and virtual members are weak, instantiated where the table is used.
+Internal-linkage and local classes, specializations for them, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
 yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·
 [#1154](https://github.com/yrashk/ycxx/issues/1154) · [#1155](https://github.com/yrashk/ycxx/issues/1155)
 

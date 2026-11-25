@@ -6785,6 +6785,9 @@ public:
                                        begin, end, info));
     }
     if (virtual_slot) {
+      // A virtual function that is not pure is odr-used ([basic.def.odr]): a specialization's is instantiated.
+      if (!d->is_pure && w_->entities.rec(w_->entities.rec(d->entity).scope).templ != EntityId::none)
+        demands.push_back({d->entity, ast::Loc{item_, loc_base_ + begin}});
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
       // in-place insert after a one-element vector as writing past its allocation (#748).
       // Without the bug: `std::vector<QualType> parameters{o.type()};` and

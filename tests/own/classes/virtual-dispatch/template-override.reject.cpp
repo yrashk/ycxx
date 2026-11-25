@@ -41,3 +41,13 @@ template <class T> struct NotVirtual {
   int f() final { return 9; } //! error
 };
 NotVirtual<int> not_virtual;
+
+template <class T> struct NothingToOverride : Base {
+  int nothing() override { return 10; } //! error
+};
+NothingToOverride<int> nothing;
+
+template <class T> struct FinalBase : Base {
+  int h() override { return 11; } //! error
+};
+FinalBase<int> final_base;

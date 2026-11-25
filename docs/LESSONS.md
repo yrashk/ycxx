@@ -595,7 +595,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 - **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
   with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
-  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
+  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`), or in `gcc:16`
+  with `--pull never` where that platform of it is already local (#1153). On #309 this
   ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
   - Learned on #309.
 

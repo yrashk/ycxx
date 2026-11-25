@@ -16,6 +16,11 @@ template <class T> struct Square : Shape<T> {
 };
 static_assert(!__is_abstract(Square<int>) && __has_virtual_destructor(Square<int>));
 
+template <class T> struct Defaulted : Shape<T> {
+  ~Defaulted() override = default;
+  T area() const override { return 5; }
+};
+
 struct Unit : Shape<long> {
   long area() const override { return 1; }
 };
@@ -36,6 +41,9 @@ int main() {
   Square<int> s(3);
   Shape<int>& r = s;
   if (r.doubled() != 18) return 1;
+  Defaulted<int> dd;
+  Shape<int>& rd = dd;
+  if (rd.doubled() != 10) return 5;
   Unit u;
   Shape<long>* p = &u;
   if (p->doubled() != 2) return 2;

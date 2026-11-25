@@ -318,7 +318,17 @@ including the mixed-object peers.
 A field declared through `decltype` keeps the class out (sema can lose an alias's alignment
 there, #1167), as does a class in an unnamed namespace (#1155).
 
-Class templates, local and internal-linkage classes, other base shapes (non-polymorphic or
+A class template specialization is a dynamic class by the same rules (#1153). Its template's
+definition is never laid out or abstract, and checks no override that could depend on an argument;
+each specialization checks its members against its substituted base. An implicit specialization
+has no key function: every unit that installs its table emits the table, its RTTI and the virtual
+members in its slots weakly, instantiating those members there ([temp.inst] leaves it unspecified
+whether unused ones are). Synthesized special members of every dynamic class, the implicit
+destructor included, are emitted only where something uses them, so a table that nothing installs
+instantiates nothing. A specialization for a TU-local type needs a local table (#1155).
+[[temp.inst]](https://eel.is/c++draft/temp.inst)
+
+Local and internal-linkage classes, other base shapes (non-polymorphic or
 non-public bases, multiple inheritance), `delete` through a virtual destructor, covariant returns,
 `typeid`, and constant evaluation of dynamic objects remain open; their issues are listed in #309.
 
