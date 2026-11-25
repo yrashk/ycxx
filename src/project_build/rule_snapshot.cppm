@@ -30,6 +30,7 @@ struct RuleObservation {
   Fp128 package;
   Fp128 invocation;
   std::vector<RuleProbeSnapshot> projections = {};
+  std::optional<Fp128> witness = std::nullopt;
 };
 
 struct RuleSnapshot {
@@ -37,6 +38,7 @@ struct RuleSnapshot {
   std::vector<RuleObservation> observations;  // in expansion order
   std::vector<RuleProbeSnapshot> probes;
   std::vector<RuleProbeSnapshot> pending_projections = {};  // in-memory watch state for a failed rule
+  std::optional<RuleExpansion> pending_witness = std::nullopt;
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
@@ -168,6 +170,8 @@ struct StoredRule {
   std::optional<std::vector<RuleCapabilityBinding>> capabilities = std::nullopt;
   std::optional<std::vector<StoredProbe>> projections = std::nullopt;
   std::optional<std::vector<PlanFact>> capability_facts = std::nullopt;
+  std::optional<std::string> value_export = std::nullopt;
+  std::optional<std::string> witness = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -232,6 +236,10 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
         .reads = std::move(item.reads),
     };
     if (item.capabilities) demand.capabilities = std::move(*item.capabilities);
+    demand.value_export = std::move(item.value_export);
+    const auto witness = item.witness ? decode_fp(*item.witness) : std::nullopt;
+    if (item.witness.has_value() != witness.has_value() ||
+        demand.value_export.has_value() != witness.has_value()) return std::nullopt;
     std::vector<RuleProbeSnapshot> projections;
     if (item.projections)
       for (auto& projection : *item.projections) {
@@ -239,10 +247,14 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
         if (!restored) return std::nullopt;
         projections.push_back(std::move(*restored));
       }
-    if (!demand.capabilities.empty() && (projections.empty() || !item.capability_facts ||
-                                        item.capability_facts->size() != demand.capabilities.size()))
+    const bool compiler_bindings = std::ranges::any_of(demand.capabilities, [](const auto& binding) {
+      return !binding.value;
+    });
+    const auto facts = demand.capabilities.size() + (demand.value_export ? 1 : 0);
+    if ((compiler_bindings && projections.empty()) ||
+        (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
       return std::nullopt;
-    result.observations.push_back({demand, *package, *invocation, std::move(projections)});
+    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness});
     result.expansions.push_back({std::move(demand), std::move(item.definition),
                                  item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
@@ -267,10 +279,12 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     };
     if (!demand.capabilities.empty()) {
       rule.capabilities = demand.capabilities;
-      rule.capability_facts = expansion.capability_facts;
       auto& projections = rule.projections.emplace();
       for (const auto& probe : observed.projections) projections.push_back(store_probe(probe));
     }
+    if (!expansion.capability_facts.empty()) rule.capability_facts = expansion.capability_facts;
+    rule.value_export = demand.value_export;
+    if (observed.witness) rule.witness = hex(*observed.witness);
     saved.rules.push_back(std::move(rule));
   }
   if (!snapshot.probes.empty()) {
