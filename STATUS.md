@@ -3058,7 +3058,7 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
   [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
 
-## 128-bit integers, slices 1–3 (#1172)
+## 128-bit integers (#1172)
 
 - `__int128` and `unsigned __int128` are `ast::Builtin::int128` and `unsigned_int128`, after
   `unsigned_long_long`, so `ast::is_integral` covers them. `ast::is_extended_signed` and
@@ -3082,13 +3082,25 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   bounds reject it. Substitution checks a dependent array bound against the target's
   `size_t` range before conversion. [#1212](https://github.com/yrashk/ycxx/issues/1212)
 - Static data of 16-byte integer type is written with its high half.
+- **Native code**: L2 has `i128` (`ycxx.ir.l2`), and `lower` writes `i128` operations for every
+  target. `legalize` (`ycxx.ir.legalize`) is an L2-to-L2 pass, run at the end of the `lower` cell,
+  that expands what `Int128Support` does not list for the target: into two i64 halves, with carries
+  and the new `umulh`, or into a call of a compiler runtime function (`ir::Runtime`; `Lowered::runtime`
+  carries the symbols to the object). The table is empty for AArch64 and x86-64. `unit.lower` runs
+  it for a mock target with native 128-bit `add`, `load` and `store`. Both code generators refuse a
+  body with an `i128` left in it.
+- **Calls**: `lower` splits a 128-bit parameter, argument or result into two integer words
+  (`LowerConfig::int128_in_words`). Both go in registers when two are left, else on the stack at
+  16 bytes. Apple's arm64 convention has no even-numbered-register rule (measured with Clang and
+  GCC as black boxes). A class holding one is placed the same way.
 - Not yet:
-  - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
-    bytes" (#1172, slice 4).
+  - A 128-bit integer through an ellipsis, or named in a variadic function on x86-64 (#1247).
   - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
     are diagnosed as not supported (#1176).
 - Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
-  peer). `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
+  peer, native arithmetic against constant evaluation, and calls in both directions with a Clang
+  peer), and `unit.linux_int128` runs the native ones on x86-64 Linux with GCC and Clang peers.
+  `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
   `-Wno-pedantic` for the oracles.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)

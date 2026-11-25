@@ -114,6 +114,8 @@ namespace ycxx::aarch64 {
 
 std::expected<MachineCode, std::string> compile_function(const l2::Function& body, std::span<const ir::EntityId> defined,
                                                          const CallingConvention& cc) {
+  if (std::ranges::contains(body.values, l2::Type::i128, &l2::Value::type))
+    return std::unexpected("an i128 value was not legalized");
   auto m = select(body, defined, cc);
   if (!m) return std::unexpected(m.error());
   allocate_slots(*m, cc);
