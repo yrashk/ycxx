@@ -1,0 +1,31 @@
+// ACTION: run
+// Add and then remove an evaluated use while keeping the sizeof operand unchanged.
+// The type-only states exit 0 and the live state exits 23 after invoking the callback.
+--- main.cpp
+#include "deduced-callback.hpp"
+int main() { return 0; }
+--- deduced-callback.hpp
+template<class Key>
+struct CallbackSource {
+    static auto evaluate() { return 61L; }
+};
+
+template<class Key>
+struct DeferredCallback {
+    inline static long (*volatile callback)() = &CallbackSource<Key>::evaluate;
+
+    static long invoke() { return DeferredCallback<Key>::callback(); }
+    static auto inspect() { return invoke(); }
+};
+
+static_assert(sizeof(DeferredCallback<int>::inspect()) == sizeof(long));
+=== edit
+--- main.cpp
+#include "deduced-callback.hpp"
+int main() {
+    return DeferredCallback<int>::invoke() == 61L ? 23 : 1;
+}
+=== edit
+--- main.cpp
+#include "deduced-callback.hpp"
+int main() { return 0; }
