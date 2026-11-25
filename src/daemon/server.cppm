@@ -19,6 +19,8 @@
 export module ycxx.daemon:server;
 
 import std;
+import ycxx.build.plan;
+import ycxx.build.project;
 import ycxx.compile;
 import ycxx.engine;
 import ycxx.lsp;
@@ -263,6 +265,9 @@ class Server {
         return;
       case Kind::await_change:
         if (auto r = decode<AwaitChange>(*frame)) serve_await_change(fd, *r);
+        return;
+      case Kind::project_build:
+        if (auto r = decode<ProjectBuildRequest>(*frame)) serve_project_build(fd, *r);
         return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
@@ -529,8 +534,9 @@ class Server {
     log(dropped ? "a trace watcher fell behind and was dropped" : "a trace watcher detached");
   }
 
-  // `ycxx cxx --watch` between builds (#245): answers once the revision is past the one the last
-  // build started from, whoever applied the batch (another request, the LSP, or this wait, which
+  // Waits between watch builds (#245, #1263). An observed plan change wakes a project build even
+  // if no compiler file input changed. Otherwise the revision must pass the one the last build
+  // started from, whoever applied the batch (another request, the LSP, or this wait, which
   // applies batches as a request's tick would). Ends unanswered on a hang-up or the stop, which
   // shuts it down like an LSP session.
   void serve_await_change(int fd, const AwaitChange& r) {
@@ -549,24 +555,87 @@ class Server {
     }
     // No build answered (refused, failed): wait from now, never answer at once.
     const std::uint64_t since = r.instance == 0 ? revision() : r.since;
-    send(fd, Kind::watching, WatchedFiles{table_.present_keys()});
+    std::vector<std::string> paths = table_.present_keys();
+    const auto observe_project = [&] { return build::watch_project(r.project->cwd, r.project->target); };
+    bool plan_changed = false;
+    if (r.project) {
+      auto observed = observe_project();
+      paths.append_range(std::move(observed.paths));
+      std::ranges::sort(paths);
+      paths.erase(std::ranges::unique(paths).begin(), paths.end());
+      plan_changed = observed.stamp != r.project->stamp;
+    }
+    send(fd, Kind::watching, WatchedFiles{std::move(paths)});
     // Without a watcher a batch is a rescan of the whole table: less often.
     const auto every = watcher_ ? std::chrono::milliseconds(150) : std::chrono::milliseconds(1000);
     do {
-      if (const std::uint64_t now = revision(); now > since) {
-        send(fd, Kind::changed, Changed{now - since});
+      if (const std::uint64_t now = revision(); now > since || plan_changed) {
+        send(fd, Kind::changed, Changed{now > since ? now - since : 1});
         break;
       }
       {
         std::lock_guard g(conn_mu_);
         if (lsp_closed_) break;
       }
-      std::unique_lock strand(strand_mu_, std::try_to_lock);
-      if (strand && (running_ == 0 || admission_.may_apply(Clock::now())) && apply_batch(false) > 0)
-        admission_.applied(Clock::now());
-    } while (!wait_readable(fd, every));
+      {
+        std::unique_lock strand(strand_mu_, std::try_to_lock);
+        if (strand && (running_ == 0 || admission_.may_apply(Clock::now())) && apply_batch(false) > 0)
+          admission_.applied(Clock::now());
+      }
+      if (wait_readable(fd, every)) break;
+      if (r.project) plan_changed = observe_project().stamp != r.project->stamp;
+    } while (true);
     std::lock_guard g(conn_mu_);
     lsp_fds_.erase(fd);
+  }
+
+  void serve_project_build(int fd, const ProjectBuildRequest& r) {
+    auto cwd = real_path(r.cwd);
+    if (!cwd || r.target.empty() || r.target == "." || r.target == ".." ||
+        r.target.contains('/') || r.target.contains('\0')) {
+      send(fd, Kind::project_build_done, ProjectBuildDone{1, {}, {"invalid workspace or target name"}, 0});
+      return;
+    }
+    auto& sess = session();
+    auto mode = compile::Trace::off;
+    if (r.trace) mode = r.trace_live ? compile::Trace::live : r.trace_values ? compile::Trace::values : compile::Trace::events;
+    auto traced = trace_for(fd, mode, "build " + r.target);
+    std::optional<WatchedProject> watched;
+    if (r.watch) watched = WatchedProject{*cwd, r.target, build::watch_project(*cwd, r.target).stamp};
+    std::optional<std::uint64_t> started_at;
+    auto refresh = [&] {
+      std::lock_guard strand(strand_mu_);
+      catch_up();
+      if (!started_at && watched) {
+        std::lock_guard g(stats_mu_);
+        started_at = stats_.revision;
+      }
+    };
+    auto cancelled = [&] { return hung_up(fd); };
+    auto apply = [&](const std::function<void(engine::Db&)>& write) {
+      std::lock_guard strand(strand_mu_);
+      restarted(sess.apply(write));
+    };
+    auto publish = [&](engine::Revision revision, const std::function<void()>& write) {
+      std::lock_guard strand(strand_mu_);
+      if (cancelled()) return false;
+      catch_up();
+      if (sess.db().revision() != revision || cancelled()) return false;
+      write();
+      return true;
+    };
+    auto tick = [&] {
+      if (traced && !cancelled()) traced->pump(), traced->flush_client();
+    };
+    auto report = build_->run(*cwd, r.target, refresh, cancelled, apply, publish, tick,
+                              traced ? traced->tracer() : nullptr);
+    if (traced) {
+      traced->finish();
+      if (!cancelled()) traced->flush_client();
+    }
+    if (!cancelled()) send(fd, Kind::project_build_done, ProjectBuildDone{
+        report.status, std::move(report.output), std::move(report.diagnostics), report.actions_executed,
+        started_at.value_or(0), std::move(watched)});
   }
 
   void serve_compile(int fd, const compile::Request& r) {
@@ -955,6 +1024,7 @@ class Server {
       session_ = std::make_unique<pipeline::Session>(*pool_, o_.build_checkpoint);
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
       session_->set_reader([this](const std::string& path) { return table_.read(path); });
+      build_ = std::make_unique<build::Coordinator>(*session_);
     });
     return *session_;
   }
@@ -1009,6 +1079,7 @@ class Server {
   std::once_flag session_once_;
   std::unique_ptr<engine::Pool> pool_;           // outlives the session
   std::unique_ptr<pipeline::Session> session_;  // created once, for the daemon's life
+  std::unique_ptr<build::Coordinator> build_;
   std::mutex provided_mu_;
   std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells
   std::vector<std::string> system_dirs_;

@@ -1023,6 +1023,8 @@ public:
   const std::vector<Diagnostic>& diags_of(const typename Q::Key& k);
 
   Revision revision() const noexcept { return revision_.load(std::memory_order_relaxed); }
+  // Reserve an event ID for coordinator work observed alongside queries in this database.
+  std::uint64_t reserve_trace_id() noexcept { return trace_ids_.fetch_add(1, std::memory_order_relaxed); }
   // Frames started and not yet finished.
   std::size_t live_frames() const noexcept { return live_.load(std::memory_order_acquire); }
   Stats stats() const noexcept;
@@ -2600,7 +2602,7 @@ void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer*
 
 Span Db::open_span() noexcept {
   Span s;
-  s.id = trace_ids_.fetch_add(1, std::memory_order_relaxed);
+  s.id = reserve_trace_id();
   s.start = std::chrono::steady_clock::now();
   s.worker = worker_now();
   return s;

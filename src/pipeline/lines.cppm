@@ -51,9 +51,6 @@ std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& regi
 // first token.
 engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileId file, ast::ItemId item);
 
-// File contents as this revision sees them. An open buffer takes precedence in the editor view.
-const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name);
-
 struct SourcePosition {
   std::uint32_t offset;
   std::string where;  // file:line:column
@@ -94,15 +91,6 @@ std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& regi
   return std::nullopt;
 }
 
-const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name) {
-  std::filesystem::path p(name);
-  if (p.is_relative() && !source.cwd.empty()) p = std::filesystem::path(source.cwd) / p;
-  const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-  if (source.config.view == pp::View::editor)
-    if (const auto& open = cx.fetch<pp::Buffer>(id)) return open;
-  return cx.fetch<pp::FileContent>(id);
-}
-
 engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileId file, ast::ItemId item) {
   const pp::Source* source = db.peek<pp::SourceOf>(file);
   const pp::Region* region = db.peek<pp::Pp>(file);
@@ -118,20 +106,11 @@ engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileI
     if (a.file >= region->files.size()) return {};
     const bool main = a.file == 0;
     const std::string& name = main ? source->path : region->files[a.file];
-    // The text preprocessing read, as `source_content` finds it: the editor's buffer first in the
-    // editor view.
     const std::string* text = nullptr;
-    if (main && source->config.view == pp::View::disk) {
+    if (main && source->config.view == pp::View::disk)
       text = db.peek<pp::FileText>(file);
-    } else if (name != "<built-in>") {
-      std::filesystem::path p(name);
-      if (p.is_relative() && !source->cwd.empty()) p = std::filesystem::path(source->cwd) / p;
-      const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-      if (source->config.view == pp::View::editor)
-        if (const auto* open = db.peek<pp::Buffer>(id); open && *open) text = &**open;
-      if (!text)
-        if (const auto* content = db.peek<pp::FileContent>(id); content && *content) text = &**content;
-    }
+    else if (name != "<built-in>")
+      text = pp::peek_source_content(db, *source, name);
     if (!text) return {main ? name : region->file_names[a.file]};
     // One table per thread, for the last text it measured: a unit's functions share it.
     thread_local struct {
@@ -162,7 +141,7 @@ std::string SourceLocations::at(pp::TokLoc loc) {
       std::lock_guard lock(ps.mutex);
       it = lines_.try_emplace(loc.file, ps.builtin_text()).first;
     } else {
-      const auto& text = source_content(cx_, source_, name);
+      const auto& text = pp::source_content(cx_, source_, name);
       if (!text) return {};
       it = lines_.try_emplace(loc.file, *text).first;
     }

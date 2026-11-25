@@ -194,6 +194,14 @@ struct TBuiltinSpec {
   SeqId<TemplateArg> args;
 };
 
+// A dependent alias in a type default whose written arguments still require substitution.
+// `result` is the expanded type used for deduction and mangling ([temp.alias]).
+struct TDeferredAlias {
+  EntityId alias = EntityId::none;
+  SeqId<TemplateArg> args;
+  QualType result;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -204,7 +212,8 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr, TPackIndex>;
+                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr, TPackIndex,
+                              TDeferredAlias>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

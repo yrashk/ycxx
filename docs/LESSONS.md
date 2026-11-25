@@ -552,6 +552,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `docker run --rm -v "$PWD":/src:ro gcc:16 …`, copying the tree and running cmake and ctest
     directly (`tools/sync-submodules` cannot see a worktree's `.git` from inside the container).
   - Learned on #96/#97.
+- **Choose the module partition before starting the build.** The action runner's platform
+  helper was added after CMake had produced the active Ninja graph. That build had no mapping
+  for its import. On regeneration, an interface partition imported privately was rejected.
+  - Do: stop the active build before changing module edges, let CMake regenerate, and use an
+    implementation partition for a helper imported only by the primary module.
+  - Learned on #1255.
 - **A watcher test that passes at once may not test the race.** The FSEvents test of "an edit
   between the read and the new stream" passed with the replay removed: a stream created "since
   now" still saw an event `fseventsd` had not journaled yet.
@@ -988,6 +994,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     target only where the code is target-specific (object format, calling convention). Before
     porting a feature, compile its fixtures for both targets and diff the results.
   - Learned on #650.
+- **Name target capabilities for the operation a caller needs.** The first #1241
+  version used `int3_statement_asm`, exposing the x86 mnemonic in a capability
+  check. Use a name such as `breakpoint_statement_asm`. Keep the accepted
+  mnemonic in the target profile and the machine encoding in the backend.
+  When reviewing a capability, ask whether its name would still fit a second
+  target that implements the same operation.
+  Learned on #1012.
 - **On macOS the configured C++ compiler is Homebrew GCC, not the platform's C++ ABI.** Apple's
   arm64 RTTI convention (private-external vague-linkage descriptors, bit 63 on the name pointer)
   and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`

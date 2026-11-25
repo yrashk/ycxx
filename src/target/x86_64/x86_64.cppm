@@ -613,6 +613,12 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[1], rcx);
       e_.reg({0x0f, 0xaf}, rax, rcx);  // imul
       break;
+    case Op::umulh:
+      read(ops[0]);
+      read(ops[1], rcx);
+      e_.reg({0xf7}, 4, rcx);  // mul rcx: RDX:RAX = RAX * RCX
+      e_.move(rax, rdx);
+      break;
     case Op::sdiv: case Op::udiv: case Op::srem: case Op::urem: {
       Type type = body_.type(body_.result(n));
       if (type != Type::i32 && type != Type::i64)
@@ -832,6 +838,8 @@ std::expected<MachineCode, std::string> compile_function(const l2::Function& bod
                                                          std::span<const ir::EntityId> direct_symbols,
                                                          std::span<const ir::EntityId> got_symbols) {
   if (auto valid = l2::verify(body); !valid) return std::unexpected(valid.error());
+  if (std::ranges::contains(body.values, Type::i128, &l2::Value::type))
+    return std::unexpected("an i128 value was not legalized");
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
   return Emitter(body, *frame, direct_symbols, got_symbols).run();
