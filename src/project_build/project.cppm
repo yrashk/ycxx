@@ -17,6 +17,7 @@ import ycxx.build.toolchain_matrix;
 import ycxx.engine;
 import ycxx.hash;
 import ycxx.lsp;
+import ycxx.obj.archive;
 import ycxx.pipeline;
 import ycxx.pp;
 
@@ -252,6 +253,7 @@ Fp128 action_key(const GeneratorPlan& generator) {
 }
 
 using ActionOutputs = std::vector<NamedArtifact>;
+using LookupActionOutputs = std::function_ref<const ActionOutputs*(std::size_t)>;
 
 template<class Lookup>
 bool append_artifact_inputs(const GeneratorPlan& generator, Lookup lookup, std::vector<ActionInput>& inputs) {
@@ -292,11 +294,30 @@ ActionResolution resolve_actions(const ProjectPlan& plan, Lookup lookup) {
   return result;
 }
 
-Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<Fp128>>& keys) {
+struct LinkArtifact {
+  std::string name;
+  std::span<const std::uint8_t> bytes;
+};
+
+LinkArtifact link_artifact(const ProjectPlan& plan, const LinkInputPlan& input, LookupActionOutputs output_at) {
+  const auto& generator = plan.generators[input.producer];
+  const auto& output = generator.action.outputs[input.output];
+  return {generated_path({}, generator.name, output.filename), (*output_at(input.producer))[input.output].contents.bytes};
+}
+
+Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<Fp128>>& keys,
+                      LookupActionOutputs output_at) {
   std::vector<std::pair<std::string_view, Fp128>> generated;
   for (std::size_t i = 0; i < plan.generators.size(); ++i)
     if (plan.generators[i].native_outputs) generated.emplace_back(plan.generators[i].name, *keys[i]);
-  return fingerprint(std::tie(plan.sources, generated));
+  std::vector<std::pair<std::string, Fp128>> archives;
+  for (const auto& input : plan.link_inputs) {
+    auto [name, bytes] = link_artifact(plan, input, output_at);
+    archives.emplace_back(std::move(name), fingerprint128(bytes));
+  }
+  // Ordered archive bytes enter the link. A recipe edit with the same output
+  // retains the existing native request, irrespective of the action receipt key.
+  return fingerprint(std::tie(plan.sources, generated, archives));
 }
 
 struct Demand {
@@ -315,12 +336,15 @@ struct WorkspaceBuild {
     const auto& snapshot = cx.fetch<WorkspacePlan>(key);
     const auto& plan = snapshot.resolved;
     Demand demand{};
-    demand.actions = resolve_actions(plan, [&](Fp128 action) -> const ActionOutputs* {
-      const auto& receipt = cx.fetch<ActionReceipt>(action);
-      return receipt ? &*receipt : nullptr;
-    });
+    const auto receipt = [&](Fp128 action) -> const ActionOutputs* {
+      const auto& stored = cx.fetch<ActionReceipt>(action);
+      return stored ? &*stored : nullptr;
+    };
+    demand.actions = resolve_actions(plan, receipt);
     if (!demand.actions.pending.empty()) co_return demand;
-    demand.native_plan = native_plan_key(plan, demand.actions.keys);
+    demand.native_plan = native_plan_key(plan, demand.actions.keys, [&](std::size_t i) {
+      return receipt(*demand.actions.keys[i]);
+    });
     const auto& prepared = cx.fetch<PreparedBuild>(snapshot.workspace);
     if (!prepared || prepared->output != key || prepared->plan != demand.native_plan) {
       demand.prepare = true;
@@ -344,7 +368,7 @@ namespace {
 std::string native(const fs::path& path) { return path.generic_native_encoded_string(); }
 
 pipeline::RequestId register_native(pipeline::Session& session, const std::string& cwd, const std::string& target,
-                                    const ProjectPlan& plan) {
+                                    const ProjectPlan& plan, LookupActionOutputs output_at) {
   pipeline::BuildKey build;
   for (const auto& source : plan.sources) {
     pp::Config config;
@@ -356,7 +380,25 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
     const std::string object = source.path + ".o";
     build.units.push_back(session.unit({source.path, cwd, std::move(config), object}));
   }
-  build.program = session.program({.tus = build.units, .objects = {}, .identifier = target});
+  std::optional<pipeline::ArchiveLinkInputs> archives;
+  if (!plan.link_inputs.empty()) {
+    using enum pipeline::LinkOperand::Kind;
+    const auto format = pp::native_target == &ast::x86_64_linux ? obj::target::x86_64_linux : obj::target::aarch64_macos;
+    archives.emplace(pipeline::ArchiveLinkInputs{.target = format, .operands = {}, .archives = {}});
+    for (std::size_t i = 0; i < build.units.size(); ++i) archives->operands.push_back({source, i});
+
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> positions;
+    for (const auto& input : plan.link_inputs) {
+      const auto [position, inserted] = positions.try_emplace({input.producer, input.output}, archives->archives.size());
+      if (inserted) {
+        auto [name, bytes] = link_artifact(plan, input, output_at);
+        archives->archives.emplace_back(std::move(name), std::string(bytes.begin(), bytes.end()));
+      }
+      archives->operands.push_back({archive, position->second});
+    }
+  }
+  build.program = session.program({.tus = build.units, .objects = {}, .identifier = target,
+                                   .archive_link = std::move(archives)});
   return session.request(std::move(build));
 }
 
@@ -1391,7 +1433,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (demand->prepare) {
-        const auto request = register_native(session_, workspace_path, target, plan);
+        const auto request = register_native(session_, workspace_path, target, plan, output_at);
         std::map<std::string, std::string> generated;
         for (std::size_t index = 0; index < plan.generators.size(); ++index) {
           const auto& generator = plan.generators[index];
