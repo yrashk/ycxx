@@ -1135,9 +1135,9 @@ private daemons.
     request. Concurrent clients include two requests of one file and a distinct build root
     reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
-  - `daemon.compare`, `daemon.process`, `daemon.trace` and `unit.linux_elf_comdat` put their
-    private daemon runtimes under `TMPDIR` when the socket path fits, with `/tmp` as the fallback
-    for long paths (#793).
+  - `daemon.compare`, `daemon.process`, `daemon.trace`, `unit.linux_basic_asm` and
+    `unit.linux_elf_comdat` put their private daemon runtimes under `TMPDIR` when the socket path
+    fits, with `/tmp` as the fallback for long paths (#793, #1273).
 - The first persistence slice (#17) shares phase-1 and phase-2 source preparation in immutable
   mapped snapshot files. A selected query cell can be loaded at quiescence with its direct input
   dependency fingerprints and then verified by the usual engine path. The lexer borrows mapped
