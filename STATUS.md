@@ -2280,9 +2280,11 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   identity and for symbols, which write `TnDa`/`TnDc` (`TpTnDa` for a pack) before the argument, as
   Clang and GCC do (GCC writes none for an empty pack).
 - Tests: `tests/own/templates/placeholder-parameters/`, with a Clang peer for the symbols.
-- Not yet: `C auto X` (#286), `auto* P`, `auto& R`, and `decltype(auto)` of a parenthesized lvalue,
-  which deduces the prvalue's type instead of a reference (#1401). A floating-point argument is
-  rejected (#317), and a `nullptr` argument has no symbol yet (#64).
+- Not yet: `C auto X` (#286), `auto* P`, `auto& R`, and `decltype(auto)` of a parenthesized lvalue
+  or a reference, which deduces the prvalue's type instead of a reference (#1401). A floating-point
+  argument is rejected (#317), and a `nullptr` argument has no symbol yet (#64). `decltype(X)` in
+  a function template's signature is mangled as `T_`, not `DtT_E` (#1406), and an alias template
+  passes `I<'a'>` on as a `char` where its pattern's parameter is `int` (#1405).
 
 ## Pack-index-specifiers (#297)
 
