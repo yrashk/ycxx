@@ -28,14 +28,17 @@ std::pair<std::string_view, double> native_clock() {
   return {"mach_absolute_time", double(numerator) / denominator};
 }
 
-std::uint64_t rss_bytes(long amount) { return std::uint64_t(amount); }
+std::optional<std::uint64_t> rusage_max_rss_bytes(long amount) {
+  if (amount <= 0) return {};
+  return std::uint64_t(amount);
+}
 
-std::optional<std::uint64_t> resident_memory() {
+std::optional<ResidentMemory> resident_memory() {
   mach_task_basic_info_data_t info{};
   mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
   if (::task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
         reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) return {};
-  return info.resident_size;
+  return ResidentMemory{info.resident_size, info.resident_size_max, RssSource::mach_task_basic_info};
 }
 
 std::optional<HostTicks> host_cpu_ticks() {
