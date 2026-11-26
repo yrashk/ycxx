@@ -1030,7 +1030,10 @@ class Mangler {
         bool empty = p.pack && a.kind == ast::TemplateArgKind::pack && in_.seqs.size(a.elems) == 0;
         bool same = i < same_heads.size() && same_heads[i];
         const bool gcc = compatibility_ == ast::Compatibility::gcc;
-        const bool decl = p.kind == ast::TemplateArgKind::value    ? !gcc && (dependent(p.type) || empty)
+        // A placeholder parameter's `TnDa` both write, except GCC before an empty pack.
+        const bool placeholder = p.placeholder != ast::Placeholder::none;
+        const bool decl = p.kind == ast::TemplateArgKind::value    ? (placeholder ? !(gcc && empty)
+                                                                                  : !gcc && (dependent(p.type) || empty))
                           : p.kind == ast::TemplateArgKind::template_ ? (empty ? !gcc : !same)
                                                                       : p.type_constraint != ast::ConstId::none;
         if (decl) {

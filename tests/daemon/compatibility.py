@@ -58,6 +58,8 @@ template<class T> int variable(Box<N::value<T>>) { return 1; }
 template<class... Ts> int index(Ts...[0]) { return 2; }
 template<class T, T V> int typed() { return V; }
 template<class T, T... V> int empty_values() { return sizeof...(V); }
+template<auto V> int placeholder() { return V; }
+template<auto... V> int empty_placeholders() { return sizeof...(V); }
 template<class, class = int> struct Two {};
 template<template<class> class T> int different_head() { return 5; }
 template<class T> struct Y { template<class> using apply = T; };
@@ -65,7 +67,8 @@ template<template<class> class Q> struct Use {};
 template<class T> int member(Use<Y<T>::template apply>) { return 3; }
 int use() {
   return variable<int>(Box<true>{0}) + index<int>(0) + typed<int, 4>()
-       + member<int>(Use<Y<int>::apply>{}) + empty_values<int>() + different_head<Two>();
+       + member<int>(Use<Y<int>::apply>{}) + empty_values<int>() + different_head<Two>()
+       + placeholder<4>() + empty_placeholders<>();
 }
 int target() noexcept { return 4; }
 using Signature = int (*)();
@@ -83,6 +86,7 @@ SYMBOLS = {
     'index': ('_Z5indexIJiEEiDyT_Lm0E', '_Z5indexIJiEEiDyT_Li0E'),
     'typed': ('_Z5typedIiTnT_Li4EEiv', '_Z5typedIiLi4EEiv'),
     'empty-values': ('_Z12empty_valuesIiTpTnT_JEEiv', '_Z12empty_valuesIiJEEiv'),
+    'empty-placeholders': ('_Z18empty_placeholdersITpTnDaJEEiv', '_Z18empty_placeholdersIJEEiv'),
     'member': ('_Z6memberIiEi3UseIN1YIT_E5applyEE', '_Z6memberIiEi3UseIsr1YIT_EE5applyE'),
     'closure': ('_ZZ7closureiENUliE_8__invokeEi', '_ZZ7closureiENUliE_4_FUNEi'),
     'closure-prefix': ('_ZNK2ltIiEMUliE_clEi', '_ZNK2ltIiEUliE_clEi'),
@@ -216,6 +220,7 @@ def mangling(world):
             assert alternatives[use_second].encode() in names, (mode, key, sorted(names)[-45:])
             assert alternatives[not use_second].encode() not in names, (mode, key)
         assert b'_Z14different_headITtTyE3TwoEiv' in names, (mode, sorted(names)[-45:])
+        assert b'_Z11placeholderITnDaLi4EEiv' in names, (mode, sorted(names)[-45:])
 
     source = '''\
 int labelled(int) __asm("_first");
