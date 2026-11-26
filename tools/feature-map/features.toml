@@ -1536,7 +1536,8 @@ group = 'attr'
 clauses = ['dcl.attr.nouniqueaddr', 'intro.object']
 std = 'C++20'
 detect = '\bno_unique_address\b'
-status = 'missing'
+status = 'partial'
+note = 'Supported record layouts overlap empty fields and select eligible member tail padding by compatibility mode. Further layout cases remain open.'
 probe = '''
 struct E {}; struct S { [[no_unique_address]] E e; int i; };
 int main() { return sizeof(S) == sizeof(int) ? 0 : 1; }
