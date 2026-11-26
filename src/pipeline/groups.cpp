@@ -286,7 +286,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   SemaResult out;
   // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
   out.lex_errors = co_await cx.fetch<LexErrors>(file);
-  const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
   // What one Program says of the items [first, end): where each entity is first declared and the
   // bodies, for an editor's position requests (#170), whether or not the unit has errors; only what
   // the analysis reached, which analysing more would change (its diagnostics). Then its messages,
@@ -398,7 +398,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       const bool gcc_differs = classes.trivial_for_calls(c, ast::CallTriviality::gcc) &&
                                !classes.trivial_for_calls(c, ast::CallTriviality::itanium);
       shape.trivial_calls = classes.trivial_for_calls(c, call_rule);
-      shape.gcc_stack_calls = linux && call_rule == ast::CallTriviality::gcc && gcc_differs;
+      shape.gcc_stack_calls = target_is_linux && call_rule == ast::CallTriviality::gcc && gcc_differs;
       shape.layout_uncertain = uncertain.contains(c);
       shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
       {
@@ -412,7 +412,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
                                 (t.copy_constructor == ineligible && t.move_constructor == ineligible);
         // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
         shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && (!known || !nontrivial) &&
-                                    !(linux && nontrivial_destructor(c));
+                                    !(target_is_linux && nontrivial_destructor(c));
       }
       // Only a class outside the general dynamic layout lacks a native complete-object type.
       shape.layout_requires_virtual_support = record.virtual_layout_unsupported;
