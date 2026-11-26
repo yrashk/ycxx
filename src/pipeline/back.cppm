@@ -1311,13 +1311,14 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.constructor_table = d.constructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
-  for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
+  bool needs_nonthrowing = facts.classify(facts.return_type(d.decl.type)) == irgen::TypeClass::record;
+  for (std::uint32_t index = 0, count = seqs.size(locals); !needs_nonthrowing && index < count; ++index) {
     QualType type = seqs.at(locals, index).type;
     while (facts.classify(type) == irgen::TypeClass::array) type = facts.element(type);
-    if (facts.classify(type) != irgen::TypeClass::record) continue;
-    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
-    break;
+    needs_nonthrowing = facts.classify(type) == irgen::TypeClass::record;
   }
+  if (needs_nonthrowing)
+    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
   input.guards = d.guards;
   input.guard_acquire = d.guard_acquire;
   input.guard_release = d.guard_release;

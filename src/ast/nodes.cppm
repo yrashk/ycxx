@@ -112,6 +112,7 @@ struct Conditional {
   [[=sequenced(0)]] Child condition;
   [[=sequenced(1)]] Child then_;
   [[=sequenced(2)]] Child else_;
+  bool unchecked_class_copy = false;  // a class glvalue used the legacy value conversion
 };
 
 // `a[b]`: `a` is sequenced before `b` ([expr.sub]).

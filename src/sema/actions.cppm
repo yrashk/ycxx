@@ -12714,6 +12714,7 @@ public:
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;
+    bool unchecked_class_copy = false;
     // [expr.cond]/4.1: glvalues of one category, of a class and its base class: the derived one
     // converted to the base, as reference binding does.
     if (t.glvalue() && t.cat() == f.cat() && types().is_class(t.type()) && types().is_class(f.type())) {
@@ -12729,7 +12730,20 @@ public:
         return {NodeId::none, begin, end};
       }
       info = t.info;
+    } else if (t.glvalue() != f.glvalue() &&
+               (t.cat() == ValueCategory::lvalue || f.cat() == ValueCategory::lvalue) &&
+               types().is_class(t.type()) && same_unqualified(t.type(), f.type()) &&
+               object_cv(t.type()) == Cv::none && object_cv(f.type()) == Cv::none) {
+      // [expr.cond]/4: convert the lvalue to the other arm's class prvalue by copy
+      // initialization. The conditional's operand is an ordinary lvalue.
+      Ex& source = t.glvalue() ? t : f;
+      const QualType type = object_unqualified(t.type());
+      source = construct(type, {source}, source.begin, source.end, Construction::copy);
+      if (!source.ok()) return {NodeId::none, begin, end};
+      info = {type, ValueCategory::prvalue, 0};
     } else {
+      unchecked_class_copy = (t.glvalue() && types().is_class(t.type())) ||
+                             (f.glvalue() && types().is_class(f.type()));
       Ex a = rvalue(t), b = rvalue(f);
       QualType ta = a.type(), tb = b.type();
       if (ta == tb) {
@@ -12775,7 +12789,8 @@ public:
       t = a;
       f = b;
     }
-    return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
+    return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin), unchecked_class_copy},
+                begin, end, info);
   }
 
   // [expr.call]: a call to a named function or through a pointer to function. Each argument
