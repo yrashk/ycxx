@@ -113,7 +113,11 @@ struct DeclSema {
   SeqId<TemplateParamSema> template_params;
   u8 bit_width = 0;  // a non-static data member declared as a bit-field ([class.bit])
   bool is_virtual = false;  // a virtual member function ([class.virtual])
-  bool is_explicit = false;  // a constructor with a bare explicit specifier ([dcl.fct.spec])
+  bool is_explicit = false;  // a constructor whose explicit-specifier is true ([dcl.fct.spec])
+  // A constructor template's explicit-specifier whose condition is value-dependent on its own
+  // parameters: the condition as an atom (`VAtom`), read again after deduction
+  // ([temp.deduct.general], [over.match.funcs.general]); none otherwise.
+  ConstId explicit_condition = ConstId::none;
   bool is_mutable = false;  // a mutable non-static data member ([dcl.stc])
   // A named function declarator spelled an exception specifier, even if its type does not retain it.
   bool has_written_noexcept = false;

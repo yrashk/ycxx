@@ -1583,11 +1583,23 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
-- Ordinary constructors can spell bare `explicit` in class, in either order with `constexpr`.
+- Constructors and constructor templates, in ordinary classes and class templates, can spell
+  `explicit` or `explicit(constant-expression)` in class, in either order with `constexpr`.
   A matching out-of-class definition inherits the property. Copy-initialization excludes these
   constructors. Direct initialization includes them. Copy-list-initialization ranks them and
   diagnoses an explicit winner, including a default constructor or a temporary for a reference
-  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
+  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157, #715).
+  The condition is a contextually converted constant expression of type `bool`, and narrowing
+  is diagnosed. A condition that depends on a class template's parameters is evaluated when the
+  member is instantiated. One that is value-dependent on a constructor template's own parameters
+  is kept as an atom and read again after deduction, once the template's constraints are
+  satisfied. A substitution failure there fails deduction, and an explicit specialization leaves
+  copy-initialization ([temp.deduct.general], [over.match.funcs.general]). Conversion functions
+  (#339) and deduction guides (#316) do not take the specifier yet.
+- Constructor templates take part in overload resolution only when their associated
+  constraints are satisfied ([temp.deduct.general]/5, #1398). An atom spelled in a member of a
+  class template specialization, such as a member template's constraint, reads the enclosing
+  class's parameters with the specialization's arguments.
 - Both native targets coalesce eligible inline complete-object constructors across translation
   units. This covers in-class bodies and out-of-class bodies marked inline by a declaration
   ([dcl.inline], [basic.def.odr]). Translation-unit-local classes retain local constructor
@@ -1652,8 +1664,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, conditional
-  `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
+  member subobject whose class has an implicit constructor, and other `= default` forms
+  (#157, #244). A pack expansion in a mem-initializer is #1400.
 
 - Ordinary explicit class returns copy-initialize from an eligible named local or
   parameter as an xvalue, including parenthesized names. A written move constructor

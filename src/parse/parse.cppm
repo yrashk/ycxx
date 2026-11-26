@@ -1124,6 +1124,11 @@ public:
   // required).
   std::optional<bool> atom_satisfied(ConstId c, u32 point);
   std::map<u32, std::optional<bool>> atoms_;
+  // A value-dependent explicit-specifier's condition, atom `c` with its mapping substituted
+  // ([dcl.fct.spec]): whether the specialization is explicit, none when substitution into it
+  // fails ([temp.deduct.general]). Memoized as satisfaction is.
+  std::optional<bool> explicit_value(ConstId c, u32 point);
+  std::map<u32, std::optional<bool>> explicit_atoms_;
   std::set<u32> atom_errors_;  // the atoms whose satisfaction check raised a hard error
   // Whether an atom of normal form `c` is among them.
   bool satisfaction_failed(ConstId c) {
@@ -2610,6 +2615,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
+  std::optional<bool> explicit_value(ConstId c) override { return p_->explicit_value(c, point()); }
   void record_nested_constraint_operand(u32 begin, u32 end) override {
     p_->nested_constraint_operand_ends_.try_emplace(begin, end);
   }
@@ -3511,6 +3517,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
+  std::optional<bool> explicit_value(ConstId c) override { return p_->explicit_value(c, p_->end()); }
   void record_nested_constraint_operand(u32 begin, u32 end) override {
     at_.record_nested_constraint_operand(begin, end);
   }
@@ -6201,13 +6208,11 @@ private:
     if (ctor || dtor) {
       std::optional<u32> virtual_at;
       std::optional<u32> explicit_at;
-      auto flags = constructor_flags(ctor_at, dtor, dtor ? &virtual_at : nullptr, ctor ? &explicit_at : nullptr);
+      parse::Parser::ExplicitSpec explicit_spec{false};
+      auto flags = constructor_flags(ctor_at, dtor, dtor ? &virtual_at : nullptr, ctor ? &explicit_at : nullptr,
+                                     ctor ? &explicit_spec : nullptr);
       if (!flags) return bad();
-      if (explicit_at && (!s_.template_scopes.empty() || inst_ || member_template_)) {
-        s_.diag(*explicit_at, Diag::not_supported, Tk::kw_explicit);
-        return bad();
-      }
-      return special_member(c, ctor, *flags, virtual_at, explicit_at.has_value());
+      return special_member(c, ctor, *flags, virtual_at, explicit_spec);
     }
     std::vector<ast::AnnotationSema> annotations;
     if (ps_.is(Tk::l_square) && ps_.kind(1) == Tk::l_square) {
@@ -7643,9 +7648,11 @@ private:
   u32 constructor_start() {
     u32 next = ps_.past_attributes(0);
     while (ps_.kind(next) == Tk::kw_constexpr || ps_.kind(next) == Tk::kw_consteval || ps_.kind(next) == Tk::kw_inline ||
-           ps_.kind(next) == Tk::kw_static || ps_.kind(next) == Tk::kw_virtual ||
-           (ps_.kind(next) == Tk::kw_explicit && ps_.kind(next + 1) != Tk::l_paren))
+           ps_.kind(next) == Tk::kw_static || ps_.kind(next) == Tk::kw_virtual || ps_.kind(next) == Tk::kw_explicit) {
+      // `explicit ( constant-expression )` ([dcl.fct.spec]).
+      if (ps_.kind(next) == Tk::kw_explicit && ps_.kind(next + 1) == Tk::l_paren) next = ps_.past_parentheses(next + 1) - 1;
       next = ps_.past_attributes(next + 1);
+    }
     return next;
   }
 
@@ -7664,8 +7671,11 @@ private:
     return ps_.kind(next) == Tk::identifier && ps_.kind(next + 1) == Tk::l_paren;
   }
 
+  // `explicit_at`, for a constructor: where its explicit-specifier is, and in `explicit_spec` what
+  // it says.
   std::optional<u16> constructor_flags(u32 count, bool destructor, std::optional<u32>* virtual_at = nullptr,
-                                       std::optional<u32>* explicit_at = nullptr) {
+                                       std::optional<u32>* explicit_at = nullptr,
+                                       parse::Parser::ExplicitSpec* explicit_spec = nullptr) {
     using namespace sema::decl_flag;
     u16 flags = 0;
     u32 end = ps_.pos() + count;
@@ -7704,6 +7714,12 @@ private:
         }
         *explicit_at = ps_.pos();
         ps_.bump();
+        // A value-dependent condition of a constructor template waits for deduction
+        // ([over.match.funcs.general]); one that depends only on an enclosing class template's
+        // parameters is evaluated when the member is instantiated.
+        auto spec = ps_.explicit_specifier(/*want_atom=*/member_template_);
+        if (!spec) return std::nullopt;
+        if (explicit_spec) *explicit_spec = *spec;
         continue;
       }
       if (kind == Tk::kw_virtual) {
@@ -7877,7 +7893,8 @@ private:
 
   // A constructor or destructor declared in class `c` ([class.ctor], [class.dtor]), possibly
   // deleted ([dcl.fct.def.delete]).
-  void special_member(const ast::DeclSema& c, bool ctor, u16 flags, std::optional<u32> virtual_at, bool is_explicit) {
+  void special_member(const ast::DeclSema& c, bool ctor, u16 flags, std::optional<u32> virtual_at,
+                      parse::Parser::ExplicitSpec explicit_spec) {
     sema::Types& types = s_.types();
     u32 name_at = ps_.pos();
     if (!ctor) ps_.bump();
@@ -8004,7 +8021,10 @@ private:
     sem.linkage = ast::Linkage::external;
     sem.flags = flags;
     sem.is_virtual = is_virtual;
-    sem.is_explicit = is_explicit;
+    // A value-dependent condition is not explicit in a pattern: its specializations say
+    // ([dcl.fct.spec]). A constructor template's is read again after deduction.
+    sem.is_explicit = explicit_spec.value.value_or(false);
+    sem.explicit_condition = explicit_spec.atom;
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
     if (!defaults_trail(params, fs.params, name_at)) return bad();
@@ -11422,9 +11442,12 @@ NodeId Program::bind_member_default(EntityId cls, EntityId function, std::size_t
 // error. What it instantiates keeps its own diagnostics in its own cell.
 class AtomAnalysis {
 public:
-  AtomAnalysis(Program& p, const ast::VAtom& a, u32 point)
+  // `explicit_specifier`: the atom is an explicit-specifier's condition ([dcl.fct.spec]), contextually
+  // converted to bool, whose substitution failure fails deduction rather than being false.
+  AtomAnalysis(Program& p, const ast::VAtom& a, u32 point, bool explicit_specifier = false)
       : p_(&p), k_(p.index(a.item)), it_(&p.items().items[k_]), b_(p.world().ins, &p.arena_), q_(p, k_, false),
-        s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
+        s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a),
+        explicit_specifier_(explicit_specifier) {
     ps_.set_questions(q_);
     q_.at_point = point;
     q_.satisfying_atom = true;
@@ -11432,7 +11455,8 @@ public:
   }
 
   // Satisfied or not. An empty result means the initializer already reported a hard error.
-  std::optional<bool> run(std::vector<engine::Diagnostic>& hard) {
+  // `substitution_failed`, if given, is set when the expression is invalid for the mapping.
+  std::optional<bool> run(std::vector<engine::Diagnostic>& hard, bool* substitution_failed = nullptr) {
     auto& ins = p_->world().ins;
     s_.current_class = atom_.lookup_class;
     // A lambda in it belongs to no declaration: its closure type is this satisfaction's own.
@@ -11457,6 +11481,18 @@ public:
       if (ins.seqs.size(d.template_params) > 0) s_.template_scopes.push_back(ins.seqs.elements(d.template_params));
     }
     sema::Templates t = s_.templates();
+    // Spelled in a member of a class template specialization (a member template's constraint or
+    // explicit-specifier): the enclosing class templates' parameters have the specialization's
+    // arguments, as when the member was instantiated ([temp.inst]).
+    for (EntityId c = atom_.lookup_class; c != EntityId::none; c = p_->world().entities.rec(c).scope) {
+      const auto kind = p_->world().entities.rec(c).kind;
+      if (kind != sema::EntityKind::class_ && kind != sema::EntityKind::class_template) break;
+      if (auto args = p_->class_args_.find(std::to_underlying(c)); args != p_->class_args_.end()) {
+        s_.template_args = args->second;
+        break;
+      }
+    }
+    if (s_.template_args.levels.size() > atom_.depth) s_.template_args.levels[atom_.depth].clear();
     s_.template_args.levels.resize(atom_.depth + 1);
     for (ConstId e : ins.seqs.elements(atom_.mapping))
       s_.template_args.levels[atom_.depth].push_back(e == ConstId::none ? std::nullopt : std::optional(t.mapping_arg(e)));
@@ -11504,7 +11540,9 @@ public:
       failed = true;
     }
     if (q_.observed_type_trait_failure) return std::nullopt;
+    if (failed && substitution_failed) *substitution_failed = true;
     if (failed) return false;
+    if (explicit_specifier_) return explicit_value(e, hard, substitution_failed);
     QualType ty = sema::Types::unqualified(s_.types().canonical(s_.rvalue(e).type()));
     if (!s_.types().is(ty, sema::Builtin::bool_)) {
       s_.diag(0, Diag::constraint_not_bool, ty);
@@ -11522,6 +11560,25 @@ public:
   }
 
 private:
+  // An explicit-specifier's condition with the arguments substituted ([dcl.fct.spec]). Where it
+  // is not a contextually converted constant expression of type bool (narrowing, not constant,
+  // not convertible), the substituted specifier is invalid and deduction fails
+  // ([temp.deduct.general]/8). A limit of ycxx's stays a hard error.
+  std::optional<bool> explicit_value(Ex e, std::vector<engine::Diagnostic>& hard, bool* substitution_failed) {
+    const std::size_t before = sink_.size();
+    bool dependent = false;
+    auto value = ps_.explicit_condition_value(e, dependent);
+    bool limited = false;
+    for (std::size_t i = before; i < sink_.size(); ++i)
+      if (sema::survives_substitution(sink_[i].id)) {
+        hard.push_back(sink_[i]);
+        limited = true;
+      }
+    if (value && sink_.size() == before) return value;
+    if (!limited && substitution_failed) *substitution_failed = true;
+    return false;
+  }
+
   Program* p_;
   u32 k_;
   const items::Item* it_;
@@ -11532,6 +11589,7 @@ private:
   Parser ps_;
   ast::VAtom atom_;
   std::vector<sema::Expansion> expansions_;
+  bool explicit_specifier_ = false;
 };
 
 std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
@@ -11552,6 +11610,26 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
     if (!std::ranges::contains(end_diags_, d) && !std::ranges::contains(seen, d)) end_diags_.push_back(std::move(d));
   atoms_[key] = r.value_or(false);
   return atoms_[key];
+}
+
+std::optional<bool> Program::explicit_value(ConstId c, u32 point) {
+  const u32 key = std::to_underlying(c);
+  if (auto it = explicit_atoms_.find(key); it != explicit_atoms_.end()) return it->second;
+  // Still dependent, or of the item being analysed: its specializations decide.
+  if (templates().constraint_dependent(c) ||
+      std::ranges::contains(running_, index(w_->ins.values.get<ast::VAtom>(c).item))) return false;
+  // A condition that asks for itself leaves the candidate out while it is evaluated, as a
+  // failed deduction ([temp.inst]: its own value is not known yet).
+  explicit_atoms_[key] = std::nullopt;
+  std::vector<engine::Diagnostic> hard;
+  bool substitution_failed = false;
+  auto r = AtomAnalysis(*this, w_->ins.values.get<ast::VAtom>(c), point, /*explicit_specifier=*/true).run(hard, &substitution_failed);
+  const std::vector<engine::Diagnostic>& seen = item_sema(index(w_->ins.values.get<ast::VAtom>(c).item)).diags;
+  for (engine::Diagnostic& d : hard)
+    if (!std::ranges::contains(end_diags_, d) && !std::ranges::contains(seen, d)) end_diags_.push_back(std::move(d));
+  std::optional<bool> value = substitution_failed && hard.empty() ? std::nullopt : std::optional(r.value_or(false));
+  explicit_atoms_[key] = value;
+  return value;
 }
 
 bool Program::member_value(EntityId e, MemberDemand demand) {
