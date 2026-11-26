@@ -197,6 +197,7 @@ struct ClassShape {
   bool trivial_calls = true;
   bool gcc_stack_calls = false;  // GCC's System V MEMORY class for an implicit deletion
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
+  std::vector<std::pair<std::uint8_t, std::uint8_t>> wide_bit_fields{};  // extent and alignment
   std::vector<std::uint32_t> overlapping_fields{};  // [[no_unique_address]] ([intro.object])
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
@@ -1085,6 +1086,10 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     ast::Placed f = placed(in.canonical(it->fields[i]));
     f.potentially_overlapping = std::ranges::binary_search(it->overlapping_fields, std::uint32_t(i));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
+    if (!it->wide_bit_fields.empty()) {
+      f.wide_bit_width = it->wide_bit_fields[i].first;
+      f.wide_bit_alignment = it->wide_bit_fields[i].second;
+    }
     if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
   }
@@ -2108,7 +2113,7 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
       if (s.bit_field) {
         if (!in.values.is<ast::VInt>(elems[i])) return std::unexpected("a bit-field initializer is not an integer");
         const auto bits = s.bit_field;
-        auto value = std::uint32_t(in.values.get<ast::VInt>(elems[i]).bits.lo) << bits.shift;
+        auto value = in.values.get<ast::VInt>(elems[i]).bits.lo << bits.shift;
         for (std::uint32_t byte = 0; byte < bits.bytes(); ++byte) {
           auto mask = std::uint8_t(bits.mask() >> (8 * byte));
           auto& dst = out.bytes[offset + s.offset + byte];

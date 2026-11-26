@@ -143,6 +143,7 @@ struct DeclSema {
   u8 written_field_alignment = 0;  // the strongest validated alignas, including the natural alignment
   WrittenConstraint head_constraint{};
   WrittenConstraint trailing_constraint{};
+  u8 wide_bit_width = 0;  // written width if greater than the declared type's size in bits
   constexpr bool operator==(const DeclSema&) const = default;
 };
 

@@ -141,9 +141,24 @@ struct Placed {
   bool empty = false;  // an empty class ([class.prop], Itanium §1.1)
   // Its subobjects of empty class type, by class entity and offset, itself included.
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
-  u8 bit_width = 0;  // a bit-field has a width within its declared type's allocation unit
+  u8 bit_width = 0;  // bits that represent the field's value
   bool potentially_overlapping = false;
+  u8 wide_bit_width = 0;  // storage extent for a field wider than its declared type
+  u8 wide_bit_alignment = 0;
 };
+
+constexpr u8 over_width_bit_field_alignment(const Target& target, Compatibility mode, u8 width) {
+  u8 alignment = 1;
+  // Itanium §2.4 selects the largest integral POD allocation unit that fits the width.
+  using enum Builtin;
+  for (const auto type : {unsigned_char, unsigned_short, unsigned_int, unsigned_long_long, unsigned_int128}) {
+    if (type == unsigned_int128 && mode == Compatibility::clang && target.operating_system == OperatingSystem::linux_)
+      continue;
+    const auto layout = target[type];
+    if (layout.size && layout.size * 8 <= width) alignment = std::max(alignment, layout.align);
+  }
+  return alignment;
+}
 // A scalar, pointer or reference member's.
 constexpr Placed scalar_placed(std::uint64_t size, std::uint64_t align) { return {size, align, size, align, false, {}}; }
 constexpr Placed array_placed(const Placed& e, std::uint64_t n) {
@@ -158,7 +173,7 @@ struct BitField {
   u8 width = 0;
   constexpr explicit operator bool() const { return width != 0; }
   constexpr u32 bytes() const { return (u32(shift) + width + 7) / 8; }
-  constexpr u32 mask() const { return u32(((std::uint64_t{1} << width) - 1) << shift); }
+  constexpr u64 mask() const { return width == 64 ? ~u64{0} : ((u64{1} << width) - 1) << shift; }
 };
 
 struct RecordLayout {
@@ -209,15 +224,16 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
     if (f.bit_width != 0) {
       // Itanium §2.4 and the target C psABI: keep a bit-field in one aligned allocation unit of
       // its declared type. An ordinary member can start at the first whole byte after it.
-      std::uint64_t alignment = f.align * 8;
-      if (next_bit % alignment + f.bit_width > f.size * 8)
+      const auto field_alignment = f.wide_bit_width ? std::uint64_t(f.wide_bit_alignment) : f.align;
+      const std::uint64_t alignment = field_alignment * 8;
+      if (f.wide_bit_width || next_bit % alignment + f.bit_width > f.size * 8)
         next_bit = (next_bit + alignment - 1) / alignment * alignment;
       out.offsets.push_back(next_bit / 8);
       out.bit_fields.push_back({u8(next_bit % 8), f.bit_width});
-      next_bit += f.bit_width;
+      next_bit += f.wide_bit_width ? f.wide_bit_width : f.bit_width;
       dsize = (next_bit + 7) / 8;
       size = std::max(size, dsize);
-      align = std::max(align, f.align);
+      align = std::max(align, field_alignment);
       continue;
     }
     out.bit_fields.push_back({});

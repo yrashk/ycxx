@@ -2646,11 +2646,21 @@ struct Ctor { int value = 17; char byte = 19; Ctor() noexcept; };
 struct Assign { int value; char byte; Assign& operator=(const Assign&) noexcept; };
 struct DerivedAssign : Assign { char tail; };
 struct Dtor { int value; char byte; ~Dtor() noexcept; };
+struct Copy { int value; char byte; Copy() = default; Copy(const Copy&) noexcept; };
+struct MutableCopy { int value; char byte; MutableCopy() = default; MutableCopy(MutableCopy&) noexcept; };
+struct Move { int value; char byte; Move() = default; Move(Move&&) noexcept; };
+struct DerivedCopy : Copy { char tail; };
+struct DerivedMutableCopy : MutableCopy { char tail; };
+struct DerivedMove : Move { char tail; };
 static_assert(sizeof(DerivedAssign) == 8);
+static_assert(sizeof(DerivedCopy) == 8 && sizeof(DerivedMutableCopy) == 8 && sizeof(DerivedMove) == 8);
 #if defined(PROVIDER)
 Ctor::Ctor() noexcept = default;
 Assign& Assign::operator=(const Assign&) noexcept = default;
 Dtor::~Dtor() noexcept = default;
+Copy::Copy(const Copy&) noexcept = default;
+MutableCopy::MutableCopy(MutableCopy&) noexcept = default;
+Move::Move(Move&&) noexcept = default;
 extern "C" int read_late_assignment(const DerivedAssign& value) { return value.value + value.byte + value.tail; }
 #else
 extern "C" int read_late_assignment(const DerivedAssign&);
@@ -2660,14 +2670,41 @@ int main() {
   DerivedAssign dst{{0, 0}, 23};
   const Assign src{31, 37};
   Assign& result = static_cast<Assign&>(dst).operator=(src);
+  Copy copy_source;
+  copy_source.value = 11;
+  copy_source.byte = 13;
+  MutableCopy mutable_source;
+  mutable_source.value = 17;
+  mutable_source.byte = 19;
+  Move move_source;
+  move_source.value = 23;
+  move_source.byte = 29;
+  Copy copy(copy_source);
+  MutableCopy mutable_copy(mutable_source);
+  Move move(static_cast<Move&&>(move_source));
   return ctor.value + ctor.byte + dtor.value + dtor.byte != 54 ||
-         &result != &dst || dst.tail != 23 || read_late_assignment(dst) != 91;
+         &result != &dst || dst.tail != 23 || read_late_assignment(dst) != 91 ||
+         copy.value != 11 || copy.byte != 13 || mutable_copy.value != 17 || mutable_copy.byte != 19 ||
+         move.value != 23 || move.byte != 29;
 }
+#endif
+''')
+    (scope / 'late-invalid.cpp').write_text('''\
+#ifdef COPY
+struct Base { Base(volatile Base&); };
+Base::Base(volatile Base&) = default;
+#else
+struct Base { Base(const Base&&); };
+Base::Base(const Base&&) = default;
 #endif
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
         for target in (LINUX, DARWIN):
+            for options in ([], ['-DCOPY']):
+                args = [target, '-fcompat=' + mode, *options, '-fsyntax-only', 'late-invalid.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == 1, (mode, target, cold, warm)
             for options, rejected in (([], False), (['-DCHECK_CONST'], True)):
                 args = [target, '-fcompat=' + mode, *options, '-fsyntax-only', 'const-defaulted.cpp']
                 cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
@@ -2679,6 +2716,10 @@ int main() {
                 assert result == (0, b'', b''), (mode, target, result)
                 outputs.append((scope / 'late-defaulted.o').read_bytes())
             assert outputs[0] == outputs[1], (mode, target)
+            names = outputs[1].split(b'\0')
+            prefix = b'_' if target == DARWIN else b''
+            for symbol in (b'_ZN4CopyC1ERKS_', b'_ZN11MutableCopyC1ERS_', b'_ZN4MoveC1EOS_'):
+                assert prefix + symbol in names, (mode, target, symbol)
             if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
                 peer = clang if mode == 'clang' else gxx
                 if not peer:
@@ -3387,6 +3428,104 @@ int main() {{ return call(Box{{7}}) != 1; }}
                     subprocess.run([scope / 'allocation-call'], cwd=scope, check=True, timeout=20)
 
 
+def over_width_bit_fields(world, gxx):
+    scope = world.scope
+    fixture = '''\
+struct Wide { unsigned first : 40; char byte; };
+struct WideShort { unsigned short first : 40; char byte; };
+struct WideChar { unsigned char first : 40; char byte; };
+struct Huge { unsigned long long first : 128; char byte; };
+struct Private {
+private:
+  unsigned first : 40;
+  char byte;
+};
+struct Derived : Huge { char last; };
+struct PrivateDerived : Private { char last; };
+static_assert(sizeof(Wide) == 8 && alignof(Wide) == 4 && __builtin_offsetof(Wide, byte) == 5);
+static_assert(sizeof(WideShort) == 8 && alignof(WideShort) == 4 && __builtin_offsetof(WideShort, byte) == 5);
+static_assert(sizeof(WideChar) == 8 && alignof(WideChar) == 4 && __builtin_offsetof(WideChar, byte) == 5);
+static_assert(alignof(Huge) == HUGE_ALIGNMENT && sizeof(Huge) == HUGE_SIZE);
+static_assert(__builtin_offsetof(Derived, last) == HUGE_SIZE && sizeof(Derived) == HUGE_SIZE + HUGE_ALIGNMENT);
+static_assert(sizeof(PrivateDerived) == PRIVATE_SIZE);
+extern "C" unsigned long long read_big(Huge&);
+extern "C" unsigned read_small(Wide&, WideShort&, WideChar&);
+'''
+    (scope / 'bit-fields-provider.cpp').write_text(fixture + '''\
+unsigned long long read_big(Huge& object) {
+  unsigned long long previous = object.first;
+  object.first = 0x123456789abcdef0ULL;
+  return previous + object.byte;
+}
+unsigned read_small(Wide& wide, WideShort& half, WideChar& byte) {
+  unsigned result = wide.first + half.first + byte.first;
+  wide.first = 17;
+  half.first = 19;
+  byte.first = 23;
+  return result;
+}
+''')
+    (scope / 'bit-fields-peer.cpp').write_text(fixture + '''\
+int main() {
+  Huge h{0x100000002ULL, 5};
+  if (read_big(h) != 0x100000007ULL || h.first != 0x123456789abcdef0ULL || h.byte != 5) return 1;
+  Wide upper{7, 11};
+  WideShort half{13, 21};
+  WideChar byte{29, 31};
+  return read_small(upper, half, byte) != 49 || upper.first != 17 || half.first != 19 || byte.first != 23 ||
+         upper.byte != 11 || half.byte != 21 || byte.byte != 31;
+}
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            huge = 24 if mode == 'clang' and target == LINUX else 32
+            alignment = 8 if huge == 24 else 16
+            private = 12 if mode == 'clang' and target == DARWIN else 8
+            macros = [f'-DHUGE_SIZE={huge}', f'-DHUGE_ALIGNMENT={alignment}', f'-DPRIVATE_SIZE={private}']
+            command = [target, '-fcompat=' + mode, *macros, '-c', 'bit-fields-provider.cpp', '-o', 'bit-fields.o']
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result[0] == 0, (mode, target, result)
+                outputs.append((scope / 'bit-fields.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            peer = clang if mode == 'clang' else gxx
+            native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+            if peer and native:
+                subprocess.run([peer, '-std=c++26', *macros, 'bit-fields-peer.cpp', 'bit-fields.o', '-o', 'wide-fields'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'wide-fields'], cwd=scope, check=True, timeout=20)
+
+
+def over_width_bit_field_diagnostics(world):
+    scope = world.scope
+    (scope / 'bit-field-diagnostic.cpp').write_text('struct Record { unsigned value : 40; };\n')
+    for target in (LINUX, DARWIN):
+        for args in ((), ('-w',), ('-Werror',), ('-Wno-bitfield-width',), ('-Wbitfield-width',),
+                     ('-Werror=bitfield-width',), ('-Werror', '-Wno-error=bitfield-width'), ('-pedantic-errors',)):
+            for mode in MODES:
+                unavailable = mode == 'gcc' and any(arg in args for arg in (
+                    '-Wbitfield-width', '-Werror=bitfield-width', '-Wno-error=bitfield-width'))
+                suppressed = '-w' in args or (mode == 'clang' and '-Wno-bitfield-width' in args)
+                diagnosed = mode != 'spec' and not suppressed and not unavailable
+                promoted = diagnosed and '-Wno-error=bitfield-width' not in args and (
+                    '-Werror' in args or '-Werror=bitfield-width' in args)
+                command = [target, '-fcompat=' + mode, *args, '-fsyntax-only', 'bit-field-diagnostic.cpp']
+                cold = world.cxx(command, scope, world.cold, timeout=40)
+                resident = world.cxx(command, scope, world.daemon, timeout=40)
+                assert cold == resident, (mode, target, args, cold, resident)
+                assert resident[0] == int(unavailable or promoted), (mode, target, args, resident)
+                if unavailable:
+                    assert b'unsupported option' in resident[2], (mode, target, args, resident)
+                elif diagnosed:
+                    message = b"'Record::value' exceeds its type" if mode == 'gcc' else b'truncated to 32 bits'
+                    severity = b'error: ' if promoted else b'warning: '
+                    assert message in resident[2] and severity in resident[2], (mode, target, args, resident)
+                else:
+                    assert resident[2] == b'', (mode, target, args, resident)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3433,6 +3572,8 @@ def main():
         mixed_class_alignment(world, gxx)
         mixed_tail_padding(world, gxx)
         overlapping_member_layout(world, gxx)
+        over_width_bit_fields(world, gxx)
+        over_width_bit_field_diagnostics(world)
         late_defaulted_special_members(world, gxx)
         mixed_constraints(world, gxx)
         function_language_linkage(world, gxx)

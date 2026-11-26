@@ -2838,7 +2838,7 @@ public:
     // Structs: the common initial sequence must be all members of both.
     for (std::size_t i = 0; i < fx.size(); ++i) {
       const FieldRec &f = fx[i], &g = fy[i];
-      if (f.bit_width != g.bit_width) return false;
+      if (f.bit_width != g.bit_width || f.wide_bit_width != g.wide_bit_width) return false;
       const auto same = layout_compatible(f.type, g.type);
       if (same != true) return same;
       if (compatibility() == ast::Compatibility::clang) {
@@ -11177,6 +11177,9 @@ public:
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
+      m->wide_bit_width = f.wide_bit_width;
+      if (f.wide_bit_width)
+        m->wide_bit_alignment = ast::over_width_bit_field_alignment(w_->target, compatibility(), f.wide_bit_width);
       m->potentially_overlapping = f.no_unique_address;
       m->align = std::max(m->align, u64(f.explicit_alignment));
       places.push_back(*m);

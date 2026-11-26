@@ -395,31 +395,40 @@ class Lowering {
   // a separate ordinary member, which is a distinct memory location ([intro.memory]).
   ValueId load_field(ValueId state, ValueId base, const SubObject& field) {
     const ast::BitField bits = field.bit_field;
-    ValueId packed = constant(T::i32, 0);
+    const auto field_type = layout(field.type);
+    const T storage = field_type.size == 8 ? T::i64 : T::i32;
+    ValueId packed = constant(storage, 0);
     for (std::uint32_t i = 0; i < bits.bytes(); ++i) {
       ValueId p = add_offset(base, field.offset + i);
       ValueId byte = emit1(Op2::load, T::i8, {state, p}, {0});
-      ValueId v = resize(byte, T::i32, false);
-      if (i != 0) v = emit1(Op2::shl, T::i32, {v, constant(T::i32, 8 * i)});
-      packed = emit1(Op2::or_, T::i32, {packed, v});
+      ValueId v = resize(byte, storage, false);
+      if (i != 0) v = emit1(Op2::shl, storage, {v, constant(storage, 8 * i)});
+      packed = emit1(Op2::or_, storage, {packed, v});
     }
-    if (bits.shift != 0) packed = emit1(Op2::lshr, T::i32, {packed, constant(T::i32, bits.shift)});
-    if (bits.width == 32) return packed;
-    if (layout(field.type).is_signed) {
-      ValueId shift = constant(T::i32, 32 - bits.width);
-      ValueId high = emit1(Op2::shl, T::i32, {packed, shift});
-      return emit1(Op2::ashr, T::i32, {high, shift});
+    if (bits.shift != 0) packed = emit1(Op2::lshr, storage, {packed, constant(storage, bits.shift)});
+    const auto storage_width = storage == T::i64 ? 64u : 32u;
+    if (bits.width < storage_width) {
+      if (field_type.is_signed) {
+        const ValueId shift = constant(storage, storage_width - bits.width);
+        const ValueId high = emit1(Op2::shl, storage, {packed, shift});
+        packed = emit1(Op2::ashr, storage, {high, shift});
+      } else {
+        packed = emit1(Op2::and_, storage, {packed, constant(storage, std::int64_t(bits.mask() >> bits.shift))});
+      }
     }
-    return emit1(Op2::and_, T::i32, {packed, constant(T::i32, bits.mask() >> bits.shift)});
+    const T result = field_type.size == 1 ? T::i8 : field_type.size == 2 ? T::i16 : storage;
+    return resize(packed, result, false);
   }
 
   ValueId store_field(ValueId state, ValueId base, const SubObject& field, ValueId value) {
     const ast::BitField bits = field.bit_field;
-    if (bits.shift != 0) value = emit1(Op2::shl, T::i32, {value, constant(T::i32, bits.shift)});
+    const T storage = layout(field.type).size == 8 ? T::i64 : T::i32;
+    value = resize(value, storage, false);
+    if (bits.shift != 0) value = emit1(Op2::shl, storage, {value, constant(storage, bits.shift)});
     for (std::uint32_t i = 0; i < bits.bytes(); ++i) {
       std::uint8_t mask = std::uint8_t(bits.mask() >> (8 * i));
       ValueId p = add_offset(base, field.offset + i);
-      ValueId v = i == 0 ? value : emit1(Op2::lshr, T::i32, {value, constant(T::i32, 8 * i)});
+      ValueId v = i == 0 ? value : emit1(Op2::lshr, storage, {value, constant(storage, 8 * i)});
       ValueId byte = resize(v, T::i8, false);
       if (mask != 0xff) {
         ValueId previous = emit1(Op2::load, T::i8, {state, p}, {0});

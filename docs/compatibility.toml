@@ -100,6 +100,31 @@ limits = "Covers uniform private or protected access, mixed access, default memb
 evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cpp"]
 
 [[divergence]]
+id = "over-width-bit-field-allocation"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[class.bit], Itanium C++ ABI §1.1 and §2.4"
+prior = "Limit named int and unsigned int bit-fields to the declared type's width."
+spec = "Allocate the written width with the alignment of the largest integral POD allocation unit that fits. The low bits of the declared type represent the value. Preserve the final aligned size in an otherwise POD base."
+gcc = "For a 128-bit wide field of type unsigned long long, GCC 16.2 on Linux uses 16-byte alignment and a 32-byte base. The derived tail begins at offset 32."
+clang = "Uses an 8-byte allocation unit on x86-64 Linux, giving a 24-byte base. Uses a 16-byte unit on arm64 Darwin, giving a 32-byte base."
+limits = "The probes also cover 40-bit wide named fields and private base tail padding. The availability and warning controls of a named over-width field are tracked separately."
+probe = 'struct Base { unsigned long long field : 128; char byte; }; struct Derived : Base { char last; };'
+evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types", "GCC 16.2 x86-64 Linux and upstream Clang 23.1.6 x86-64 Linux and arm64 Darwin layout probes"]
+
+[[divergence]]
+id = "over-width-bit-field-diagnostic"
+status = "recorded"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[class.bit]"
+prior = "Reject widths larger than the stated bounded bit-field subset."
+spec = "The pinned draft permits the excess padding bits."
+gcc = "Warns by default with no named warning group. Global -w suppresses the warning and -Werror promotes it. The positive Clang-only group controls are unsupported."
+clang = "Warns by default under -Wbitfield-width. Accept the named suppression and promotion controls as well as global -w and -Werror."
+probe = 'struct Base { unsigned int field : 40; };'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin diagnostics with default, suppressed, promoted, and pedantic warning settings"]
+
+[[divergence]]
 id = "class-tail-padding-overlapping-member"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

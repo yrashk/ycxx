@@ -1527,6 +1527,7 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_assignment_body(sema::Sema& sm, EntityId cls, Ex source, bool representation_copy);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
+  Ex copy_constructor_body(sema::Sema& sm, const sema::ClassRec& record, Ex source, Ex body);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
   // with the function's cv-qualifiers.
@@ -6287,10 +6288,13 @@ private:
         return bad();
       }
       u8 bit_width = 0;
+      u8 wide_bit_width = 0;
       if (ps_.is(Tk::colon)) {
         auto width = bit_field(spec, d, c.entity);
         if (!width) return bad();
-        bit_width = *width;
+        const auto size = s_.world().target[*types.builtin_of(d.type)].size;
+        bit_width = u8(std::min(int(*width), size * 8));
+        if (*width != bit_width) wide_bit_width = *width;
       }
       if (types.is_function(d.type) || spec.is_static) {
         if (it_->kind == ItemKind::class_def || p_->items().items[it_->parent].unnamed_type_ordinal != items::none) {
@@ -6343,6 +6347,7 @@ private:
       sem.kind = ast::DeclKind::data_member;
       sem.type = d.type;
       sem.bit_width = bit_width;
+      sem.wide_bit_width = wide_bit_width;
       sem.field_alignment = field_alignment;
       sem.written_field_alignment = written_field_alignment;
       sem.is_mutable = spec.mutable_at.has_value();
@@ -6402,10 +6407,12 @@ private:
     auto attributed = [&](u32 begin, u32 end) {
       return layout_attribute(p_->region(), begin, end, LayoutAttributes::any);
     };
+    const auto type = s_.types().builtin_of(d.type);
+    const auto size = type ? s_.world().target[*type].size : 0;
     if (d.name_at != d.begin || d.template_args || member_template_ || spec.is_static || !q_.defining_bases(owner).empty() ||
         p_->class_rec_is_union(it_->parent) || record.template_depth != 0 || record.specialization ||
         sema::Types::cv(s_.types().canonical(d.type)) != sema::Cv::none ||
-        !(s_.types().is(d.type, sema::Builtin::int_) || s_.types().is(d.type, sema::Builtin::unsigned_int)) ||
+        !type || !ast::is_integral(*type) || *type == sema::Builtin::bool_ || size == 0 || size > 8 ||
         attributed(record.begin, record.brace_begin) || attributed(it_->begin, ps_.index())) {
       s_.diag(ps_.pos(), Diag::bit_field_declaration);
       return std::nullopt;
@@ -6418,13 +6425,19 @@ private:
     if (s_.types().is_integral(e.type())) v = sema::Evaluator(s_, q_).evaluate(e).value;
     auto& values = s_.world().values;
     u64 width = v && values.rec(*v).kind == sema::ValueKind::integer && !values.rec(*v).wide ? values.rec(*v).bits : 0;
-    if (width == 0 || width > 32) {
+    if (width == 0 || width > 255) {
       s_.diag(at, Diag::bit_field_width);
       return std::nullopt;
     }
     if (ps_.is(Tk::equal) || ps_.is(Tk::l_brace)) {
       s_.diag(ps_.pos(), Diag::bit_field_initializer);
       return std::nullopt;
+    }
+    if (width > u64(size * 8)) {
+      if (s_.compatibility() == ast::Compatibility::gcc)
+        s_.diag(d.name_at, Diag::bit_field_excess_width, s_.world().entities.rec(owner).name, d.name);
+      else if (s_.compatibility() == ast::Compatibility::clang)
+        s_.diag(d.name_at, Diag::bit_field_truncated_width, d.name, width, size * 8);
     }
     return u8(width);
   }
@@ -7206,15 +7219,28 @@ private:
         s_.diag(name_at, Diag::redefinition, m->name);
         return bad();
       }
+      const auto ordinary = fs.params.empty();
+      const auto copy_or_move = [&] {
+        if (!ctor || fs.params.size() != 1) return false;
+        const QualType parameter = fs.params.front().type;
+        if (!s_.types().is_reference(parameter)) return false;
+        const auto referee = s_.types().canonical(s_.types().referee(parameter));
+        return ast::without_cv(referee) == s_.types().canonical(cls) &&
+               !sema::Types::is_volatile(referee) &&
+               (!s_.types().rec(parameter).rvalue_ref || !sema::Types::is_const(referee));
+      }();
       if (!definition || template_ || explicit_ || inst_ || m->is_template || cr->union_ || cr->polymorphic ||
-          !cr->bases.empty() || !fs.params.empty() || fs.variadic || fs.cv != sema::Cv::none ||
+          !cr->bases.empty() || (!ordinary && !copy_or_move) || fs.variadic || fs.cv != sema::Cv::none ||
           fs.ref != ast::RefQual::none ||
           !Program::encloses(p_->ns_of(k_), p_->enclosing_namespace_path(owner)) ||
           std::ranges::any_of(cr->fields, [&](const sema::FieldRec& field) {
             const QualType element = s_.types().innermost_array_element(field.type);
-            return !s_.types().is_scalar(element) || (ctor && !field.dmi && sema::Types::is_const(element));
+            return !s_.types().is_scalar(element) ||
+                   (ctor && ordinary && !field.dmi && sema::Types::is_const(element));
           })) {
-        s_.diag(name_at, ctor ? Diag::defaulted_default_constructor : Diag::defaulted_destructor_out_of_class);
+        const auto error = !ctor ? Diag::defaulted_destructor_out_of_class
+                         : ordinary ? Diag::defaulted_default_constructor : Diag::defaulted_copy_declaration;
+        s_.diag(name_at, error);
         return bad();
       }
       // [dcl.fct.def.default]: a later defaulted definition is user-provided and uses
@@ -9650,7 +9676,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         }
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, member_has_overlap(w_->ins, d),
-                        d.field_alignment, d.written_field_alignment});
+                        d.field_alignment, d.written_field_alignment, d.wide_bit_width});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
@@ -11575,7 +11601,14 @@ public:
       s_.pop_scope();
       const bool dtor = f->flags & sema::decl_flag::destructor;
       if (root.ok() && (dtor || (ctor && !inits.delegation)) && !check_subobject_destructors(root.begin)) root = {};
-      if (root.ok() && ctor) root = constructor_body(std::move(inits), root, signature.fn_noexcept);
+      if (root.ok() && ctor) {
+        if (defaulted && !param_locals.empty() && !p_->defaulted_member_definition(k_, *f)) {
+          const auto& record = p_->classes_.rec(s_.current_class);
+          root = p_->copy_constructor_body(s_, record, s_.local_ref(param_locals.front(), 0, 0), root);
+        } else {
+          root = constructor_body(std::move(inits), root, signature.fn_noexcept);
+        }
+      }
       if (root.ok() && dtor) root = destructor_body(s_, s_.current_class, root);
     }
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
@@ -13024,6 +13057,34 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   return synth_bodies_[i] = synthesize_body(s, specialization ? std::optional(end()) : std::nullopt);
 }
 
+// [class.copy.ctor]: initialize each base and member from the corresponding source.
+Ex Program::copy_constructor_body(sema::Sema& sm, const sema::ClassRec& rec, Ex source, Ex body) {
+  std::vector<ast::Child> stmts;
+  bool failed = false;
+  // Each direct base from the other object's base class subobject.
+  for (const sema::BaseRec& base : rec.bases) {
+    QualType bt = w_->types.class_type(base.cls);
+    // A dynamic base, abstract or not, is copied by its own copy constructor ([class.copy.ctor]/14).
+    const auto* base_record = classes_.find(base.cls);
+    Ex init = base_record && base_record->dynamic
+                  ? sm.construct(bt, {source}, 0, 0, sema::Construction::direct,
+                                 sema::ConstructorDestination::polymorphic_base)
+                  : copy_from(sm, source, bt);
+    failed |= !init.ok();
+    stmts.push_back({sm.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
+  }
+  for (u32 i = 0; i < rec.fields.size(); ++i) {
+    const sema::FieldRec& f = rec.fields[i];
+    Ex src = sm.member(source, false, f.name, 0, 0, 0);
+    Ex init = copy_from(sm, src, f.type);
+    failed |= !init.ok();
+    stmts.push_back({sm.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
+  }
+  stmts.push_back({body.id, 0});
+  // A copy that cannot be formed leaves no body: code generation reports it.
+  return failed || sm.has_error_since(0) ? Ex{} : sm.node(ast::Compound{sm.builder().list(stmts)}, 0, 0);
+}
+
 // The body of an implicit copy constructor or destructor; a specialization's as of `point`.
 ast::BodySema Program::synthesize_body(const Synthesized& s, std::optional<u32> point) {
   ast::Builder b(w_->ins, &arena_);
@@ -13042,31 +13103,8 @@ ast::BodySema Program::synthesize_body(const Synthesized& s, std::optional<u32> 
     NameId other = w_->ins.names.intern("other");
     sm.push_scope();
     sm.declare_local(other, w_->ins.seqs.at(s.decl.params, 0).type, sema::local_flag::parameter, 0, false);
-    std::vector<ast::Child> stmts;
-    bool failed = false;
-    // Each direct base from the other object's base class subobject.
-    for (const sema::BaseRec& base : rec.bases) {
-      QualType bt = w_->types.class_type(base.cls);
-      // A dynamic base, abstract or not, is copied by its own copy constructor ([class.copy.ctor]/14).
-      const auto* base_record = classes_.find(base.cls);
-      Ex init = base_record && base_record->dynamic
-                    ? sm.construct(bt, {sm.name_expr(other, 0, 0)}, 0, 0, sema::Construction::direct,
-                                   sema::ConstructorDestination::polymorphic_base)
-                    : copy_from(sm, sm.name_expr(other, 0, 0), bt);
-      failed |= !init.ok();
-      stmts.push_back({sm.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
-    }
-    for (u32 i = 0; i < rec.fields.size(); ++i) {
-      const sema::FieldRec& f = rec.fields[i];
-      Ex src = sm.member(sm.name_expr(other, 0, 0), false, f.name, 0, 0, 0);
-      Ex init = copy_from(sm, src, f.type);
-      failed |= !init.ok();
-      stmts.push_back({sm.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
-    }
-    Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
-    stmts.push_back({body.id, 0});
-    // A copy that cannot be formed leaves no body: code generation reports it.
-    root = failed || sm.has_error_since(0) ? Ex{} : sm.node(ast::Compound{b.list(stmts)}, 0, 0);
+    const Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
+    root = copy_constructor_body(sm, rec, sm.name_expr(other, 0, 0), body);
     sm.pop_scope();
   } else {
     Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
