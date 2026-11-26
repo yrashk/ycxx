@@ -341,6 +341,7 @@ enum class Diag : std::uint32_t {
   // [temp]
   invalid_template_parameter_type [[=message{Severity::error, "a non-type template parameter must have a structural type"}]],
   template_args_mismatch [[=message{Severity::error, "the template arguments do not match the parameters of '{0:n}'"}]],
+  template_argument_narrowing [[=message{Severity::error, "narrowing conversion of {0:i} from '{1:t}' to '{2:t}' in a template argument"}]],
   not_a_template [[=message{Severity::error, "'{0:n}' is not a template"}]],
   instantiation_depth [[=message{Severity::error, "template instantiations nest more than {0} deep"}]],
   nested_too_deeply [[=message{Severity::error, "nested too deeply to analyse: half of the stack is in use"}]],
@@ -391,6 +392,8 @@ enum class Diag : std::uint32_t {
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   builtin_overflow_operand [[=message{Severity::error, "checked integer builtin requires an argument of type '{0:t}', got '{1:t}'"}]],
+  builtin_ctzg_operand [[=message{Severity::error, "the supported form of '__builtin_ctzg' requires an 'unsigned int' operand but got '{0:t}'"}]],
+  builtin_ctzg_fallback [[=message{Severity::error, "'__builtin_ctzg' with a fallback argument is not supported yet"}]],
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
   va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer, pointer and double subset"}]],
@@ -566,7 +569,7 @@ std::string render(Diag d, std::span<const std::uint64_t> args, Spell&& spell) {
     std::uint64_t v = n < args.size() ? args[n] : 0;
     char how = spec.size() > 2 ? spec[2] : 'd';
     if (how == 'k') out += lex::spelling(lex::Tk(v));
-    else if (how == 'n' || how == 't' || how == 'c' || how == 'r') out += spell(how, v);
+    else if (how == 'n' || how == 't' || how == 'c' || how == 'i' || how == 'r') out += spell(how, v);
     else out += std::format("{}", v);
     i = close;
   }

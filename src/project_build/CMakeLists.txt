@@ -21,6 +21,7 @@ target_sources(ycxxc_project_build PUBLIC FILE_SET CXX_MODULES FILES
   toolchain_matrix.cppm
   inspection_model.cppm
   inspection_html.cppm
+  module_graph_diff.cppm
   inspection.cppm
   module_providers.cppm
   plan.cppm

@@ -22,6 +22,7 @@ def main():
                  f'{test}.run.cpp', '-o', f'{test}.o'], scope, env)
         for compiler in native_compilers(host, scope, env):
             for level in ('-O0', '-O2'):
+                print(f'Checking mixed int128 tests with {compiler} at {level}', flush=True)
                 for test in ('abi', 'symbols'):
                     run([compiler, '-std=c++26', level, '-fno-lto', '-fno-pie', '-c', f'{test}-peer.cpp',
                          '-o', f'{test}-peer.o'], scope, env)
