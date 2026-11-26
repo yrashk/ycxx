@@ -3333,6 +3333,13 @@ includes the resolved plan and its definition.
 Use the same `--target` option to read the chosen variant and its target
 provenance. The trace carries the compiler target for the request.
 
+Schema-1 JSON plans include a typed `dependency_graph` of resolved library
+and named artifact uses (#1453). Each edge gives the consumer, producer,
+planner field, and manifest location. Artifact edges name the output, and
+named input edges also give the consumer binding. Unresolved rules can yield
+an incomplete graph with the edges resolved so far. The HTML report shows
+these records under **Dependencies**, with links into the manifest.
+
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
 with their declared rule kinds and source locations. JSON includes the same
