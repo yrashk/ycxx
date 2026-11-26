@@ -1376,7 +1376,23 @@ public:
     }
     return interp::GlobalVar{type, c, c.has_value()};
   }
+  // The point the declarations seen from `item` reach: a function body in a member list is a
+  // complete-class context ([class.mem.general]), where the members declared after it, and those of
+  // the enclosing classes, are declared too. Only once the member list is complete: whether a
+  // callee is defined is decided where the evaluation happens ([expr.const]).
+  u32 complete_class_point(u32 item) const {
+    if (item >= items_->items.size() || !items_->items[item].has_body() || !member_body_ready(item)) return item;
+    u32 outer = items::none;
+    for (u32 p = items_->items[item].parent; p != items::none && items_->items[p].kind == ItemKind::class_def;
+         p = items_->items[p].parent)
+      outer = p;
+    if (outer == items::none) return item;
+    u32 last = outer;  // the items are in preorder: a class's members follow it
+    while (!items_->items[last].members.empty()) last = items_->items[last].members.back();
+    return std::max(item, last);
+  }
   bool is_constexpr(EntityId f, u32 item) {
+    item = complete_class_point(item);
     if (auto constructor = dynamic_synthesized_.find(f); constructor != dynamic_synthesized_.end()) {
       const auto& synthesized = synth_[constructor->second];
       const EntityId owner = w_->entities.rec(f).scope;
