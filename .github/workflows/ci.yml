@@ -71,6 +71,8 @@ jobs:
         shell: bash
         run: |
           source deps/libycxx/tools/toolchain/activate.sh
+          # This is a separate project. ycxx uses YCXX_ROOT as its daemon scope override.
+          unset YCXX_ROOT
           test -x "$YCXX_CLANGXX"
           "$YCXX_CLANGXX" --version
           cmake --version
