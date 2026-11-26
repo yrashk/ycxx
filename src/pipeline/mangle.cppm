@@ -661,7 +661,11 @@ class Mangler {
     }
     auto n = template_name(name, scope, special, internal_name);
     if (!n) return n;
-    auto args = specialization_args(spec);
+    // GCC's primary nested-name encoding uses only the arguments at this position.
+    // A trailing requires-clause is still part of the subsequent function signature.
+    const bool plain_arguments = compatibility_ == ast::Compatibility::gcc && scope != ast::EntityId::none &&
+                                 in_.types.is<ast::TFunction>(c);
+    auto args = plain_arguments ? template_args(spec.args) : specialization_args(spec);
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);

@@ -3787,6 +3787,61 @@ int main() {{ unsigned char closure = 0; return convert(&closure)(19) != 19 || o
                     subprocess.run([scope / 'constrained-conversion'], cwd=scope, check=True, timeout=20)
 
 
+def nested_template_symbols(world, gxx):
+    scope = world.scope
+    declarations = '''\
+template<class T> concept C = sizeof(T) > 0;
+template<class T, class U = T> struct X {};
+template<class T> requires C<T> int global(T n) BODY(n)
+namespace N {
+  template<class T> requires C<T> int named(T n) BODY(n)
+  template<class T> int trailing(T n) requires C<T> BODY(n)
+  template<class T> requires C<T> int both(T n) requires (sizeof(T) >= 1) BODY(n)
+  template<auto V> int placeholder() BODY(V)
+  template<template<class> class Q> int templ() BODY(11)
+}
+struct S {
+  template<class T> requires C<T> static int member(T n) BODY(n)
+  template<class T> static int trailing(T n) requires C<T> BODY(n)
+  template<C T> static int typed(T n) BODY(n)
+  template<C... T> static int pack(T... n) BODY(sizeof...(n))
+};
+'''
+    exercise = ('global(1) + N::named(2) + N::trailing(3) + N::both(4) + S::member(5) + S::trailing(6) + '
+                'S::typed(7) + S::pack(8, 9) + N::placeholder<10>() + N::templ<X>()')
+    (scope / 'nested-provider.cpp').write_text(
+        '#define BODY(EXPR) { return EXPR; }\n' + declarations + 'int use() { return ' + exercise + '; }\n')
+    (scope / 'nested-caller.cpp').write_text(
+        '#define BODY(EXPR) ;\n' + declarations + 'int main() { return (' + exercise + ') != 51; }\n')
+    common = ('_Z6globalIiQ1CIT_EEiS0_', '_ZN1N8trailingIiEEiT_Q1CIS1_E', '_ZN1S8trailingIiEEiT_Q1CIS1_E')
+    gcc = ('_ZN1N5namedIiEEiT_', '_ZN1N4bothIiEEiT_QgestS1_Li1E', '_ZN1S6memberIiEEiT_', '_ZN1S5typedIiEEiT_',
+           '_ZN1S4packIJiiEEEiDpT_', '_ZN1N11placeholderILi10EEEiv', '_ZN1N5templI1XEEiv')
+    structural = ('_ZN1N5namedIiQ1CIT_EEEiS1_', '_ZN1N4bothIiQ1CIT_EEEiS1_QgestS1_Li1E',
+                  '_ZN1S6memberIiQ1CIT_EEEiS1_', '_ZN1S5typedITk1CiEEiT_', '_ZN1S4packITpTk1CJiiEEEiDpT_',
+                  '_ZN1N11placeholderITnDaLi10EEEiv', '_ZN1N5templITtTyE1XEEiv')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        symbols = (*common, *(gcc if mode == 'gcc' else structural))
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-c', 'nested-provider.cpp', '-o', 'nested-provider.o']
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'nested-provider.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            names = outputs[1].split(b'\0')
+            prefix = '_' if target == DARWIN else ''
+            for symbol in symbols:
+                assert (prefix + symbol).encode() in names, (mode, target, symbol, names)
+            peer = gxx if mode == 'gcc' else clang
+            if peer and ((target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')):
+                abi = ['-fabi-compat-version=0'] if mode == 'gcc' else []
+                subprocess.run([peer, '-std=c++26', *abi, 'nested-caller.cpp', 'nested-provider.o', '-o', 'nested-call'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'nested-call'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3825,6 +3880,7 @@ def main():
         dependent_variable_spellings(world, gxx)
         static_lambda_conversion(world, gxx)
         constrained_lambda_conversions(world, gxx)
+        nested_template_symbols(world, gxx)
         lambda_conversion_symbols(world, gxx)
         floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.

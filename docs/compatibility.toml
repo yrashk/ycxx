@@ -598,6 +598,18 @@ limits = "The Itanium proposal is open. The interoperable slice covers concept n
 evidence = ["docs/design/ast.md", "tests/own/templates/c6-overloads.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "nested-function-template-head-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.5.3 and §5.1.5.7, [temp.over.link], constraint mangling proposal"
+prior = "Encode a function's template-head constraint and parameter declaration prefixes the same way in a nested name as in an unscoped name."
+spec = "Keep the written Q constraint and applicable parameter declaration prefixes in a nested function template's arguments. A trailing Q remains after the function type."
+gcc = "In the tested nested function template symbols, omit the entire template-head Q and all parameter declaration prefixes, including Tk, TpTk, TnDa and Tt. Keep the trailing Q. Global function template encodings retain their existing rules."
+clang = "Same as spec for the tested functions in named and unnamed namespaces, in ordinary classes, and in class templates."
+probe = 'namespace N { template<class T> requires (sizeof(T) > 0) int f(T n) { return n; } }'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF with -fabi-compat-version=0 and upstream Clang 23.1.6 ELF and Mach-O symbols for global, namespace and class members, written headings and trailing clauses, and constrained, placeholder, and template template parameters"]
+
+[[divergence]]
 id = "constrained-operator-expression-symbol"
 status = "shared"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
