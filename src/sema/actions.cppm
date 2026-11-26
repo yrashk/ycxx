@@ -630,10 +630,12 @@ public:
     if (!e.ok() || ast::kind_of(e.id) != ast::Nodes::index_of<T>()) return std::nullopt;
     return b_->get<T>(e.id);
   }
-  ExprInfo expression_info(NodeId id) {
+  ExprInfo expression_info(NodeId id, bool draft = false) {
+    const NodeId published = draft ? b_->adopted_node(id) : id;
     ExprInfo info{};
     ast::dispatch<ast::Nodes>(ast::kind_of(id), [&]<class T>(std::type_identity<T>) {
-      if constexpr (requires(T value) { value.info; }) info = b_->get<T>(id).info;
+      if constexpr (requires(T value) { value.info; })
+        info = published == NodeId::none ? b_->get<T>(id).info : ins().ast.get<T>(published).info;
     });
     return info;
   }
@@ -9906,7 +9908,8 @@ public:
     if (!cast || (cast->conversion != ast::ConversionKind::integral_to_pointer &&
                   cast->conversion != ast::ConversionKind::pointer_to_integral))
       return e;
-    return {cast->operand.id, operand.begin + cast->operand.at, operand.end, expression_info(cast->operand.id)};
+    return {cast->operand.id, operand.begin + cast->operand.at, operand.end,
+            expression_info(cast->operand.id, /*draft=*/true)};
   }
 
   Ex paren(Ex e, u32 begin, u32 end) {
