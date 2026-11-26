@@ -14,7 +14,7 @@ Model minimize_example() {
   const Term minimum[]{{1, x}, {2, pick.integer}, {0, x}};
   const Term maximum[]{{1, x}};
   model.linear(minimum, Rel::ge, 4);
-  model.linear(maximum, Rel::le, 2);
+  model.linear(maximum, Rel::le, 4);
   const Term objective[]{{-1, x}, {5, pick.integer}, {-2, x}};
   model.minimize(objective);
   return model;
@@ -51,7 +51,7 @@ void test_export() {
         "var -4..7: x1 :: output_var;\n"
         "var -21..17: objective;\n"
         "constraint int_lin_le([-2, -1], [x0, x1], -4);\n"
-        "constraint int_lin_le([1], [x1], 2);\n"
+        "constraint int_lin_le([1], [x1], 4);\n"
         "constraint int_lin_eq([5, -3, -1], [x0, x1, objective], 0);\n"
         "solve minimize objective;\n", "canonical FlatZinc with a signed linear objective");
   check(write_flatzinc(model) == text, "same model exports identically");

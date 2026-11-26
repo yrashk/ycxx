@@ -1,0 +1,35 @@
+#!/bin/sh
+# Build the documented standalone installation and run a consumer outside the source tree.
+set -eu
+
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+jobs=${1:-2}
+scratch=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ycxx-bench-package.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+
+toolchain="$repo/deps/libycxx/cmake/ycxx-toolchain.cmake"
+libycxx="$scratch/stage/libycxx"
+bench="$scratch/stage/bench"
+
+# The in-tree libycxx has install rules disabled and enables compiler-specific
+# reflection flags. Use a standalone install, with the same source-module
+# cycle workaround as the compiler build.
+cmake -S "$repo/deps/libycxx" -B "$scratch/libycxx-build" -G Ninja \
+  "-DCMAKE_TOOLCHAIN_FILE=$toolchain" -DCMAKE_BUILD_TYPE=Release -DYCXX_MODULES=ON \
+  -DYCXX_SOURCE_MODULES=OFF "-DCMAKE_INSTALL_PREFIX=$libycxx"
+cmake --build "$scratch/libycxx-build" --parallel "$jobs"
+cmake --install "$scratch/libycxx-build"
+
+cp -R "$repo/packages/ycxx-bench" "$scratch/bench-source"
+cmake -S "$scratch/bench-source" -B "$scratch/bench-build" -G Ninja \
+  "-DCMAKE_TOOLCHAIN_FILE=$toolchain" -DCMAKE_BUILD_TYPE=Release \
+  "-DCMAKE_PREFIX_PATH=$libycxx" "-DCMAKE_INSTALL_PREFIX=$bench"
+cmake --build "$scratch/bench-build" --parallel "$jobs"
+cmake --install "$scratch/bench-build"
+
+cp -R "$repo/tests/unit/bench/installed_package" "$scratch/consumer-source"
+cmake -S "$scratch/consumer-source" -B "$scratch/consumer-build" -G Ninja \
+  "-DCMAKE_TOOLCHAIN_FILE=$toolchain" -DCMAKE_BUILD_TYPE=Release \
+  "-DCMAKE_PREFIX_PATH=$bench;$libycxx"
+cmake --build "$scratch/consumer-build" --parallel "$jobs"
+ctest --test-dir "$scratch/consumer-build" --output-on-failure
