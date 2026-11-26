@@ -1908,8 +1908,10 @@ public:
     if (!tmpl && !tt && !builtin && !dependent_member) return std::nullopt;
     const bool namespace_template = tmpl && (!in || in->ns) && s_->namespace_scoped(tmpl->entity);
     const bool ordinary = alias_constraints_enabled_ && !s_->templated();
+    const bool classify_layout_alias = classify_only && in && in->ns && namespace_template &&
+        tmpl->kind == ast::DeclKind::type_alias && s_->questions().alias_call_pattern(tmpl->entity).layout_arguments;
     TemplateArgumentEnd extent{};
-    if (ordinary && namespace_template && (scope || classify_only)) {
+    if ((ordinary && namespace_template && (scope || classify_only)) || classify_layout_alias) {
       extent = template_argument_end(k + 1, /*verify_openers=*/true);
       if (extent.closed && (extent.half || kind(extent.next) != Tk::coloncolon)) {
         if (scope) return std::nullopt;
@@ -1945,7 +1947,8 @@ public:
     if (args && closed) {
       // A terminal namespace alias already names a type in lookahead. Its expansion may
       // instantiate another template, so leave substitution to the committed parse.
-      if (classify_only && in && in->ns && constrained_alias && (half_ || kind() != Tk::coloncolon))
+      if (classify_only && in && in->ns && (half_ || kind() != Tk::coloncolon) &&
+          (classify_layout_alias || (ordinary && constrained_alias)))
         t = s_->builtin(Builtin::dependent);
       else
         t = tt ? s_->template_param_id(*tt, *args, 0)
@@ -1997,7 +2000,7 @@ public:
                                                        bool* terminal_template_id = nullptr,
                                                        bool template_argument = false,
                                                        bool conversion = false) {
-    const bool classify_only = !checked && alias_constraints_enabled_ && !s_->templated();
+    const bool classify_only = !checked;
     const TemplateIdLookahead lookahead{*this, in_template_id_lookahead_ || !checked};
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
