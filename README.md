@@ -41,8 +41,8 @@ when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
 **Embed the query engine or compiler.** Build the components as static or shared libraries
-with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the engine and
-compiler examples in [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the component
+APIs and examples in the [embedder guide](docs/EMBEDDING.md).
 
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 Use `ycxx show --targets` to list the workspace's declared target names and rule
@@ -60,7 +60,8 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 `.ycxx/targets/<triple>/out/app`. Pass the same option to `ycxx show app` to
 inspect that variant.
 Use `target_triple()` in a declared action's `args` to pass the selected triple
-to a host tool that generates a target-specific input.
+to a host tool that generates a target-specific input. Use `host_triple()`
+for the host's canonical triple across target configurations.
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
@@ -96,9 +97,8 @@ the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
-Generated actions can track the executable bytes of declared helper tools.
-An action can also run a generated executable selected as a named artifact
-input.
+Generators and witnesses can track helper executables by path and run
+generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
@@ -851,6 +851,8 @@ written default member initializer are value-initialized.
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
   Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
   expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
+  `__builtin_ctz`, used by libycxx's `<charconv>`, converts its argument to `unsigned int`
+  and counts trailing zero bits as an `int`. [#1479](https://github.com/yrashk/ycxx/issues/1479)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the

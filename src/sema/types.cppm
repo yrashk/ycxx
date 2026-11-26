@@ -544,10 +544,12 @@ public:
       r.wide = negative ? i.bits.hi != ~u64{0} || i64(i.bits.lo) >= 0 : i.bits.hi != 0;
     } else if (v.is<ast::VFloat>(c)) {
       auto f = v.get<ast::VFloat>(c);
-      r.kind = ValueKind::floating;
       r.type = f.type;
       r.bits = f.bits.lo;
-      r.real = ast::float_double(*ins_, *target_, c);
+      if (ast::computes(ast::float_format(*ins_, *target_, f.type))) {
+        r.kind = ValueKind::floating;
+        r.real = ast::float_double(*ins_, *target_, c);
+      }
     } else if (v.is<ast::VString>(c)) {
       auto s = v.get<ast::VString>(c);
       r.kind = ValueKind::string;
@@ -625,6 +627,8 @@ struct EntityRec {
   // A closure type of a template's definition, outside function bodies: a dependent type, which
   // each instantiation's own closure types replace (docs/design/closures.md).
   bool closure_pattern = false;
+  // The head of a captureless generic lambda's synthesized static invoker template.
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
 };

@@ -24,5 +24,6 @@ esac
 {
     printf '#pragma once\n\n'
     printf 'static_assert(%s == 1 && %s == 1, "Generated for %s");\n' "$architecture" "$platform" "$target"
+    printf 'inline constexpr char build_target[] = "%s";\n' "$target"
     printf 'inline constexpr int score = %s;\n' "$score"
 } > "$3"

@@ -16,6 +16,7 @@ import :tok;
 import :diag;
 import :unicode;
 import :lexer;
+import :extended_float;
 
 export namespace ycxx::lex {
 
@@ -449,8 +450,13 @@ Tk classify_number(Literal& l, Tables& names, R&& report) {
       auto fmt = hex ? std::chars_format::hex : std::chars_format::scientific;
       auto bits = l.float_suffix == FloatSuffix::f ? float_bits<float>(text, fmt, at_least_one, overflow)
                                                     : float_bits<double>(text, fmt, at_least_one, overflow);
+      if (l.float_suffix == FloatSuffix::l) {
+        l.x87 = x87_literal(digits, fraction, exponent, hex);
+        l.x87_overflow = l.x87[1] == 0x7fff;
+        l.overflow = overflow;
+      }
       if (overflow) {
-        report(0, LexDiag::float_out_of_range, 0, 0);
+        if (l.float_suffix != FloatSuffix::l) report(0, LexDiag::float_out_of_range, 0, 0);
         bits = l.float_suffix == FloatSuffix::f ? u64(std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity()))
                                                 : std::bit_cast<u64>(std::numeric_limits<double>::infinity());
       }

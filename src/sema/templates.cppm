@@ -221,7 +221,9 @@ public:
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: a positive converted constant expression of type std::size_t.
         const auto bits = ast::int_bits(ins(), a->value);
-        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(bits))
+          const auto value_type = ins().values.get<ast::VInt>(a->value).type;
+          const auto builtin = types().builtin_of(value_type);
+          if (!builtin || (ast::is_signed(w_->target, *builtin) && ast::is_negative(bits)))
           return std::nullopt;
         const auto width = ast::width_of(w_->target, w_->target.size_type);
         if (ast::wide::is_zero(bits) || ast::wrap(bits, width, false) != bits) return std::nullopt;
@@ -1350,7 +1352,17 @@ public:
           if (ins().values.is<ast::VDepParam>(ar.bound_value) && ins().values.get<ast::VDepParam>(ar.bound_value).depth == depth)
             return false;
           if (!ins().values.is<ast::VInt>(ar.bound_value) && !ins().values.is<ast::VDepParam>(ar.bound_value)) return false;
-          QualType size = types().canonical(types().builtin(Builtin::unsigned_long));
+          QualType size = types().canonical(types().builtin(w_->target.size_type));
+          ConstId bound = ar.bound_value;
+          if (compatibility == ast::Compatibility::gcc && !head_.empty() && head_.front().depth == depth &&
+              p.index < head_.size() && head_[p.index].placeholder == ast::Placeholder::auto_ &&
+              ins().values.is<ast::VInt>(bound)) {
+            // GCC deduces a signed int for a bare auto parameter inferred from an array bound.
+            const auto bits = ast::int_bits(ins(), bound);
+            if (ast::wrap(bits, ast::width_of(w_->target, Builtin::int_), true) != bits) return false;
+            size = types().builtin(Builtin::int_);
+            bound = ast::int_value(ins(), w_->target, size, bits);
+          }
           // Keep the array-bound type deduction as a fallback until all
           // compared parameters have supplied their ordinary deductions.
           if (array_bound_types_ && !head_.empty() && head_.front().depth == depth && p.index < head_.size()) {
@@ -1358,7 +1370,7 @@ public:
             if (bound_type.kind == TypeKind::template_param && bound_type.depth == depth)
               array_bound_types_->insert(bound_type.index);
           }
-          if (!bind(out, p.index, {TemplateArgKind::value, size, ar.bound_value})) return false;
+          if (!bind(out, p.index, {TemplateArgKind::value, size, bound})) return false;
           return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
         }
       }
@@ -2102,7 +2114,11 @@ public:
     QualType pattern = tmpl.type;
     TypeRec f = types().rec(pattern);
     const bool deduced_result = address && types().has_placeholder(f.inner);
-    if (deduced_result) pattern = types().function(types().rec(type).inner, f.params, f.variadic, f.linkage, f.fn_cv);
+    if (deduced_result) {
+      auto signature = ins().types.get<ast::TFunction>(types().canonical(pattern));
+      signature.ret = types().rec(type).inner;
+      pattern = ins().intern_type(signature);
+    }
     if (!deduce(pattern, type, depth, out)) return std::nullopt;
     auto full = complete(tmpl, params, std::move(out));
     if (!full || deduced_result) return full;

@@ -97,6 +97,12 @@ add_test(NAME daemon.project_foreign_make
 add_test(NAME daemon.project_staged_tool
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_tool.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_staged_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_witness_helpers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_witness_helpers.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_runtime_assets
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_runtime_assets.py $<TARGET_FILE:ycxxc>)
 

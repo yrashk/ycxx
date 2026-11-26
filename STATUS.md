@@ -2794,13 +2794,19 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
-## Trailing-zero count builtin (#1381)
+## Trailing-zero count builtins (#1381, #1479)
 
 `__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
 operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
 after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
 Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
 Other unsigned operand types and the optional fallback argument remain in #248.
+
+`__builtin_ctz` uses the same lowering after implicitly converting its single argument to
+`unsigned int`. The result type is `int` and `__has_builtin` answers 1. Spec and Clang
+modes diagnose a reached zero operand in a required constant expression. GCC mode yields the
+width of `unsigned int` during constant evaluation. At run time the GNU builtin's zero
+operand has undefined behavior. The other fixed-width spellings remain in #248.
 
 ## C library string and memory builtins (#248, #1093, #1170)
 
@@ -3375,6 +3381,12 @@ exports and their consumers are scoped by triple. Package bootstrap recipes
 continue to describe host builds. Inspection shows the argument source and
 the action trace shows its position and resolved word.
 
+Project generators and rule witnesses can use `host_triple()` in their
+arguments to get the canonical host triple independently of target selection
+(#1534). Receipts key on the resolved argument, so builds for different
+targets can share an action with identical resolved arguments and inputs.
+Inspection and traces identify the host selector.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
@@ -3568,12 +3580,23 @@ Inspection reports current helper identity or availability without launching
 the action. The Make adapter uses these declarations for its C compiler and
 archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
+Rule witnesses also accept `tool_inputs`. A helper change invalidates the
+witness receipt, and an equal classified value preserves downstream reuse.
+The staged-witness walkthrough passes an absolute helper path to its
+analyzer and watches helper-only edits. [#1526](https://github.com/yrashk/ycxx/issues/1526)
+
 A rule-emitted generator can select an executable artifact with
 `tool = input("name")` (#1505). The producer's named output is staged using
 its bytes and executable mode, which enter the consumer's ordinary action
 identity. Inspection reports the staged path and selector and links the
 input edge to the producer. The staged tool example watches an executable
 script that writes a generated C++ header.
+
+A witness can also use `tool = input("name")` to run a staged executable
+artifact (#1515). The staged-witness example classifies the generated
+analyzer's stdout into a typed score and generates a C++ constant from it.
+An analyzer edit with the same score updates the witness evidence and
+reuses the header and native build.
 
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.

@@ -126,14 +126,17 @@ The caller owns cache admission and materialization. A crash, cancellation
 or failed command produces no reusable successful result. The first runner
 can return owned bytes, before deciding on durable artifact storage.
 
-Generators can name helper executables through a record such as
+Generators and witnesses can name helper executables through a record such as
 `tool_inputs = { cc = "/usr/bin/cc", ar = "/usr/bin/ar" }`. Each helper's name,
 declared absolute path, canonical pathname, and executable content fingerprint
 enter the ordinary action receipt identity. The declaration observes the
-helper at its host path. The direct tool still gets the declared arguments
-and environment. Watch reobserves both spellings, and `ycxx show` reports
-the current canonical path and fingerprint or the reason it is unavailable.
+helper at its host path. Pass a helper path through the declared arguments
+or environment when the action needs it. Watch reobserves both spellings.
+`ycxx show` reports the canonical path and fingerprint of a current helper.
+An unavailable generator helper has a diagnostic fact, and a stale witness
+snapshot is reported as a partial plan until the next successful build.
 [#1343](https://github.com/yrashk/ycxx/issues/1343)
+[#1526](https://github.com/yrashk/ycxx/issues/1526)
 
 Keep subprocess execution outside ordinary reevaluation. A query returns
 pending action demands to the build coordinator. The coordinator deduplicates
@@ -230,14 +233,16 @@ external actions run on the host and share receipts when their declared inputs
 match. An external action that supplies a linker input must produce an archive
 for the selected target.
 
-An action can opt into that selection by placing `target_triple()` in its
-`args` (#1347). The planner supplies one canonical argv word and the tool
-executes on the host. The default request supplies the host triple. The
-resolved word enters the action key, so requests with the same resolved argv
-and inputs can reuse its receipt. Generated planning inputs and rule witnesses
-resolve the argument with the same target. Typed witness values have a
-separate identity per triple. Read-only inspection shows the argument and its
-manifest location. Value traces show the resolved argv position and origin.
+Project generators and rule witnesses accept `target_triple()` (#1347)
+and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
+argv word. `target_triple()` resolves to the selected compiler target and
+defaults to the host. `host_triple()` resolves to the host across all target
+selections. The resolved words enter the action key, so identical argv and
+inputs can reuse a receipt across target selections and equivalent literals.
+Typed witness values have a separate identity per target triple. Read-only
+inspection shows each argument and its manifest location. Value traces show
+the resolved argv position and selector. [Target-aware example](../../examples/project-build/target-aware-action/README.md)
+
 `host_action` package recipes build the rule package for the host.
 
 Named-module discovery reads the preprocessor's marked module and import
@@ -832,6 +837,34 @@ from the shipped catalogue.
 
 The independent Astra design review identified the stable export address and
 separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)
+
+### Staged witness tools (#1515)
+
+An `action.observe` can select its tool through an executable artifact input.
+In the staged-witness example the producer copies `analyzer.sh` as its named
+`runner` output while preserving its executable mode.
+
+```text
+action.observe "observed" {
+    tool = input("analyzer")
+    inputs = { analyzer = artifact("runner", "runner") }
+    export = "score"
+    schema = "example.score.v1"
+}
+```
+
+The coordinator stages the producer receipt and invokes the selected copy
+as the witness. Its bytes and executable mode are part of the witness action
+key. The classifier turns the output into a typed `score` row, which the
+header rule consumes with `facts = { score = value("observed", "score") }`.
+An edit that preserves the classified score can reuse header generation
+and native compilation. Build the example with `ycxx build app` and inspect
+the artifact and value links with `ycxx show app --format=html`.
+[Runnable example](../../examples/project-build/staged-witness/README.md)
+
+The same staged analyzer can call a helper at an absolute host path. Declare
+the path in `tool_inputs` to track helper changes as witness inputs. Equal
+classified scores still reuse the app. [Helper walkthrough](../../examples/project-build/staged-witness/README.md#track-a-helper-executable)
 
 ### Structured shader reflection
 

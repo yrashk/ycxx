@@ -440,13 +440,26 @@ private:
   }
 
   // The value of a zero-initialized object of type `t` ([dcl.init.general]).
-  std::optional<ConstId> zero_constant(QualType t) {
+  std::optional<ConstId> zero_constant(QualType t, bool raw_union_member = false) {
     Types& types = s_->types();
     Values& values = s_->world().values;
     if (s_->is_aggregate(t)) {
+      raw_union_member = raw_union_member || (s_->is_union(t) && s_->compatibility() == ast::Compatibility::gcc);
       std::vector<ConstId> elements;
       for (const Sema::Element& element : s_->elements(t)) {
-        auto value = zero_constant(element.type);
+        auto value = zero_constant(element.type, raw_union_member);
+        if (!value) return std::nullopt;
+        elements.push_back(*value);
+      }
+      return values.aggregate(t, elements);
+    }
+    if (raw_union_member && types.is_class(t)) {
+      const auto layout = constant_record_layout(t);
+      if (!layout) return std::nullopt;
+      std::vector<ConstId> elements;
+      elements.reserve(layout->fields.size());
+      for (const auto& field : layout->fields) {
+        auto value = zero_constant(field.type, true);
         if (!value) return std::nullopt;
         elements.push_back(*value);
       }
@@ -457,8 +470,8 @@ private:
       return s_->ins().intern_value(ast::VMemberPtr{Types::unqualified(types.canonical(t))});
     if (types.is_enum(t)) return values.integer(s_->underlying_of(t), 0);
     if (types.is_integral(t)) return values.integer(Types::unqualified(t), 0);
-    if (types.is_standard_floating(t) && ast::computes(ast::float_format(s_->ins(), s_->world().target, t)))
-      return values.floating(Types::unqualified(t), 0.0);
+    if (types.is_standard_floating(t))
+      return ast::float_value(s_->ins(), s_->world().target, Types::unqualified(t), ast::Bits128{});
     return std::nullopt;
   }
 
@@ -473,7 +486,8 @@ private:
     // ([expr.prim.lambda.capture]/15), or a class a constructor initializes ([class.ctor]): its
     // fields are its value whatever their access.
     const bool aggregate = s_->is_aggregate(type);
-    if (!record || (!aggregate && !record->closure && (!record->user_ctors || record->polymorphic)) || record->union_ ||
+    if (!record || (!aggregate && !record->closure && (!record->user_ctors || record->polymorphic)) ||
+        (record->union_ && !aggregate) ||
         !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
         !record->destructor_usable || record->destructor != EntityId::none)
       return std::nullopt;
@@ -481,8 +495,11 @@ private:
     if (!layout) return std::nullopt;
 
     interp::ConstantRecordLayout result{layout->size, {}};
-    result.fields.reserve(record->fields.size());
-    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+    // The currently supported union aggregate initializer gives a value to its first
+    // variant only. Its other variants share storage without supplying constant values.
+    const std::size_t fields = record->union_ ? std::min<std::size_t>(record->fields.size(), 1) : record->fields.size();
+    result.fields.reserve(fields);
+    for (std::size_t i = 0; i < fields; ++i) {
       const FieldRec& field = record->fields[i];
       if ((aggregate && record->access_of(field.entity) != ast::Access::public_) || field.bit_width || field.no_unique_address ||
           !constant_record_field(field.type))
@@ -592,7 +609,7 @@ private:
   bool constant_record_field(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
-    if (s_->compatibility() == ast::Compatibility::gcc) {
+    if (s_->compatibility() == ast::Compatibility::gcc || types.is_class(types.innermost_array_element(type))) {
       while (types.is_array(type)) {
         const auto array = types.rec(type);
         if (array.bound_value == ConstId::none) return false;
@@ -601,6 +618,7 @@ private:
     }
     if (Types::is_volatile(type)) return false;
     if (types.is_array(type)) return constant_record_char_array(types, type);
+    if (types.is_class(type)) return constant_record_layout(type).has_value();
     if (types.is_pointer(type)) return true;
     if (types.is_enum(type)) {
       const EnumRec* enumeration = s_->enum_rec(types.enum_of(type));
@@ -611,7 +629,7 @@ private:
     if (!b) return false;
     const auto& target = s_->world().target;
     return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 128) ||
-           (ast::is_floating(*b) && ast::computes(target[*b].format));
+           (ast::is_floating(*b) && (ast::computes(target[*b].format) || target[*b].format == ast::FloatFormat::x87_extended));
   }
 
   struct Host {
@@ -654,7 +672,7 @@ private:
       QualType t = s_->types().is_enum(r.type) ? s_->underlying_of(r.type) : r.type;
       return {vs.integer(t, ast::Bits128{r.bits, r.hi}), 0, true};
     }
-    case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
+    case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, r.hi}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
     case K::aggregate: {

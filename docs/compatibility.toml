@@ -166,55 +166,90 @@ id = "function-template-placeholder-argument-prefix"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.param], [dcl.spec.auto], Itanium C++ ABI §5.1.5.7, #1244"
-limits = "Placeholders in compound declarators (auto*, auto&) are rejected (#1401). A decltype(X) parameter type is mangled as a type (#1406)."
+limits = "Uses current primary symbols, with no GCC legacy aliases. Placeholders in compound declarators (auto*, auto&) are rejected (#1401). A decltype(X) parameter type is mangled as a type (#1406)."
 prior = "Reject the tested placeholder-typed constant template parameter."
-spec = "Accept it. Write TnDa (TnDc for decltype(auto)) before each argument and TpTnDa before a pack, including an empty pack."
+spec = "Deduce auto and decltype(auto) from each argument. Write TnDa (TnDc for decltype(auto)) before each argument and TpTnDa before a pack, including an empty pack."
 gcc = "Write TnDa, TnDc and TpTnDa only after an unscoped name (global or St), and none before an empty pack."
 clang = "Same as spec."
 spec_observed = "A placeholder type can be used in a constant template parameter."
 gcc_observed = "GCC 16.2 callers use TnDa for a single auto parameter and TpTnDa for a nonempty auto pack. An empty auto pack uses J...E alone."
 clang_observed = "Uses TnDa for a single auto parameter and TpTnDa for both empty and nonempty auto packs on x86-64 Linux and AArch64 Darwin."
 probe = 'template<auto... V> int f(); int use() { return f<>() + f<4>(); }'
-evidence = ["tests/draft/temp/temp.arg.template-2.accept.cpp", "tests/daemon/compatibility.py", "tests/own/templates/placeholder-parameters/mangling.run.cpp"]
+evidence = ["tests/draft/temp/temp.arg.template-2.accept.cpp", "tests/daemon/compatibility.py", "tests/own/templates/placeholder-parameters/mangling.run.cpp", "GCC 16.2 and Clang 23.1.6 primary symbols for single parameters, heterogeneously typed packs, and defaults"]
+
+[[divergence]]
+id = "placeholder-template-array-bound-deduction"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.deduct.type]/2, [temp.arg.nontype]"
+prior = "Reject a bare auto constant template parameter."
+spec = "Deduce std::size_t when an array bound supplies the argument."
+gcc = "Deduce signed int when an array bound supplies the argument. Reject a bound that cannot be represented in int during deduction. An explicitly supplied argument retains its type."
+clang = "Same as spec."
+probe = 'template<auto N> int f(const char (&)[N]); int use() { return f("xyz"); }'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 array-bound deduction and primary symbols at INT_MAX and above, on Linux x86-64 and Clang Darwin arm64"]
 
 [[divergence]]
 id = "lambda-invoker-symbol"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.8, #281"
 prior = "Clang's __invoke spelling for the static function-pointer conversion target."
 spec = "Use ycxx's established __invoke spelling."
-gcc = "Use _FUN for the static invoker."
+gcc = "Use _FUN for the static invoker, including a specialization of a generic lambda's conversion target."
 clang = "Same as spec."
 limits = "This controls the invoker's name inside the closure symbol. Translation-unit-local closure numbering and generic invoker signatures have separate entries."
 evidence = ["tests/own/lambda/p2-impl-mangle.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "translation-unit-local-closure-symbol"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[basic.def.odr], Itanium C++ ABI §5.1.8–9"
 prior = "Use the structural Ul encoding and a per-signature closure ordinal, including for translation-unit-local functions."
 spec = "Use ycxx's structural encoding. The ABI leaves private closure names implementation-defined."
-gcc = "Same as prior."
-clang = "Same as prior."
-gcc_observed = "In the tested ordinary and static non-inline functions, uses Ul with a signature-specific ordinal. An unused earlier same-signature closure can increment the ordinal."
-clang_observed = "Uses a private $<underscore><ordinal> source-name in the tested ordinary and static non-inline functions. An unused closure does not consume an ordinal in the test and converting the long lambda before either int lambda gives the long lambda ordinal zero. Externally linkable inline and template scopes keep Ul and a per-signature ordinal."
-evidence = ["GCC 16.2 and Clang 23.1.6 primary ELF and Mach-O symbols for inline, templated, static and ordinary functions with mixed lambda signatures"]
+gcc = "Use Ul with a per-signature declaration ordinal. An unused same-signature closure can increment the ordinal without emitting a member."
+clang = "Use $_ followed by a per-function ordinal for closures in ordinary non-inline functions. Use the first native reference to the closure member or its type to allocate the ordinal. Inline and templated scopes retain the structural encoding."
+limits = "Covers the call operator and static invoker of nongeneric lambdas, including namespace-scope static, ordinary in-class and out-of-class function owners, C linkage, and closure types in function template arguments. Both compiler modes omit unreferenced members of the tested private closures. Generic conversion signatures have a separate entry."
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 primary ELF and Mach-O symbols for inline, templated, static and ordinary functions, using direct calls, pointer conversions, and closure template arguments"]
 
 [[divergence]]
 id = "generic-lambda-invoker-signature"
-status = "recorded"
-mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.8"
-prior = "Emit the same generic invoker signature in every mode, with a different member name in GCC mode."
-spec = "Same as prior. The ABI specifies a closure encoding and leaves the conversion target implementation-defined."
-gcc = "Same as prior except for the _FUN member name."
-clang = "Same as prior."
-gcc_observed = "Encodes the generic invoker's return as a dependent call through a null closure pointer, retaining the explicit template head on externally linkable closures."
-clang_observed = "Uses Da for the deduced return and an ordinary mangled parameter type or substitution. Externally linkable closures encode the explicit template head and distinguish it from an invented auto parameter."
+prior = "Reject conversion from a generic lambda to a function pointer."
+spec = "Deduce the specialization from the target pointer and use the structural closure encoding. An explicit return type is encoded as written. A deduced return keeps its placeholder in the invoker's signature."
+gcc = "Use the written return type when present. A deduced return is encoded as a dependent call to the call operator through a null closure pointer, with template arguments and forwarded parameters."
+clang = "Use the written return type, preserving the placeholder for a deduced return. Inline and templated owners retain the explicit template head in the closure component."
+limits = "This entry covers the invoker for captureless unconstrained lambda specializations. A written dependent exception specification, constrained lambdas, and static call operators have separate language requirements. The conversion member is recorded separately."
 probe = 'inline int (*provider())(int) { return []<class T>(T n) { return n; }; }'
-evidence = ["GCC 16.2 and Clang 23.1.6 static invoker symbols from generic lambdas on ELF and Mach-O"]
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 static invoker symbols from generic lambdas on ELF and Mach-O, including explicit and inferred types, packs, defaults, references, mutable and noexcept"]
+
+[[divergence]]
+id = "generic-lambda-conversion-function-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.5.1 and §5.1.8"
+prior = "Use the invoker address directly without emitting a separate conversion member."
+spec = "The conversion member yields the invoker address, or the address of the call operator if it is static. Encode an emitted conversion member as cv followed by the conversion type."
+gcc = "At -O0, emit a constexpr conversion member when the address conversion is used. A deduced generic conversion type uses a dependent call to the lambda call operator, using a null closure pointer for a nonstatic operator."
+clang = "At -O0, emit the conversion member when used. The conversion type of the tested generic closure has a placeholder return. Both peers use the same concrete conversion-member spelling for the tested nongeneric closure."
+limits = "The object symbols depend on optimization. Both peers inline these tested conversions at -O2. Both return the static call operator directly for a static lambda."
+probe = 'inline int (*provider())(int) { return [](auto n) { return n; }; }'
+evidence = ["GCC 16.2 with -fabi-compat-version=0 and upstream Clang 23.1.6 -O0 and -O2 ELF and Mach-O symbol probes"]
+
+[[divergence]]
+id = "constrained-lambda-call-operator-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.lambda.closure], [temp.constr.decl], Itanium C++ ABI §5.1.8 and the constraint mangling proposal"
+prior = "A lambda's written requires-clause is unsupported."
+spec = "The conversion template has the same associated constraints as the function call operator template. An emitted symbol uses the corresponding closure signature or trailing constraint according to its source placement."
+gcc = "The tested explicit head constraint and explicit constrained parameter use Q and Tk in the closure signature. A trailing concept argument decltype(n) references a level-one function parameter."
+clang = "Use the same Q and Tk prefixes for the tested explicit forms. The tested trailing decltype(n) references a level-zero function parameter. Both peers omit the tested invented auto parameter's constraint from the closure signature."
+probe = 'inline int (*provider())(int) { return [](auto n) requires Integral<decltype(n)> { return n; }; }'
+evidence = ["GCC 16.2 primary symbols and upstream Clang 23.1.6 ELF and Mach-O symbols for explicit, invented and trailing lambda constraints"]
 
 [[divergence]]
 id = "constexpr-memory-builtin-range"
@@ -316,19 +351,43 @@ probe = 'constexpr int* a = nullptr; static_assert(__builtin_memchr(&a, 0, sizeo
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constant evaluation of null, non-null, global and local pointer objects"]
 
 [[divergence]]
-id = "constexpr-memory-extended-representations"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
-reference = "[expr.const], [basic.types], [cstring.syn]"
-prior = "Reject constexpr byte reads through the tested x87 long double, nested record, and active union objects."
-spec = "Same as prior for the built-in wrappers."
-gcc = "Same as prior."
+id = "constexpr-memory-long-double-representation"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [lex.fcon], [cstring.syn], SysV AMD64 psABI §3.1.2"
+prior = "Reject constexpr byte reads of an x87 long double object."
+spec = "Parse the target's long double literals. Keep the byte builtins' narrow-character constexpr model."
+gcc = "Read long double representation bytes. The x86-64 target uses the full x87 significand and exponent with zero padding in the tested globals. The arm64 Darwin target uses binary64."
 clang = "Same as spec."
-gcc_observed = "GCC 16.2 accepts the tested x87 long double, records containing other records, and a union with a scalar active member."
+limits = "Covers constexpr byte reads of literal-initialized long double objects. General x87 arithmetic and native transport are separate feature work."
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constexpr byte probes with more than 53 significand bits, hexadecimal exponents and x87 padding"]
+
+[[divergence]]
+id = "constexpr-memory-active-union-representation"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [dcl.init.aggr], [basic.types], [cstring.syn]"
+prior = "Reject reads of bytes through the tested union object."
+spec = "Keep the typed byte builtins' narrow-character model. A normal constant expression can read the initialized first variant."
+gcc = "Read the first active scalar variant of the tested namespace-scope constexpr unions and treat the remaining union bytes as zero. Reject typed byte reads from automatic union storage."
+clang = "Same as spec."
+limits = "Covers the supported first-variant aggregate initializers. Retaining another designated active variant needs general union initialization support."
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 probes for active and inactive reads, automatic storage, first-variant bytes and zero padding"]
+
+[[divergence]]
+id = "constexpr-memory-extended-representations"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [basic.types], [cstring.syn]"
+prior = "Reject constexpr byte reads through the tested nested record objects."
+spec = "Same as prior for the built-in wrappers."
+gcc = "Read bytes through supported namespace-scope constexpr records containing nested records and fixed arrays of records. Include padding as zero and keep match addresses relative to the complete designated record."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts the tested namespace-scope constexpr records containing other records, including values after a nested member and padding."
 clang_observed = "Upstream Clang rejects the corresponding typed byte reads on Linux x86-64 and Darwin arm64."
-limits = "Remaining GCC cases need representation for extended floats, nested record storage and active union variants. Flat record padding and null pointer representations have separate entries."
-probe = 'constexpr long double a = 1.0L, b = 2.0L; static_assert(__builtin_memcmp(&a, &b, sizeof a) > 0);'
-evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes"]
+limits = "Covers nested versions of the supported constexpr record layouts. Flat records, pointers, long double and first-variant union representations have separate entries."
+probe = 'struct Inner { int x; }; struct Outer { Inner a; int b; }; constexpr Outer x{{3}, 1}, y{{3}, 2}; static_assert(__builtin_memcmp(&x, &y, sizeof x) < 0);'
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes"]
 
 [[divergence]]
 id = "system-header-dialect"
@@ -417,6 +476,20 @@ spec = "Allow the infinity on the supported IEEE floating types."
 gcc = "Reject an infinity newly produced by arithmetic on finite operands in constant evaluation."
 clang = "Same as spec."
 evidence = ["tests/own/floating/run-infinity.run.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constexpr-ctz-zero"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "GNU bit operation builtins: __builtin_ctz, [expr.const], #1479"
+prior = "The ordinary GNU spelling was unavailable."
+spec = "A reached zero operand fails constant evaluation."
+gcc = "A reached zero operand yields the width of unsigned int during constant evaluation."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 returned 32 on x86-64 Linux for both a literal zero and a zero function argument."
+clang_observed = "Clang 23.1 rejected both forms on x86-64 Linux and arm64 Darwin."
+limits = "Runtime zero has undefined behavior. Unary __builtin_ctzg retains its existing constant-evaluation policy."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/builtin_ctz/zero-literal.cpp", "tests/daemon/builtin_ctz/zero-parameter.cpp"]
 
 [[divergence]]
 id = "constexpr-nan-operand"
@@ -547,6 +620,19 @@ spec = "Accept the pinned-draft binding cases."
 gcc = "Reject references to immediate functions stored outside an immediate invocation, and constexpr initializers whose value retains an immediate function pointer or reference. Immediate invocations may consume the pointer."
 clang = "Same as GCC."
 evidence = ["tests/own/consteval/function-reference-constexpr.accept.cpp", "tests/own/consteval/function-reference-binding.accept.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "immediate-function-template-argument-escalation"
+status = "pending"
+mode_status = { spec = "partial", gcc = "partial", clang = "pending" }
+reference = "[expr.const.imm]/2, example 2; [temp.arg.nontype]"
+prior = "Allow a direct constant call through a bare auto template parameter in every mode. Targetless address selection for the function specialization fails before immediate escalation can be checked."
+spec = "Accept a constant invocation. Treat the specialization as immediate when invoking the substituted immediate function with a runtime parameter, and reject an escaping address of the specialization."
+gcc = "Same as spec for the tested forwarding function."
+clang = "Reject the immediate function as a template argument, including at a direct constant call."
+probe = 'consteval int id(int x) { return x; } template<auto F> constexpr auto apply_to(int i) { return F(i); }'
+limits = "GCC and Clang both accept a direct call and a targetless address for the same specialization when id is constexpr. The existing draft rejection case does not distinguish targetless address deduction from immediate escalation."
+evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin syntax probes for static_assert(apply_to<id>(7) == 7) and auto p = &apply_to<id>, repeated with constexpr id"]
 
 [[divergence]]
 id = "constexpr-void-cast-one-past"
@@ -706,17 +792,18 @@ evidence = ["docs/EXTENSIONS.md", "tests/own/builtins/dependent-transform-overlo
 
 [[divergence]]
 id = "builtin-concrete-type-transform-in-template-symbol"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.5 and §5.1.5.8"
 prior = "Fold a nondependent builtin transform to its result type."
 spec = "Use the concrete result of the transform in the signature."
-gcc = "Same as spec."
+gcc = "Retain the builtin transform in the tested function template parameter and return patterns, including trailing returns and a dependent alias template that denotes the transform. Syntax-only compilation can use the transformed type. Emitting a specialization diagnoses its unsupported signature, and a distinct overload can conflict at the call."
 clang = "Same as spec."
-gcc_observed = "Accepts syntax but diagnoses emitting the function template specialization when its signature contains even a nondependent __remove_cv(const int)."
+gcc_observed = "The current GCC rejection also applies when an alias template carries the transform into the signature. A non-template alias, a function body, and the tested ordinary member of a class template retain their folded behavior."
 clang_observed = "Emits the same symbol as spelling the resulting int directly."
+limits = "Header-required builtin spellings remain available in every mode. The supported slice covers directly written transforms, concrete alias results, and the tested member template. More involved dependent aliases still need verification."
 probe = 'template<class T> __remove_cv(const int) f(T n) { return n; } int use() { return f(7); }'
-evidence = ["docs/EXTENSIONS.md"]
+evidence = ["docs/EXTENSIONS.md", "tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 syntax and primary-emission probes for concrete builtin transforms in direct and alias signatures"]
 
 [[divergence]]
 id = "builtin-addressof-pack"
@@ -739,7 +826,7 @@ spec = "Copy-list-initialize the first variant of an empty aggregate union initi
 gcc = "Use zero initialization without calling the first variant's constructor in the tested empty lists. A written default initializer on the first variant still runs."
 clang = "Same as spec."
 gcc_observed = "GCC 16.2 zeroes automatic union storage without calling a constructor for the first variant in direct lists, copy lists, and nested lists. A constexpr aggregate union can expose zero in the first variant even when the variant's constructor would produce a different value."
-limits = "The first-variant constructor and its implicit copy-list checks are covered for the supported directly and indirectly initialized runtime aggregates. Reading a union variant during constant evaluation still needs coverage."
+limits = "The supported runtime aggregates and a constexpr union with an implicit destructor and a nontrivial first record are covered. Constant evaluation with a written union destructor still needs coverage."
 evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]

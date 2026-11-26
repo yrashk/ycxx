@@ -89,6 +89,7 @@ export enum class Flag : std::uint8_t {
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
+  ctz_gcc_zero,      // GCC mode accepts a zero operand for this spelling in constant evaluation
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -184,7 +185,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V}).with({commutative})]],
   or_ [[=pure({V, V}, {V}).with({commutative})]],
   xor_ [[=pure({V, V}, {V}).with({commutative})]],
-  ctz [[=pure({V}, {V})]],  // trailing zero bits of an integer; undefined for zero
+  ctz [[=pure({V}, {V}).accepts({ctz_gcc_zero})]],  // trailing zero bits of an integer
   icmp [[=pure({V, V}, {V}).imms({pred})]],
   select [[=pure({V, V, V}, {V})]],
 
