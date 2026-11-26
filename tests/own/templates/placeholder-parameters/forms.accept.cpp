@@ -28,3 +28,12 @@ static_assert(wrap<5L>::k == 0);
 
 template<auto X, decltype(X) Y> struct pair { static constexpr bool equal = X == Y; };
 static_assert(pair<3, 3>::equal && !pair<'a', 'b'>::equal);
+
+// A default naming an earlier parameter deduces that argument's type.
+template<auto X, auto Y = X> struct twin { using type = decltype(Y); static constexpr auto value = Y; };
+static_assert(same<twin<'a'>::type, char> && twin<'a'>::value == 'a');
+static_assert(same<twin<1L>, twin<1L, 1L>> && !same<twin<1L>, twin<1L, 1>>);
+template<int X, auto Y = X> struct from_int { using type = decltype(Y); };
+static_assert(same<from_int<3>::type, int>);
+template<auto X, auto Y = X> constexpr auto second() { return Y; }
+static_assert(second<'a'>() == 'a' && same<decltype(second<'a'>()), char>);

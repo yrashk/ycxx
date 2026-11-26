@@ -1436,7 +1436,9 @@ public:
     if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth) {
       const u16 index = ins().values.get<ast::VDepParam>(x.value).index;
       if (needs_class_value_check(y.type, x.type, y.value)) {
-        if (index >= head_.size() || head_[index].pack) return false;
+        if (index >= head_.size()) return false;
+        // An element of a placeholder pack deduces its own type, as a placeholder parameter does.
+        if (head_[index].pack && head_[index].placeholder == ast::Placeholder::none) return false;
         auto value = head_[index].placeholder != ast::Placeholder::none ? placeholder_value(y)
                                                                         : converted_value(y, head_[index].type);
         return value && bind(out, index, *value);
@@ -1915,8 +1917,9 @@ public:
   // deduced from the argument ([temp.arg.nontype]/1, [dcl.type.auto.deduct]), here the argument's
   // own type without cv, and must be structural ([temp.param]/7). Template-argument identity
   // then includes that type ([temp.type]): `1` and `1u` are different arguments.
-  // `decltype(auto)` deduces the same, which is right for a prvalue or an unparenthesized name
-  // but not for a parenthesized lvalue, whose value category the argument no longer has (#1401).
+  // `decltype(auto)` deduces the same, which is right for a prvalue or a name of a non-reference
+  // object, but not for a parenthesized lvalue or a reference, whose declared type and value
+  // category the argument no longer has (#1401).
   std::optional<TemplateArg> placeholder_value(const TemplateArg& a) {
     if (a.kind != TemplateArgKind::value) return std::nullopt;
     const QualType t = types().canonical(Types::unqualified(a.type));
@@ -2030,7 +2033,16 @@ public:
         auto p = ins().values.get<ast::VDepParam>(d.value);
         auto a = p.depth == depth && p.index < i ? out[p.index] : std::nullopt;
         auto pt = substitute(params[i].type, bindings(depth, out));
-        auto v = a && pt ? converted_value(*a, *pt) : std::nullopt;
+        auto v = !a                                                 ? std::nullopt
+                 : params[i].placeholder != ast::Placeholder::none ? placeholder_value(*a)
+                 : pt                                               ? converted_value(*a, *pt)
+                                                                    : std::nullopt;
+        if (!v) return std::nullopt;
+        d = *v;
+      }
+      // A placeholder parameter's substituted default deduces its type ([temp.arg.nontype]/1).
+      if (params[i].placeholder != ast::Placeholder::none && d.kind == TemplateArgKind::value) {
+        auto v = placeholder_value(d);
         if (!v) return std::nullopt;
         d = *v;
       }

@@ -25,3 +25,11 @@ static_assert(y_of(cw<P{1, 9}>{}) == 9);
 template<auto N> constexpr auto bound(int (&)[N]) { return N; }
 int arr[5];
 static_assert(bound(arr) == 5 && same<decltype(bound(arr)), decltype(sizeof(int))>);
+
+// Class-type elements of an `auto...` pack are deduced too.
+template<auto... Xs> struct list {};
+template<auto... Xs> constexpr int count(list<Xs...>) { return sizeof...(Xs); }
+static_assert(count(list<P{1, 2}>{}) == 1 && count(list<P{1, 2}, 4, 'c'>{}) == 3);
+template<class T> struct is_list { static constexpr int k = 0; };
+template<auto... Xs> struct is_list<list<Xs...>> { static constexpr int k = 1; };
+static_assert(is_list<list<P{1, 2}, 4>>::k == 1);
