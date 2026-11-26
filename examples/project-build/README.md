@@ -8,6 +8,8 @@ out of the checkout and build it there.
 | --- | --- | --- |
 | [Freestanding targets](freestanding-targets/README.md) | [build.ycxx](freestanding-targets/build.ycxx) | Build one app for Linux x86-64 and macOS arm64 and inspect each target's output. |
 | [Target-aware action](target-aware-action/README.md) | [build.ycxx](target-aware-action/build.ycxx) | Pass the selected target to a host tool and compile against the generated header. |
+| [Staged tool](staged-tool/README.md) | [build.ycxx](staged-tool/build.ycxx) | Run a generated executable to produce a C++ header, then edit the executable under watch. |
+| [Staged witness](staged-witness/README.md) | [build.ycxx](staged-witness/build.ycxx) | Run a generated analyzer and compare edits that preserve or change its typed result. |
 | [Module discovery](module-discovery/README.md) | [build.ycxx](module-discovery/build.ycxx) | Inspect named module providers and compare the imports selected for Linux and macOS. |
 | [Module providers](module-providers/README.md) | [build.ycxx](module-providers/build.ycxx) | Resolve a shared module through two import paths and compare its provider on Linux and macOS. |
 | [Native C++](native/README.md) | [build.ycxx](native/build.ycxx) | Watch a generator input change and inspect the library dependency and source glob. |

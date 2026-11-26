@@ -18,6 +18,7 @@ using lex::Severity;
 struct message {
   Severity severity;
   char text[120];
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 
 enum class Diag : std::uint32_t {
@@ -57,6 +58,8 @@ enum class Diag : std::uint32_t {
   integer_literal_operator_conflict [[=message{Severity::error, "both a raw literal operator and a numeric literal operator template are visible"}]],
   integer_literal_operator_unsupported [[=message{Severity::error, "raw and template integer literal calls are not supported yet"}]],
   enum_no_type [[=message{Severity::error, "no integral type can hold every value of '{0:n}'"}]],
+  enum_increment_truncation [[=message{Severity::warning, "incremented enumerator value {0:i} is not representable in the largest integer type", lex::Warning::enum_too_large}]],
+  enum_range_truncation [[=message{Severity::warning, "enumeration values exceed range of largest integer", lex::Warning::enum_too_large}]],
   enum_base_required [[=message{Severity::error, "this declaration of unscoped enumeration '{0:n}' requires an underlying type"}]],
   enum_base_not_integral [[=message{Severity::error, "an enumeration base must name an integral type"}]],
   enum_base_mismatch [[=message{Severity::error, "enumeration '{0:n}' redeclared with a different underlying type"}]],
@@ -146,6 +149,7 @@ enum class Diag : std::uint32_t {
   allocation_declaration [[=message{Severity::error, "unsupported declaration of '{0:n}'; expected an ordinary global allocation or deallocation function"}]],
   negative_new_bound [[=message{Severity::error, "array new bound is negative"}]],
   oversized_new_bound [[=message{Severity::error, "array new bound exceeds the maximum allocation size"}]],
+  new_bound_conversion [[=message{Severity::warning, "converting the array new bound to size_t changes its value from {0:i} to {1:i}", lex::Warning::constant_conversion}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
   default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],
@@ -412,6 +416,8 @@ enum class Diag : std::uint32_t {
   class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  class_alignment_zero [[=message{Severity::warning, "a zero class alignment is not a positive power of two", lex::Warning::attributes}]],
+  class_alignment_ignored [[=message{Severity::warning, "class alignment is ignored after the class is defined", lex::Warning::attributes}]],
   post_definition_layout_attribute [[=message{Severity::error, "layout- or ABI-affecting attributes after a class or enum definition are not supported yet"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   field_alignment_not_constant [[=message{Severity::error, "a member alignment requires an integral constant expression or a type"}]],
@@ -457,6 +463,7 @@ enum class Diag : std::uint32_t {
   unique_object_representations_unsupported [[=message{Severity::error, "'__has_unique_object_representations' for '{0:t}' is not supported yet"}]],
   trivial_or_pod_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
   trivial_or_pod_unsupported [[=message{Severity::error, "'{1:n}' for '{0:t}' is not supported yet"}]],
+  builtin_nansl_string [[=message{Severity::error, "the supported form of '__builtin_nansl' requires an empty ordinary string literal"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

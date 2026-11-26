@@ -1,6 +1,4 @@
 // #327: the pinned library's private descriptor has two pointers and two unsigned fields.
-// XFAIL: ycxx@darwin-arm64 source-location descriptors on Darwin (#327)
-// PARITY: #327 Darwin source-location descriptors
 // FLAGS: -isystem ../../../deps/libycxx/include
 #include <source_location>
 

@@ -154,7 +154,7 @@ constexpr EmbeddedInput capabilities_inputs[] = {
 };
 
 std::string path_text(const fs::path& path) {
-  return path.generic_native_encoded_string();
+  return path.generic_string<char>();
 }
 
 struct PlanningError {
@@ -861,20 +861,26 @@ class Planner {
       const auto* value = field(decl, name);
       return value ? std::get_if<Record>(&value->data) : nullptr;
     };
-    const auto require_binding = [&](const RuleValueReference& ref, SourceLocation location, bool structured) {
+    const auto require_binding = [&](const RuleValueReference& ref, std::string_view binding,
+                                     SourceLocation location, bool structured) {
       const auto [provider, kind] = find(ref.target, location, ref.field);
       require_value_export(provider, kind, ref.field, location);
       if (observation_schema(provider).has_value() != structured)
         fail(location, std::format("value export '{}.{}' requires a {} binding", ref.target, ref.field,
                                   structured ? "capability" : "fact"));
+      if (inspection_)
+        inspection_->dependency_graph->value_edges->push_back({
+            decl.name, provider.name, structured ? "facts" : "capabilities", std::string(binding), ref.field,
+            {.line = location.line, .column = location.column}});
     };
     const auto* capabilities = find_bindings("capabilities");
     const auto* facts = find_bindings("facts");
     for (const auto& binding : demand.capabilities) {
-      if (binding.value) require_binding(*binding.value, field(*capabilities, binding.name)->location, false);
+      if (binding.value)
+        require_binding(*binding.value, binding.name, field(*capabilities, binding.name)->location, false);
     }
     for (const auto& binding : demand.facts)
-      require_binding(binding.value, field(*facts, binding.name)->location, true);
+      require_binding(binding.value, binding.name, field(*facts, binding.name)->location, true);
     (void)resolve_rule_inputs(decl, demand.plan_inputs);
     const auto expansion = std::ranges::find(expansions_, demand, &RuleExpansion::demand);
     if (expansion == expansions_.end()) {
@@ -940,15 +946,17 @@ class Planner {
     GeneratorPlan plan;
     plan.name = decl.name;
     const auto& tool = require_field(decl, "tool");
+    const bool artifact_inputs_allowed = !sdk_header;
+    const auto* staged_tool = artifact_inputs_allowed ? std::get_if<InputArg>(&tool.data) : nullptr;
     if (const auto* spelling = std::get_if<std::string>(&tool.data)) {
       if (spelling->contains('\0') || !fs::path(*spelling).is_absolute())
         fail(tool.location, "expected an absolute tool path");
       plan.action.tool = *spelling;
       if (inspection_) fact("tool", decl, "tool", display_path(*spelling), "declared in tool", tool.location);
       else observe(*spelling);
-    } else if (!sdk_header || !std::holds_alternative<CxxTool>(tool.data)) {
-      fail(tool.location, sdk_header ? "expected an absolute tool path or cxx() selector"
-                                     : "expected an absolute tool path");
+    } else if (!staged_tool && (!sdk_header || !std::holds_alternative<CxxTool>(tool.data))) {
+      if (sdk_header) fail(tool.location, "expected an absolute tool path or cxx() selector");
+      fail(tool.location, "expected an absolute tool path or input(name) selector");
     }
 
     if (const auto* entries = field(decl, "environment")) {
@@ -968,7 +976,6 @@ class Planner {
       plan.inputs.push_back({"ycxx_rule_api.h", std::move(sdk_path),
                              {{sdk_header->begin(), sdk_header->end()}, false}});
     }
-    const bool artifact_inputs_allowed = !sdk_header;
     const auto first_file_input = plan.inputs.size();
     const auto* inputs = field(decl, "inputs");
     const auto* bindings = inputs ? &as<Record>(*inputs, "a record of named inputs") : nullptr;
@@ -1018,6 +1025,14 @@ class Planner {
         if (inspection_) fact("input", decl, name, path, artifact_origin(*ref), value.location);
         plan.artifact_inputs.push_back({name, std::move(path), producer, output});
       }
+    }
+    if (staged_tool) {
+      const auto binding = std::ranges::find(plan.artifact_inputs, staged_tool->name, &ArtifactInputPlan::name);
+      if (binding == plan.artifact_inputs.end())
+        fail(tool.location, std::format("tool input '{}' must name an artifact-backed input", staged_tool->name));
+      plan.action.tool = "inputs/" + binding->path;
+      if (inspection_)
+        fact("tool", decl, "tool", plan.action.tool, std::format("input({:?})", binding->name), tool.location);
     }
 
     if (!observer) {
@@ -1358,7 +1373,8 @@ std::expected<PlanInspection, std::string> inspect_project(
     const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
     std::string_view native_triple, ProjectPlan& resolved) {
   PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {},
-                            .dependency_graph = DependencyGraphInspection{}};
+                            .dependency_graph = DependencyGraphInspection{
+                                .value_edges = std::vector<PlanValueDependencyEdge>{}}};
   auto& graph = *inspection.dependency_graph;
   try {
     auto plan = read_project(cwd, target, nullptr, &inspection, expansions, nullptr, native_triple);
@@ -1373,6 +1389,11 @@ std::expected<PlanInspection, std::string> inspect_project(
                     edge.producer, edge.output, edge.binding);
   };
   std::ranges::sort(graph.edges, {}, edge_order);
+  const auto value_edge_order = [](const auto& edge) {
+    return std::tie(edge.consumer, edge.location.line, edge.location.column, edge.usage,
+                    edge.producer, edge.export_name, edge.binding);
+  };
+  std::ranges::sort(*graph.value_edges, {}, value_edge_order);
   return inspection;
 }
 

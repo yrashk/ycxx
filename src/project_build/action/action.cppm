@@ -13,6 +13,7 @@ module;
 export module ycxx.build.action;
 
 import std;
+import ycxx.execution;
 import :spawn;
 
 export namespace ycxx::build {
@@ -40,7 +41,7 @@ struct ActionArg {
 };
 
 struct Action {
-  std::string tool;  // resolved absolute host executable
+  std::string tool;  // absolute host executable or normalized path to a staged input under inputs/
   std::vector<ActionArg> args;
   std::vector<std::pair<std::string, std::string>> environment;
   std::vector<ActionOutput> outputs;
@@ -66,7 +67,7 @@ struct ActionResult {
 // working directory. All named outputs become available together on success. The tool can use
 // its ambient filesystem, so the caller needs an input contract before reusing its result.
 ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
-                     const std::filesystem::path& scratch_root, std::inplace_stop_token stop = {},
+                     const std::filesystem::path& scratch_root, ycxx::exec::inplace_stop_token stop = {},
                      std::optional<std::size_t> log_limit = std::nullopt);
 
 }  // namespace ycxx::build
@@ -97,18 +98,24 @@ struct Command {
 };
 
 std::expected<Command, std::string> prepare(const Action& action, std::span<const ActionInput> inputs) {
-  if (action.tool.empty() || action.tool.contains('\0') || !fs::path(action.tool).is_absolute())
-    return std::unexpected("action tool must be an absolute executable path");
+  if (action.tool.empty() || action.tool.contains('\0'))
+    return std::unexpected("action tool must be an absolute executable path or a declared staged input");
 
+  const Artifact* staged_tool = nullptr;
   std::map<std::string_view, std::string> input_paths;
   std::set<std::string> paths;
   for (const auto& input : inputs) {
     if (!valid_path(input.path)) return std::unexpected("invalid action input path: " + input.path);
-    auto path = (fs::path("inputs") / fs::path(input.path).lexically_normal()).native_encoded_string();
+    auto path = (fs::path("inputs") / fs::path(input.path).lexically_normal()).native();
+    if (path == action.tool) staged_tool = &input.contents;
     if (input.name.empty() || !input_paths.emplace(input.name, path).second)
       return std::unexpected("empty or duplicate action input name: " + input.name);
     if (!paths.insert(std::move(path)).second)
       return std::unexpected("duplicate action input path: " + input.path);
+  }
+  if (!fs::path(action.tool).is_absolute()) {
+    if (!staged_tool) return std::unexpected("staged action tool is not a declared input: " + action.tool);
+    if (!staged_tool->executable) return std::unexpected("staged action tool is not executable: " + action.tool);
   }
 
   std::map<std::string_view, std::string> output_paths;
@@ -224,13 +231,15 @@ std::expected<pid_t, std::string> spawn(const fs::path& cwd, Command& command) {
 
   auto args = argv(command.args);
   auto env = argv(command.environment);
+  // Resolve staged executables independently of when the child changes its working directory.
+  const auto tool = cwd / command.args.front();
   pid_t pid;
-  if (int error = ::posix_spawn(&pid, args.front(), &files.state, &flags.state, args.data(), env.data()))
+  if (int error = ::posix_spawn(&pid, tool.c_str(), &files.state, &flags.state, args.data(), env.data()))
     return std::unexpected(os_error("cannot start action tool " + command.args.front(), error));
   return pid;
 }
 
-std::expected<int, std::string> wait_for(pid_t pid, std::inplace_stop_token stop) {
+std::expected<int, std::string> wait_for(pid_t pid, ycxx::exec::inplace_stop_token stop) {
   for (;;) {
     if (stop.stop_requested()) {
       ::kill(-pid, SIGKILL);
@@ -293,7 +302,7 @@ std::expected<std::string, std::string> read_log(int dir, const std::string& fil
 }  // namespace
 
 ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
-                     const fs::path& scratch_root, std::inplace_stop_token stop,
+                     const fs::path& scratch_root, ycxx::exec::inplace_stop_token stop,
                      std::optional<std::size_t> log_limit) {
   auto cmd = prepare(action, inputs);
   if (!cmd) return failed(std::move(cmd.error()));
@@ -302,7 +311,7 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
   std::error_code ec;
   auto root = fs::absolute(scratch_root, ec);
   if (ec) return failed("cannot locate action scratch directory: " + ec.message());
-  auto path = (root / "action-XXXXXX").native_encoded_string();
+  auto path = (root / "action-XXXXXX").native();
   if (!::mkdtemp(path.data())) return failed(os_error("cannot create action scratch directory", errno));
   const Scratch scratch{fs::path(path)};
   if (auto error = stage(scratch.path, inputs)) return failed(std::move(*error));

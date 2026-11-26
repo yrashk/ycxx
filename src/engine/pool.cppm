@@ -4,9 +4,9 @@
 // workers push onto an injection queue. Every resumption starts at a worker loop's depth, so
 // stacks never nest.
 //
-// The pool is a `std::execution` scheduler (`pool_scheduler`), and `pool_backend` implements
+// The pool is a `ycxx::exec` scheduler (`pool_scheduler`), and `pool_backend` implements
 // `parallel_scheduler_replacement::parallel_scheduler_backend` over it, so a program that
-// installs it (the daemon, #83) makes `std::execution::parallel_scheduler` this pool.
+// installs it (the daemon, #83) makes `ycxx::exec::parallel_scheduler` this pool.
 //
 // The chaos scheduler (§A5.5, §A9) is the same pool with a seed: it reverses deques, steals
 // before popping, migrates tasks through the injection queue and adds short delays at fetch
@@ -17,6 +17,7 @@ export module ycxx.engine:pool;
 
 import ycxx.memory;
 import std;
+import ycxx.execution;
 
 export namespace ycxx::engine {
 
@@ -112,6 +113,7 @@ public:
   }
 
 private:
+  void stop_and_join();
   class Deque;
   struct Worker;
 
@@ -137,17 +139,17 @@ private:
   std::atomic<const Scope*> scope_{nullptr};
 };
 
-// `std::execution::scheduler` over the pool: `schedule()` completes on a worker, at the
+// `ycxx::exec::scheduler` over the pool: `schedule()` completes on a worker, at the
 // scheduler's priority (§A3.1).
 class pool_scheduler {
 public:
-  using scheduler_concept = std::execution::scheduler_tag;
+  using scheduler_concept = ycxx::exec::scheduler_tag;
 
   pool_scheduler(Pool& p, Priority prio) noexcept : pool_(&p), prio_(prio) {}
 
   template <class R>
   struct op : Task {
-    using operation_state_concept = std::execution::operation_state_tag;
+    using operation_state_concept = ycxx::exec::operation_state_tag;
     op(Pool* p, Priority prio, R r) : rcvr(std::move(r)), pool(p), prio(prio) { run = &op::go; }
     op(const op&) = delete;
     void start() & noexcept { pool->push(this, prio); }
@@ -159,33 +161,33 @@ public:
   private:
     static void go(Task* t) noexcept {
       auto& o = *static_cast<op*>(t);
-      if constexpr (std::unstoppable_token<std::stop_token_of_t<std::execution::env_of_t<R>>>) {
-        std::execution::set_value(std::move(o.rcvr));
-      } else if (std::get_stop_token(std::execution::get_env(o.rcvr)).stop_requested()) {
-        std::execution::set_stopped(std::move(o.rcvr));
+      if constexpr (ycxx::exec::unstoppable_token<ycxx::exec::stop_token_of_t<ycxx::exec::env_of_t<R>>>) {
+        ycxx::exec::set_value(std::move(o.rcvr));
+      } else if (ycxx::exec::get_stop_token(ycxx::exec::get_env(o.rcvr)).stop_requested()) {
+        ycxx::exec::set_stopped(std::move(o.rcvr));
       } else {
-        std::execution::set_value(std::move(o.rcvr));
+        ycxx::exec::set_value(std::move(o.rcvr));
       }
     }
   };
 
   class sender {
   public:
-    using sender_concept = std::execution::sender_tag;
+    using sender_concept = ycxx::exec::sender_tag;
     template <class Self, class... Env>
     static consteval auto get_completion_signatures() {
-      if constexpr (sizeof...(Env) != 0 && (std::unstoppable_token<std::stop_token_of_t<Env>> && ...)) {
-        return std::execution::completion_signatures<std::execution::set_value_t()>();
+      if constexpr (sizeof...(Env) != 0 && (ycxx::exec::unstoppable_token<ycxx::exec::stop_token_of_t<Env>> && ...)) {
+        return ycxx::exec::completion_signatures<ycxx::exec::set_value_t()>();
       } else {
-        return std::execution::completion_signatures<std::execution::set_value_t(), std::execution::set_stopped_t()>();
+        return ycxx::exec::completion_signatures<ycxx::exec::set_value_t(), ycxx::exec::set_stopped_t()>();
       }
     }
     struct attrs {
       Pool* pool;
       Priority prio;
       template <class Tag>
-        requires (std::is_same_v<Tag, std::execution::set_value_t> || std::is_same_v<Tag, std::execution::set_stopped_t>)
-      pool_scheduler query(std::execution::get_completion_scheduler_t<Tag>) const noexcept {
+        requires (std::is_same_v<Tag, ycxx::exec::set_value_t> || std::is_same_v<Tag, ycxx::exec::set_stopped_t>)
+      pool_scheduler query(ycxx::exec::get_completion_scheduler_t<Tag>) const noexcept {
         return {*pool, prio};
       }
     };
@@ -204,8 +206,8 @@ public:
 
   sender schedule() const noexcept { return {pool_, prio_}; }
   bool operator==(const pool_scheduler&) const noexcept = default;
-  std::execution::forward_progress_guarantee query(std::execution::get_forward_progress_guarantee_t) const noexcept {
-    return std::execution::forward_progress_guarantee::parallel;
+  ycxx::exec::forward_progress_guarantee query(ycxx::exec::get_forward_progress_guarantee_t) const noexcept {
+    return ycxx::exec::forward_progress_guarantee::parallel;
   }
 
 private:
@@ -213,9 +215,9 @@ private:
   Priority prio_;
 };
 
-// The pool as `std::execution::parallel_scheduler`'s backend (§A3.1). A program installs it by
+// The pool as `ycxx::exec::parallel_scheduler`'s backend (§A3.1). A program installs it by
 // defining `parallel_scheduler_replacement::query_parallel_scheduler_backend` to return it.
-std::shared_ptr<std::execution::parallel_scheduler_replacement::parallel_scheduler_backend> pool_backend(Pool& pool);
+std::shared_ptr<ycxx::exec::parallel_scheduler_replacement::parallel_scheduler_backend> pool_backend(Pool& pool);
 
 }  // namespace ycxx::engine
 
@@ -320,7 +322,7 @@ private:
 struct Pool::Worker {
   std::array<Deque, priority_levels> deques;
   std::uint64_t rng = 0;
-  std::jthread thread;
+  ycxx::exec::worker_thread thread;
 };
 
 Pool::Pool(unsigned threads, std::optional<std::uint64_t> chaos_seed, std::size_t stack) : chaos_(chaos_seed) {
@@ -330,15 +332,23 @@ Pool::Pool(unsigned threads, std::optional<std::uint64_t> chaos_seed, std::size_
     w->rng = chaos_seed.value_or(0x79637878) ^ (0x9e3779b97f4a7c15ull * (i + 1));
     workers_.push_back(std::move(w));
   }
-  for (unsigned i = 0; i < threads; ++i)
-    workers_[i]->thread = std::jthread(std::jthread::stack_size_hint(stack), [this, i] { loop(i); });
+  try {
+    for (unsigned i = 0; i < threads; ++i)
+      ycxx::exec::start_worker(workers_[i]->thread, stack, [this, i] { loop(i); });
+  } catch (...) {
+    stop_and_join();
+    throw;
+  }
 }
 
-Pool::~Pool() {
+Pool::~Pool() { stop_and_join(); }
+
+void Pool::stop_and_join() {
   stopping_.store(true, std::memory_order_seq_cst);
   epoch_.fetch_add(1, std::memory_order_seq_cst);
   epoch_.notify_all();
-  for (auto& w : workers_) w->thread.join();
+  for (auto& w : workers_)
+    if (w->thread.joinable()) w->thread.join();
 }
 
 std::optional<unsigned> Pool::worker_index() const noexcept {
@@ -488,7 +498,7 @@ pool_scheduler Pool::scheduler(Priority p) noexcept { return {*this, p}; }
 
 namespace {
 
-namespace psr = std::execution::parallel_scheduler_replacement;
+namespace psr = ycxx::exec::parallel_scheduler_replacement;
 
 class Backend final : public psr::parallel_scheduler_backend {
 public:
@@ -506,7 +516,7 @@ public:
       One* o = static_cast<One*>(task);
       psr::receiver_proxy& rcvr = *o->r;
       if (o->heap) delete o;
-      const auto tok = rcvr.try_query<std::inplace_stop_token>(std::get_stop_token);
+      const auto tok = rcvr.try_query<ycxx::exec::inplace_stop_token>(ycxx::exec::get_stop_token);
       if (tok && tok->stop_requested()) rcvr.set_stopped();
       else rcvr.set_value();
     };
@@ -546,7 +556,7 @@ private:
       c.run = [](Task* task) noexcept {
         Chunk& me = *static_cast<Chunk*>(task);
         Shared* sh = me.shared;
-        const auto tok = sh->r->try_query<std::inplace_stop_token>(std::get_stop_token);
+        const auto tok = sh->r->try_query<ycxx::exec::inplace_stop_token>(ycxx::exec::get_stop_token);
         if (!tok || !tok->stop_requested()) sh->r->execute(me.begin, me.end);
         if (sh->left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
           psr::bulk_item_receiver_proxy& rcvr = *sh->r;

@@ -144,6 +144,31 @@ verification rechecks queries using receipts without launching tools.
 Publication uses a completed request's generation and can restore removed
 output files from cached values.
 
+### Staged action tools (#1505)
+
+A rule package can emit an `action.generate` whose tool is a named input
+selected from a producer's artifact. In the staged tool example, the
+`runner` action copies an executable script while preserving its mode.
+The consumer runs the staged copy to write a generated header.
+
+```text
+action.generate "config" {
+    tool = input("runner")
+    args = [output("header")]
+    inputs = { runner = artifact("runner", "runner") }
+    outputs = { header = "generated_config.hh" }
+}
+```
+
+The selector must name an artifact-backed input with the executable bit
+set. The coordinator uses the ordinary producer receipt to stage that input,
+and the consumer action identity includes the staged path, bytes, and
+executable mode. When the producer runs again and returns an equivalent
+selected output, the consumer can reuse its receipt. Watch follows the
+producer's declared inputs. In `ycxx show app --format=html`, the tool
+fact shows the planned staged path and selector, and **Target dependencies**
+links the consumer to its producer. [Runnable example](../../examples/project-build/staged-tool/README.md)
+
 ## Compiler and trace
 
 Native compilation should run as a descendant of the workspace root in the
@@ -359,6 +384,120 @@ also shows the current plan's dependencies. **Plan changes** compares
 semantic facts. The `link-input` facts describe the executable's effective
 archive order. The read-only report can identify an artifact before its
 bytes exist.
+
+### Typed value bindings (#1477)
+
+In `examples/project-build/package-probe`, the `config` header binds `fast`
+to the `fast-mode` export of the `wire` target.
+
+```text
+capabilities.header "config" {
+    namespace = "example::codec"
+    filename = "codec_config.hh"
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+```
+
+From that example directory, run `ycxx build app` and then
+`ycxx show app --format=html > plan.html`. **Value bindings** shows `config`
+as the consumer, `capabilities` as the usage, `fast` as the binding, and
+`wire` as the producer with export `fast-mode`. The declaration link opens
+the `value(...)` reference in `build.ycxx`. Structured `facts` bindings use
+the same report section.
+
+Schema-1 JSON reports these references in `dependency_graph.value_edges`
+with `consumer`, `usage`, `binding`, `producer`, `export_name`, and
+`location`. A complete plan with no value bindings has an empty array.
+An incomplete plan reports the bindings resolved so far with
+`dependency_graph.complete: false`. The HTML comparison shows the current
+plan's **Value bindings** alongside **Dependency changes**.
+
+### Dependency comparisons (#1464)
+
+`ycxx show app --against before.json --format=json` includes
+`dependency_changes` when both plans have complete dependency graphs. The
+comparison groups occurrences by consumer, usage, producer, output, and
+binding. Each group with different counts has `before` and `after` arrays
+of the original edge records, including every source site on each side.
+An added dependency has an empty `before` array, and a removed dependency
+has an empty `after` array.
+
+Source locations explain where dependencies were used. Moving a reference
+with the same identity and count produces an empty `dependency_changes`
+array. **Plan changes** reports changes in the effective archive order
+through the `link-input` facts. Older schema-1 snapshots without a
+dependency graph can still compare plan facts.
+
+Run `ycxx show app --against before.json --format=html > changes.html` to
+read **Dependency changes** alongside the current **Dependencies**. The
+table shows before and after counts and source sites. After links open
+the relevant lines in the current manifest. Before sites describe the
+saved plan. A comparison with equal counts shows **No dependency changes.**
+
+### Value binding comparisons (#1493)
+
+From the package-probe example, build the plan and save a baseline.
+
+```sh
+ycxx build app
+ycxx show app --format=json > before.json
+```
+
+Rename the producer from `wire` to `wire_alt` in its declaration and its
+`value("wire", "fast-mode")` reference in `build.ycxx`. Make the same rename
+in the observer declaration and target check in `rules/codec.cc`. Build the
+edited plan and open the comparison report.
+
+```sh
+ycxx build app
+ycxx show app --against before.json --format=html > changes.html
+```
+
+**Value binding changes** shows the removed `config` binding to `wire` and the
+added binding to `wire_alt`, with before and after counts. Saved sites give
+the original coordinates. Current links open the reference in the displayed
+manifest. **Value bindings** shows all resolved bindings in the current plan.
+
+The same comparison with `--format=json` reports `value_binding_changes`.
+A binding's identity is its consumer, usage, local binding, producer, and
+export. Each identity with different occurrence counts includes all its
+`before` and `after` edge records. Moving a reference for the same binding
+preserves its count. When counts match, JSON returns an empty array and HTML
+says **No value binding changes.**
+
+The binding comparison requires complete graphs with `value_edges` in both
+snapshots. Older schema-1 baselines still support the comparisons for which
+they have data.
+
+### Target dependency navigation (#1499)
+
+From `examples/project-build/generated-archive`, build the example and
+save its HTML plan.
+
+```sh
+ycxx build app
+ycxx show app --format=html > plan.html
+```
+
+Open **Target dependencies** and start at `app`. Follow `score`, `bonus`,
+and `bonus_archive` to see how the generated archive reaches the executable.
+The `public_link_inputs` reference on `bonus` links to both the archive
+producer card and the use site in `build.ycxx`.
+
+The same navigation follows typed bindings in the shader reflection example.
+From `app`, follow `scene_bindings` and its `facts` binding to
+`fragment_reflection`.
+
+```text
+shaders.bindings "scene_bindings" {
+    facts = { layout = value("fragment_reflection", "layout") }
+}
+```
+
+Each target has one card, so all occurrences of a shared producer lead to
+the same destination. A partial plan shows the resolved paths and marks
+the navigation incomplete. In an HTML comparison, these links navigate
+the current plan. The comparison tables carry the saved occurrence sites.
 
 ### Declared target catalog (#1392)
 
@@ -694,6 +833,30 @@ from the shipped catalogue.
 The independent Astra design review identified the stable export address and
 separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)
 
+### Staged witness tools (#1515)
+
+An `action.observe` can select its tool through an executable artifact input.
+In the staged-witness example the producer copies `analyzer.sh` as its named
+`runner` output while preserving its executable mode.
+
+```text
+action.observe "observed" {
+    tool = input("analyzer")
+    inputs = { analyzer = artifact("runner", "runner") }
+    export = "score"
+    schema = "example.score.v1"
+}
+```
+
+The coordinator stages the producer receipt and invokes the selected copy
+as the witness. Its bytes and executable mode are part of the witness action
+key. The classifier turns the output into a typed `score` row, which the
+header rule consumes with `facts = { score = value("observed", "score") }`.
+An edit that preserves the classified score can reuse header generation
+and native compilation. Build the example with `ycxx build app` and inspect
+the artifact and value links with `ycxx show app --format=html`.
+[Runnable example](../../examples/project-build/staged-witness/README.md)
+
 ### Structured shader reflection
 
 ```text
@@ -731,9 +894,10 @@ without demanding reflection.
 The classifier exports the declared schema and a bounded table of named rows
 with named fields. Fields are unsigned 32-bit integers or strings. The worker
 rejects duplicate names and canonicalizes row and field order. The shader
-package defines `shader.descriptors.v1` and emits one row per uniform buffer
-with its descriptor set and binding. Its bindings rule reads the typed table
-and generates C++ constants from it. The existing support-state ABI and
+package defines `shader.descriptors.v2` and emits one row per uniform buffer or
+one-dimensional literal `sampler2D` array, with its descriptor set, binding,
+kind, and element count. Its bindings rule generates `constexpr` C++ values,
+including an enum for descriptor kind. The existing support-state ABI and
 `capabilities` bindings continue to use the same export address.
 
 An implementation edit can change the SPIR-V bytes and the witness receipt

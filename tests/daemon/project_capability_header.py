@@ -164,7 +164,8 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1*) { return 0; }
 
 
 def profile_header(ycxx, scope, env, wrapper, filesystem):
-    facts = json.loads(show(ycxx, scope, env, 'json'))['facts']
+    plan = json.loads(show(ycxx, scope, env, 'json'))
+    facts = plan['facts']
     projected = [row for row in facts
                  if (row['kind'], row['target']) == ('capability-input', 'profile')]
     expected = {'filesystem': filesystem, 'no_header': 'unsupported', 'no_object': 'indeterminate'}
@@ -174,6 +175,7 @@ def profile_header(ycxx, scope, env, wrapper, filesystem):
         origin = row['origin']
         assert BINDINGS[row['name']] in origin and wrapper.name in origin, row
         assert 'profile' in origin.lower(), row
+    assert plan['dependency_graph']['value_edges'] == [], 'package-only probes have no producer target'
     assert any((row['kind'], row['target'], row['name']) == ('output', 'profile', 'header')
                and row['value'].endswith('/compiler_profile.hh') for row in facts), facts
     assert any(row['kind'] == 'include' and row['target'] == 'app'
