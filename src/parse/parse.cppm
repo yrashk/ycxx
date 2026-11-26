@@ -2880,7 +2880,15 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   if (!dmi) return std::nullopt;
   const auto& entity = p_->world().entities.rec(field);
   const auto arguments = p_->class_args_.find(std::to_underlying(entity.scope));
-  if (fallback && (arguments == p_->class_args_.end() || !caller.types().is_scalar(entity.type))) return std::nullopt;
+  // The fold of a constant default, where an initialization selects it ([temp.inst]/3): a
+  // specialization's scalar member, or any class's array of scalars, which keeps no value of its
+  // own at declaration ([dcl.init.aggr]). Other nonconstant forms remain #118.
+  const auto& types = caller.types();
+  const QualType element = types.innermost_array_element(entity.type);
+  const bool scalar_array =
+      types.is_array(entity.type) && types.is_scalar(element) && !types.is_member_pointer(element);
+  if (fallback && !scalar_array && (arguments == p_->class_args_.end() || !types.is_scalar(entity.type)))
+    return std::nullopt;
   if (dmi->invalid) return NodeId::none;
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
