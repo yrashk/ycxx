@@ -10822,6 +10822,20 @@ public:
     return offset == size;
   }
 
+  // [basic.fundamental]: corresponding signed and unsigned integers have the same object
+  // and value representations. The target proves unsigned int has no padding, so a
+  // same-width conversion preserves the complete representation ([bit.cast], [conv.integral]).
+  bool bit_cast_int_pair(QualType to, QualType from, u64 size) {
+    if (!w_->target.little_endian_unsigned_integers || size != 4 ||
+        w_->target[Builtin::unsigned_int].size != size) return false;
+    const auto int_scalar = [&](QualType type) {
+      const auto builtin = types().builtin_of(type);
+      return !Types::is_volatile(types().canonical(type)) &&
+             (builtin == Builtin::int_ || builtin == Builtin::unsigned_int);
+    };
+    return int_scalar(to) && int_scalar(from);
+  }
+
   Ex bit_cast(QualType destination, Ex source, u32 begin, u32 end, u32 type_at) {
     const Ex fail{NodeId::none, begin, end};
     if (!source.ok()) return fail;
@@ -10839,8 +10853,9 @@ public:
           diag(begin, Diag::bit_cast_size, destination, from, *to_size, *from_size);
           return fail;
         }
-        supported = !source.info.bit_width && bit_cast_representation(destination, *to_size) &&
-                    bit_cast_representation(from, *from_size);
+        supported = !source.info.bit_width &&
+                    (bit_cast_int_pair(destination, from, *to_size) ||
+                     (bit_cast_representation(destination, *to_size) && bit_cast_representation(from, *from_size)));
       }
     }
     const bool deferred = destination_dependent || dependent(source);
