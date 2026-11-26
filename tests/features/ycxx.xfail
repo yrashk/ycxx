@@ -211,7 +211,6 @@ draft/expr/expr.const.core-1.accept.cpp 'static' is not supported yet
 draft/expr/expr.const.core-3.accept.cpp 'auto' not supported yet
 draft/expr/expr.const.core-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.core-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.const.defns-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.imm-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.imm-2.reject.cpp errors elsewhere: 'template' is not supported yet
 draft/expr/expr.const.imm-3.reject.cpp errors elsewhere: overloading 'id' is not supported yet
