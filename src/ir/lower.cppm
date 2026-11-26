@@ -925,7 +925,7 @@ class Lowering {
           default: break;
         }
         if (op != Op2::fence) {
-          QualType access(std::uint32_t(imms[0]));
+          const QualType access{std::uint32_t(imms[0])};
           auto value_type = type_of(access);
           if (!value_type || *value_type != T::i32 || layout(access).align < 4)
             return fail("native atomics require a naturally aligned 32-bit integer access");

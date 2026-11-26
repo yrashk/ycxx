@@ -84,5 +84,26 @@ The other `__GNUC__` tests in those headers select nothing new for ycxx: `sys/cd
 `libkern/arm/_OSByteOrder.h`'s byte swaps use `__builtin_bswap32` and `__builtin_bswap64` only
 under `__llvm__` (their portable path has a local union, which ycxx does not have yet).
 
+### GNU atomics on Linux x86-64
+
+The [GNU atomic builtins](https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html)
+work on naturally aligned 32-bit `int` and `unsigned int` objects (#1293).
+`__atomic_load_n`, `__atomic_store_n`, `__atomic_exchange_n`, and
+`__atomic_compare_exchange_n` are available, along with the `fetch_OP` and
+`OP_fetch` forms of add, subtract, AND, OR, and XOR, and `__atomic_thread_fence`.
+Weak compare-exchange uses the strong machine operation. Compare-exchange
+writes the observed value to the expected object on failure. The arithmetic
+forms wrap at the object width.
+
+This target predefines the six `__ATOMIC_*` order constants from relaxed (0)
+through sequentially consistent (5). Consume has acquire ordering. Illegal
+constant order combinations are diagnosed. A runtime order argument is
+evaluated and the operation uses sequentially consistent ordering.
+
+`__atomic_always_lock_free` with constant null alignment returns true for size
+4 and false for size 3. Other sizes and non-null alignment arguments are
+outside this slice. `__has_builtin` reports these builtin names on Linux
+x86-64. Other widths, GNU builtin forms, and AArch64 are tracked in #328.
+
 The standard `[[…]]` attribute syntax is available on declarations and statements. The parser
 skips unrecognized attributes ([dcl.attr.grammar]/6).

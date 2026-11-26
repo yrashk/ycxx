@@ -59,6 +59,7 @@ enum class ObjectFormat : u8 { macho, elf };
 enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
   source_location_descriptor = std::uint64_t{1} << 5,
+  gnu_atomic32 = std::uint64_t{1} << 6,
   peer_typed_dynamic_cast = std::uint64_t{1} << 1,
   hosted_trivial_class_throw = std::uint64_t{1} << 4,
   namespace_hidden_asm = std::uint64_t{1} << 2,
@@ -339,7 +340,8 @@ inline constexpr Target x86_64_linux{
                          std::to_underlying(NativeOperation::peer_typed_dynamic_cast) |
                          std::to_underlying(NativeOperation::namespace_hidden_asm) |
                          std::to_underlying(NativeOperation::breakpoint_statement_asm) |
-                         std::to_underlying(NativeOperation::source_location_descriptor),
+                         std::to_underlying(NativeOperation::source_location_descriptor) |
+                         std::to_underlying(NativeOperation::gnu_atomic32),
     .little_endian_unsigned_integers = true,
 };
 
