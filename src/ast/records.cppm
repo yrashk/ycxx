@@ -8,6 +8,7 @@
 export module ycxx.ast.records;
 
 import std;
+import ycxx.hash;
 import ycxx.ast.handles;
 import ycxx.ast.schema;
 import ycxx.ast.nodes;
@@ -55,7 +56,15 @@ struct TemplateParamSema {
   // `depth + 1`; empty otherwise.
   SeqId<TemplateParamSema> params{};
   u8 rank_type_default = 0;  // substituting the written type default can check a dependent rank
+  ConstId type_constraint = ConstId::none;  // concept and its explicit arguments, for linkage
   constexpr bool operator==(const TemplateParamSema&) const = default;
+};
+
+// The written expression is separate from the normal form used for constraint checking.
+struct WrittenConstraint {
+  ConstId expression = ConstId::none;
+  Fp128 tokens{};
+  constexpr bool operator==(const WrittenConstraint&) const = default;
 };
 
 struct ParamSema {
@@ -121,6 +130,9 @@ struct DeclSema {
   bool explicit_default_visibility = false;
   GnuVisibility namespace_visibility = GnuVisibility::none;  // lexical namespace-definition occurrence
   u8 field_alignment = 0;  // a validated alignment stricter than the field type's natural alignment
+  u8 written_field_alignment = 0;  // the strongest validated alignas, including the natural alignment
+  WrittenConstraint head_constraint{};
+  WrittenConstraint trailing_constraint{};
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
@@ -242,10 +254,21 @@ struct BodySema {
   constexpr bool operator==(const BodySema&) const = default;
 };
 
+enum class RequirementKind : u8 { type, expression, nested };
+
+// A requirement as written in a constraint's requires-expression, for ABI encoding.
+struct WrittenRequirement {
+  RequirementKind kind;
+  ConstId operand;
+  ConstId result_constraint = ConstId::none;
+  bool noexcept_ = false;
+  constexpr bool operator==(const WrittenRequirement&) const = default;
+};
+
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
-                                ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection>;
+                                ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection, WrittenRequirement>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

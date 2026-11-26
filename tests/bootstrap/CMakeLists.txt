@@ -23,6 +23,7 @@ foreach(feature IN LISTS _features)
   endif()
   target_link_libraries(bootstrap_${feature} PRIVATE bootstrap_smoke_module)
 endforeach()
+target_link_libraries(bootstrap_execution PRIVATE ycxxc_execution)
 # A violated precondition reaches the replaceable violation handler.
 add_executable(bootstrap_contract_violation contract_violation.cpp)
 target_link_libraries(bootstrap_contract_violation PRIVATE ycxxc_options)

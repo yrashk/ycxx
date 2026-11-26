@@ -603,7 +603,7 @@ def check_conflict_and_cycle_comparison(ycxx, scope, env, journal, before):
 
 
 def check_edits(ycxx, scope, env, journal, before):
-    legacy = {key: value for key, value in before.items() if key != 'module_graph'}
+    legacy = {key: value for key, value in before.items() if key not in ('module_graph', 'dependency_graph')}
     saved = scope.parent / 'old-schema-1.json'
     saved.write_text(json.dumps(legacy), encoding='utf-8')
     current_snapshot = scope.parent / 'with-module-graph.json'
@@ -789,6 +789,7 @@ cpp.executable "app" {{ sources = ["main.cc"] deps = ["again", "left", "right"] 
     assert legacy_diff['changes'] == diff['changes'], legacy_diff
     check_module_changes(legacy_diff, metadata={'unavailable': 'ambiguous_legacy_configuration'})
     compare_html(ycxx, scope, env, journal, LINUX, legacy, reordered_plan, legacy_diff)
+    check_invalid_graph(ycxx, scope, env, journal, legacy)
 
     replace_source(scope, 'build.ycxx', reordered.replace('"left-include"', '"left-include/"'))
     build(ycxx, scope, env, LINUX, 'add a trailing separator to an include directory')

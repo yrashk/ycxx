@@ -9,13 +9,13 @@ stricter than libycxx's: the only directives allowed are
 Everything else (#define, #if and friends, #include of a project file, #pragma) is an error.
 Configuration reaches the code as values (a configured module, constexpr), never as macros.
 
-Checked: every .cpp, .cppm and .cppm.in under src/ and tests/bootstrap/.
+Checked: every .cpp, .cppm and .cppm.in under src/, packages/ycxx-bench/, and tests/bootstrap/.
   tools/check-preprocessor [FILE...]
 """
 import pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TREES = ["src", "tests/bootstrap"]
+TREES = ["src", "packages/ycxx-bench", "tests/bootstrap"]
 SUFFIXES = (".cpp", ".cppm", ".cppm.in")
 DIRECTIVE = re.compile(r"^\s*#\s*(\w+)?(.*)$")
 SYSTEM_INCLUDE = re.compile(r"^\s*<[^<>]+>\s*$")

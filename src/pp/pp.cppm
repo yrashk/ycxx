@@ -34,6 +34,7 @@ export import :cond;
 namespace {
 // Preserve the bit values of earlier source configurations.
 constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08, small_pic_bit = 0x10;
+constexpr std::uint8_t compatibility_shift = 5, compatibility_mask = 0x60;
 }
 
 export namespace ycxx::pp {
@@ -166,7 +167,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, static_cast<std::uint64_t>(s.config.view));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.call_triviality ? 1 + std::to_underlying(*s.config.call_triviality) : 0));
-  std::uint8_t modes = 0;
+  std::uint8_t modes = std::to_underlying(s.config.compatibility) << compatibility_shift;
   if (s.config.freestanding) modes |= freestanding_bit;
   if (!s.config.exceptions_enabled) modes |= no_exceptions_bit;
   if (!s.config.rtti_enabled) modes |= no_rtti_bit;
@@ -192,13 +193,16 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
-  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit | small_pic_bit)) != 0 ||
+  const auto compatibility = (modes & compatibility_mask) >> compatibility_shift;
+  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit | small_pic_bit | compatibility_mask)) != 0 ||
+      compatibility > std::to_underlying(ast::Compatibility::clang) ||
       (modes & (pic_bit | small_pic_bit)) == (pic_bit | small_pic_bit))
     in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
   s.config.exceptions_enabled = (modes & no_exceptions_bit) == 0;
   s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
   s.config.pic = (modes & pic_bit) != 0 ? 2 : (modes & small_pic_bit) != 0 ? 1 : 0;
+  s.config.compatibility = static_cast<ast::Compatibility>(compatibility);
   return s;
 }
 
@@ -268,7 +272,7 @@ Paths& paths() {
 PathId source_path(const Source& source, std::string_view name) {
   std::filesystem::path path(name);
   if (path.is_relative() && !source.cwd.empty()) path = std::filesystem::path(source.cwd) / path;
-  return path_id(path.lexically_normal().generic_native_encoded_string());
+  return path_id(path.lexically_normal().generic_string<char>());
 }
 
 bool is_generated_path(const Source& source, PathId id) {
@@ -277,7 +281,7 @@ bool is_generated_path(const Source& source, PathId id) {
   auto state = std::filesystem::path(source.cwd) / ".ycxx";
   if (view == View::explicit_target_build) state = state / "targets" / source.config.target->triple;
   const auto root = (state / "virtual").lexically_normal();
-  const std::string prefix = root.generic_native_encoded_string() + '/';
+  const std::string prefix = root.generic_string<char>() + '/';
   return path_of(id).starts_with(prefix);
 }
 
@@ -514,6 +518,16 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
 
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg) {
   std::string_view a = args[i];
+  constexpr std::string_view compat = "-fcompat=";
+  if (a.starts_with(compat)) {
+    const auto mode = a.substr(compat.size());
+    if (mode == "spec") cfg.compatibility = ast::Compatibility::spec;
+    else if (mode == "gcc") cfg.compatibility = ast::Compatibility::gcc;
+    else if (mode == "clang") cfg.compatibility = ast::Compatibility::clang;
+    else return std::unexpected(std::format("invalid value in '{}'; expected spec, gcc, or clang", a));
+    return true;
+  }
+  if (a == "-fcompat") return std::unexpected("'-fcompat' requires '=spec', '=gcc', or '=clang'");
   if (a == "-nostdinc") {
     cfg.nostdinc = true;
     return true;
@@ -563,7 +577,7 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
   auto normal = [&](std::string_view d) {
     std::filesystem::path p(d);
     if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
-    std::string s = p.lexically_normal().generic_native_encoded_string();
+    std::string s = p.lexically_normal().generic_string<char>();
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };

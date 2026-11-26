@@ -13,7 +13,8 @@ reasoning; do not leave decisions only in issue threads.
 2. **Extensions:** only those system headers and libycxx need, each listed in
    `docs/EXTENSIONS.md` with the headers that require it (GNU attributes, `asm` labels,
    availability and nullability annotations, the builtins libycxx probes for). An extension is
-   added because a real header needs it, never for its own sake.
+   added because a real header needs it, never for its own sake. Documented extensions are
+   available in every compatibility mode so that the same system and libycxx headers can compile.
 3. **Targets, in order:** AArch64 Mach-O (macOS), x86-64 ELF (Linux), AArch64 ELF (Linux). Each
    target has to be fully supported, including its object format, linker, unwind tables and DWARF,
    before the next one starts.
@@ -99,47 +100,37 @@ reasoning; do not leave decisions only in issue threads.
      against Clang's for the same target (`tests/own/pp/predefined-target.pp.cpp`).
    - **Feature-test macros:** a `__cpp_*` macro is defined only for a feature ycxx implements,
      from `src/pp/predefined.cppm`'s table. A slice that completes a feature updates the table.
-     `__cplusplus` is `202400L`, as Clang 23 and GCC 16 have it for C++26.
+     `__cplusplus` follows the pinned draft in spec mode and the selected compiler in GCC or Clang mode.
    - *Reason:* a header that tests for a compiler or a feature must get the truth about ycxx.
    - *Rejected:* mimicking Clang (its extensions would all be owed at once), and defining every
      feature-test macro now (libycxx would enable code sema cannot compile).
-6. **Which classes pass in registers** (decided on #230). This is the rule for when a class is
-   trivially copyable for the purposes of calls. Compilers disagree on it.
-   - **Default, every target:** upstream Clang and GCC, the Itanium "non-trivial for the purposes
-     of calls" wording ([class.temporary]/3, Itanium C++ ABI §3.1.2.3). Where they differ, upstream
-     Clang (the oracle) decides. They differ on a class whose member can be neither copied nor
-     moved.
-   - **The switch, `-fclass-call-abi=apple`:** on arm64 Darwin, Apple Clang's behaviour, for code
-     that links with Xcode-built objects. A class passes in registers when its destructor is
-     trivial and its copy constructor is trivial or deleted, whatever its move constructors.
-     Apple Clang 21 passes move-only and deleted-copy classes in registers; Clang 23 and GCC 16
-     pass them by address.
-   - **Data:** `ast::Target` carries each target's default (`call_triviality`) and whether it
-     offers the switch (`apple_calls`). The option is part of the compile configuration
-     (`pp::Config::call_triviality`), so it enters the unit's fingerprint and the daemon's
-     configuration.
-   - **Tests:** `tests/own/abi/call-triviality` checks the default against Clang 23 objects. It is
-     an expected failure under GCC only because of those members. `call-triviality-apple` checks
-     the switch against Apple Clang objects (`PEER-WITH: apple-clang`).
-   - *Reason:* the oracles and the ABI document agree on the default, and the switch serves code
-     that must link with the platform's own objects.
+6. **Which classes pass in registers** (decided on #230). The default follows
+   [class.temporary]/3 and Itanium C++ ABI §3.1.2.3. GCC and upstream Clang differ on classes
+   whose copy and move constructors are implicitly deleted by a class subobject. The
+   compatibility mode selects the corresponding rule for that case.
+   - `-fclass-call-abi=itanium` explicitly selects the published rule.
+   - `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin, for linking with
+     Xcode-built objects. The destructor must be trivial and the copy constructor trivial or
+     deleted, regardless of the move constructors.
+   - Both the override and the compatibility mode enter the source configuration and its
+     fingerprint. Mixed-object tests use their matching compiler.
 
-7. **Dependent variable-template-ids in symbols** (decided on #777). Clang and GCC mangle them
-   differently in a function template's signature when the name is qualified or an argument is
-   defaulted or a pack: Clang as written (`sr …E`, `gs`, no defaults, no `J…E`), GCC the
-   `<source-name>` and the converted arguments. ycxx writes GCC's form.
-   - *Reason:* values hold no spelling (ast.md §5.5), and Clang's form would need it. GCC builds
-     the `libycxx.a` ycxx programs link against. Implicit instantiations are emitted in every
-     object that uses them, so a mismatch with a Clang object costs a duplicate, not a link error.
-   - *Rejected:* Clang's form (needs the qualifier and arguments as written in every value);
-     Clang's form for unqualified names only (two rules, still wrong for defaults and packs).
-   - The same holds for pack-index-specifiers `T...[I]` (#297). GCC writes a constant index as
-     the converted `std::size_t` (`Lm0E`), a substituted parameter in that parameter's type
-     (`Li1E`), and a bound pack as `J <args> E`. Clang writes the literal as spelled (`Li0E`) and
-     a bound pack as a placeholder. ycxx writes GCC's form.
-   - The same holds for a dependent member template as a template template argument,
-     `Use<Y<T>::template apply>` (#340): GCC writes `N1YIT_E5applyE`, Clang `sr1YIT_EE5applyE`.
-     ycxx writes GCC's form.
+7. **Dependent template arguments in symbols** (#773, #777, #297, #340). The published
+   Itanium grammar encodes unresolved names with their qualification and written template
+   arguments. The value of a dependent variable-template-id retains its semantic arguments for
+   substitution and the written arguments for mangling. GCC mode uses the converted arguments
+   and unqualified name, including when exchanging those symbols with the GCC-built libycxx.
+   The compatibility table records the choices for pack indexing and dependent member templates.
+
+8. **Compatibility modes.** A translation unit selects `-fcompat=spec|gcc|clang`. Spec is the
+   default and follows the pinned C++26 draft, applicable defect resolutions and the published
+   target ABI. GCC and Clang modes select the observed behavior for the cases implemented in
+   [the compatibility table](docs/compatibility.toml). It records the previous choice,
+   applicable clauses, each mode's behavior and support status, and evidence. Record
+   implementation-defined choices relevant to the modes there too. A mode may select an
+   extension's behavior. Feature probes describe ycxx's supported capabilities in every mode.
+   The flag belongs to the translation-unit configuration and affects the daemon and editor
+   in the same way as a cold compile.
 
 ## 2. Provenance
 
@@ -181,9 +172,11 @@ reasoning; do not leave decisions only in issue threads.
 
 ## 3. Implementation language and bootstrap
 
-1. **C++26 with libycxx.** ycxx is written in C++26 and uses libycxx (submodule
-   `deps/libycxx`) as its standard library, with `import std;`. libycxx's preprocessor policy
-   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's own sources too.
+1. **C++26 with a selectable standard library.** The default build uses the pinned libycxx
+   submodule and `import std;`. A system build imports the bootstrap GCC installation's
+   libstdc++ module and builds libycxx's portable execution provider against that same library.
+   The bootstrap compiler and the source language stay the same. libycxx's preprocessor policy
+   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's sources in both configurations.
 2. **Modern C++, as far as the bootstrap compiler allows.** ycxx exercises C++20–26 as heavily
    as the bootstrap compiler supports. The test is: *how would this be written in fully
    implemented C++26?* Write it that way, unless the bootstrap compiler cannot.

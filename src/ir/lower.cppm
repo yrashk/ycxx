@@ -56,11 +56,13 @@ export struct TypeLayout {
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
+  bool sysv_stack_record = false;  // by-value MEMORY argument and hidden-pointer result
   bool sysv_empty_record = false;  // a call-trivial empty record classified as NO_CLASS
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
   bool calls_abi_uncertain = false;  // records whose non-triviality for calls is not established
   bool layout_uncertain = false;     // records whose source layout directives are not applied
   bool contains_explicit_alignment = false;  // a class-head requirement raises this object or a subobject's alignment
+  bool unusable_class_alignment = false;  // no native object layout under the selected compatibility mode
 };
 
 export struct SubObject {
@@ -142,6 +144,7 @@ export struct Amd64ArgumentLocation {
 
 // AMD64 psABI §3.2.3. Register classes advance independently. A group of INTEGER
 // eightbytes that does not fit uses consecutive stack slots and leaves the GPRs available.
+// A MEMORY argument requests zero register words.
 export class Amd64ArgumentPlan {
  public:
   static constexpr std::uint32_t integer_registers = 6;
@@ -152,7 +155,7 @@ export class Amd64ArgumentPlan {
     const bool sse = l2::is_float(type);
     auto& used = sse ? sse_used_ : integer_used_;
     const auto limit = sse ? sse_registers : integer_registers;
-    if (used + register_words <= limit) {
+    if (register_words != 0 && used + register_words <= limit) {
       const auto first = used;
       used += register_words;
       return {sse ? Amd64ArgumentKind::sse : Amd64ArgumentKind::integer, first};
@@ -237,6 +240,7 @@ class Lowering {
  private:
   using T = l2::Type;
   using Op2 = l2::Op;
+  static constexpr const char* alignment_error = "the requested class alignment has no usable object layout";
 
   struct ClassPieces {
     std::uint32_t words = 0;
@@ -490,6 +494,7 @@ class Lowering {
       if (result || byval) {
         QualType pc = layout(cxx(p)).pointee;
         const TypeLayout object = layout(pc);
+        if (object.unusable_class_alignment) return fail(alignment_error);
         if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
         if (!config_.sysv_amd64 && object.contains_explicit_alignment)
           return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
@@ -788,7 +793,9 @@ class Lowering {
         return {};
       }
       case Op::ptr_add: {
-        std::uint64_t size = layout(QualType(std::uint32_t(imms[0]))).size;
+        const TypeLayout element = layout(QualType(std::uint32_t(imms[0])));
+        if (element.unusable_class_alignment) return fail(alignment_error);
+        std::uint64_t size = element.size;
         ValueId i = resize(in(n, 1), T::i64, is_signed(f_.operands_of(n)[1]));
         if (size != 1) i = emit1(Op2::mul, T::i64, {i, constant(T::i64, std::int64_t(size))}, {}, bit(Flag::nsw));
         out(n, 0, emit1(Op2::ptradd, T::ptr, {in(n, 0), i}));
@@ -797,7 +804,9 @@ class Lowering {
       case Op::ptr_diff: {
         auto t = result_type();
         if (!t) return fail(t.error());
-        std::uint64_t size = layout(QualType(std::uint32_t(imms[0]))).size;
+        const TypeLayout element = layout(QualType(std::uint32_t(imms[0])));
+        if (element.unusable_class_alignment && element.size == 0) return fail(alignment_error);
+        std::uint64_t size = element.size;
         ValueId a = emit1(Op2::ptr2int, T::i64, {in(n, 0)});
         ValueId c = emit1(Op2::ptr2int, T::i64, {in(n, 1)});
         ValueId d = emit1(Op2::sub, T::i64, {a, c}, {}, bit(Flag::nsw));
@@ -807,11 +816,13 @@ class Lowering {
       }
       case Op::ptr_member: {
         QualType base = layout(cxx(f_.operands_of(n)[0])).pointee;
+        if (layout(base).unusable_class_alignment) return fail(alignment_error);
         out(n, 0, add_offset(in(n, 0), offset(base, path_at(imms, 1))));
         return {};
       }
       case Op::ptr_derived: {
         QualType derived{std::uint32_t(imms[0])};
+        if (layout(derived).unusable_class_alignment) return fail(alignment_error);
         out(n, 0, add_offset(in(n, 0), -offset(derived, path_at(imms, 1))));
         return {};
       }
@@ -833,6 +844,7 @@ class Lowering {
         if (storage != Storage::automatic && storage != Storage::temporary)
           return fail(std::format("{} storage is not in the α subset", ir::name_of(storage)));
         TypeLayout l = layout(QualType(std::uint32_t(imms[0])));
+        if (l.unusable_class_alignment) return fail(alignment_error);
         if (Init(imms[2]) != Init::indeterminate && l.contains_member_pointer)
           return fail("zero-initializing a pointer-to-member object is not supported yet");
         ValueId p = emit1(Op2::alloca, T::ptr, {}, {l.size, l.align, raw(n)});
@@ -875,6 +887,7 @@ class Lowering {
         // A trivial copy ([class.copy.ctor], [basic.types.general]): the object's bytes, in the
         // widest chunks its alignment allows.
         TypeLayout l = layout(QualType(std::uint32_t(imms[0])));
+        if (l.unusable_class_alignment) return fail(alignment_error);
         if (l.kind == TypeKind::record) l.size = l.data;
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), l, imms[0]));
         return {};
@@ -887,6 +900,7 @@ class Lowering {
         auto vt = type_of(t);
         if (!vt) return fail(vt.error());
         QualType base = layout(cxx(f_.operands_of(n)[1])).pointee;
+        if (layout(base).unusable_class_alignment) return fail(alignment_error);
         ValueId p = add_offset(in(n, 1), offset(base, path_at(imms, 1)));
         ValueId v = emit1(Op2::load, memory_type(*vt), {in(n, 0), p}, {imms[0]}, nd.flags & bit(Flag::volatile_));
         if (*vt == T::i1) v = emit1(Op2::trunc, T::i1, {v});
@@ -898,6 +912,7 @@ class Lowering {
         auto vt = type_of(t);
         if (!vt) return fail(vt.error());
         QualType base = layout(cxx(f_.operands_of(n)[1])).pointee;
+        if (layout(base).unusable_class_alignment) return fail(alignment_error);
         ValueId p = add_offset(in(n, 1), offset(base, path_at(imms, 1)));
         ValueId v = in(n, 2);
         if (*vt == T::i1) v = emit1(Op2::zext, T::i8, {v});
@@ -1007,6 +1022,7 @@ class Lowering {
           if (class_arg || class_result) {
             c = layout(cxx(l1ops[i])).pointee;
             const TypeLayout object = layout(c);
+            if (object.unusable_class_alignment) return fail(alignment_error);
             if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
             if (!config_.sysv_amd64 && object.contains_explicit_alignment)
               return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
@@ -1276,6 +1292,9 @@ class Lowering {
         emit_unreachable();
         return {};
       }
+      case Op::builtin:
+        if (BuiltinFn(imms[0]) == BuiltinFn::nansl) return fail("evaluating __builtin_nansl is not supported yet");
+        [[fallthrough]];
       default: return fail(std::format("`{}` is not in the α subset", info(nd.op).name));
     }
   }
@@ -1337,6 +1356,11 @@ class Lowering {
     if (l.kind != TypeKind::record || !l.trivial_calls) return {};
     auto words = std::uint32_t((l.size + 7) / 8);
     if (config_.sysv_amd64) {
+      if (l.sysv_stack_record) {
+        if (!args) return {};
+        args->add(first, T::i64, 0, words, l.align > 8 ? 2 : 1);
+        return {words, T::i64, l.size};
+      }
       std::uint8_t chunks = l.sysv_integer_eightbytes;
       if (!chunks) return {};
       auto registers = std::uint32_t(std::popcount(chunks));
@@ -1356,7 +1380,7 @@ class Lowering {
   bool sysv_memory_result(QualType c) const {
     TypeLayout l = layout(c);
     return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
-           ((!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
+           (l.sysv_stack_record || (!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
   // Darwin omits empty call-trivial arguments and results (#116). System V transports no
   // value for a NO_CLASS record in a fixed direct call or its definition (#641).
