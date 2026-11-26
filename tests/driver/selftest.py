@@ -5,7 +5,7 @@ says which in its `// FIXTURE: <code>` line. They run with Clang (else GCC) as t
 under test, so a driver that passes everything, or fails everything, is caught. The rest checks
 the parts that need no compiler: markers, the incremental format, sharding, state and selection.
 """
-import json, os, re, runpy, subprocess, sys, tempfile, unittest
+import json, os, re, runpy, shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 from . import discover, incremental, kinds, state, toolchain
@@ -45,6 +45,81 @@ class Fixtures(unittest.TestCase):
 
 
 class Parts(unittest.TestCase):
+    @unittest.skipUnless(all(shutil.which(t) for t in ('cmake', 'ctest', 'ninja')), 'needs CMake and Ninja')
+    def test_build_requires_enabled_ctests(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            tools = root / 'tools'
+            tools.mkdir()
+            shutil.copy2(REPO / 'tools' / 'build', tools / 'build')
+            sync = tools / 'sync-submodules'
+            sync.write_text('#!/bin/sh\nexit 0\n')
+            sync.chmod(0o700)
+            (root / 'CMakeLists.txt').write_text('''\
+cmake_minimum_required(VERSION 3.30)
+project(build_gate LANGUAGES NONE)
+option(YCXXC_BUILD_TESTS "Build the test" ON)
+option(REGISTER_TEST "Register the test" ON)
+add_custom_target(ycxxc ALL COMMAND "${CMAKE_COMMAND}" -E touch compiler-built)
+if(YCXXC_BUILD_TESTS)
+  add_custom_target(smoke ALL COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/smoke.cmake" .)
+  enable_testing()
+  if(REGISTER_TEST)
+    add_test(NAME smoke COMMAND "${CMAKE_COMMAND}" -P smoke.cmake)
+  endif()
+endif()
+''')
+            (root / 'smoke.cmake').write_text('file(TOUCH test-ran)\n')
+
+            def configure(build, *opts):
+                subprocess.run(['cmake', '-S', root, '-B', build, '-G', 'Ninja', *opts],
+                               check=True, capture_output=True, timeout=60)
+
+            def run(build, *opts):
+                return subprocess.run([tools / 'build', *opts], env={**os.environ, 'YCXX_BUILD_DIR': str(build)},
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+
+            warm = root / 'warm'
+            enabled = run(warm)
+            self.assertEqual(enabled.returncode, 0, enabled.stdout)
+            (warm / 'test-ran').unlink()
+            registration = warm / 'CTestTestfile.cmake'
+            stale_registration = registration.read_bytes()
+            configure(warm, '-DYCXXC_BUILD_TESTS=OFF')
+            # Reproduce the stale registration even if a newer CMake cleans up its old file.
+            registration.write_bytes(stale_registration)
+            self.assertTrue((warm / 'smoke.cmake').is_file())
+
+            fresh = root / 'fresh'
+            configure(fresh, '-DYCXXC_BUILD_TESTS=OFF')
+            for build in (fresh, warm):
+                with self.subTest(build=build.name):
+                    disabled = run(build)
+                    self.assertNotEqual(disabled.returncode, 0, disabled.stdout)
+                    self.assertIn('-DYCXXC_BUILD_TESTS=ON', disabled.stdout)
+                    self.assertFalse((build / 'test-ran').exists())
+
+            empty = root / 'empty'
+            configure(empty, '-DREGISTER_TEST=OFF')
+            no_tests = run(empty)
+            self.assertNotEqual(no_tests.returncode, 0, no_tests.stdout)
+            self.assertIn('No tests were found', no_tests.stdout)
+
+            opt_out = root / 'opt-out'
+            compiler_only = run(opt_out, '--no-tests')
+            self.assertEqual(compiler_only.returncode, 0, compiler_only.stdout)
+            self.assertTrue((opt_out / 'compiler-built').is_file())
+            self.assertFalse((opt_out / 'smoke.cmake').exists())
+            no_smoke = run(opt_out, '--no-smoke')
+            self.assertEqual(no_smoke.returncode, 0, no_smoke.stdout)
+            self.assertTrue((opt_out / 'smoke.cmake').is_file())
+            self.assertFalse((opt_out / 'test-ran').exists())
+            for option in ('--no-tests', '--no-smoke'):
+                with self.subTest(option=option):
+                    skipped = run(warm, option)
+                    self.assertEqual(skipped.returncode, 0, skipped.stdout)
+                    self.assertFalse((warm / 'test-ran').exists())
+
     def test_draft_initializer_placeholder_fragments(self):
         extractor = runpy.run_path(str(REPO / 'tools' / 'draft-examples'))
 
