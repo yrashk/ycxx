@@ -829,6 +829,7 @@ int show(std::span<const std::string_view> args) {
       "       ycxx show --targets [--format=text|json|html]";
   std::string_view target;
   bool targets = false;
+  bool source_format = false;
   const ast::Target* native_target = nullptr;
   InspectionFormat format = InspectionFormat::text;
   std::optional<std::filesystem::path> against;
@@ -844,7 +845,10 @@ int show(std::span<const std::string_view> args) {
       const auto named = arg.substr(9);
       if (named == "text") format = InspectionFormat::text;
       else if (named == "json") format = InspectionFormat::json;
-      else if (named == "source") format = InspectionFormat::source;
+      else if (named == "source") {
+        format = InspectionFormat::source;
+        source_format = true;
+      }
       else if (named == "html") format = InspectionFormat::html;
       else {
         std::println(std::cerr, "ycxx: unknown plan format '{}'", named);
@@ -866,7 +870,7 @@ int show(std::span<const std::string_view> args) {
       return 2;
     }
   }
-  if (targets && (!target.empty() || native_target || against || format == InspectionFormat::source)) {
+  if (targets && (!target.empty() || native_target || against || source_format)) {
     std::println(std::cerr, "ycxx: --targets accepts only --format=text, --format=json, or --format=html\n{}", usage);
     return 2;
   }

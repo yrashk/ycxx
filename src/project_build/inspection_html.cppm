@@ -619,10 +619,10 @@ std::string render_target_catalog_html(const TargetCatalog& catalog, std::string
       escaped(out, entry.name);
       out += "</code></td><td><code>";
       escaped(out, entry.kind);
-      out += R"(</code></td><td class="location">)";
+      out += R"(</code></td><td><span class="location">)";
       const auto& [path, line, column] = entry.location;
       append_manifest_ref(out, path, line, column, true);
-      out += "</td></tr>\n";
+      out += "</span></td></tr>\n";
     }
     out += "</tbody></table>";
   }
