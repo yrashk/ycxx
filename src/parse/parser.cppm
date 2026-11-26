@@ -2237,7 +2237,8 @@ public:
           const bool value = noexcept_value(s->noexcept_condition, d.ok, &dependent);
           if (!dependent) nonthrowing = value;
         }
-        t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
+        const auto type_linkage = sema::function_type_linkage(linkage_, s_->compatibility());
+        t = s_->types().function(t, ps, s->variadic, type_linkage, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
         d.ok = false;  // the bound was diagnosed when parsed

@@ -368,14 +368,14 @@ class Mangler {
         // before F, and the ref-qualifier before E (Itanium §5.1.5.3).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
         auto f = in_.types.get<ast::TFunction>(in_.types.canon(bare));
-        if (f.linkage != ast::LangLinkage::cxx) return std::unexpected("an extern \"C\" function type");
         auto sig = signature(f, true);
         if (!sig) return sig;
         if (std::to_underlying(f.cv) & 2) inner += "V";
         if (std::to_underlying(f.cv) & 1) inner += "K";
         if (f.noexcept_ != ast::ConstId::none && in_.values.is<ast::VInt>(f.noexcept_) &&
             in_.values.get<ast::VInt>(f.noexcept_).bits.lo != 0) inner += "Do";
-        inner += "F" + *sig;
+        inner += f.linkage == ast::LangLinkage::c ? "FY" : "F";
+        inner += *sig;
         if (f.ref != ast::RefQual::none) inner += f.ref == ast::RefQual::lvalue ? "R" : "O";
         inner += "E";
         candidates_.push_back(full_key(bare));

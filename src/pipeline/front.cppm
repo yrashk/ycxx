@@ -75,6 +75,7 @@ struct SemaMessage {
   bool error = true;
   std::string text;
   std::uint32_t token = 0;
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 
 // The analysis of a unit (#947, slice 0): what `TuFront` was, less placing messages in files.
@@ -2336,7 +2337,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const SemaResult& sema = co_await cx.fetch<TuSema>(tu);
   for (const SemaMessage& m : sema.messages) {
     const pp::TokLoc at = region.site(std::min<std::size_t>(m.token, region.locs.size() - 1));
-    out.messages.push_back({at.offset, m.error, m.text, locations.at(at), m.token});
+    out.messages.push_back({at.offset, m.error, m.text, locations.at(at), m.token, m.warning});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
   out.shapes = sema.shapes;

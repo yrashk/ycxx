@@ -8479,7 +8479,7 @@ public:
   // are copy-initialized parameters as in any call ([expr.call]/7). The call carries the
   // function's `constant`, so that constant evaluation reads the bytes itself (`ir::BuiltinFn`).
   Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
-    const ast::DeclSema d = w_->string_function(f);
+    const ast::DeclSema d = w_->string_function(f, compatibility());
     const auto& signature = types().rec(d.type);
     if (!builtin_arity(signature.params.size(), args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
