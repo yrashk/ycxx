@@ -3018,7 +3018,10 @@ public:
       ok = false;
       return std::nullopt;
     }
-    const bool dependent = std::ranges::any_of(constraints, [&](ConstId value) { return concept_dependent_constraint(value); });
+    // A replay can bind the concept before reading this head. Its written clause still names
+    // the concept parameter even when the normalized constraint already names its argument.
+    const bool dependent = concept_dependent_constraint(p.type_constraint) ||
+                           std::ranges::any_of(constraints, [&](ConstId value) { return concept_dependent_constraint(value); });
     if ((clause || !constraints.empty()) && (!dependent || s_->compatibility() != ast::Compatibility::clang)) {
       if (dependent) s_->diag(clause_at, Diag::concept_dependent_template_head);
       else s_->diag(clause_at, Diag::not_supported, Tk::kw_requires);  // [temp.arg.template]/3 (#271)

@@ -3172,11 +3172,31 @@ int keep() { return f<Yes, Plain>(7); }
 #endif
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    (scope / 'concept-dependent-head-replay.cpp').write_text('''
+template<class T> concept Yes = sizeof(T) > 0;
+template<class T> struct Plain { int n; };
+template<template<class> concept C, template<C> class TT> using Alias = TT<int>;
+template<template<class> concept C, template<class T> requires C<T> class TT>
+constexpr int value = sizeof(TT<int>);
+template<template<class> concept C, template<class T> requires (C<T> && true) class TT>
+struct Holder {
+  TT<int> item;
+  constexpr int first() const noexcept { return 3; }
+  constexpr auto second() const -> int { return 4; }
+  constexpr int third() const { return 5; }
+};
+static_assert(value<Yes, Plain> == sizeof(Alias<Yes, Plain>));
+static_assert(Holder<Yes, Plain>{}.first() == 3 && Holder<Yes, Plain>{}.second() == 4);
+static_assert(Holder<Yes, Plain>{}.third() == 5);
+''')
     symbols = ('_Z1fI3YesTtTkN1f1CEE5PlainEii', '_Z1fI3YesTtTyQ1CITL0__EE5PlainEii',
                '_Z1fI3YesTtTyQaa1CITL0__ELb1EE5PlainEii')
     for mode in MODES:
         for target in (LINUX, DARWIN):
             prefix = '_' if target == DARWIN else ''
+            replay = [target, '-fcompat=' + mode, '-fsyntax-only', 'concept-dependent-head-replay.cpp']
+            cold, warm = (world.cxx(replay, scope, env, timeout=40) for env in (world.cold, world.daemon))
+            assert cold == warm and warm[0] == (0 if mode == 'clang' else 1), (mode, target, cold, warm)
             for case, name in enumerate(symbols):
                 flags = [target, '-fcompat=' + mode, f'-DCASE={case}']
                 compile_ = [*flags, '-c', 'concept-dependent-head.cpp', '-o', 'concept-dependent-head.o']
