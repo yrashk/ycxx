@@ -1,7 +1,10 @@
 // #117 Itanium C++ ABI §5.1.6: a local class is a <local-name>, `Z <encoding> E <name>`, with a
 // discriminator for a later class of the same name in its function and `Ut [n] _` for unnamed
-// ones, or the typedef-name that names one; a function template specialization's local class is in its specialization's encoding.
-// The peer defines the functions whose parameters have these types ([class.local], [basic.link]).
+// ones, or the typedef-name that names one; a function template specialization's local class is in
+// its specialization's encoding. This unit defines functions whose parameters have these types and
+// the peer calls them, so the peer's references must name ycxx's symbols ([class.local],
+// [basic.link]). (The peer odr-uses them without defining them, which [basic.link] leaves without
+// a required diagnostic for types without linkage; the test needs exactly that reference.)
 // PEER: local-class-names-peer.cpp
 // EXIT: 0
 inline auto first() { struct A { int v; }; return A{1}; }
@@ -27,17 +30,12 @@ template <class T> auto in_template() {
   return B{5};
 }
 
-int peer_first(decltype(first()));
-int peer_second(decltype(second()));
-int peer_unnamed(decltype(unnamed()));
-int peer_template(decltype(in_template<int>()));
-int peer_typedef(decltype(typedef_named()));
+int take_first(decltype(first()) a) { return a.v; }
+int take_second(decltype(second()) a) { return a.v; }
+int take_unnamed(decltype(unnamed()) a) { return a.v; }
+int take_template(decltype(in_template<int>()) a) { return a.v; }
+int take_typedef(decltype(typedef_named()) a) { return a.v; }
 
-int main() {
-  if (peer_first(first()) != 1) return 1;
-  if (peer_second(second()) != 2) return 2;
-  if (peer_unnamed(unnamed()) != 4) return 3;
-  if (peer_template(in_template<int>()) != 5) return 4;
-  if (peer_typedef(typedef_named()) != 6) return 5;
-  return 0;
-}
+int peer();
+
+int main() { return peer(); }

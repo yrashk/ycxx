@@ -1,4 +1,4 @@
-// Compiled by the peer compiler: the same inline functions, and the functions the test calls.
+// Compiled by the peer compiler: the same inline functions, and calls to the test's functions.
 inline auto first() { struct A { int v; }; return A{1}; }
 inline auto second() {
   { struct A { int w; } inner{0}; (void)inner; }
@@ -22,8 +22,17 @@ template <class T> auto in_template() {
   return B{5};
 }
 
-int peer_first(decltype(first()) a) { return a.v; }
-int peer_second(decltype(second()) a) { return a.v; }
-int peer_unnamed(decltype(unnamed()) a) { return a.v; }
-int peer_template(decltype(in_template<int>()) a) { return a.v; }
-int peer_typedef(decltype(typedef_named()) a) { return a.v; }
+int take_first(decltype(first()));
+int take_second(decltype(second()));
+int take_unnamed(decltype(unnamed()));
+int take_template(decltype(in_template<int>()));
+int take_typedef(decltype(typedef_named()));
+
+int peer() {
+  if (take_first(first()) != 1) return 1;
+  if (take_second(second()) != 2) return 2;
+  if (take_unnamed(unnamed()) != 4) return 3;
+  if (take_template(in_template<int>()) != 5) return 4;
+  if (take_typedef(typedef_named()) != 6) return 5;
+  return 0;
+}
