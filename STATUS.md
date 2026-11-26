@@ -2558,9 +2558,11 @@ session's.*
   diagnostics. The supported class-template base and variable-template initializer replay paths
   accept dependent operands. Replay expands packs in place among the arguments, checks newly
   concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
-  pack contributes zero arguments. The target must be a separately written type-id. General
-  dependent queries, including function-template uses, and class construction remain in
-  [#218](https://github.com/yrashk/ycxx/issues/218).
+  pack contributes zero arguments. The target must be a separately written type-id.
+  `__is_nothrow_constructible(C, C&&)` can use a written exact move constructor and the
+  effective destructor facts of a complete ordinary class without bases. A query during class
+  completion gets an unsupported-operand diagnostic if the constructor's specification is pending.
+  General dependent queries and broader class construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
@@ -2568,9 +2570,10 @@ session's.*
   fold to the same Boolean when both underlying types are supported arithmetic types. A non-const
   lvalue reference destination is assignable, including a volatile referent. The source may be
   cv-qualified or a reference. Supported class-template base and variable-template initializer
-  replay paths evaluate dependent operands at instantiation. Other operand types and dependent
-  queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
-  predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
+  replay paths evaluate dependent operands at instantiation. `__is_nothrow_assignable(C&, C&&)` can
+  use a written exact move assignment returning `C&` in a complete ordinary class without bases.
+  `__has_builtin` answers 0 for the three predicates while support is partial
+  ([meta.unary.prop], [expr.assign], #218).
 - `__is_convertible(From, To)` and `__is_nothrow_convertible(From, To)` share a Boolean result
   for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
   give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
@@ -4188,7 +4191,19 @@ member templates already had (#713, `replay_member_exception`); an explicit spec
 its own specification. An invalid condition of a specialization that is never needed is no error.
 In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
 In a template's definition, `noexcept` on a call of such a function is value-dependent.
-- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- A function template's exception specification can combine dependent `__is_nothrow_constructible`
+  and `__is_nothrow_assignable` with `&&`, as in libycxx's move-swap overload in
+  `include/ycxx/core/concepts.hpp`. After overload selection, replay forms both written type-ids
+  with the selected arguments and checks class completeness at the demand. A failing substitution
+  in that specification is a hard error. A nested requirement's replay skips semantic analysis of
+  discarded operands that were parsed successfully in the template definition, including logical
+  expressions in complete parenthesized groups. An enclosing equality, negation, call, cast,
+  conditional, assignment or comma keeps its expression atomic
+  ([#1314](https://github.com/yrashk/ycxx/issues/1314)). The trait evaluators cover the arithmetic
+  cases and the written exact move operations above. Broader class queries remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
+  [#1303](https://github.com/yrashk/ycxx/issues/1303).
+- Tests: `tests/own/template-noexcept/`.
 - Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
   in the address of a class template member (#838).
 
