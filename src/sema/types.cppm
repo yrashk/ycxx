@@ -866,6 +866,12 @@ struct ClassRec {
   EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
+  // The base member functions its using-declarations introduce ([namespace.udecl]/1), each as
+  // its base declares it (`entity` is the base's), except those a member of its own with the
+  // same name, parameter-type-list, cv-qualification and ref-qualifier hides or overrides
+  // (/11). Lookup finds them as members of this class ([class.member.lookup]); access is the
+  // using-declaration's (/16), in `access`.
+  std::vector<MemberDeclRec> introduced;
   // Member alias templates ([temp.alias], [temp.mem]): `type` is the pattern, at the member's own
   // depth; named only with arguments (`Sema::member_alias_template`), so not among `types`.
   std::vector<NestedType> alias_templates;

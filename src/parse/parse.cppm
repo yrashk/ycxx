@@ -1615,9 +1615,14 @@ public:
     std::vector<sema::NestedType> alias_templates;
     std::vector<EntityId> friends;
     std::vector<ast::MemberRec> adl_friends;
+    // The member using-declarations' items, with the access in effect there ([namespace.udecl]/16).
+    std::vector<std::pair<u32, ast::Access>> usings;
     bool unapplied_field_layout = false;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
+  // The base member functions the using-declarations `usings` of class `cls` introduce
+  // ([namespace.udecl]), into `rec.introduced`, once `rec.members` has its own declarations.
+  void introduce_members(EntityId cls, sema::ClassRec& rec, std::span<const std::pair<u32, ast::Access>> usings);
   bool class_assertion(u32 member) const {
     return r_->tokens[items_->items[member].begin].kind == lex::Tk::kw_static_assert;
   }
@@ -1956,6 +1961,10 @@ private:
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
+  // By (member item, class entity): the base member functions a member using-declaration names
+  // ([namespace.udecl]), as lookup in its nominated base found them; for a specialization, as
+  // its instantiation of the item found them. `introduce_members` filters them.
+  std::map<std::pair<u32, u32>, std::vector<sema::MemberDeclRec>> member_usings_;
   std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, lex::Tk> class_definition_keys_;  // by defining item: the parsed class-key
@@ -3969,6 +3978,116 @@ private:
     }
   }
 
+  // One using-declarator of a member using-declaration of class `ce` ([namespace.udecl]/3): it
+  // names a member of a base class, here a member function or a set of them, which become
+  // members of `ce` for lookup (`Program::introduce_members`). A base that is dependent is named
+  // again in each specialization's analysis of the item ([temp.dep.type]).
+  bool member_using_declarator(EntityId ce) {
+    sema::Types& types = s_.types();
+    if (ps_.is(Tk::kw_typename)) {  // a member type (#1425)
+      s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_typename);
+      return false;
+    }
+    const sema::Sema::ClassPrefixScope prefix(s_, ce);
+    u32 next = 0;
+    auto sc = ps_.nested_name(0, next);
+    if (!sc || !(ps_.lookup_id_ahead(next) || ps_.kind(next) == Tk::kw_operator)) {
+      s_.diag(ps_.pos(), Diag::not_a_namespace, ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : s_.no_name());
+      return false;
+    }
+    for (u32 j = 0; j < next; ++j) ps_.bump();
+    const u32 at = ps_.pos();
+    std::optional<NameId> name;
+    std::optional<QualType> conversion;
+    if (ps_.conversion_id_ahead()) {
+      ps_.bump();
+      conversion = ps_.conversion_type_id();
+      if (!conversion) return false;
+      name = s_.ins().names.intern(lex::conversion_function_name);
+    } else if (ps_.is(Tk::kw_operator) && !ps_.literal_operator_ahead()) {
+      name = ps_.operator_function_name();
+    } else {
+      name = ps_.lookup_id();
+    }
+    if (!name) return false;
+    if (sc->ns) {
+      s_.diag(at, Diag::using_namespace_member, *name);
+      return false;
+    }
+    if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) return true;
+    if (!sc->type || !types.is_class(*sc->type)) {
+      s_.diag(at, Diag::using_not_base, sc->type ? *sc->type : s_.builtin(sema::Builtin::void_), types.class_type(ce));
+      return false;
+    }
+    const EntityId b = types.class_of(*sc->type);
+    // A direct base, or a base of one: the class is not complete yet, so its base-clause's.
+    std::vector<EntityId> direct;
+    for (const sema::BaseRec& x : q_.defining_base_records(ce)) direct.push_back(x.cls);
+    if (const auto own = p_->instantiating_bases_.find(ce); own != p_->instantiating_bases_.end() &&
+                                                             !std::ranges::contains(direct, own->second))
+      direct.push_back(own->second);
+    const bool is_base = std::ranges::any_of(direct, [&](EntityId d) {
+      int paths = 0;
+      return d == b || s_.base_path(d, b, paths).has_value();
+    });
+    if (b == ce || !is_base) {
+      s_.diag(at, Diag::using_not_base, *sc->type, types.class_type(ce));
+      return false;
+    }
+    // An inheriting constructor (#308) names the base's constructors.
+    if (*name == s_.world().entities.rec(b).name) {
+      s_.diag(at, Diag::not_supported, Tk::kw_using);
+      return false;
+    }
+    if (!s_.require_complete(*sc->type, at)) return false;
+    const auto found = s_.find_member(b, *name);
+    if (!found) {
+      s_.diag(at, Diag::no_member, *name, *sc->type);
+      return false;
+    }
+    if (found->ambiguous) {
+      s_.diag(at, Diag::ambiguous_member, *name, *sc->type);
+      return false;
+    }
+    // A data member, member type or enumerator (#1425).
+    if (!found->member || !found->member->is_function) {
+      s_.diag(at, Diag::not_supported, Tk::kw_using);
+      return false;
+    }
+    std::vector<const sema::MemberDeclRec*> functions = s_.member_functions(found->owner, *name);
+    if (conversion)
+      std::erase_if(functions, [&](const sema::MemberDeclRec* f) {
+        return types.canonical(types.rec(f->type).inner) != types.canonical(*conversion);
+      });
+    if (functions.empty()) {
+      s_.diag(at, Diag::no_member, *name, *sc->type);
+      return false;
+    }
+    // [namespace.udecl]/14: each declaration it names is accessible here.
+    for (const sema::MemberDeclRec* f : functions)
+      if (!s_.check_access(found->owner, f->entity, *name, at, b)) return false;
+    // [namespace.udecl]/10, [class.mem.general]/6: a member using-declarator is not repeated.
+    std::vector<sema::MemberDeclRec>& introduced = p_->member_usings_[{k_, std::to_underlying(ce)}];
+    for (u32 m : p_->items().items[it_->parent].members) {
+      if (m == k_) break;
+      if (p_->items().items[m].kind == ItemKind::access_spec ||
+          p_->region().tokens[p_->items().items[m].begin].kind != Tk::kw_using)
+        continue;
+      // A specialization's members are analysed in order; a class's earlier ones on demand.
+      if (!p_->class_patterns_.contains(std::to_underlying(ce))) p_->item_sema(m);
+      const auto earlier = p_->member_usings_.find({m, std::to_underlying(ce)});
+      if (earlier == p_->member_usings_.end()) continue;
+      for (const sema::MemberDeclRec* f : functions)
+        if (std::ranges::contains(earlier->second, f->entity, &sema::MemberDeclRec::entity)) {
+          s_.diag(at, Diag::redeclared_member, *name);
+          return false;
+        }
+    }
+    for (const sema::MemberDeclRec* f : functions)
+      if (!std::ranges::contains(introduced, f->entity, &sema::MemberDeclRec::entity)) introduced.push_back(*f);
+    return true;
+  }
+
   // One using-declarator at namespace scope: `N::x` or `::x` ([namespace.udecl]).
   bool using_declarator() {
     ps_.accept(Tk::kw_typename);
@@ -5796,6 +5915,19 @@ private:
       ps_.replayed_member_alias_type = false;
       ps_.member_alias_type = false;
       if (!t || !member_alias(c, n, at, *t)) return bad();
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
+    }
+    // A using-declaration ([namespace.udecl]) naming members of a base class.
+    if (ps_.is(Tk::kw_using) && ps_.kind(1) != Tk::kw_namespace && ps_.kind(1) != Tk::kw_enum) {
+      ps_.bump();
+      do {
+        if (!member_using_declarator(ce)) {
+          bad();
+          ps_.skip_to_semi();
+          return;
+        }
+      } while (ps_.accept(Tk::comma));
       if (!ps_.expect(Tk::semi)) bad();
       return;
     }
@@ -9342,6 +9474,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       continue;
     }
     const ast::ItemSema& ms = sema_of(m);
+    if (r_->tokens[mi.begin].kind == lex::Tk::kw_using) out.usings.push_back({m, access});
     bool inspect_field_layout = !out.unapplied_field_layout;
     // The default member initializers' values, by declaration ordinal.
     std::map<u32, ConstId> inits;
@@ -9406,6 +9539,32 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
     }
   }
   return out;
+}
+
+void Program::introduce_members(EntityId cls, sema::ClassRec& rec, std::span<const std::pair<u32, ast::Access>> usings) {
+  // [namespace.udecl]/11: the same name, parameter-type-list, cv-qualification and ref-qualifier
+  // (and for a template, a template's head: the same kind of member, approximated by its type).
+  const auto corresponds = [&](const sema::MemberDeclRec& own, const sema::MemberDeclRec& base) {
+    if (own.name != base.name || !own.is_function || own.is_ctor || own.is_dtor || own.is_template != base.is_template ||
+        !own.head.empty() || !base.head.empty())
+      return false;
+    const sema::TypeRec a = w_->types.rec(own.type);
+    const sema::TypeRec b = w_->types.rec(base.type);
+    return a.fn_cv == b.fn_cv && a.fn_ref == b.fn_ref && a.variadic == b.variadic &&
+           std::ranges::equal(a.params, b.params, {}, [&](QualType t) { return w_->types.canonical(t); },
+                              [&](QualType t) { return w_->types.canonical(t); });
+  };
+  for (const auto& [m, access] : usings) {
+    const auto found = member_usings_.find({m, std::to_underlying(cls)});
+    if (found == member_usings_.end()) continue;
+    for (const sema::MemberDeclRec& f : found->second) {
+      if (std::ranges::contains(rec.introduced, f.entity, &sema::MemberDeclRec::entity) ||
+          std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& own) { return corresponds(own, f); }))
+        continue;
+      rec.introduced.push_back(f);
+      rec.access.push_back({f.entity, access});
+    }
+  }
 }
 
 sema::PeerVirtualLayout Program::peer_virtual_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
@@ -10505,6 +10664,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.alias_templates = std::move(c.alias_templates);
     if (auto b = class_bases_.find(std::to_underlying(*cls)); b != class_bases_.end()) rec.bases = b->second;
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
+    introduce_members(*cls, rec, c.usings);
     rec.friends = std::move(c.friends);
     rec.adl_friends = c.adl_friends;
     if (!can_complete) failed_class_assertions_.insert(*cls);
@@ -12932,6 +13092,7 @@ const sema::ClassRec* Program::replay_class(EntityId spec, u32 k, u32 point,
   built.types = std::move(c.nested);
   built.alias_templates = std::move(c.alias_templates);
   for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
+  introduce_members(spec, built, c.usings);
   built.friends = std::move(c.friends);
   built.adl_friends = std::move(c.adl_friends);
   if (const auto head = class_heads_.find(k); head != class_heads_.end()) built.is_final = head->second.is_final;

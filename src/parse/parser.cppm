@@ -1541,6 +1541,27 @@ public:
     return type;
   }
 
+  // An operator-function-id ([over.oper.general]) at `operator`: `operator@`, named as the
+  // splitter spells it; none, diagnosed, for an operator ycxx does not name yet.
+  std::optional<NameId> operator_function_name() {
+    bump();
+    std::string spelled = "operator";
+    if (auto pair = paired_operator_suffix(); !pair.empty()) {
+      spelled += pair;
+      bump();
+      bump();
+    } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
+      spelled = allocation_operator_name();
+    } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
+      spelled += lex::spelling(kind());
+      bump();
+    } else {
+      s_->diag(pos(), Diag::not_supported, Tk::kw_operator);
+      return std::nullopt;
+    }
+    return s_->world().ins.names.intern(spelled);
+  }
+
   // The allocation operator's keyword and optional empty brackets follow `operator`.
   std::string_view allocation_operator_name() {
     const auto f = is(Tk::kw_new) ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
@@ -1601,23 +1622,12 @@ public:
     } else if (!abstract && is(Tk::kw_operator)) {
       // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells it.
       l.name_at = pos();
-      bump();
-      std::string spelled = "operator";
-      if (auto pair = paired_operator_suffix(); !pair.empty()) {
-        spelled += pair;
-        bump();
-        bump();
-      } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
-        spelled = allocation_operator_name();
-      } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
-        spelled += lex::spelling(kind());
-        bump();
-      } else {
-        s_->diag(pos(), Diag::not_supported, Tk::kw_operator);
+      auto n = operator_function_name();
+      if (!n) {
         ok = false;
         return l;
       }
-      l.name = s_->world().ins.names.intern(spelled);
+      l.name = *n;
       l.named = true;
     } else if (is(Tk::identifier)) {
       l.name = name_of(tok());
