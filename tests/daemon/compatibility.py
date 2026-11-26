@@ -3655,7 +3655,7 @@ def static_lambda_conversion(world, gxx):
     scope = world.scope
     (scope / 'static-lambda.cpp').write_text('''\
 using P = int (*)(int);
-inline P plain() { return [](int n) static { return n + 1; }; }
+inline P plain() { return +[](int n) static { return n + 1; }; }
 inline P generic() { return [](auto n) static { return n + 2; }; }
 inline P explicit_generic() { return []<class T>(T n) static { return n + 3; }; }
 extern "C" P export_plain() { return plain(); }

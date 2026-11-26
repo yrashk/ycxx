@@ -12228,10 +12228,11 @@ public:
       if (auto o = overloaded(sp, {e}, begin, end, op_at)) return *o;
     // `+closure`: the built-in `+` of the pointer its conversion function gives ([over.built]/9).
     if (op == plus && types().is_class(e.type()))
-      if (const ClassRec* r = class_rec(types().class_of(e.type())))
+      if (const ClassRec* r = class_rec(types().class_of(e.type())); r && r->closure)
         for (const MemberDeclRec& m : r->members)
-          if (m.is_static && m.name == ins().names.intern("__invoke")) {
-            Ex p = invoker_pointer(e, m.entity);
+          if (m.is_static && !m.is_template && (m.name == ins().names.intern("__invoke") ||
+                                                m.name == ins().names.intern("operator()"))) {
+            Ex p = invoker_pointer(e, {m.entity, m.type});
             return {p.id, begin, end, p.info};
           }
     auto make = [&](Ex operand, QualType t, ValueCategory cat) {
