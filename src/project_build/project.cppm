@@ -1185,16 +1185,19 @@ std::expected<void, std::string> prepare_project(
       const auto* host_input = plan.witness.host_inputs.empty() ? nullptr : &plan.witness.host_inputs.front();
       const auto* host = host_input ? &plan.producers.host_executables[host_input->executable] : nullptr;
       std::optional<HostWitnessTool> host_tool;
-      const auto current_witness = [&] {
+      const auto current_witness_recipe = [&] {
         if (!current_invocation()) return false;
         const auto current = plan_rule_witness(cwd, expansion, prepared.rules.expansions, native_triple);
         const auto* recipe = current ? std::get_if<RuleWitnessPlan>(&*current) : nullptr;
-        if (!recipe || witness_stamp(*recipe) != *witness_key) return false;
+        return recipe && witness_stamp(*recipe) == *witness_key;
+      };
+      const auto current_witness = [&] {
+        if (!current_witness_recipe()) return false;
         if (!host_tool || current_host_files(host_tool->files)) return true;
         auto updated = build_witness_tool(*host);
         if (!updated || updated->executable.bytes != host_tool->executable.bytes) return false;
         host_tool->files = std::move(updated->files);
-        return current_invocation();
+        return current_witness_recipe();
       };
       const auto changed_witness = [&] {
         superseded = true;
@@ -1212,7 +1215,7 @@ std::expected<void, std::string> prepare_project(
           prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
         }
         if (!host_tool->error.empty()) {
-          if (!current_invocation() || !current_host_files(host_tool->files)) return changed_witness();
+          if (!current_witness_recipe() || !current_host_files(host_tool->files)) return changed_witness();
           return std::unexpected(std::format("host executable '{}': {}", host->name, host_tool->error));
         }
         plan.witness.inputs.push_back({host_input->name, host_input->path, host_tool->executable});
