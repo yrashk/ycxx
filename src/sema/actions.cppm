@@ -8766,6 +8766,14 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
+    if (b.function == ctz) {
+      if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return {NodeId::none, begin, end};
+      const QualType param = builtin(Builtin::unsigned_int);
+      Ex operand = args.front();
+      if (!dependent(operand) && types().is_class(operand.type()))
+        operand = exact_conversion_call(operand, param, operand.begin, /*allow_explicit=*/false).value_or(operand);
+      return builtin_value_call(ast::BuiltinOp::ctz_gcc_zero, builtin(Builtin::int_), param, operand, begin, end);
+    }
     if (b.function == ctzg) {
       const Ex invalid{NodeId::none, begin, end};
       const QualType result = builtin(Builtin::int_);
@@ -8826,6 +8834,7 @@ public:
       case trap:
       case unreachable:
       case strlen:
+      case ctz:
       case ctzg:
       case library:
       case constant_p:
@@ -9929,8 +9938,8 @@ public:
     return e;
   }
 
-  // [over.match.conv]: the bounded exact-result case of direct initialization.
-  std::optional<Ex> exact_conversion_cast(Ex object, QualType target, u32 cast_at) {
+  // [over.match.conv]: the bounded exact-result case. Copy initialization excludes explicit conversions.
+  std::optional<Ex> exact_conversion_call(Ex object, QualType target, u32 at_, bool allow_explicit) {
     const EntityId cls = types().class_of(object.type());
     const NameId name = ins().names.intern(lex::conversion_function_name);
     const ClassRec* record = class_rec(cls);
@@ -9938,6 +9947,7 @@ public:
     auto candidates = member_functions(cls, name);
     const bool lvalue = object.cat() == ValueCategory::lvalue;
     std::erase_if(candidates, [&](const MemberDeclRec* candidate) {
+      if (!allow_explicit && candidate->is_explicit) return true;
       const TypeRec fn = types().rec(candidate->type);
       if (!cv_within(Types::cv(object.type()), fn.fn_cv)) return true;
       if (fn.fn_ref == ast::RefQual::rvalue) return lvalue;
@@ -9970,8 +9980,8 @@ public:
       if ((fn.fn_cv != selected_fn.fn_cv || fn.fn_ref != selected_fn.fn_ref) &&
           !better_object(selected_fn, fn)) return std::nullopt;
     }
-    Ex callee = bind_members(cls, {selected}, object, false, object.begin, object.end, cast_at);
-    return member_call(callee, {}, object.end, cast_at);
+    Ex callee = bind_members(cls, {selected}, object, false, object.begin, object.end, at_);
+    return member_call(callee, {}, object.end, at_);
   }
 
   // A conversion as `static_cast<to>(e)` performs it ([expr.static.cast]); a cast in functional
@@ -10005,7 +10015,7 @@ public:
     if (types().is_class(target) && has_user_ctors(target)) return construct(target, {e}, e.begin, e.end);
     if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     if (named_static_cast && types().is_class(e.type()))
-      if (auto cast = exact_conversion_cast(e, target, at_)) return *cast;
+      if (auto cast = exact_conversion_call(e, target, at_, /*allow_explicit=*/true)) return *cast;
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());

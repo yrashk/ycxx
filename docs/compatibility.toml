@@ -418,6 +418,20 @@ clang = "Same as spec."
 evidence = ["tests/own/floating/run-infinity.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "constexpr-ctz-zero"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "GNU bit operation builtins: __builtin_ctz, [expr.const], #1479"
+prior = "The ordinary GNU spelling was unavailable."
+spec = "A reached zero operand fails constant evaluation."
+gcc = "A reached zero operand yields the width of unsigned int during constant evaluation."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 returned 32 on x86-64 Linux for both a literal zero and a zero function argument."
+clang_observed = "Clang 23.1 rejected both forms on x86-64 Linux and arm64 Darwin."
+limits = "Runtime zero has undefined behavior. Unary __builtin_ctzg retains its existing constant-evaluation policy."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/builtin_ctz/zero-literal.cpp", "tests/daemon/builtin_ctz/zero-parameter.cpp"]
+
+[[divergence]]
 id = "constexpr-nan-operand"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

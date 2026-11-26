@@ -793,6 +793,10 @@ static_assert(__builtin_memcmp(past, past, 5) == 0);
 #endif
 ''')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
+    ctz_fixtures = Path(__file__).with_name('builtin_ctz')
+    ctz_cases = ('zero-literal.cpp', 'zero-parameter.cpp')
+    for case in ctz_cases:
+        shutil.copyfile(ctz_fixtures / case, world.scope / case)
     (world.scope / 'void-cast.cpp').write_text('''\
 #ifdef SINGLETON
 constexpr int value = 37;
@@ -1094,6 +1098,10 @@ int use() { return transform(7); }
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
         for target in (LINUX, DARWIN):
+            for case in ctz_cases:
+                diagnostic = invoke(target, *flags, '-fsyntax-only', case, status=mode != 'gcc')[2]
+                if mode != 'gcc':
+                    assert b'counting trailing zeros with a zero operand' in diagnostic, diagnostic
             invoke(target, *flags, '-DNULL_ZERO', '-fsyntax-only', 'memcmp-identity.cpp')
             for case in ('', 'NULL_RANGE', 'INT_RANGE', 'PAST_END', 'LOCAL'):
                 case_flags = ['-D' + case] if case else []
