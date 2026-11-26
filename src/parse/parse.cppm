@@ -6099,16 +6099,15 @@ private:
             return bad();
           }
         }
-        const auto& owner = s_.world().entities.rec(c.entity);
-        const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
-                                     p_->is_namespace(p_->outermost_class_scope(c.entity));
-        // Replay the written object ref-qualifier for the supported deleted copy-assignment form.
-        // member_function_or_static checks the copy-assignment parameter and declaration context.
-        const bool deleted_template_assignment = !spec.is_static && !member_template_ &&
-            owner.templ != EntityId::none && p_->is_namespace(owner.scope) &&
-            s_.ins().names.spelling(d.name) == "operator=" && plain_deleted_body();
-        if (!is_virtual && !conversion && !ordinary_member && !deleted_template_assignment &&
-            !ps_.check_named_ref_qualifier(d)) return bad();
+        // [dcl.fct]: a non-static member of a class at namespace scope, a class template, its
+        // nested classes and member templates included, keeps its ref-qualifier through
+        // instantiation; the implicit object parameter carries it ([over.match.funcs]/4-5).
+        EntityId enclosing = s_.world().entities.rec(c.entity).scope;
+        while (enclosing != EntityId::none && (s_.world().entities.rec(enclosing).kind == sema::EntityKind::class_ ||
+                                               s_.world().entities.rec(enclosing).kind == sema::EntityKind::class_template))
+          enclosing = s_.world().entities.rec(enclosing).scope;
+        const bool ordinary_member = !spec.is_static && p_->is_namespace(enclosing);
+        if (!is_virtual && !conversion && !ordinary_member && !ps_.check_named_ref_qualifier(d)) return bad();
       }
       // A member whose type became a function type through substitution is a data member of
       // function type, which cannot exist ([temp.inst], [class.mem.general]).
