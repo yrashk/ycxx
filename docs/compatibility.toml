@@ -821,11 +821,24 @@ prior = "Fold a nondependent builtin transform to its result type."
 spec = "Use the concrete result of the transform in the signature."
 gcc = "Retain the builtin transform in the tested function template parameter and return patterns, including trailing returns and a dependent alias template that denotes the transform. Syntax-only compilation can use the transformed type. Emitting a specialization diagnoses its unsupported signature, and a distinct overload can conflict at the call."
 clang = "Same as spec."
-gcc_observed = "The current GCC rejection also applies when an alias template carries the transform into the signature. A non-template alias, a function body, and the tested ordinary member of a class template retain their folded behavior."
+gcc_observed = "The current GCC rejection also applies to chained aliases, partially bound aliases, pointer results, direct class-template arguments, and class-template arguments inherited through an alias. A non-template alias, a fully bound alias, a dependent qualified member alias of a class template, a function body, and the tested ordinary member of a class template retain their folded behavior."
 clang_observed = "Emits the same symbol as spelling the resulting int directly."
-limits = "Header-required builtin spellings remain available in every mode. The supported slice covers directly written transforms, concrete alias results, and the tested member template. More involved dependent aliases still need verification."
+limits = "Header-required builtin spellings remain available in every mode. The supported slice covers directly written transforms, concrete alias results, and the tested member template. Additional dependent alias cases are recorded above and still need verification in ycxx."
 probe = 'template<class T> __remove_cv(const int) f(T n) { return n; } int use() { return f(7); }'
 evidence = ["docs/EXTENSIONS.md", "tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 syntax and primary-emission probes for concrete builtin transforms in direct and alias signatures"]
+
+[[divergence]]
+id = "builtin-type-transform-in-static-initialization-guard"
+status = "pending"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[stmt.dcl]/3, [basic.start.static], Itanium C++ ABI §5.1.4.4"
+prior = "Syntax-only compilation accepts a specialization with a dynamic local static and a builtin transform in its signature."
+spec = "The valid local static declaration is accepted. The ABI rule for a guard uses the guarded object's name."
+gcc = "A dynamic local static in a used specialization requires the enclosing function's signature to have a symbol, and diagnoses an unsupported builtin transform in that signature even during syntax-only compilation. This applies to dependent and concrete transforms, including nested class arguments."
+clang = "Accepts the specialization with a dynamic local static."
+gcc_observed = "Constant initialization, an uninstantiated specialization, and a static in a discarded constexpr branch each leave syntax-only compilation valid. A static that needs dynamic initialization diagnoses even when the local's value is unused."
+probe = 'template<class T> __remove_cv(const int) f(T n) { static int value = n; return value; } int use() { return f(7); }'
+evidence = ["docs/EXTENSIONS.md", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax and primary emission probes for local static initialization with builtin transforms"]
 
 [[divergence]]
 id = "builtin-addressof-pack"

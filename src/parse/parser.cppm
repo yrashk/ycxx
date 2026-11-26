@@ -3042,6 +3042,28 @@ public:
     return type;
   }
 
+  std::optional<lex::TypeTrait> gcc_signature_transform(QualType type) {
+    if (!type) return std::nullopt;
+    const auto rec = s_->types().rec(type);
+    if (rec.kind == sema::TypeKind::transform) return lex::TypeTrait(rec.trait);
+    if (auto trait = gcc_signature_transform(rec.inner)) return trait;
+    if (auto trait = gcc_signature_transform(rec.member_owner)) return trait;
+    for (QualType parameter : rec.params)
+      if (auto trait = gcc_signature_transform(parameter)) return trait;
+    auto argument_transform = [&](auto&& self, const ast::TemplateArg& argument) -> std::optional<lex::TypeTrait> {
+      if (argument.kind == ast::TemplateArgKind::type) return gcc_signature_transform(argument.type);
+      if (argument.kind == ast::TemplateArgKind::pack)
+        for (const auto& element : s_->ins().seqs.elements(argument.elems))
+          if (auto trait = self(self, element)) return trait;
+      return std::nullopt;
+    };
+    const auto args = rec.kind == sema::TypeKind::class_ ? s_->world().entities.rec(rec.entity).args
+                                                        : s_->ins().seqs.elements(rec.args);
+    for (const auto& argument : args)
+      if (auto trait = argument_transform(argument_transform, argument)) return trait;
+    return std::nullopt;
+  }
+
   struct GccSignatureScope {
     Parser& parser;
     bool saved;
@@ -3294,7 +3316,10 @@ public:
                            /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
           in_template_type_argument_ = saved_type_argument;
           if (!t) ok = false;
-          else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
+          else {
+            const auto type = writing_gcc_template_signature_ ? retain_gcc_signature_transforms(*t) : *t;
+            args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type), sema::ConstId::none});
+          }
         } else {
           Ex e = template_argument_expression(replay != nullptr);
           if (e.ok()) {
@@ -7059,6 +7084,15 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent && !v.variable_instantiation_failure)
         s_->diag(init.begin, Diag::not_constant, v.reason);
+      else if (s_->compatibility() == ast::Compatibility::gcc && s_->current_function != EntityId::none &&
+               !v.dependent && !v.variable_instantiation_failure) {
+        // GCC needs the enclosing template's ABI name for a dynamic static guard,
+        // including during syntax-only compilation of a specialization.
+        const auto entity = s_->world().entities.rec(s_->current_function);
+        if (entity.templ != EntityId::none)
+          if (auto trait = gcc_signature_transform(s_->world().entities.rec(entity.templ).type))
+            s_->diag(dbegin, Diag::gcc_static_guard_transform, s_->ins().names.intern(lex::type_trait_info(*trait).name));
+      }
     }
     if (spec.is_constinit && value != ast::ConstId::none)
       if (auto entity = s_->immediate_result_entity(value))

@@ -2383,6 +2383,40 @@ template<class T> Alias<T> f(T n) { return n; }
 #elif defined(BOUND_ALIAS)
 template<class T> using Alias = __remove_cv(const int);
 template<class T> Alias<int> f(T n) { return n; }
+#elif defined(CHAINED_ALIAS)
+template<class A> using Inner = __remove_cv(const int);
+template<class B> using Alias = Inner<B>;
+template<class T> Alias<T> f(T n) { return n; }
+#elif defined(PARTIAL_ALIAS)
+template<class X, class Y> using Alias = __remove_cv(Y);
+template<class T> Alias<T, const int> f(T n) { return n; }
+#elif defined(POINTER_ALIAS)
+int value = 7;
+template<class X, class Y> using Alias = __remove_cv(Y)*;
+template<class T> Alias<T, const int> f(T) { return &value; }
+#elif defined(MEMBER_ALIAS)
+template<class X> struct S { template<class Y> using Alias = __remove_cv(const int); };
+template<class T> typename S<T>::template Alias<T> f(T n) { return n; }
+#elif defined(CLASS_ARGUMENT) || defined(GUARD_CLASS_ARGUMENT)
+template<class T> struct Result { T value; };
+template<class T> Result<__remove_cv(const int)> f(T n) {
+#if defined(GUARD_CLASS_ARGUMENT)
+  static T value = n;
+  return {value};
+#else
+  return {n};
+#endif
+}
+#elif defined(CLASS_ALIAS)
+template<class X, class Y> struct Result { Y value; };
+template<class X> using Alias = Result<X, __remove_cv(const int)>;
+template<class T> Alias<T> f(T n) { return {n}; }
+#elif defined(GUARD_DYNAMIC)
+template<class T> __remove_cv(const int) f(T n) { static int value = n; return value; }
+#elif defined(GUARD_DEPENDENT)
+template<class T> __remove_cv(T) f(T n) { static T value = n; return value; }
+#elif defined(GUARD_CONSTANT)
+template<class T> __remove_cv(const int) f(T n) { static constexpr int value = 1; return n + value; }
 #elif defined(ORDINARY_MEMBER)
 template<class T> struct S { __remove_cv(const int) apply(int n) { return n; } };
 template<class T> int f(T n) { S<T> s; return s.apply(n); }
@@ -2404,14 +2438,18 @@ int use() { return f(7); }
     for mode in MODES:
         flags = ['-fcompat=' + mode]
         for target in (LINUX, DARWIN):
-            for case in ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ORDINARY_ALIAS', 'ALIAS_TEMPLATE', 'BOUND_ALIAS',
-                         'ORDINARY_MEMBER', 'MEMBER_TEMPLATE', 'BODY', 'HEADER_EXTENSION', 'OVERLOAD'):
+            emitted_cases = ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ALIAS_TEMPLATE', 'MEMBER_TEMPLATE',
+                             'CHAINED_ALIAS', 'PARTIAL_ALIAS', 'POINTER_ALIAS', 'CLASS_ARGUMENT', 'CLASS_ALIAS',
+                             'GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT', 'GUARD_CONSTANT')
+            folded = ('ORDINARY_ALIAS', 'BOUND_ALIAS', 'MEMBER_ALIAS', 'ORDINARY_MEMBER', 'BODY', 'HEADER_EXTENSION')
+            for case in (*emitted_cases, *folded, 'OVERLOAD'):
                 opts = [target, *flags, *(['-D' + case] if case else [])]
                 syntax = [*opts, '-fsyntax-only', 'concrete-transform.cpp']
                 native = [*opts, '-c', 'concrete-transform.cpp', '-o', 'concrete-transform.o']
                 ambiguous = mode == 'gcc' and case == 'OVERLOAD'
-                emitted = mode == 'gcc' and case in ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ALIAS_TEMPLATE', 'MEMBER_TEMPLATE')
-                for command, reject in ((syntax, ambiguous), (native, ambiguous or emitted)):
+                emitted = mode == 'gcc' and case in emitted_cases
+                guard = mode == 'gcc' and case in ('GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT')
+                for command, reject in ((syntax, ambiguous or guard), (native, ambiguous or emitted)):
                     cold = world.cxx(command, scope, world.cold, timeout=40)
                     resident = world.cxx(command, scope, world.daemon, timeout=40)
                     assert cold == resident and resident[0] == int(reject), (mode, target, case, cold, resident)

@@ -1310,9 +1310,11 @@ public:
     if (compatibility() == ast::Compatibility::gcc) {
       // A dependent alias still carries the written transformations of its concrete
       // result into a template signature. An already-bound alias uses the folded type.
-      if (!types().is_dependent(tmpl.type) && std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); }))
-        return tmpl.type;
-      auto result = templates_for_use(at).substitute(tmpl.type, bindings);
+      const bool dependent_alias = std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); });
+      if (!types().is_dependent(tmpl.type) && dependent_alias) return tmpl.type;
+      auto substitution = templates_for_use(at);
+      substitution.retain_gcc_concrete_transforms = dependent_alias;
+      auto result = substitution.substitute(tmpl.type, bindings);
       if (result && ins().types.is<ast::SWrittenTransform>(*result)) return types().canonical(*result);
       return result;
     }

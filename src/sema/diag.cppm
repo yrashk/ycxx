@@ -175,6 +175,7 @@ enum class Diag : std::uint32_t {
   nonconstant_initializer [[=message{Severity::error, "dynamic initialization of a namespace-scope variable is not supported yet: {0:r}"}]],
   // [dcl.constexpr], [dcl.pre], [expr.const]
   not_constant [[=message{Severity::error, "not a constant expression: {0:r}"}]],
+  gcc_static_guard_transform [[=message{Severity::error, "cannot name a static initialization guard for a function signature containing the built-in type trait '{0:n}'"}]],
   static_assert_failed [[=message{Severity::error, "static assertion failed"}]],
   static_assert_failed_message [[=message{Severity::error, "static assertion failed: {0:c}"}]],
   constexpr_uninitialized [[=message{Severity::error, "constexpr variable '{0:n}' must be initialized"}]],
