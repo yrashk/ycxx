@@ -1651,12 +1651,16 @@ i64 Machine::offset_of(const Value& p) {
 bool Machine::may_overlap(const Value& a, const Value& b) {
   const Object& oa = objects_[a.ref];
   const Object& ob = objects_[b.ref];
-  u64 es = shape(shape(oa.type).inner).size;
+  const u64 es = shape(shape(oa.type).inner).size;
   if (es == 0 || shape(shape(ob.type).inner).size != es) return false;
-  i64 ia = offset_of(a) / i64(es), ib = offset_of(b) / i64(es);
-  i64 na = oa.ncells, nb = ob.ncells;
-  for (i64 d = -std::min(ia, ib); ia + d < na && ib + d < nb; ++d)
-    if (cells_[oa.cell0 + u32(ia + d)].v.bits != cells_[ob.cell0 + u32(ib + d)].v.bits) return false;
+  const i64 ia = offset_of(a) / i64(es), ib = offset_of(b) / i64(es);
+  // Align the pointer positions. The nonnegative difference can span all 64 unsigned bits.
+  const u64 start_a = ia > ib ? u64(ia) - u64(ib) : 0;
+  const u64 start_b = ib > ia ? u64(ib) - u64(ia) : 0;
+  if (start_a >= oa.ncells || start_b >= ob.ncells) return true;  // no shared code units
+  const u64 count = std::min(oa.ncells - start_a, ob.ncells - start_b);
+  for (u64 i = 0; i < count; ++i)
+    if (cells_[oa.cell0 + start_a + i].v.bits != cells_[ob.cell0 + start_b + i].v.bits) return false;
   return true;
 }
 
