@@ -409,6 +409,40 @@ table shows before and after counts and source sites. After links open
 the relevant lines in the current manifest. Before sites describe the
 saved plan. A comparison with equal counts shows **No dependency changes.**
 
+### Value binding comparisons (#1493)
+
+From the package-probe example, build the plan and save a baseline.
+
+```sh
+ycxx build app
+ycxx show app --format=json > before.json
+```
+
+Rename the producer from `wire` to `wire_alt` in both its declaration and
+the `value("wire", "fast-mode")` reference in `build.ycxx`. Build the edited
+plan and open the comparison report.
+
+```sh
+ycxx build app
+ycxx show app --against before.json --format=html > changes.html
+```
+
+**Value binding changes** shows the removed `config` binding to `wire` and the
+added binding to `wire_alt`, with before and after counts. Saved sites give
+the original coordinates. Current links open the reference in the displayed
+manifest. **Value bindings** shows all resolved bindings in the current plan.
+
+The same comparison with `--format=json` reports `value_binding_changes`.
+A binding's identity is its consumer, usage, local binding, producer, and
+export. Each identity with different occurrence counts includes all its
+`before` and `after` edge records. Moving a reference for the same binding
+preserves its count. When counts match, JSON returns an empty array and HTML
+says **No value binding changes.**
+
+The binding comparison requires complete graphs with `value_edges` in both
+snapshots. Older schema-1 baselines still support the comparisons for which
+they have data.
+
 ### Declared target catalog (#1392)
 
 Run `ycxx show --targets` from the workspace directory to see the target names

@@ -3380,6 +3380,12 @@ shows those counts under **Dependency changes** and links current sites to
 the manifest. Moved references preserve the count, and older snapshots
 without a dependency graph can still compare plan facts.
 
+When both plans have complete graphs with `value_edges`, `ycxx show --against`
+also compares typed binding occurrence counts by consumer, usage, binding,
+producer, and export (#1493). JSON records before and after occurrences in
+`value_binding_changes`. HTML shows counts and source sites under
+**Value binding changes**, with links for sites in the current manifest.
+
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
 with their declared rule kinds and source locations. JSON includes the same
