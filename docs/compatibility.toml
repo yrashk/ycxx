@@ -64,15 +64,15 @@ evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/builtin-line.ru
 
 [[divergence]]
 id = "source-location-position"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[support.srcloc.cons], #327"
 prior = "Clang's line and byte column for the start of the whole expression."
 spec = "The implementation-defined position uses the start of the expression and a one-based byte column."
 gcc = "Uses the opening parenthesis of the call and the opening site of a macro expansion."
 clang = "Same as spec."
-limits = "This entry covers line and column on x86-64 Linux and AArch64 Darwin. Native Darwin runtime verification is pending."
-evidence = ["tests/own/headers/source-location-descriptor.run.cpp", "tests/daemon/compatibility.py"]
+limits = "This entry covers line and column on x86-64 Linux and arm64 Darwin."
+evidence = ["tests/own/headers/source-location-descriptor.accept.cpp", "tests/own/headers/source-location-descriptor.run.cpp", "tests/daemon/compatibility.py", "Native arm64 Darwin compatibility and mixed-object tests in https://github.com/yrashk/ycxx/actions/runs/45777934698/job/139766060435"]
 
 [[divergence]]
 id = "class-call-triviality"
