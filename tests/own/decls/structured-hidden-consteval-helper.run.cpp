@@ -9,7 +9,9 @@ struct AssemblyView {
   constexpr const char* data() const noexcept { return text; }
   constexpr unsigned size() const noexcept { return count; }
 };
+}
 
+namespace consteval_array_spec {
 class Table {
   static inline constexpr int dormant_table_entry(int seed) {
     int length = 2 + (seed & 3);
@@ -38,7 +40,7 @@ extern "C" int separate_target(int input) {
 }
 
 int runtime_value(int input) {
-  return Table::value(input);
+  return consteval_array_spec::Table::value(input);
 }
 
 int main(int argc, char**) {
