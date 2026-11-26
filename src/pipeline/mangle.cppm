@@ -83,6 +83,7 @@ struct ClassName {
   ast::EntityId closure_variable = ast::EntityId::none;
   std::optional<ast::SeqId<ast::TemplateParamSema>> template_params{};
   std::optional<std::uint32_t> private_closure_number{};
+  bool static_closure = false;
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -603,8 +604,9 @@ class Mangler {
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
     if (sc.closure && in_.types.is<ast::TFunction>(c)) {
       auto f = in_.types.get<ast::TFunction>(c);
-      const bool gcc_invoker = compatibility_ == ast::Compatibility::gcc && in_.seqs.size(spec.generic_invoker_head) != 0;
-      if (gcc_invoker) name = "_FUN";
+      const bool conversion = name == lex::conversion_function_name;
+      const bool gcc_generated = compatibility_ == ast::Compatibility::gcc && in_.seqs.size(spec.generic_invoker_head) != 0;
+      if (gcc_generated && !conversion) name = "_FUN";
       std::string local;
       if (sc.closure_variable == ast::EntityId::none) {  // else the variable is its <closure-prefix>
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
@@ -614,6 +616,22 @@ class Mangler {
       }
       auto p = prefix(scope);
       if (!p) return p;
+      const bool gcc_deduced = gcc_generated && in_.types.is<ast::TAuto>(in_.types.canon(f.ret));
+      if (conversion) {
+        auto target = [&]() -> std::expected<std::string, std::string> {
+          if (!gcc_deduced) return type(ast::pointer_to(const_cast<ast::Interners&>(in_), c));
+          auto signature = signature_for_closure(f, sc, spec, scope, true);
+          if (!signature) return signature;
+          const bool nonthrowing = in_.values.is<ast::VInt>(f.noexcept_) &&
+                                   in_.values.get<ast::VInt>(f.noexcept_).bits.lo != 0;
+          return (nonthrowing ? "PDoF" : "PF") + *signature + "E";
+        }();
+        if (!target) return target;
+        candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
+        auto args = specialization_args(spec);
+        if (!args) return args;
+        return local + "NK" + *p + "cv" + *target + *args + "Ev";
+      }
       std::string unqualified = std::format("{}{}", name.size(), name);
       if (name.starts_with("operator") && name.size() > 8) {
         auto code = operator_code(name.substr(8), in_.seqs.size(f.params) + 1);
@@ -623,8 +641,7 @@ class Mangler {
       candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());  // the <template-prefix>
       auto args = specialization_args(spec);
       if (!args) return args;
-      const bool deduced_result = in_.types.is<ast::TAuto>(in_.types.canon(f.ret));
-      auto sig = signature_for_closure(f, sc, spec, scope, gcc_invoker && deduced_result);
+      auto sig = signature_for_closure(f, sc, spec, scope, gcc_deduced);
       if (!sig) return sig;
       const auto saved_depth = std::exchange(own_depth, sc.closure_constraint_depth);
       auto trailing = constraint_suffix(spec.trailing, false);
@@ -654,32 +671,35 @@ class Mangler {
                                                                const TemplateSpec& spec, ast::EntityId scope,
                                                                bool gcc_deduced_invoker) {
     if (!gcc_deduced_invoker) return signature(invoker, true);
-    // GCC's current primary signature describes the deduced result by calling
-    // operator() through a null closure pointer with the forwarded parameters.
+    // GCC uses the direct call for a static operator. For a non-static
+    // operator, it forms the dependent result through a null closure pointer.
     auto& in = const_cast<ast::Interners&>(in_);
-    const auto member = in_.types.get<ast::TFunction>(in_.types.canon(closure.closure_type));
-    auto object = ast::with_cv(in.intern_type(ast::TClass{scope}), member.cv);
-    auto pointer = type(ast::pointer_to(in, object, ast::Cv::const_));
-    if (!pointer) return pointer;
-    std::string out = "DTcldtdeL" + *pointer + "0EonclI";
-    for (const auto& parameter : in_.seqs.elements(spec.generic_invoker_head)) {
-      if (parameter.pack) out += 'J';
-      if (parameter.kind == ast::TemplateArgKind::value) {
-        auto value = in.intern_value(ast::VDepParam{parameter.depth, parameter.index});
-        if (parameter.pack) value = in.intern_value(ast::VDepExpansion{value});
-        auto a = template_arg({ast::TemplateArgKind::value, parameter.type, value});
-        if (!a) return a;
-        out += *a;
-      } else {
-        auto t = in.intern_type(ast::TTemplateParam{parameter.depth, parameter.index, parameter.pack});
-        if (parameter.pack) t = in.intern_type(ast::TPackExpansion{t});
-        auto a = type(t);
-        if (!a) return a;
-        out += *a;
+    std::string out = "DTcloncl";
+    if (!closure.static_closure) {
+      const auto member = in_.types.get<ast::TFunction>(in_.types.canon(closure.closure_type));
+      auto object = ast::with_cv(in.intern_type(ast::TClass{scope}), member.cv);
+      auto pointer = type(ast::pointer_to(in, object, ast::Cv::const_));
+      if (!pointer) return pointer;
+      out = "DTcldtdeL" + *pointer + "0EonclI";
+      for (const auto& parameter : in_.seqs.elements(spec.generic_invoker_head)) {
+        if (parameter.pack) out += 'J';
+        if (parameter.kind == ast::TemplateArgKind::value) {
+          auto value = in.intern_value(ast::VDepParam{parameter.depth, parameter.index});
+          if (parameter.pack) value = in.intern_value(ast::VDepExpansion{value});
+          auto a = template_arg({ast::TemplateArgKind::value, parameter.type, value});
+          if (!a) return a;
+          out += *a;
+        } else {
+          auto t = in.intern_type(ast::TTemplateParam{parameter.depth, parameter.index, parameter.pack});
+          if (parameter.pack) t = in.intern_type(ast::TPackExpansion{t});
+          auto a = type(t);
+          if (!a) return a;
+          out += *a;
+        }
+        if (parameter.pack) out += 'E';
       }
-      if (parameter.pack) out += 'E';
+      out += 'E';
     }
-    out += 'E';
     std::size_t index = 0;
     for (auto p : in_.seqs.elements(invoker.params)) {
       if (in_.types.is<ast::TPackExpansion>(in_.types.canon(p))) {

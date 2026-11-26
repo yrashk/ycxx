@@ -749,12 +749,12 @@ private:
   std::optional<interp::Callee> closure_callee(EntityId f) {
     for (std::size_t i = 0; i < s_->closures.size(); ++i) {
       const ast::ClosureDef& c = s_->closures[i];
-      if (c.call != f && c.invoker != f) continue;
+      if (c.call != f && c.invoker != f && c.conversion != f) continue;
       if (c.flags & closure_flag::polymorphic_result)
         return interp::Callee{.is_constexpr = true, .unsupported = true};
       std::vector<ast::LocalRec> locals = s_->closure_locals[i];
       for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts
-      ast::Child body = s_->builder().commit(ast::Child{c.call == f ? c.body : c.invoker_body, 0});
+      ast::Child body = s_->builder().commit(ast::Child{Sema::closure_member_body(c, f), 0});
       Sema::ClosureMember m = Sema::closure_member_def(s_->world(), c, f, body.id, std::move(locals));
       irgen::FunctionInput input{f, m.decl, m.body, s_->item(), s_->loc_base() + c.body_begin, false, {}, m.this_type};
       EvalFacts facts(s_->world(), *q_);

@@ -281,7 +281,7 @@ prior = "Use the invoker address directly without emitting a separate conversion
 spec = "The conversion member yields the invoker address, or the address of the call operator if it is static. Encode an emitted conversion member as cv followed by the conversion type."
 gcc = "At -O0, emit a constexpr conversion member when the address conversion is used. A deduced generic conversion type uses a dependent call to the lambda call operator, using a null closure pointer for a nonstatic operator."
 clang = "At -O0, emit the conversion member when used. The conversion type of the tested generic closure has a placeholder return. Both peers use the same concrete conversion-member spelling for the tested nongeneric closure."
-limits = "The object symbols depend on optimization. Both peers inline these tested conversions at -O2. Both return the static call operator directly for a static lambda."
+limits = "The object symbols depend on optimization. Both peers inline these tested conversions at -O2. A static lambda's conversion returns its call operator directly. At -O0 both peers emit a conversion member, and GCC uses the direct dependent call encoding DTcloncl for the tested generic static lambdas."
 probe = 'inline int (*provider())(int) { return [](auto n) { return n; }; }'
 evidence = ["GCC 16.2 with -fabi-compat-version=0 and upstream Clang 23.1.6 -O0 and -O2 ELF and Mach-O symbol probes"]
 
@@ -407,6 +407,18 @@ gcc = "Read long double representation bytes. The x86-64 target uses the full x8
 clang = "Same as spec."
 limits = "Covers constexpr byte reads of literal-initialized long double objects. General x87 arithmetic and native transport are separate feature work."
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constexpr byte probes with more than 53 significand bits, hexadecimal exponents and x87 padding"]
+
+[[divergence]]
+id = "floating-literal-underflow-warning"
+status = "pending"
+mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+reference = "[lex.fcon]"
+prior = "Round to zero without a diagnostic in all modes."
+spec = "Keep the existing nearest-value rounding and emit no underflow warning."
+gcc = "Warn under -Woverflow when a nonzero floating literal rounds to zero."
+clang = "Warn under -Wliteral-range when a nonzero floating literal rounds to zero, using the selected target's format for long double."
+probe = 'constexpr float tiny = 0x1p-150f;'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 default and suppressed warnings for float, double and long double on x86-64 Linux and arm64 Darwin"]
 
 [[divergence]]
 id = "constexpr-memory-active-union-representation"
@@ -773,12 +785,12 @@ status = "pending"
 mode_status = { spec = "partial", gcc = "partial", clang = "pending" }
 reference = "[expr.const.imm]/2, example 2; [temp.arg.nontype]"
 prior = "Allow a direct constant call through a bare auto template parameter in every mode. Targetless address selection for the function specialization fails before immediate escalation can be checked."
-spec = "Accept a constant invocation. Treat the specialization as immediate when invoking the substituted immediate function with a runtime parameter, and reject an escaping address of the specialization."
-gcc = "Same as spec for the tested forwarding function."
-clang = "Reject the immediate function as a template argument, including at a direct constant call."
+spec = "Accept a direct immediate-function template argument. Treat the specialization as immediate when the substituted call cannot be evaluated at compile time, and reject an escaping address of that specialization."
+gcc = "Accept a direct immediate-function template argument. The tested forwarding specialization is immediate even when it supplies a constant to the substituted call. Reject a class-valued argument that retains the address."
+clang = "Reject the immediate function as a template argument, including at a direct constant call. The tested ordinary type-template specialization still escalates when it calls a named immediate function with a runtime parameter."
 probe = 'consteval int id(int x) { return x; } template<auto F> constexpr auto apply_to(int i) { return F(i); }'
 limits = "GCC and Clang both accept a direct call and a targetless address for the same specialization when id is constexpr. The existing draft rejection case does not distinguish targetless address deduction from immediate escalation."
-evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin syntax probes for static_assert(apply_to<id>(7) == 7) and auto p = &apply_to<id>, repeated with constexpr id"]
+evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin direct, typed and aggregate template arguments, ordinary address controls, and immediate-escalation probes"]
 
 [[divergence]]
 id = "constexpr-void-cast-one-past"

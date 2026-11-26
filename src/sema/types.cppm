@@ -640,6 +640,7 @@ struct EntityRec {
   ast::WrittenConstraint lambda_head_constraint{};
   ast::WrittenConstraint lambda_trailing_constraint{};
   u16 lambda_constraint_depth = 0;
+  bool static_closure = false;
 };
 
 class Entities {

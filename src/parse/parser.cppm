@@ -3213,6 +3213,11 @@ public:
       if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
+    // Clang rejects direct immediate-function arguments. GCC permits those, but
+    // rejects an aggregate argument whose constant value contains such an address.
+    if ((s_->compatibility() == ast::Compatibility::clang ||
+         (class_argument && s_->compatibility() == ast::Compatibility::gcc)) &&
+        !s_->check_immediate_initializer(*v.value, e.begin)) return std::nullopt;
     if (class_argument) {
       const auto a = s_->templates().converted_value({ast::TemplateArgKind::value, t, *v.value}, t);
       if (!a) {
@@ -6167,17 +6172,24 @@ public:
       bool constexpr_ = false;
       for (;;) {
         // [expr.prim.lambda.general]/3: each lambda-specifier at most once.
-        if ((is(Tk::kw_mutable) && spec.mutable_) || (is(Tk::kw_constexpr) && constexpr_)) {
+        if ((is(Tk::kw_mutable) && spec.mutable_) || (is(Tk::kw_constexpr) && constexpr_) ||
+            (is(Tk::kw_static) && spec.static_)) {
           s_->diag(pos(), Diag::duplicate_specifier, kind());
           return fail();
         }
         if (accept(Tk::kw_mutable)) spec.mutable_ = true;
         else if (accept(Tk::kw_constexpr)) {
           constexpr_ = true;
-        } else if (is(Tk::kw_consteval) || is(Tk::kw_static)) {
+        } else if (accept(Tk::kw_static)) {
+          spec.static_ = true;
+        } else if (is(Tk::kw_consteval)) {
           s_->diag(pos(), Diag::not_supported, kind());
           return fail();
         } else break;
+      }
+      if (spec.static_ && (spec.has_capture || spec.mutable_)) {
+        s_->diag(spec.begin, Diag::static_lambda_specifier_conflict);
+        return fail();
       }
       // The rest of the lambda-declarator is in the scope of the init-captures ([basic.scope.lambda])
       // and of the parameters ([basic.scope.param]).

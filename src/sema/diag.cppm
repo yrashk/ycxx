@@ -76,6 +76,8 @@ enum class Diag : std::uint32_t {
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
   extended_float_not_supported [[=message{Severity::error, "extended floating-point types are not supported yet"}]],
   float_literal_out_of_range [[=message{Severity::warning, "floating-point literal is out of the range of its type; it is infinity"}]],
+  float_literal_underflow_gcc [[=message{Severity::warning, "floating constant truncated to zero", lex::Warning::overflow}]],
+  float_literal_underflow_clang [[=message{Severity::warning, "floating-point literal is too small for type '{0:t}' and rounds to zero", lex::Warning::literal_range}]],
   static_member_definition_not_supported [[=message{Severity::error, "defining a static data member of a class template outside the class is not supported yet"}]],
   extraneous_template_head [[=message{Severity::error, "extraneous template parameter list: only a member template of a class template is declared after two"}]],
   // [dcl.spec], [dcl.type]
@@ -112,6 +114,7 @@ enum class Diag : std::uint32_t {
   nonlocal_lambda_capture_default [[=message{Severity::error, "a non-local lambda cannot have a capture-default"}]],
   capture_twice [[=message{Severity::error, "'{0:n}' is captured twice"}]],
   closure_assignment [[=message{Severity::error, "'{0:t}' has a lambda-capture: its copy assignment is deleted"}]],
+  static_lambda_specifier_conflict [[=message{Severity::error, "a static lambda cannot have a capture or be mutable"}]],
   capture_redundant [[=message{Severity::error, "'{0:n}' is captured the way the capture-default already captures"}]],
   this_not_captured [[=message{Severity::error, "'this' is not captured: the lambda has no capture-default"}]],
   trailing_return_needs_auto [[=message{Severity::error, "a function with a trailing return type is declared with 'auto' alone"}]],

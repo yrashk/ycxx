@@ -3526,6 +3526,200 @@ def over_width_bit_field_diagnostics(world):
                     assert resident[2] == b'', (mode, target, args, resident)
 
 
+def immediate_template_escalation(world):
+    scope = world.scope
+    (scope / 'immediate-template.cpp').write_text('''\
+consteval int next(int value) { return value + 1; }
+constexpr int ordinary(int value) { return value + 1; }
+template<auto F> constexpr auto apply(int value) { return F(value); }
+template<auto F> constexpr auto fixed(int) { return F(3); }
+template<class T> constexpr int direct(T value) { return next(value); }
+#if CASE == 1
+static_assert(apply<next>(3) == 4);
+#elif CASE == 2
+auto p = &apply<next>;
+#elif CASE == 3
+int runtime(int value) { return apply<next>(value); }
+#elif CASE == 4
+auto p = &fixed<next>;
+#elif CASE == 5
+auto p = &apply<ordinary>;
+static_assert(apply<ordinary>(3) == 4);
+#elif CASE == 6
+static_assert(direct(3) == 4);
+#elif CASE == 7
+auto p = &direct<int>;
+#elif CASE == 8
+int (*p)(int) = &apply<next>;
+#elif CASE == 9
+template<int (*F)(int)> constexpr int typed(int value) { return F(value); }
+static_assert(typed<next>(3) == 4);
+#elif CASE == 10
+template<auto F> void ignore() {}
+void use() { ignore<&next>(); }
+#endif
+''')
+    for target in (LINUX, DARWIN):
+        for case in range(1, 11):
+            for mode in MODES:
+                clang_argument = mode == 'clang' and case in (1, 2, 3, 4, 8, 9, 10)
+                address_escape = case in (2, 7, 8) or (mode == 'gcc' and case == 4)
+                command = [target, '-fcompat=' + mode, f'-DCASE={case}', '-fsyntax-only', 'immediate-template.cpp']
+                cold = world.cxx(command, scope, world.cold, timeout=40)
+                resident = world.cxx(command, scope, world.daemon, timeout=40)
+                assert cold == resident, (mode, target, case, cold, resident)
+                assert resident[0] == int(clang_argument or address_escape or case == 3), (mode, target, case, resident)
+                if clang_argument or address_escape:
+                    assert b'address of immediate function' in resident[2], (mode, target, case, resident)
+                elif case == 3:
+                    assert b'not a constant expression' in resident[2], (mode, target, case, resident)
+
+
+def lambda_conversion_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'lambda-conversion.cpp').write_text('''\
+using I = int(*)(int);
+using N = int(*)(int) noexcept;
+inline I plain() { return [](int v) { return v; }; }
+inline I generic() { return [](auto v) { return v + 1; }; }
+inline I typed() { return []<class T>(T v) -> T { return v; }; }
+inline I mut() { return [](auto v) mutable { return v; }; }
+inline N noex() { return [](auto v) noexcept { return v; }; }
+extern "C" int exercise_conversion() { return plain()(1) + generic()(2) + typed()(3) + mut()(4) + noex()(5); }
+''')
+    (scope / 'lambda-conversion-caller.cpp').write_text('''\
+using I = int(*)(int);
+extern "C" I convert(const void*) __asm__(CONVERSION);
+extern "C" int exercise_conversion();
+int main() { unsigned char closure = 0; return convert(&closure)(7) != 8 || exercise_conversion() != 16; }
+''')
+    gcc_result = 'DTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_'
+    clang_result = 'DaS_'
+    common = ('_ZZ5plainvENKUliE_cvPFiiEEv', '_ZZ5typedvENKUlTyT_E_cvPFS_S_EIiEEv')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        encoding = gcc_result if mode == 'gcc' else clang_result
+        generic = f'_ZZ7genericvENKUlT_E_cvPF{encoding}EIiEEv'
+        mut = encoding.replace('KPKS0_', 'KPS0_')
+        symbols = (*common, generic, f'_ZZ3mutvENKUlT_E_cvPF{mut}EIiEEv', f'_ZZ4noexvENKUlT_E_cvPDoF{encoding}EIiEEv')
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-O0', '-c', 'lambda-conversion.cpp', '-o', 'lambda-conversion.o']
+            binaries = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                binaries.append((scope / 'lambda-conversion.o').read_bytes())
+            assert binaries[0] == binaries[1], (mode, target)
+            names = set(binaries[0].split(b'\0'))
+            prefix = '_' if target == DARWIN else ''
+            if mode == 'spec':
+                assert all(b'_cvP' not in name for name in names), (mode, target, names)
+                continue
+            for symbol in symbols:
+                assert (prefix + symbol).encode() in names, (mode, target, symbol, [n for n in names if b'_cvP' in n])
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                peer = gxx if mode == 'gcc' else clang
+                if not peer:
+                    continue
+                define = f'-DCONVERSION="{prefix}{generic}"'
+                subprocess.run([peer, '-std=c++26', define, 'lambda-conversion-caller.cpp', 'lambda-conversion.o',
+                                '-o', 'lambda-conversion'], cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'lambda-conversion'], cwd=scope, check=True, timeout=20)
+
+
+def floating_underflow_warnings(world):
+    scope = world.scope
+    (scope / 'literal-underflow.cpp').write_text('''\
+constexpr float f = 0x1p-150f;
+constexpr double d = 0x1p-1075;
+constexpr long double l = 0x1p-16446L;
+constexpr float zero = 0.0f;
+constexpr float subnormal = 0x1p-149f;
+''')
+    for target in (LINUX, DARWIN):
+        for mode in MODES:
+            own = 'overflow' if mode == 'gcc' else 'literal-range'
+            peer = 'literal-range' if mode == 'gcc' else 'overflow'
+            cases = (([], mode != 'spec', False), (['-Wno-' + own], False, False),
+                     (['-Wno-' + peer], mode != 'spec', False),
+                     (['-Werror=' + own], mode != 'spec', mode != 'spec'),
+                     (['-Werror=' + own, '-Wno-error=' + own], mode != 'spec', False))
+            for options, diagnosed, rejected in cases:
+                args = [target, '-fcompat=' + mode, *options, '-fsyntax-only', 'literal-underflow.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=30) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == int(rejected), (mode, target, options, cold, warm)
+                assert warm[2].count(b' to zero') == (3 if diagnosed else 0), (mode, target, options, warm[2])
+
+
+def static_lambda_conversion(world, gxx):
+    scope = world.scope
+    (scope / 'static-lambda.cpp').write_text('''\
+using P = int (*)(int);
+inline P plain() { return [](int n) static { return n + 1; }; }
+inline P generic() { return [](auto n) static { return n + 2; }; }
+inline P explicit_generic() { return []<class T>(T n) static { return n + 3; }; }
+extern "C" P export_plain() { return plain(); }
+extern "C" P export_generic() { return generic(); }
+extern "C" P export_explicit_generic() { return explicit_generic(); }
+''')
+    (scope / 'static-caller.cpp').write_text('''\
+using P = int (*)(int);
+extern "C" P export_plain();
+extern "C" P export_generic();
+extern "C" P export_explicit_generic();
+int main() {
+  return export_plain()(10) != 11 || export_generic()(20) != 22 ||
+         export_explicit_generic()(30) != 33;
+}
+''')
+    (scope / 'static-lambda-invalid.cpp').write_text('''\
+int invalid(int n) {
+#ifdef MUTABLE
+  return [](int p) mutable static { return p; }(n);
+#else
+  return [n]() static { return n; }();
+#endif
+}
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    operators = (
+        '_ZZ5plainvENUliE_clEi',
+        '_ZZ7genericvENUlT_E_clIiEEDaS_',
+        '_ZZ16explicit_genericvENUlTyT_E_clIiEEDaS_',
+    )
+    for mode in MODES:
+        pattern = 'DTclonclscOS_fp_EE' if mode == 'gcc' else 'Da'
+        conversions = (
+            '_ZZ5plainvENKUliE_cvPFiiEEv',
+            f'_ZZ7genericvENKUlT_E_cvPF{pattern}S_EIiEEv',
+            f'_ZZ16explicit_genericvENKUlTyT_E_cvPF{pattern}S_EIiEEv',
+        )
+        for target in (LINUX, DARWIN):
+            flags = [target, '-fcompat=' + mode]
+            outputs = []
+            for env in (world.cold, world.daemon):
+                command = [*flags, '-c', 'static-lambda.cpp', '-o', 'static-lambda.o']
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'static-lambda.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            prefix = '_' if target == DARWIN else ''
+            names = outputs[1].split(b'\0')
+            assert all((prefix + name).encode() in names for name in operators), (mode, target, names)
+            assert not any(b'__invoke' in name or b'_FUN' in name for name in names), (mode, target, names)
+            for name in conversions:
+                assert ((prefix + name).encode() in names) == (mode != 'spec'), (mode, target, name, names)
+            for options in ([], ['-DMUTABLE']):
+                args = [*flags, *options, '-fsyntax-only', 'static-lambda-invalid.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == 1 and b'static lambda' in warm[2], (mode, target, cold, warm)
+            peer = clang if mode == 'clang' else gxx
+            if peer and ((target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')):
+                subprocess.run([peer, '-std=c++26', 'static-caller.cpp', 'static-lambda.o', '-o', 'static-call'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'static-call'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3562,6 +3756,9 @@ def main():
         private_closure_symbols(world, gxx)
         generic_invoker_symbols(world, gxx)
         dependent_variable_spellings(world, gxx)
+        static_lambda_conversion(world, gxx)
+        lambda_conversion_symbols(world, gxx)
+        floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)
@@ -3599,6 +3796,7 @@ def main():
         placeholder_template_prefixes(world, gxx)
         mixed_source_location(world, gxx)
         concrete_transform_signatures(world)
+        immediate_template_escalation(world)
         compile_database(world)
         world.same_daemon('compatibility modes', pid)
     finally:

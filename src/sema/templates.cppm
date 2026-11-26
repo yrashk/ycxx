@@ -2203,7 +2203,7 @@ public:
   // The arguments for which `tmpl` is the function of type `type` ([temp.deduct.decl],
   // [temp.deduct.funcaddr]). A placeholder return in address deduction is checked after
   // instantiating the specialization.
-  std::optional<std::vector<TemplateArg>> deduce_declaration(const ast::DeclSema& tmpl, QualType type,
+  std::optional<std::vector<TemplateArg>> deduce_declaration(const ast::DeclSema& tmpl, std::optional<QualType> target,
                                                              std::span<const TemplateArg> explicit_args,
                                                              bool address = false) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
@@ -2212,6 +2212,10 @@ public:
     u16 depth = params[0].depth;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!explicit_into(params, explicit_args, out)) return std::nullopt;
+    // [temp.deduct.funcaddr]: without a target there are no types to compare. Explicit
+    // and default arguments must provide all arguments that the specialization needs.
+    if (!target) return complete(tmpl, params, std::move(out));
+    const QualType type = *target;
     QualType pattern = tmpl.type;
     TypeRec f = types().rec(pattern);
     const bool deduced_result = address && types().has_placeholder(f.inner);

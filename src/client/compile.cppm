@@ -150,12 +150,14 @@ namespace {
 // `pedantic` selects no warning: ycxx accepts the extensions it implements (docs/EXTENSIONS.md)
 // silently. Tests pass `-Wno-pedantic` so that the oracles accept them under `-pedantic-errors`.
 enum class WarningFlag : std::uint8_t {
-  all, extra, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large, bit_field_width, pedantic, count
+  all, extra, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large,
+  bit_field_width, overflow, literal_range, pedantic, count
 };
 
 struct WarningSelection {
   WarningFlag flag;
   bool enabled;
+  bool as_error;
 };
 
 std::optional<WarningSelection> warning_option(std::string_view arg) {
@@ -163,15 +165,21 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
   arg.remove_prefix(2);
   const bool enabled = !arg.starts_with("no-");
   if (!enabled) arg.remove_prefix(3);
+  const bool as_error = arg.starts_with("error=");
+  if (as_error) arg.remove_prefix(6);
   constexpr std::pair<std::string_view, WarningFlag> names[] = {
       {"all", WarningFlag::all}, {"extra", WarningFlag::extra}, {"multichar", WarningFlag::multichar},
       {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation},
       {"constant-conversion", WarningFlag::constant_conversion},
       {"enum-too-large", WarningFlag::enum_too_large},
       {"bitfield-width", WarningFlag::bit_field_width},
+      {"overflow", WarningFlag::overflow},
+      {"literal-range", WarningFlag::literal_range},
       {"pedantic", WarningFlag::pedantic}};
   for (const auto& [name, flag] : names)
-    if (arg == name) return WarningSelection{flag, enabled};
+    if (arg == name && (!as_error || flag == WarningFlag::enum_too_large || flag == WarningFlag::overflow ||
+                        flag == WarningFlag::literal_range || flag == WarningFlag::bit_field_width))
+      return WarningSelection{flag, enabled, as_error};
   return std::nullopt;
 }
 
@@ -179,25 +187,28 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
 // same preprocessing and semantic results.
 class WarningOptions {
  public:
-  void select(WarningSelection selection) { flags_[std::to_underlying(selection.flag)] = selection.enabled; }
+  void select(WarningSelection selection) {
+    const auto index = std::to_underlying(selection.flag);
+    if (selection.as_error) errors_[index] = selection.enabled;
+    if (!selection.as_error || selection.enabled) flags_[index] = selection.enabled;
+  }
   void compatibility(ast::Compatibility mode) { multichar_in_all_ = mode != ast::Compatibility::gcc; }
   void suppress_warnings() { suppress_warnings_ = true; }
   void warnings_as_errors(bool enabled) { warnings_as_errors_ = enabled; }
   void pedantic_errors() { pedantic_errors_ = true; }
-  void enum_too_large_error(bool enabled) {
-    enum_too_large_error_ = enabled;
-    if (enabled) select({WarningFlag::enum_too_large, true});
-  }
-  void bit_field_width_error(bool enabled) {
-    bit_field_width_error_ = enabled;
-    if (enabled) select({WarningFlag::bit_field_width, true});
-  }
 
   bool is_error(bool error, lex::Warning warning) const {
     if (error) return true;
-    if (warning == lex::Warning::enum_too_large) return enum_too_large_error_.value_or(pedantic_errors_ || warnings_as_errors_);
-    if (warning == lex::Warning::bit_field_width) return bit_field_width_error_.value_or(warnings_as_errors_);
-    return warnings_as_errors_;
+    const auto promoted = [&](WarningFlag flag, bool forced = false) {
+      return errors_[std::to_underlying(flag)].value_or(forced || warnings_as_errors_);
+    };
+    switch (warning) {
+      case lex::Warning::enum_too_large: return promoted(WarningFlag::enum_too_large, pedantic_errors_);
+      case lex::Warning::bit_field_width: return promoted(WarningFlag::bit_field_width);
+      case lex::Warning::overflow: return promoted(WarningFlag::overflow);
+      case lex::Warning::literal_range: return promoted(WarningFlag::literal_range);
+      default: return warnings_as_errors_;
+    }
   }
 
   bool emits(bool error, lex::Warning warning) const {
@@ -215,14 +226,15 @@ class WarningOptions {
       case lex::Warning::constant_conversion: return selected(WarningFlag::constant_conversion).value_or(true);
       case lex::Warning::enum_too_large: return selected(WarningFlag::enum_too_large).value_or(true);
       case lex::Warning::bit_field_width: return selected(WarningFlag::bit_field_width).value_or(true);
+      case lex::Warning::overflow: return selected(WarningFlag::overflow).value_or(true);
+      case lex::Warning::literal_range: return selected(WarningFlag::literal_range).value_or(true);
     }
     std::unreachable();
   }
 
  private:
   std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> flags_{};
-  std::optional<bool> enum_too_large_error_{};
-  std::optional<bool> bit_field_width_error_{};
+  std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> errors_{};
   bool suppress_warnings_ = false;
   bool warnings_as_errors_ = false;
   bool multichar_in_all_ = true;
@@ -355,17 +367,11 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a == "-pedantic-errors") o.warnings.pedantic_errors();
     else if (a == "-w") o.warnings.suppress_warnings();
     else if (a == "-Werror" || a == "-Wno-error") o.warnings.warnings_as_errors(a == "-Werror");
-    else if (a == "-Werror=enum-too-large") o.warnings.enum_too_large_error(true);
-    else if (a == "-Wno-error=enum-too-large") o.warnings.enum_too_large_error(false);
-    else if (a == "-Werror=bitfield-width" || a == "-Wno-error=bitfield-width") {
-      clang_bit_field_warning = a;
-      o.warnings.bit_field_width_error(a == "-Werror=bitfield-width");
-    }
     else if (a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
              a == "-fno-color-diagnostics")
       continue;
     else if (auto warning = warning_option(a)) {
-      if (warning->flag == WarningFlag::bit_field_width && warning->enabled) clang_bit_field_warning = a;
+      if (warning->flag == WarningFlag::bit_field_width && (warning->as_error || warning->enabled)) clang_bit_field_warning = a;
       o.warnings.select(*warning);
     }
     else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
@@ -845,7 +851,6 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
                args[i].starts_with("-fclass-call-abi=") || args[i].starts_with("-fcompat=") || args[i] == "-fcompat" ||
                warning_option(args[i]) || args[i] == "-w" || args[i] == "-Werror" || args[i] == "-Wno-error" ||
-               args[i] == "-Werror=bitfield-width" || args[i] == "-Wno-error=bitfield-width" ||
                args[i] == "-fcheck-policies") {
       out.emplace_back(args[i]);
     }

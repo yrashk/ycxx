@@ -1430,12 +1430,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       // Its typed return is available to lookup, but calls and address formation require the ABI.
       if (c.flags & sema::closure_flag::polymorphic_result) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
-      for (EntityId f : {c.call, c.invoker}) {
+      for (EntityId f : {c.call, c.invoker, c.conversion}) {
         if (f == EntityId::none) continue;
-        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
+        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, sema::Sema::closure_member_body(c, f), locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
-        if (in_declaration || (c.flags & sema::closure_flag::generic_invoker))
+        if (in_declaration || (c.flags & (sema::closure_flag::generic_invoker | sema::closure_flag::generated_conversion)))
           declaration_closure_member(tu.functions.back());
       }
     }

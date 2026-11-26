@@ -1407,13 +1407,15 @@ public:
   const std::deque<MemberInitializer>& member_initializers() const { return member_initializers_; }
   void declaration_closures(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
     for (const ast::ClosureDef& c : w_->ins.seqs.elements(closures))
-      for (EntityId f : {c.call, c.invoker})
+      for (EntityId f : {c.call, c.invoker, c.conversion})
         if (f != EntityId::none) declaration_closures_.insert_or_assign(std::to_underlying(f), DeclarationClosure{c, item, begin});
   }
-  void generated_invokers(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
-    for (const auto& c : w_->ins.seqs.elements(closures))
-      if (c.flags & sema::closure_flag::generic_invoker)
-        declaration_closures_.try_emplace(std::to_underlying(c.invoker), DeclarationClosure{c, item, begin});
+  void generated_closure_members(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
+    for (const auto& c : w_->ins.seqs.elements(closures)) {
+      const EntityId generated = c.flags & sema::closure_flag::generic_invoker ? c.invoker : c.conversion;
+      if (generated != EntityId::none)
+        declaration_closures_.try_emplace(std::to_underlying(generated), DeclarationClosure{c, item, begin});
+    }
   }
   // A generic lambda's function call operator specialized ([temp.inst]): its body re-analysed
   // from the lambda's tokens with the arguments bound, an `Instance`; its type with the return
@@ -1471,9 +1473,14 @@ public:
   }
 
   bool is_immediate_function(EntityId f, u32 item) {
-    if (EntityId t = w_->entities.rec(f).templ; t != EntityId::none && !explicitly_specialized(f, item)) f = t;
-    auto d = declaration(f, item);
-    return d && (d->flags & sema::decl_flag::consteval_);
+    const EntityId pattern = w_->entities.rec(f).templ;
+    const bool instantiation = pattern != EntityId::none && !explicitly_specialized(f, item);
+    const auto d = declaration(instantiation ? pattern : f, item);
+    if (!d) return false;
+    if (d->flags & sema::decl_flag::consteval_) return true;
+    if (!instantiation || !(d->flags & sema::decl_flag::constexpr_)) return false;
+    const auto* specialization = instance(f, item);
+    return specialization && (specialization->decl.flags & sema::decl_flag::consteval_);
   }
 
   // A default member initializer's tokens in the region ([class.mem.general]), retained for the
@@ -11406,7 +11413,7 @@ bool Program::member_value(EntityId e, MemberDemand demand) {
       member_initializers_.push_back({e, m.item, r.value.closures, std::move(r.demands)});
     }
     for (const auto& closure : w_->ins.seqs.elements(r.value.closures))
-      for (EntityId f : {closure.call, closure.invoker})
+      for (EntityId f : {closure.call, closure.invoker, closure.conversion})
         if (f != EntityId::none) declaration_closures_.at(std::to_underlying(f)).lazy_member = e;
   }
   // What the template's definition diagnosed it says once, there.
@@ -11465,6 +11472,8 @@ public:
     if (!inst_ && generic_) static_cast<AtItem&>(*q_).generic_at_end = true;
   }
 
+  bool escalated_immediate() const { return s_.escalated_immediate; }
+
   Result<ast::BodySema> run() {
     try {
       return analyse();
@@ -11506,6 +11515,9 @@ public:
       s_.set_return_type(signature.inner);
       // A consteval function's body is an immediate function context ([expr.const]).
       if (f->flags & sema::decl_flag::consteval_) s_.immediate_context = 1;
+      s_.can_escalate_immediate = inst_ && function_template && !generic_ &&
+                                  (f->flags & sema::decl_flag::constexpr_) &&
+                                  !(f->flags & sema::decl_flag::destructor);
       // A template's body is in the scope of its template-head ([basic.scope.temp]); an
       // instantiation's, with the arguments bound.
       for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
@@ -11630,7 +11642,7 @@ public:
                     b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree, root.begin);
-    p_->generated_invokers(out_.value.closures, k_, begin());
+    p_->generated_closure_members(out_.value.closures, k_, begin());
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -11721,7 +11733,7 @@ public:
                                          b_.seq(std::span<const u32>{}), r ? r->type : s_.builtin(sema::Builtin::void_), u8(r.has_value()),
                                          b_.seq(std::span<const ast::ClosureDef>(s_.closures))});
     s_.check_immediate_addresses(out_.value.tree, root.begin);
-    p_->generated_invokers(out_.value.closures, k_, begin());
+    p_->generated_closure_members(out_.value.closures, k_, begin());
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -13592,7 +13604,9 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   if (!analyze_body(k).diags.empty()) {
     in.failed = true;
   } else {
-    in.body = BodyAnalysis(*this, k, Instantiation{decl, std::move(args)}).run();
+    BodyAnalysis analysis(*this, k, Instantiation{decl, std::move(args)});
+    in.body = analysis.run();
+    if (analysis.escalated_immediate()) in.decl.flags |= sema::decl_flag::consteval_;
     if (in.body.value.deduced) in.decl.type = in.body.value.deduced_type;
   }
   in.body.diags.append_range(std::move(parameter_diagnostics));
@@ -13639,6 +13653,7 @@ void Program::part_references(NodeId root, ast::SeqId<ast::ClosureDef> closures,
     if (!sema::Sema::closure_has_code(*w_, closure)) continue;
     references(closure.body, out);
     references(closure.invoker_body, out);
+    references(closure.conversion_body, out);
   }
 }
 
@@ -14194,7 +14209,7 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
       return r;
     }
     sema::Sema::ClosureMember m =
-        sema::Sema::closure_member_def(*w_, c, f, c.call == f ? c.body : c.invoker_body, w_->ins.seqs.elements(c.locals));
+        sema::Sema::closure_member_def(*w_, c, f, sema::Sema::closure_member_body(c, f), w_->ins.seqs.elements(c.locals));
     irgen::FunctionInput input{f, m.decl, m.body, id(k), begin + c.body_begin, false, {}, m.this_type};
     AtItem q(*this, k, in_body);
     // What it calls may be declared after it, as a template's instantiation may call it
@@ -14212,7 +14227,8 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
   if (auto it = declaration_closures_.find(key); it != declaration_closures_.end()) {
     const DeclarationClosure& c = it->second;
     if (c.item >= item) return r;
-    return define(c.def, c.item, c.begin, (c.def.flags & sema::closure_flag::generic_invoker) != 0);
+    return define(c.def, c.item, c.begin,
+                  (c.def.flags & (sema::closure_flag::generic_invoker | sema::closure_flag::generated_conversion)) != 0);
   }
   // The function whose body has the lambda: past the operators of enclosing lambdas.
   EntityId fn = w_->entities.rec(w_->entities.rec(f).scope).scope;
@@ -14237,7 +14253,7 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
     body = &analyze_body(k).value;
   }
   for (const ast::ClosureDef& c : w_->ins.seqs.elements(body->closures)) {
-    if (c.call != f && c.invoker != f) continue;
+    if (c.call != f && c.invoker != f && c.conversion != f) continue;
     const items::Item& it = items_->items[k];
     return define(c, k, it.body_begin - it.begin, true);
   }
@@ -14359,7 +14375,8 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
   d.type = in.body.value.deduced ? in.body.value.deduced_type : sr.type;
   d.kind = ast::DeclKind::function;
   d.linkage = sr.linkage;
-  d.flags = sema::u16(sema::decl_flag::member | sema::decl_flag::definition | sema::decl_flag::inline_);
+  d.flags = sema::u16(sema::decl_flag::member | sema::decl_flag::definition | sema::decl_flag::inline_ |
+                      ((g->flags & sema::closure_flag::static_call) ? sema::decl_flag::static_ : 0));
   d.attributes = w_->ins.intern_seq(std::span<const NodeId>{});
   d.constraint = NodeId::none;
   d.constraints = ast::ConstId::none;

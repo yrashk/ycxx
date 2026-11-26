@@ -40,6 +40,7 @@ struct Literal {
   u64 value = 0;
   std::array<u64, 2> x87{};
   bool x87_overflow = false;
+  bool nonzero_float_spelling = false;
   // [lex.string]: on the first string literal of a run that phase 5 concatenates, the code units
   // of the whole run without the terminating null, and the run's common encoding and ud-suffix;
   // the run's other tokens are flagged `tok_flag::continued`.
