@@ -8,6 +8,7 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
+from project_inspection import check_dependency_graph, compare_dependencies, dependency_edge, manifest_location
 from project_shader_bundle import check_external_actions, publication
 from runtime_dir import runtime_root
 
@@ -146,20 +147,51 @@ def inspect(ycxx, scope, env, journal, providers=(), *, owners=None, direct=None
     assert len(inputs) == len(declarations), inputs
     if not declarations:
         assert any(row['kind'] == 'unresolved' and row['target'] == 'app' for row in plan['facts']), plan
+        check_dependency_graph(plan, [], complete=False)
         return
     definition = plan['definition']
     offsets = {}
+    artifact_edges = []
     for position, (row, (owner, provider)) in enumerate(zip(inputs, declarations)):
         reference = f'artifact("{provider}", "archive")'
         start = definition.index(reference, offsets.get(owner, definition.index(f'"{owner}" {{')))
         offsets[owner] = start + len(reference)
-        location = definition.count('\n', 0, start) + 1, start - definition.rfind('\n', 0, start)
+        location = manifest_location(definition, start)
+        usage = 'link_inputs' if owner == 'app' else 'public_link_inputs'
         origin = f'declared in link_inputs as {reference}' if owner == 'app' else (
             f'inherited from {owner} (declared in public_link_inputs as {reference})')
         assert (row['target'], row['name'], row['value']) == (
             'app', str(position), f'.ycxx/virtual/{provider}/provider.a'), row
         assert row['origin'] == origin, row
-        assert (row['line'], row['column']) == location, row
+        assert (row['line'], row['column']) == (location['line'], location['column']), row
+        artifact_edges.append({'consumer': owner, 'producer': provider, 'usage': usage,
+                               'location': location, 'output': 'archive'})
+
+    direct_libraries = [('app', 'middle'), ('middle', 'leaf')]
+    if owners is not None:
+        direct_libraries.extend([('leaf', 'left'), ('leaf', 'right'), ('left', 'common'), ('right', 'common')])
+    library_edges = [
+        dependency_edge(definition, consumer, library, 'deps', json.dumps(library),
+                        start=definition.index(f'"{consumer}" {{'))
+        for consumer, library in direct_libraries
+    ]
+    note = dependency_edge(definition, 'app', 'z_provider', 'runtime_assets',
+                           'artifact("z_provider", "note")', output='note')
+    check_dependency_graph(plan, [*library_edges, *artifact_edges, note])
+    return plan
+
+
+def compare_archives(ycxx, scope, journal, snapshot, current, expected):
+    before = journal_bytes(journal)
+    diff = compare_dependencies(ycxx, scope, snapshot, current, expected)
+    assert journal_bytes(journal) == before, 'dependency comparison executed an archive producer'
+    return diff
+
+
+def archive_occurrences(plan, producer):
+    return [edge for edge in plan['dependency_graph']['edges']
+            if (edge['consumer'], edge['producer'], edge['usage'], edge.get('output')) ==
+            ('leaf', producer, 'public_link_inputs', 'archive')]
 
 
 def check_native_units_reused(events):
@@ -236,7 +268,11 @@ def check_builds(ycxx, scope, env, journal):
     check_program(executable, 17)
     check_note(scope, 'one')
     initial = publication(executable), publication(note)
-    inspect(ycxx, scope, env, journal, ORDER)
+    original_plan = inspect(ycxx, scope, env, journal, ORDER)
+    graph = original_plan['dependency_graph']
+    saved = {**original_plan, 'dependency_graph': {**graph, 'edges': list(reversed(graph['edges']))}}
+    baseline = scope / 'archive-baseline.json'
+    baseline.write_text(json.dumps(saved), encoding='utf-8')
 
     summary, events = traced_build(ycxx, scope, env, 'unchanged archive inputs')
     assert summary['actions_executed'] == 0, summary
@@ -254,20 +290,39 @@ def check_builds(ycxx, scope, env, journal):
 
     check_watch(ycxx, scope, env)
 
+    reordered = ('a_provider', 'z_provider', 'z_provider')
+    replace_source(scope, 'build.ycxx', manifest(journal, reordered))
+    _, events = traced_build(ycxx, scope, env, 'reorder archives while keeping occurrence counts')
+    check_external_actions(events)
+    assert action_keys(events, 'Link'), events
+    current = inspect(ycxx, scope, env, journal, reordered)
+    reordered_diff = compare_archives(ycxx, scope, journal, baseline, current, [])
+    reordered_facts = [change for change in reordered_diff['changes']
+                       if change['before']['kind'] == 'link-input']
+    assert {change['before']['name'] for change in reordered_facts} == {'0', '1'}, reordered_facts
+
     replace_source(scope, 'build.ycxx', manifest(journal, REVERSED_PROVIDER))
     _, events = traced_build(ycxx, scope, env, 'prefer the other provider by changing archive order')
     check_external_actions(events)
     assert action_keys(events, 'Link'), events
     check_native_units_reused(events)
     check_program(executable, 31)
-    inspect(ycxx, scope, env, journal, REVERSED_PROVIDER)
+    current = inspect(ycxx, scope, env, journal, REVERSED_PROVIDER)
+    changes = [
+        {'before': archive_occurrences(original_plan, provider),
+         'after': archive_occurrences(current, provider)}
+        for provider in ('a_provider', 'z_provider')
+    ]
+    assert [(len(group['before']), len(group['after'])) for group in changes] == [(1, 2), (2, 1)]
+    compare_archives(ycxx, scope, journal, baseline, current, changes)
 
     replace_source(scope, 'build.ycxx', manifest(journal, ORDER, diamond=True))
     _, events = traced_build(ycxx, scope, env, 'order a shared library after both of its consumers')
     check_external_actions(events)
     check_native_units_reused(events)
     check_program(executable, 41)
-    inspect(ycxx, scope, env, journal, ORDER, owners=('left', 'right', 'common'))
+    diamond = inspect(ycxx, scope, env, journal, ORDER, owners=('left', 'right', 'common'))
+    baseline.write_text(json.dumps(diamond), encoding='utf-8')
 
     direct = 'a_provider'
     replace_source(scope, 'build.ycxx', manifest(journal, ORDER, diamond=True, direct=direct))
@@ -276,7 +331,9 @@ def check_builds(ycxx, scope, env, journal):
     assert action_keys(events, 'Link'), events
     check_native_units_reused(events)
     check_program(executable, 31)
-    inspect(ycxx, scope, env, journal, ORDER, owners=('left', 'right', 'common'), direct=direct)
+    current = inspect(ycxx, scope, env, journal, ORDER, owners=('left', 'right', 'common'), direct=direct)
+    edge, = (edge for edge in current['dependency_graph']['edges'] if edge['usage'] == 'link_inputs')
+    compare_archives(ycxx, scope, journal, baseline, current, [{'before': [], 'after': [edge]}])
 
 
 def main():

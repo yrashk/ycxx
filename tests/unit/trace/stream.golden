@@ -59,8 +59,8 @@
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
 =     UnitShapeIndex(golden.cpp) reused
-*     LayoutConstant(1) executed
-*     LayoutConstant(2) executed
+*     LayoutConstant({1, false}) executed
+*     LayoutConstant({2, false}) executed
 =   UnitShapes(golden.cpp) reused
 =   UnitShapeIndex(golden.cpp) reused
 =   Lower(square) reused
@@ -144,8 +144,8 @@
 =       SourceOf(golden.cpp) reused
 =       UnitShapes(golden.cpp) reused
 =       UnitShapeIndex(golden.cpp) reused
-#       LayoutConstant(1) durable
-#       LayoutConstant(2) durable
+#       LayoutConstant({1, false}) durable
+#       LayoutConstant({2, false}) durable
 =     UnitShapes(golden.cpp) reused
 =     UnitShapeIndex(golden.cpp) reused
 +     Codegen(square) verified
@@ -251,8 +251,8 @@ trace: 1 verified, 8 reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
 =     UnitShapeIndex(golden.cpp) reused
-#     LayoutConstant(1) durable
-#     LayoutConstant(2) durable
+#     LayoutConstant({1, false}) durable
+#     LayoutConstant({2, false}) durable
 =   UnitShapes(golden.cpp) reused
 =   UnitShapeIndex(golden.cpp) reused
 +   Codegen(square) verified

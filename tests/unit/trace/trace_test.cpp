@@ -134,6 +134,78 @@ void nested_compiler() {
         "a changed source recompiles beneath the same workspace root");
 }
 
+struct [[=engine::input{engine::Durability::low}]] CancellationInput {
+  using Key = int;
+  using Value = int;
+};
+
+struct CancellationProbe {
+  using Key = int;
+  using Value = int;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key k) {
+    co_await cx.stop_point();
+    if (k == 1) throw std::runtime_error("query failed");
+    co_return cx.fetch<CancellationInput>(k);
+  }
+  static std::string show(Value value) { return std::to_string(value); }
+};
+
+struct CancelAtStart : engine::Tracer {
+  std::inplace_stop_source stop;
+  trace::Live live;
+  bool cancel = true;
+
+  bool starts() const noexcept override { return true; }
+  bool values() const noexcept override { return true; }
+  void started(engine::TraceEvent event) noexcept override {
+    if (cancel) stop.request_stop();
+    live.started(std::move(event));
+  }
+  void event(engine::TraceEvent event) noexcept override { live.event(std::move(event)); }
+};
+
+void cancellation() {
+  namespace ex = std::execution;
+  engine::Pool pool(1);
+  engine::Db db(pool);
+  auto cancel_query = [&](CancelAtStart& capture) {
+    return std::this_thread::sync_wait(ex::write_env(
+        db.request<CancellationProbe>(0, engine::Priority::interactive, nullptr, &capture),
+        ex::prop(std::get_stop_token, capture.stop.get_token())));
+  };
+  db.set<CancellationInput>(0, 7);
+  CancelAtStart cold;
+  check(!cancel_query(cold) && db.runs<CancellationProbe>(0) == 0, "a cold query stops in its body");
+  check(std::ranges::any_of(cold.live.take(), [](const Event& e) { return !e.running && e.outcome == Outcome::stopped; }),
+        "a cold cancellation reports stopped");
+  check(db.get<CancellationProbe>(0) == 7, "the query initially publishes a value");
+  db.set<CancellationInput>(0, 8);
+
+  CancelAtStart capture;
+  check(!cancel_query(capture) && db.runs<CancellationProbe>(0) == 1, "the cancelled query publishes nothing");
+  auto events = capture.live.take();
+  const auto terminal = std::ranges::find_if(events, [](const Event& e) { return !e.running && e.parent == 0; });
+  check(terminal != events.end() && terminal->outcome == Outcome::stopped, "a cancelled query reports stopped");
+  if (terminal != events.end()) {
+    check(terminal->value.empty() && terminal->errors.empty() && terminal->retained_bytes == 0,
+          "a cancelled recheck carries no old value or retained data");
+    check(trace::json_line(*terminal).contains(R"("outcome":"stopped")"), "JSON identifies cancellation");
+    trace::Tree tree;
+    tree.set_filter("is:stopped");
+    check(tree.matches(*terminal) && trace::state_name(*terminal) == "stopped", "the live browser identifies cancellation");
+  }
+  check(db.get<CancellationProbe>(0) == 8, "a retry after cancellation computes the updated value");
+
+  capture.cancel = false;
+  try {
+    (void)std::this_thread::sync_wait(db.request<CancellationProbe>(1, engine::Priority::interactive, nullptr, &capture));
+    check(false, "the failing query must throw");
+  } catch (const std::runtime_error&) {
+    check(std::ranges::any_of(capture.live.take(), [](const Event& e) { return !e.running && e.outcome == Outcome::failed; }),
+          "an exception still reports failed");
+  }
+}
+
 Event ev(std::uint64_t id, std::uint64_t parent, std::string kind, std::string key, Outcome o, std::uint64_t start = 0,
          std::uint64_t end = 0, std::int32_t worker = 0) {
   Event e;
@@ -1811,6 +1883,7 @@ int main(int argc, char** argv) {
   const bool update = argc > 2 && std::string_view(argv[2]) == "--update";
   golden(argv[1], update);
   nested_compiler();
+  cancellation();
   input();
   browser(std::filesystem::path(argv[1]).parent_path() / "browser.golden", update);
   copying();

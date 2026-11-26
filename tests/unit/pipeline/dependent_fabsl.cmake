@@ -6,9 +6,15 @@ function(check_fabsl target fixture status diagnostic)
   execute_process(
     COMMAND "${YCXX}" cxx "--target=${target}" -std=c++26 -fsyntax-only ${ARGN} "${fixture}"
     RESULT_VARIABLE result ERROR_VARIABLE errors TIMEOUT 30)
-  string(FIND "${errors}" "${diagnostic}" found)
-  if(NOT "${result}" STREQUAL "${status}" OR found EQUAL -1)
+  if(NOT "${result}" STREQUAL "${status}")
     message(FATAL_ERROR "${target} ${fixture} exited ${result}, expected ${status}\n${errors}")
+  endif()
+  if("${diagnostic}" STREQUAL "")
+    return()
+  endif()
+  string(FIND "${errors}" "${diagnostic}" found)
+  if(found EQUAL -1)
+    message(FATAL_ERROR "${target} ${fixture} did not report '${diagnostic}'\n${errors}")
   endif()
 endfunction()
 

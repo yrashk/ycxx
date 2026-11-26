@@ -30,6 +30,19 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
   (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
   extraction, and solver builds against libycxx.
+- `ycxx.cm` in `src/cm/` models bounded integers, Boolean 0/1 views, linear rows and
+  minimization. It emits stable FlatZinc with explicit failure for values beyond the
+  offline solver's integer range. Optional CTest runs exported models through Chuffed.
+  The standalone solver build pins HiGHS, CaDiCaL, and Chuffed by revision and archive
+  hash. See [optimizer experiments](docs/BUILDING.md#optimizer-experiments) and [#66](https://github.com/yrashk/ycxx/issues/66).
+- Experimental x86-64 Linux optimization rewrites unsigned division and remainder by
+  powers of two. The solver mode also selects compatible quotient/remainder pairs using
+  an exact prefix model with emitted byte costs. The query engine traces modeling, solving,
+  validation and fallback. [Unsigned division experiment](docs/design/optimization.md#93-unsigned-division-on-x86-64).
+- `ycxx.bench` in `packages/ycxx-bench/` provides calibrated, warmed sampling and balanced
+  comparisons, with typed callable properties and metadata. It reports clock and
+  host context, retained samples, and practical comparison verdicts. The optimizer
+  uses it for FlatZinc export timing. [Benchmark runner](packages/ycxx-bench/GUIDE.md).
 - AST design accepted: [`docs/design/ast.md`](docs/design/ast.md) (#2), summarized in DECISIONS
   §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
   the red view and type canonicalization.
@@ -65,6 +78,14 @@ What is true of the code today. Work in progress and its owners are tracked in
   translation-unit configuration and is read from editor compilation commands. The
   [compatibility table](docs/compatibility.toml) records prior choices, mode behavior and probes. Constrained function
   templates use the current `Q` and `Tk` forms for supported requires-clauses and type constraints.
+  GCC mode selects the last nonzero class-head alignment and carries a preceding alignment
+  into a definition that supplies none. Clang mode checks alignment consistency on opaque
+  class declarations. The compatibility table records Clang's underalignment case separately.
+  Spec mode distinguishes C and C++ function types and encodes the C type with `FY` in a
+  mangled signature. GCC and Clang modes use one type for both. C function names retain their
+  C linkage and unmangled symbols in every mode.
+  Compiler modes also select the documented wide array bound conversions, constexpr byte
+  comparisons, empty union initializers, and abstract result checks.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -1352,6 +1373,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- A constant expression can read a scalar field through a reference to an indexed element of
+  a namespace-scope constexpr array of supported flat aggregates. L1 keeps the array element
+  and field in the address path and checks the index against the array bound ([expr.sub],
+  [expr.ref], [expr.const]). [#1403](https://github.com/yrashk/ycxx/issues/1403)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
   initializer's object, including through a conditional glvalue. Reading a later field on
@@ -1448,6 +1473,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Function-template bodies replay defaults of ordinary non-template scalar aggregates, for named
   objects and aggregate expressions. Newly replayed runtime defaults use the same nonthrowing
   operation check. [#846](https://github.com/yrashk/ycxx/issues/846)
+- A selected braced default member initializer with literal character elements for a fixed
+  one-dimensional `char` array supplies the complete array value, including omitted elements.
+  Ordinary classes and class-template specializations can use it during implicit default and
+  aggregate initialization ([class.mem.general], [dcl.init.aggr], [temp.inst]).
+  [#1192](https://github.com/yrashk/ycxx/issues/1192)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
@@ -1521,6 +1551,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
   receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
   names encode the ref qualifier for mixed-object calls.
+- GCC mode also permits an unqualified nonstatic member or conversion to overload its
+  ref-qualified counterpart. Spec and Clang modes diagnose the corresponding declarations.
 - Ref-qualified virtual calls and broader template cases remain open.
 
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
@@ -1877,7 +1909,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   including defaults and type packs. Reaching a class as a base or owner contributes its namespace.
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Ordinary calls also associate the declaring namespace of a namespace-scope type
-  template supplied as a template-template argument ([basic.lookup.argdep]).
+  template supplied as a template-template argument ([basic.lookup.argdep]). Clang mode
+  skips alias template arguments in this namespace walk. GCC mode uses the original
+  template's identity and namespace when an unconstrained alias forwards the entire
+  matching parameter list and preserves the defaults.
 - Each associated namespace search uses preceding declarations that bind names in the scope.
   It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
@@ -2296,8 +2331,9 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   parameter-index form, and asm labels pin GCC's constant form.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. An index written as an enumerator or a
-  constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
+  signature (#209). In a body that arithmetic works. ycxx mangles an enumerator or a named
+  constant as a converted integer. Clang and GCC write the enumerator as an enum-typed literal
+  and a namespace constant as an external-name primary (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
 ## Functional conversions with pack expansions (#915)
@@ -2356,6 +2392,14 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
+- **Dependent layout arguments in variable template-ids** (#1371): a visible namespace variable
+  template can take `alignof(type-id)` and `sizeof(type-id)` in a variable template initializer or
+  a class template's fixed-type inline static member initializer. Replay checks layout at demand,
+  converts the target `size_t` result to the declared parameter type and expands the whole query
+  in pack order, including repeated elements and empty packs. The same arguments in a direct
+  array bound of a non-static field in an in-class nested record replay when that record needs
+  to be complete. General dependent alias arguments remain in #209 and placeholder non-type
+  parameters in #1244.
 - **Integral arithmetic in variable template initializers** (#1091): a direct variable template-id
   such as `extent<T, I - 1>` in a namespace variable template initializer evaluates its argument
   and checks its conversion when the initializer is instantiated with the selected definition's
@@ -2428,8 +2472,9 @@ session's.*
   `sizeof...(P)` of a template parameter pack.
 - **Declarations:** `class... Ts`, `T... Ns` (a pack of an earlier parameter's type too),
   `Ts... xs`, `Ts&&... xs` (`T...` without a pack is a C ellipsis), `pattern...` in template
-  argument lists. A class or variable template's pack is last; a function template's is followed
-  only by deduced or defaulted parameters ([temp.param]).
+  argument lists. A class or variable template's pack is last. Spec mode requires function
+  template parameters following a pack to be deducible or defaulted ([temp.param]). GCC and
+  Clang modes accept those declarations and check whether a call can determine its arguments.
 - **Substitution and deduction** (`ycxx.sema:templates`): `substitute_expansion` expands an
   expansion in a list (function parameters, template arguments) with each pack bound to its
   element, failing on packs of different lengths ([temp.variadic]/7). Deduction compares lists
@@ -2764,9 +2809,9 @@ fixtures mark the oracle disagreements, and the compatibility test exercises the
 An argument of a builtin with ordinary expression arguments (`src/lex/builtins.cppm`'s
 `builtin_functions`) may be a pack expansion, as a call's may (`__builtin_strlen(a...)`,
 `__builtin_memcmp(a..., n)`). The parser reads it through the same `expandable` path as call
-arguments. While a pack is unexpanded the call is one dependent operand and its arity is not
-checked; the instantiation checks arity and conversions on the expanded arguments, as Clang and
-GCC do. GCC rejects `__builtin_addressof(a...)`; ycxx accepts it, as Clang does. Fixtures:
+arguments. While a pack is unexpanded the call is one dependent operand. Instantiation checks
+arity and conversions on the expanded arguments. In GCC mode, `__builtin_addressof` requires a
+single written operand and diagnoses an instantiated expansion. Fixtures:
 `tests/own/builtins/pack-arguments*`.
 
 ## GNU constantness probe (#1065)
@@ -3313,6 +3358,35 @@ locations, or a semantic diff against a saved JSON snapshot. The HTML report
 includes the resolved plan and its definition.
 Use the same `--target` option to read the chosen variant and its target
 provenance. The trace carries the compiler target for the request.
+
+Schema-1 JSON plans include a typed `dependency_graph` of resolved library
+and named artifact uses (#1453). Each edge gives the consumer, producer,
+planner field, and manifest location. Artifact edges name the output, and
+named input edges also give the consumer binding. Unresolved rules can yield
+an incomplete graph with the edges resolved so far. The HTML report shows
+these records under **Dependencies**, with links into the manifest.
+
+The `dependency_graph.value_edges` array records resolved typed export
+bindings (#1477). A value edge names the consumer, usage (`capabilities`
+or `facts`), binding, producer, and export, with the manifest location of
+the `value(...)` reference. Graph completeness applies to both edge arrays.
+HTML plans and comparisons show current edges under **Value bindings**,
+with source links.
+
+`ycxx show --against` compares occurrence counts by consumer, usage,
+producer, output, and binding when both plans have complete dependency
+graphs (#1464).
+JSON includes before and after edge records for each changed count. HTML
+shows those counts under **Dependency changes** and links current sites to
+the manifest. Moved references preserve the count, and older snapshots
+without a dependency graph can still compare plan facts.
+
+`ycxx show --targets` catalogs declared targets in the working directory's
+`build.ycxx` (#1392). The read-only manifest parse lists names in byte order
+with their declared rule kinds and source locations. JSON includes the same
+records with schema 1.
+HTML links each record to its declaration line in the displayed manifest.
+The catalog accepts a regular UTF-8 manifest and follows symlinks to one (#1441).
 
 Named-module discovery runs before native semantic analysis through
 `ModuleDirectives` and `ModuleGraph` (#1349). It follows the marked module
@@ -4076,6 +4150,8 @@ static argument tracked in #1301 and #209.
   `template_` argument whose type is `TDepName`'s `template_name` form. Substitution applies Q's
   member alias template once Q is a class (`Templates::member_template_of`); a template template
   parameter bound to `Q::template M` gives `typename Q::template M<args>`.
+  GCC mode accepts the omitted keyword in a terminal member template-id of an explicit
+  `typename` type.
 - **Mangling:** `N <qualifier> <name> I…E E`, the template prefix a candidate, as Clang and GCC;
   `Q::template M` as a template argument follows the selected compatibility mode (DECISIONS §1.7).
 - Access is checked where one is named; it hides a base's member of its name, and an earlier
@@ -4089,8 +4165,8 @@ static argument tracked in #1301 and #209.
 - Not yet: checking member alias constraints and checking namespace alias constraints with
   dependent, defaulted or pack arguments or during substitution in requirements
   ([#234](https://github.com/yrashk/ycxx/issues/234)). Access through a dependent name substituted
-  in an alias template, as for a member type, remains open (#1199), as does `typename T::M<args>`
-  without `template` (the oracles disagree). Immediate calls in a member alias template's type
+  in an alias template, as for a member type, remains open (#1199).
+  Immediate calls in a member alias template's type
   still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
@@ -4118,7 +4194,8 @@ static argument tracked in #1301 and #209.
   constrained `decltype(auto)`, and abbreviated function templates remain open.
 - **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
   its initializer once and binds the names to elements or whole rows of the hidden array.
-  Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).
+  Value bindings copy scalar elements in order. Spec mode takes cv from the declaration
+  (CWG 2506). GCC and Clang modes also retain the initializer's cv-qualification.
   Reference bindings deduce and bind to the initializer with ordinary reference rules.
   `decltype(x)` gives the element type, and `decltype((x))` gives its lvalue reference.
 - **Class-member structured bindings** ([dcl.struct.bind], #285): a block-scope declaration
@@ -4308,6 +4385,11 @@ values, end to end; results match Clang's bit for bit.
 - On Linux x86-64, a dependent `__builtin_fabsl` call in a template definition keeps its
   `long double` result type. When instantiation selects the call and the operand is concrete,
   a well-formed call receives the unsupported x87 value diagnostic ([stmt.if], [temp.inst], #201).
+- `__builtin_nansl("")` is recognized as a `long double` prvalue in libycxx's `<limits>`
+  template, including when the arm is discarded or the expression is unevaluated. A reached
+  constant evaluation or native emission diagnoses the unsupported signaling NaN value.
+  `__has_builtin` answers 0 on all targets. x87 signaling NaN values remain in #645, and other
+  GNU builtin payloads remain in #248. [#1397](https://github.com/yrashk/ycxx/issues/1397)
 - `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
 - Tests: `tests/own/floating` (84 spec-only, and 4 from the review: literals, conversions, constant evaluation, run
   tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
@@ -4566,7 +4648,9 @@ for calls and for selection against a static function-pointer target.
 - An ordinary free immediate function is diagnosed when its name escapes through a runtime
   pointer, reference argument, or constructor argument. The same check applies after overload
   selection. It preserves immediate invocations through a name or parenthesized name,
-  unevaluated operands, and manifestly constant-evaluated initializers and assertions (#102).
+  unevaluated operands, and manifestly constant-evaluated initializers and assertions. GCC and
+  Clang modes diagnose constexpr initializers whose result retains the pointer or reference.
+  An immediate invocation may still consume it (#102).
 - The Linux x86-64 backend supports calling through the address of an ordinary function with
   internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
@@ -4947,7 +5031,8 @@ the body. A non-generic lambda body uses its own evaluation context.
   makes the operator deleted ([class.spaceship]/1.2, /2.2). The body is
   `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return R(std::strong_ordering::equal); }`
   (`defaulted_three_way_body`). Completion and the body build the same initialized local and
-  lvalue `vi != 0` test. The implicit exception specification covers the comparisons, the
+  lvalue result test. Spec and Clang modes use `vi != 0`; GCC mode checks `vi == 0` and returns
+  the result when the test is false. The implicit exception specification covers the comparisons, the
   lvalue tests, and initialization of either return value (#1225).
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
 - For non-assignment binary operators without comparison rewrites, an access, deletion or

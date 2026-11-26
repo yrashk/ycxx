@@ -19,6 +19,20 @@ out of the checkout and build it there.
 | [Generated archive](generated-archive/README.md) | [build.ycxx](generated-archive/build.ycxx) | Follow a generated archive through a library dependency and watch an archive edit relink the app. |
 | [Foreign Make library](foreign-make/README.md) | [build.ycxx](foreign-make/build.ycxx) | Link an archive built by Make, then watch a vendor header or declared helper edit. |
 
+## Find targets before building
+
+Run these commands from the `custom-rule` example directory.
+
+```sh
+ycxx show --targets
+ycxx show --targets --format=html > targets.html
+```
+
+The catalog lists `app` as `cpp.executable` and `retry_policy` as
+`policy.header`. Open `targets.html` and follow either entry's location link
+to its declaration. Run the same catalog command from any of the example
+directories to see that workspace's targets. [Custom rule manifest](custom-rule/build.ycxx)
+
 Each project declares a target named `app`. The resident daemon can reuse
 work from an earlier request in the same workspace.
 
@@ -29,6 +43,11 @@ ycxx show app --format=html > plan.html
 ```
 
 The trace shows requests and reuse. Open `plan.html` to read the resolved plan
-alongside its build definition. Use `ycxx build app --watch` to rerun on edits.
+alongside its build definition. In the generated archive example, follow
+`app` through `score` and `bonus` to the `bonus_archive` output in
+**Dependencies**. Its location link opens the archive reference in the
+displayed manifest. [Generated archive walkthrough](generated-archive/README.md)
+
+Use `ycxx build app --watch` to rerun on edits.
 
 Read the [build design](../../docs/design/build.md) for the rule and artifact model.

@@ -16,7 +16,7 @@
 //                            which of its references this TU defines; its value is the unit's
 //                            fingerprint, the unit itself is in a content-addressed store
 //   optimized(unit, target, level)  level 0: selection, slot allocation and emission
-//   codegen(TU, F)           best_available(unit, B, S) over the opt_cache_snapshot input S
+//   codegen(TU, F, mode)     best_available(unit, B, S) over the opt_cache_snapshot input S
 //   tu(TU)                   the object, in definition order (§A5.3), and the first-demand table
 //   layout                   `layout_type(T)`, `layout_step(T, s)`, `layout_constant(c)` (cheap)
 //
@@ -35,6 +35,7 @@ export module ycxx.pipeline:back;
 
 import std;
 import ycxx.ast;
+import ycxx.cm;
 import ycxx.engine;
 import ycxx.ir;
 import ycxx.ir.l2;
@@ -463,9 +464,13 @@ struct ConstLayout {
   std::optional<ConstId> object;  // a string literal or compiler-created constant object
 };
 struct [[=engine::cheap]] LayoutConstant {
-  using Key = ConstId;
+  struct Key {
+    ConstId value;
+    bool linux_target;
+    bool operator==(const Key&) const = default;
+  };
   using Value = ConstLayout;
-  static Value run(engine::SyncCtx& cx, ConstId c);
+  static Value run(engine::SyncCtx& cx, Key key);
 };
 
 // A constant object a function or variable uses, and its entity.
@@ -516,7 +521,7 @@ class QueryLayout {
   bool is_class(EntityId e) const { return shape_of(e) != nullptr; }
   bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
-    ConstLayout v = cx_->fetch<LayoutConstant>(c);
+    ConstLayout v = cx_->fetch<LayoutConstant>({c, target_->triple == ast::x86_64_linux.triple});
     if (!v.base) return {v.bits, v.high};
     if (v.object && !std::ranges::contains(objects_, *v.object, &ConstantObjectUse::object))
       objects_.push_back({*v.object, *v.base});
@@ -705,24 +710,35 @@ struct UnitQ {
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
 };
 
+enum class OptimizationMode : std::uint8_t { none, heuristic, solver };
+
 struct OptKey {
   Fp128 unit;
   obj::target target = obj::target::aarch64_macos;
   std::uint8_t level = 0;
+  OptimizationMode mode = OptimizationMode::none;
   bool operator==(const OptKey&) const = default;
 };
+enum class RewriteOutcome : std::uint8_t { none, applied, no_candidates, rejected, unsupported_target };
+enum class FusionOutcome : std::uint8_t { none, no_candidates, invalid_model, budget_exhausted, rejected };
 struct Machine {
   std::optional<aarch64::MachineCode> code;
   std::string error;
   std::optional<x86_64::MachineCode> linux_code{};
+  RewriteOutcome rewrites = RewriteOutcome::none;
+  std::uint32_t candidates = 0;
+  std::uint32_t fused_pairs = 0;
+  std::uint32_t saved_bytes = 0;
+  FusionOutcome fusion = FusionOutcome::none;
   bool ok() const { return code.has_value() || linux_code.has_value(); }
 };
-// `optimized(unit, target, options, optimizer_version, level)` (§A8.1). Options and the optimizer
-// version have nothing to choose yet: the version is the binary's, and a daemon serves one binary.
+// `optimized(unit, target, options, optimizer_version, level)` (§A8.1). The version is the
+// binary's, and a daemon serves one binary.
 struct Optimized {
   using Key = OptKey;
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, OptKey k);
+  static std::string describe(const Key& k);
   static std::string show(const Value& v);  // the instruction words, for traces (#245)
   static std::string errors(const Value& v) { return v.ok() ? std::string() : v.error; }
 };
@@ -730,10 +746,20 @@ struct Optimized {
 // `codegen(F)`: `best_available(unit, B, S)` (§A8.3; optimization design §7: S is consulted only
 // for B ≥ 1, so -O0 is level 0 exactly).
 struct Codegen {
-  using Key = FnKey;
-  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
+  struct Key {
+    FnKey function;
+    OptimizationMode mode = OptimizationMode::none;
+    bool operator==(const Key&) const = default;
+
+    friend void hash_into(Hasher& h, const Key& k) noexcept {
+      hash_append(h, k.function);
+      if (k.mode != OptimizationMode::none) h.uint(std::to_underlying(k.mode));
+    }
+    friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.function); }
+  };
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k.function); }
   using Value = Machine;
-  static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static engine::query_task<Value> run(engine::Ctx& cx, Key k);
   static std::string show(const Value& v) { return Optimized::show(v); }
   static std::string errors(const Value& v) { return Optimized::errors(v); }
 };
@@ -758,11 +784,14 @@ struct Tu {
   struct Key {
     TuId tu;
     bool check_policies = false;
+    OptimizationMode optimization = OptimizationMode::none;
     bool operator==(const Key&) const = default;
 
     friend void hash_into(Hasher& h, const Key& k) noexcept {
       hash_append(h, k.tu);
-      if (k.check_policies) h.uint(std::uint8_t(1));
+      if (k.check_policies || k.optimization != OptimizationMode::none)
+        h.uint(std::uint8_t(k.check_policies));
+      if (k.optimization != OptimizationMode::none) h.uint(std::to_underlying(k.optimization));
     }
     friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.tu); }
   };
@@ -1083,12 +1112,15 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
   return {};
 }
 
-ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
+ConstLayout LayoutConstant::run(engine::SyncCtx&, Key key) {
   ast::Interners& in = *universe().in;
+  const ConstId c = key.value;
   if (auto a = universe().consts->address(c)) {
     if (in.values.is<ast::VEntity>(a->object)) {
       const EntityId entity = in.values.get<ast::VEntity>(a->object).entity;
-      if (const auto* world = universe().linux_world) {
+      // Descriptor records are created in the target's semantic world. The same interned
+      // address can be used on both targets before both worlds contain the corresponding record.
+      if (const auto* world = universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin)) {
         if (const auto* record = world->entities.find(entity); record && record->constant_object != ConstId::none)
           return {a->offset, 0, entity, record->constant_object};
       }
@@ -1371,13 +1403,57 @@ std::string Lower::show(const Lowered& v) {
   return v.body ? unnamed(l2::print(EntityId::none, v.body->f)) : std::string();
 }
 
+std::string Optimized::describe(const Key& k) {
+  std::string out = "{";
+  engine::describe_into(out, k.unit);
+  out += ", ";
+  engine::describe_into(out, k.target);
+  out += ", ";
+  engine::describe_into(out, k.level);
+  if (k.mode != OptimizationMode::none) {
+    out += ", ";
+    engine::describe_into(out, k.mode);
+  }
+  return out + '}';
+}
+
 std::string Optimized::show(const Machine& m) {
+  std::string decision;
+  switch (m.rewrites) {
+    case RewriteOutcome::none: break;
+    case RewriteOutcome::applied:
+      decision = std::format("{0}=heuristic candidates={1} applied={1} validation=passed\n",
+                             m.fused_pairs ? "prepass" : "path", m.candidates);
+      break;
+    case RewriteOutcome::no_candidates:
+      if (!m.fused_pairs && m.fusion == FusionOutcome::none) decision = "path=baseline fallback=no_candidates\n";
+      break;
+    case RewriteOutcome::rejected:
+      decision = std::format("path=baseline candidates={} applied=0 fallback=validation_or_emission_failed\n",
+                             m.candidates);
+      break;
+    case RewriteOutcome::unsupported_target: decision = "path=baseline fallback=unsupported_target\n"; break;
+  }
+  if (m.fused_pairs != 0)
+    decision = std::format("path=solver fused_pairs={} saved_bytes={} validation=passed\n", m.fused_pairs, m.saved_bytes) + decision;
+  std::string_view fusion_fallback;
+  switch (m.fusion) {
+    case FusionOutcome::none: break;
+    case FusionOutcome::no_candidates: fusion_fallback = "no_candidates"; break;
+    case FusionOutcome::invalid_model: fusion_fallback = "invalid_model"; break;
+    case FusionOutcome::budget_exhausted: fusion_fallback = "budget_exhausted"; break;
+    case FusionOutcome::rejected: fusion_fallback = "emitted_size_or_codegen_validation_failed"; break;
+  }
+  if (!fusion_fallback.empty()) {
+    if (decision.empty()) decision = "path=baseline ";
+    decision += std::format("fusion_fallback={}\n", fusion_fallback);
+  }
   if (m.linux_code)
-    return std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
+    return decision + std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
   if (m.code)
-    return std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
+    return decision + std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
            aarch64::disassemble(*m.code, [](EntityId e) { return entity_name(e); });
-  return m.error.empty() ? std::string() : "error: " + m.error;
+  return m.error.empty() ? decision : decision + "error: " + m.error;
 }
 
 engine::query_task<FunctionIrValue> FunctionIr::run(engine::Ctx& cx, FnKey k) {
@@ -1428,7 +1504,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (f.variadic && l.kind == ir::TypeKind::integer && l.size == 16)  // #1172
       return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
-        (allow_aggregates && (l.sysv_integer_eightbytes || (l.sysv_stack_record && (result || l.size <= 16))))) return {};
+        (allow_aggregates && (l.sysv_integer_eightbytes || l.sysv_stack_record))) return {};
     if (fixed_direct && l.sysv_empty_record) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
@@ -1701,21 +1777,265 @@ engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   co_return UnitRef{universe().units->add(std::move(u)), std::nullopt};
 }
 
+struct DivisionRewrite {
+  std::uint32_t node;
+  std::uint32_t immediate;
+  l2::Op op;
+  std::uint64_t operand;
+  bool operator==(const DivisionRewrite&) const = default;
+};
+
+namespace {
+
+bool unsigned_division(const l2::Node& node) {
+  return node.flags == 0 && (node.op == l2::Op::udiv || node.op == l2::Op::urem);
+}
+
+std::vector<DivisionRewrite> power_of_two_divisions(const l2::Function& body) {
+  std::vector<DivisionRewrite> rewrites;
+  if (std::ranges::none_of(body.nodes, unsigned_division)) return rewrites;
+
+  // Successor arguments live in operands too. Changing the constant is safe only when this
+  // division or remainder is its sole use.
+  std::vector<std::uint8_t> uses(body.values.size());
+  for (const auto operand : body.operands) {
+    auto& count = uses[ir::raw(operand)];
+    if (count < 2) ++count;
+  }
+  for (std::uint32_t i = 0; i < body.nodes.size(); ++i) {
+    const auto& node = body.nodes[i];
+    if (!unsigned_division(node)) continue;
+    const auto divisor = body.operands_of(ir::NodeId(i))[1];
+    const auto& value = body.value(divisor);
+    if (value.param || uses[ir::raw(divisor)] != 1 ||
+        (value.type != l2::Type::i32 && value.type != l2::Type::i64))
+      continue;
+    const auto& constant = body.nodes[value.def];
+    if (constant.op != l2::Op::const_) continue;
+    auto bits = body.imms[constant.imm0];
+    if (value.type == l2::Type::i32) bits = std::uint32_t(bits);
+    if (!std::has_single_bit(bits)) continue;
+
+    // In both widths, division by 2^k drops the low k bits. The remainder retains exactly
+    // those bits. The nonzero divisor and in-range shift preserve defined behavior.
+    if (node.op == l2::Op::udiv)
+      rewrites.push_back({i, constant.imm0, l2::Op::lshr, std::uint64_t(std::countr_zero(bits))});
+    else
+      rewrites.push_back({i, constant.imm0, l2::Op::and_, bits - 1});
+  }
+  return rewrites;
+}
+
+std::optional<l2::Function> rewrite_divisions(const l2::Function& body,
+                                              std::span<const DivisionRewrite> rewrites) {
+  if (rewrites.empty()) return {};
+  auto transformed = body;
+  for (const auto& rewrite : rewrites) {
+    transformed.nodes[rewrite.node].op = rewrite.op;
+    transformed.imms[rewrite.immediate] = rewrite.operand;
+  }
+  return transformed;
+}
+
+}  // namespace
+
+struct DivisionModel {
+  using Key = Fp128;
+  using Value = std::vector<DivisionRewrite>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    auto rewrites = power_of_two_divisions(universe().units->at(unit).body.f);
+    co_await cx.stop_point();
+    co_return rewrites;
+  }
+  static std::string show(const Value& v) {
+    return std::format("model=unsigned_power_of_two_division candidates={}", v.size());
+  }
+};
+
+using DivisionGroups = std::vector<std::vector<x86_64::DivisionSite>>;
+
+void division_prefix_choices(std::span<const x86_64::DivisionSite> group,
+                             std::vector<cm::PrefixChoice>& choices) {
+  choices.clear();
+  std::array<std::uint32_t, 2> counts{};
+  for (const auto& site : group) {
+    ++counts[site.quotient];
+    choices.push_back({std::min(counts[0], counts[1]), site.saved_bytes});
+  }
+}
+
+struct FusionModel {
+  DivisionGroups groups;
+  std::string error;
+};
+struct DivisionFusionModel {
+  using Key = Fp128;
+  using Value = FusionModel;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    co_await cx.stop_point();
+    auto groups = x86_64::group_divisions(universe().units->at(unit).body.f, cx.stop_token());
+    co_await cx.stop_point();
+    if (!groups) co_return Value{{}, groups.error()};
+    co_return Value{std::move(*groups), {}};
+  }
+  static std::string show(const Value& v) {
+    if (!v.error.empty()) return "model=unsigned_divrem_fusion fallback=" + v.error;
+    auto out = std::format("model=unsigned_divrem_fusion equivalence_groups={}", v.groups.size());
+    if (v.groups.size() == 1 && v.groups.front().size() <= 8) {
+      std::vector<cm::PrefixChoice> choices;
+      division_prefix_choices(v.groups.front(), choices);
+      out += "\nprefix_capacity:byte_benefit";
+      for (const auto choice : choices) out += std::format(" {}:{}", choice.capacity, choice.benefit);
+    }
+    return out;
+  }
+};
+
+struct FusionResult {
+  std::vector<x86_64::DivisionPair> pairs;
+  std::uint32_t saved_bytes = 0;
+  std::size_t visits = 0;
+  std::optional<cm::PrefixFailure> failure;
+};
+struct DivisionFusionSolve {
+  static constexpr std::size_t visit_budget = 4'096;
+  using Key = Fp128;
+  using Value = FusionResult;
+  static std::string describe(const Key& unit) {
+    std::string key;
+    engine::describe_into(key, unit);
+    return key + std::format(", model=unsigned_divrem_fusion backend=exact_prefix budget={}", visit_budget);
+  }
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    // Optimized builds the model first. Fetch the completed value to record the dependency,
+    // then do the solve synchronously on this worker.
+    const auto& model = co_await cx.fetch<DivisionFusionModel>(unit);
+    co_await cx.stop_point();
+    Value result;
+    std::vector<cm::PrefixChoice> choices;
+    for (const auto& group : model.groups) {
+      co_await cx.stop_point();
+      if (group.size() > visit_budget - result.visits)
+        co_return Value{{}, 0, result.visits, cm::PrefixFailure::budget_exhausted};
+
+      division_prefix_choices(group, choices);
+      const auto selected = cm::solve_prefix_choices(choices, visit_budget - result.visits, cx.stop_token());
+      co_await cx.stop_point();
+      if (!selected) co_return Value{{}, 0, result.visits, selected.error()};
+      result.visits += group.size();
+
+      // An accepted later site must have a free earlier site of the opposite operation.
+      // Prefix feasibility ensures this in both directions, so reconstruct in source order.
+      std::array<std::vector<ir::NodeId>, 2> free;
+      auto next = selected->begin();
+      for (std::size_t i = 0; i < group.size(); ++i) {
+        const auto& site = group[i];
+        if (next == selected->end() || *next != i) {
+          free[site.quotient].push_back(site.node);
+          continue;
+        }
+        auto& opposite = free[!site.quotient];
+        if (opposite.empty()) co_return Value{{}, 0, result.visits, cm::PrefixFailure::unsupported};
+        result.pairs.push_back({opposite.back(), site.node});
+        opposite.pop_back();
+        result.saved_bytes += site.saved_bytes;
+        ++next;
+      }
+    }
+    co_await cx.stop_point();
+    co_return result;
+  }
+  static std::string show(const Value& v) {
+    if (v.failure)
+      return std::format("model=unsigned_divrem_fusion backend=exact_prefix budget={} visits={} fallback={}",
+                         visit_budget, v.visits,
+                         *v.failure == cm::PrefixFailure::budget_exhausted ? "budget_exhausted" : "invalid_model");
+    return std::format("model=unsigned_divrem_fusion backend=exact_prefix budget={} visits={} outcome=optimal pairs={} predicted_saved_bytes={}",
+                       visit_budget, v.visits, v.pairs.size(), v.saved_bytes);
+  }
+};
+
+struct DivisionFusionValidate {
+  using Key = Fp128;
+  using Value = Machine;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& u = universe().units->at(key);
+    const auto& fusion = co_await cx.fetch<DivisionFusionSolve>(key);
+    const auto& rewrites = co_await cx.fetch<DivisionModel>(key);
+    co_await cx.stop_point();
+
+    auto rewritten = rewrite_divisions(u.body.f, rewrites);
+    const auto& body = rewritten ? *rewritten : u.body.f;
+    auto heuristic = x86_64::compile_function(body, u.local, u.got_symbols);
+    co_await cx.stop_point();
+    const auto candidates = std::uint32_t(rewrites.size());
+    if (!heuristic) {
+      if (rewritten) heuristic = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
+      co_await cx.stop_point();
+      if (!heuristic)
+        co_return Machine{std::nullopt, heuristic.error(), {}, RewriteOutcome::rejected,
+                          candidates, 0, 0, FusionOutcome::rejected};
+      co_return Machine{std::nullopt, {}, std::move(*heuristic), RewriteOutcome::rejected,
+                        candidates, 0, 0, FusionOutcome::rejected};
+    }
+    const auto outcome = rewritten ? RewriteOutcome::applied : RewriteOutcome::no_candidates;
+    auto paired = x86_64::compile_function(body, u.local, u.got_symbols, fusion.pairs);
+    co_await cx.stop_point();
+    if (paired && paired->bytes.size() + fusion.saved_bytes == heuristic->bytes.size())
+      co_return Machine{std::nullopt, {}, std::move(*paired), outcome, candidates,
+                        std::uint32_t(fusion.pairs.size()), fusion.saved_bytes};
+    co_return Machine{std::nullopt, {}, std::move(*heuristic), outcome, candidates, 0, 0, FusionOutcome::rejected};
+  }
+  static std::string show(const Value& v) { return Optimized::show(v); }
+  static std::string errors(const Value& v) { return Optimized::errors(v); }
+};
+
 engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   (void)cx.fetch<CostModelIn>(k.target);  // part of `target` (§O8); level 0 reads no cost
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
+    RewriteOutcome outcome = RewriteOutcome::none;
+    std::uint32_t candidates = 0;
+    const FusionResult* fusion = nullptr;
+    FusionOutcome fusion_outcome = FusionOutcome::none;
+    if (k.mode == OptimizationMode::solver) {
+      const auto& model = co_await cx.fetch<DivisionFusionModel>(k.unit);
+      if (!model.error.empty()) fusion_outcome = FusionOutcome::invalid_model;
+      else if (model.groups.empty()) fusion_outcome = FusionOutcome::no_candidates;
+      else {
+        fusion = &co_await cx.fetch<DivisionFusionSolve>(k.unit);
+        if (fusion->failure)
+          fusion_outcome = *fusion->failure == cm::PrefixFailure::budget_exhausted
+            ? FusionOutcome::budget_exhausted : FusionOutcome::invalid_model;
+      }
+    }
+    if (k.mode != OptimizationMode::none) {
+      const auto& rewrites = co_await cx.fetch<DivisionModel>(k.unit);
+      candidates = std::uint32_t(rewrites.size());
+      outcome = RewriteOutcome::no_candidates;
+      if (fusion && !fusion->pairs.empty()) co_return co_await cx.fetch<DivisionFusionValidate>(k.unit);
+      if (auto rewritten = rewrite_divisions(u.body.f, rewrites)) {
+        auto optimized = x86_64::compile_function(*rewritten, u.local, u.got_symbols);
+        co_await cx.stop_point();
+        if (optimized)
+          co_return Machine{std::nullopt, {}, std::move(*optimized), RewriteOutcome::applied,
+                            candidates, 0, 0, fusion_outcome};
+        outcome = RewriteOutcome::rejected;
+      }
+    }
     auto m = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
-    if (!m) co_return Machine{std::nullopt, m.error()};
-    co_return Machine{std::nullopt, {}, std::move(*m)};
+    if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome, candidates, 0, 0, fusion_outcome};
+    co_return Machine{std::nullopt, {}, std::move(*m), outcome, candidates, 0, 0, fusion_outcome};
   }
+  const auto outcome = k.mode == OptimizationMode::none ? RewriteOutcome::none : RewriteOutcome::unsupported_target;
   auto m = aarch64::compile_function(u.body.f, u.local);
-  if (!m) co_return Machine{std::nullopt, m.error()};
-  co_return Machine{std::move(*m), {}};
+  if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome};
+  co_return Machine{std::move(*m), {}, {}, outcome};
 }
 
-engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
+engine::query_task<Machine> Codegen::run(engine::Ctx& cx, Key key) {
+  const FnKey k = key.function;
   const obj::target target = object_target(unit_target(cx, k.tu));
   const UnitRef& unit = co_await cx.fetch<UnitQ>(k);
   if (!unit.unit) co_return Machine{std::nullopt, unit.error ? unit.error->message : "no unit"};
@@ -1725,7 +2045,7 @@ engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
     for (const SnapshotEntry& e : cx.fetch<OptCacheSnapshot>(target))
       if (e.unit == *unit.unit) level = std::max(level, e.level);
   }
-  co_return co_await cx.fetch<Optimized>({*unit.unit, target, level});
+  co_return co_await cx.fetch<Optimized>({*unit.unit, target, level, key.mode});
 }
 
 // ------------------------------------------------------------------------------------- tu(TU)
@@ -2305,13 +2625,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
-    auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) return std::nullopt;
-    const Entity& object = *found->second;
     const sema::World* w = universe().world_for(target);
-    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+    if (!w) return std::nullopt;
     const auto& r = w->entities.rec(id);
-    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
+    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none || r.linkage == ast::Linkage::none)
+      return std::nullopt;
     auto is_namespace = [&](EntityId scope) {
       return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
     };
@@ -2321,7 +2639,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
         return std::nullopt;
     }
-    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    if (auto found = by_id.find(ir::raw(id)); found != by_id.end()) {
+      const Entity& object = *found->second;
+      if (object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+      return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    }
+    // A constant may occur only in a written type and have no emitted object.
+    return ObjectName{std::string(w->ins.names.spelling(r.name)), r.type, r.scope,
+                      namespace_object && r.linkage == ast::Linkage::internal};
   };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
@@ -2715,7 +3040,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
 
   // Code: codegen(F) for every function, in definition order.
-  auto ms = co_await cx.par_map<Codegen>(fns);
+  auto ms = co_await cx.par_map<Codegen>(fns | std::views::transform([&](FnKey fn) {
+    return Codegen::Key{fn, k.optimization};
+  }));
   for (std::size_t i = 0; i < fns.size(); ++i) {
     if (ms[i].get().ok()) continue;
     const auto& def = *definitions[i];

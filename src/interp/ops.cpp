@@ -258,7 +258,8 @@ struct Ops {
   static Flow ptr_derived(M& m, Frame&, N n) { return m.unsupported(n); }
 
   // static_cast between pointers through `void*` ([expr.static.cast]/14): in constant evaluation
-  // converting from `void*` requires a pointer to a similar object or a null pointer ([expr.const]).
+  // [expr.const] requires a pointer to a similar object or a null pointer. The compiler
+  // modes also accept one-past array pointers and Clang accepts a one-past singleton.
   static Flow ptr_cast(M& m, Frame& f, N n) {
     Value p = m.operand(f, n, 0);
     if (p.kind == VKind::object && constant(m)) {
@@ -272,7 +273,20 @@ struct Ops {
         if (!pl || !m.similar(pl->type, to)) return m.fail(Reason::void_cast_type);
         if (p.past || past) {
           QualType from = m.type_of(f, f.fn->operands_of(n)[0]);
-          if (ast::is_void(*m.in_, m.shape(from).inner)) return m.fail(Reason::void_cast_type);
+          const auto mode = m.config_.compatibility;
+          if (ast::is_void(*m.in_, m.shape(from).inner)) {
+            if (mode == ast::Compatibility::spec || (mode == ast::Compatibility::gcc && p.past))
+              return m.fail(Reason::void_cast_type);
+            // GCC treats an address inside a nested array as a position in its complete
+            // array, so the end of one row designates the start of the next row.
+            const auto& object = m.objects_[p.ref];
+            if (mode == ast::Compatibility::gcc && m.shape(object.type).kind == M::Kind::array) {
+              const i64 offset = m.offset_of(p);
+              if (offset >= 0 && u64(offset) < m.complete_size(object)) {
+                if (Flow fl = m.address(p.ref, to, offset, p); fl != Flow::next) return fl;
+              }
+            }
+          }
         }
       }
     }
@@ -534,14 +548,19 @@ struct Ops {
     return call_entity(m, f, n, target->function, 1, self);
   }
 
-  // `ir::BuiltinFn`; only constant evaluation reaches one (`consteval_br`).
+  // `ir::BuiltinFn`; supported builtin evaluations run only in constant mode (`consteval_br`).
   static Flow builtin(M& m, Frame& f, N n) {
+    const auto fn = ir::BuiltinFn(imms(f, n)[0]);
+    if (fn == ir::BuiltinFn::nansl) {
+      const auto format = (*m.target_)[ast::Builtin::long_double].format;
+      return m.fail(format == ast::FloatFormat::x87_extended ? Reason::nansl_x87_unsupported : Reason::nansl_unsupported);
+    }
     if (!constant(m) || f.fn->operands_of(n).size() != 4) return m.unsupported(n);
     const Value count = m.operand(f, n, 3);
     if (count.kind != VKind::integer) return m.fail(Reason::ill_formed);
     Value result;
     Flow fl = Flow::next;
-    switch (ir::BuiltinFn(imms(f, n)[0])) {
+    switch (fn) {
     case ir::BuiltinFn::memchr: fl = m.find_byte(m.operand(f, n, 1), m.operand(f, n, 2), count.bits, result); break;
     case ir::BuiltinFn::memcmp: fl = m.compare_bytes(m.operand(f, n, 1), m.operand(f, n, 2), count.bits, result); break;
     default: return m.unsupported(n);

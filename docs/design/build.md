@@ -336,6 +336,99 @@ read observations. A rule with no current expansion appears as unresolved.
 Source output always reads the authored definition directly. Inspection runs no
 tools and reports generator inputs and tools by their planned paths.
 
+### Resolved dependencies (#1453)
+
+`ycxx show app --format=json` includes `dependency_graph` in its schema-1
+snapshot. Each entry in `edges` records a `consumer` and its `producer`. The
+`usage` is the field that uses the dependency. A `deps` edge names a library.
+The fields `sources`, `generated_headers`, `link_inputs`,
+`public_link_inputs`, `runtime_assets`, `inputs`, and `plan_inputs` bind
+to an artifact's named `output`. The `inputs` and `plan_inputs` edges also
+record the consumer's input name as `binding`.
+
+The `location` identifies the use in `build.ycxx` by path, one-based line, and
+one-based byte column. A use emitted by a rule points to its workspace
+declaration when the rule introduced the value. The report orders edges by
+consumer and source location. If a rule needs a current expansion, the graph
+reports `complete: false` with the edges resolved so far. A complete plan can
+have an empty edge list.
+
+`ycxx show app --format=html > plan.html` displays those edges in **Dependencies**
+with links to their use sites in the displayed manifest. An HTML comparison
+also shows the current plan's dependencies. **Plan changes** compares
+semantic facts. The `link-input` facts describe the executable's effective
+archive order. The read-only report can identify an artifact before its
+bytes exist.
+
+### Typed value bindings (#1477)
+
+In `examples/project-build/package-probe`, the `config` header binds `fast`
+to the `fast-mode` export of the `wire` target.
+
+```text
+capabilities.header "config" {
+    namespace = "example::codec"
+    filename = "codec_config.hh"
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+```
+
+From that example directory, run `ycxx build app` and then
+`ycxx show app --format=html > plan.html`. **Value bindings** shows `config`
+as the consumer, `capabilities` as the usage, `fast` as the binding, and
+`wire` as the producer with export `fast-mode`. The declaration link opens
+the `value(...)` reference in `build.ycxx`. Structured `facts` bindings use
+the same report section.
+
+Schema-1 JSON reports these references in `dependency_graph.value_edges`
+with `consumer`, `usage`, `binding`, `producer`, `export_name`, and
+`location`. A complete plan with no value bindings has an empty array.
+An incomplete plan reports the bindings resolved so far with
+`dependency_graph.complete: false`. The HTML comparison shows the current
+plan's **Value bindings** alongside **Dependency changes**.
+
+### Dependency comparisons (#1464)
+
+`ycxx show app --against before.json --format=json` includes
+`dependency_changes` when both plans have complete dependency graphs. The
+comparison groups occurrences by consumer, usage, producer, output, and
+binding. Each group with different counts has `before` and `after` arrays
+of the original edge records, including every source site on each side.
+An added dependency has an empty `before` array, and a removed dependency
+has an empty `after` array.
+
+Source locations explain where dependencies were used. Moving a reference
+with the same identity and count produces an empty `dependency_changes`
+array. **Plan changes** reports changes in the effective archive order
+through the `link-input` facts. Older schema-1 snapshots without a
+dependency graph can still compare plan facts.
+
+Run `ycxx show app --against before.json --format=html > changes.html` to
+read **Dependency changes** alongside the current **Dependencies**. The
+table shows before and after counts and source sites. After links open
+the relevant lines in the current manifest. Before sites describe the
+saved plan. A comparison with equal counts shows **No dependency changes.**
+
+### Declared target catalog (#1392)
+
+Run `ycxx show --targets` from the workspace directory to see the target names
+you can pass to a per-target command. The catalog parses `build.ycxx` in
+that directory. It accepts a regular UTF-8 file or a symlink to one (#1441).
+Names are sorted in byte order and retain any embedded slashes.
+The catalog shows rule kinds as declared, including custom rule aliases.
+The read-only command works before the first build and runs independently of
+the planner, build cache, and daemon.
+
+Text is the default. With `--format=json`, the object has `schema` set to `1`
+and a `targets` array. Each record has `name`, `kind`, and a `location` with
+`path` set to `build.ycxx` and a one-based `line` and byte `column` for the
+declaration. With `--format=html`, the catalog links each entry to that line
+in the displayed manifest.
+
+Catalog mode accepts one `--targets` flag and a text, JSON, or HTML format.
+A positional target name, `--target`, `--against`, or `--format=source` is a
+usage error in this mode.
+
 ### Structured named-module graph (#1363)
 
 `ycxx show app --format=json` includes `module_graph` for a resolved plan under

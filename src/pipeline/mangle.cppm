@@ -47,7 +47,7 @@ struct FunctionName {
 };
 using FunctionNames = std::function<std::optional<FunctionName>(ast::EntityId)>;
 
-// A named whole object used as a pointer template argument.
+// An object named in a template argument or a pack index.
 struct ObjectName {
   std::string name;
   ast::QualType type;
@@ -269,9 +269,11 @@ class Mangler {
         // its argument, `u11__remove_cvIT_E`, as Clang spells it (docs/EXTENSIONS.md).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
         auto x = in_.types.get<ast::TTransform>(in_.types.canon(bare));
+        const std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
+        if (compatibility_ == ast::Compatibility::gcc)
+          return std::unexpected(std::format("a dependent built-in type trait '{}' in the signature", n));
         auto a = type(x.arg);
         if (!a) return a;
-        std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
         inner = std::format("u{}{}I{}E", n.size(), n, *a);
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TDepSpec>(in_.types.canon(bare))) {
@@ -327,7 +329,11 @@ class Mangler {
           pack = *p;
         }
         std::string index;
-        if (in_.values.is<ast::VDepParam>(x.index) && in_.values.get<ast::VDepParam>(x.index).depth == own_depth) {
+        if (x.written != ast::ConstId::none) {
+          auto written = expression(x.written);
+          if (!written) return written;
+          index = *written;
+        } else if (in_.values.is<ast::VDepParam>(x.index) && in_.values.get<ast::VDepParam>(x.index).depth == own_depth) {
           auto i = in_.values.get<ast::VDepParam>(x.index).index;
           index = i == 0 ? "T_" : std::format("T{}_", i - 1);
         } else if (in_.values.is<ast::VInt>(x.index)) {
@@ -366,14 +372,14 @@ class Mangler {
         // before F, and the ref-qualifier before E (Itanium §5.1.5.3).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
         auto f = in_.types.get<ast::TFunction>(in_.types.canon(bare));
-        if (f.linkage != ast::LangLinkage::cxx) return std::unexpected("an extern \"C\" function type");
         auto sig = signature(f, true);
         if (!sig) return sig;
         if (std::to_underlying(f.cv) & 2) inner += "V";
         if (std::to_underlying(f.cv) & 1) inner += "K";
         if (f.noexcept_ != ast::ConstId::none && in_.values.is<ast::VInt>(f.noexcept_) &&
             in_.values.get<ast::VInt>(f.noexcept_).bits.lo != 0) inner += "Do";
-        inner += "F" + *sig;
+        inner += f.linkage == ast::LangLinkage::c ? "FY" : "F";
+        inner += *sig;
         if (f.ref != ast::RefQual::none) inner += f.ref == ast::RefQual::lvalue ? "R" : "O";
         inner += "E";
         candidates_.push_back(full_key(bare));
@@ -744,8 +750,40 @@ class Mangler {
     return out;
   }
 
-  // The <expression> of a value-dependent template argument (§5.1.6), #773.
+  // The <expression> of a template argument or a written dependent type (§5.1.6), #773.
   std::expected<std::string, std::string> expression(ast::ConstId v) {
+    if (in_.values.is<ast::VEntity>(v)) {
+      const auto entity = in_.values.get<ast::VEntity>(v).entity;
+      const auto name = objects_ ? objects_(entity) : std::nullopt;
+      if (!name) return std::unexpected("a value expression whose external name is unknown");
+      auto encoded = object_encoding(name->name, name->scope, name->internal);
+      if (!encoded) return encoded;
+      return "L_Z" + *encoded + "E";
+    }
+    if (in_.values.is<ast::VWrittenOperator>(v)) {
+      const auto op = in_.values.get<ast::VWrittenOperator>(v);
+      const auto operands = in_.seqs.elements(op.operands);
+      const auto token = lex::Tk(op.token);
+      if (token == lex::Tk::kw_static_cast) {
+        if (operands.size() != 2 || !in_.values.is<ast::VType>(operands.front()))
+          return std::unexpected("a cast whose operands are unknown");
+        const auto target = in_.values.get<ast::VType>(operands.front());
+        auto cast = type(ast::with_cv(target.type, ast::Cv(target.cv)));
+        if (!cast) return cast;
+        auto operand = expression(operands.back());
+        if (!operand) return operand;
+        return "sc" + *cast + *operand;
+      }
+      const auto code = operator_code(lex::spelling(token), operands.size());
+      if (!code) return std::unexpected("an unsupported written operator");
+      std::string encoded(*code);
+      for (ast::ConstId operand : operands) {
+        auto child = expression(operand);
+        if (!child) return child;
+        encoded += *child;
+      }
+      return encoded;
+    }
     if (in_.values.is<ast::VConstraint>(v)) {
       const auto c = in_.values.get<ast::VConstraint>(v);
       std::string r = c.op == 0 ? "aa" : "oo";
@@ -825,6 +863,12 @@ class Mangler {
     if (in_.values.is<ast::VDepOp>(v)) {
       const ast::VDepOp& op = in_.values.get<ast::VDepOp>(v);
       auto operands = in_.seqs.elements(op.operands);
+      if ((op.op == ast::DepOp::sizeof_type || op.op == ast::DepOp::alignof_type) && operands.size() == 1 &&
+          operands.front().kind == ast::TemplateArgKind::type) {
+        auto operand = type(operands.front().type);
+        if (!operand) return operand;
+        return (op.op == ast::DepOp::sizeof_type ? "st" : "at") + *operand;
+      }
       if (op.op == ast::DepOp::logical_not && operands.size() == 1) {
         if (operands[0].kind != ast::TemplateArgKind::value) return std::unexpected("a type operand of '!'");
         auto e = expression(operands[0].value);

@@ -286,13 +286,14 @@ enum class DepOp : u8 {
   has_unique_object_representations,
   reference_constructs_from_temporary,
   reference_converts_from_temporary,
-  alignof_type,  // replayed from the written dependent base argument
+  alignof_type,  // replayed from the written dependent argument
   array_rank,
   is_trivial, is_pod,
+  sizeof_type,  // replayed from the written dependent argument
 };
 
 constexpr bool returns_size_type(DepOp op) {
-  return op == DepOp::alignof_type || op == DepOp::array_rank;
+  return op == DepOp::alignof_type || op == DepOp::sizeof_type || op == DepOp::array_rank;
 }
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
@@ -300,7 +301,7 @@ constexpr bool returns_size_type(DepOp op) {
 // relations (`is_base_of`, `is_virtual_base_of`, `is_pointer_interconvertible_base_of`),
 // `is_layout_compatible`, assignability, convertibility and the `reference_*_from_temporary`
 // predicates take two types. The other type predicates take one.
-// `alignof_type` and `array_rank` each take one type operand.
+// `alignof_type`, `sizeof_type` and `array_rank` each take one type operand.
 // `logical_not` takes one bool value operand, and `logical_and` takes two.
 struct [[=dependent]] VDepOp {
   DepOp op;
@@ -326,6 +327,13 @@ struct [[=dependent]] VDepSizeofPack {
 struct VType {
   QualType type;  // unqualified, as types in values are
   u8 cv;
+};
+
+// The operands of an operator as written, for ABI encoding before conversions and folding.
+// `token` is a lex::Tk. A named cast stores its type as a VType before the operand.
+struct VWrittenOperator {
+  u8 token;
+  SeqId<ConstId> operands;
 };
 
 // A pack occupies one parameter slot in an atomic constraint's mapping.
@@ -372,7 +380,8 @@ struct [[=dependent]] VRequiresTypes {
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes>;
+                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes,
+                               VWrittenOperator>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

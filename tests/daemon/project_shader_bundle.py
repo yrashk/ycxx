@@ -10,7 +10,7 @@ import tempfile
 
 from project_build import action_keys, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import fact
+from project_inspection import check_dependency_graph, dependency_edge, fact
 from runtime_dir import runtime_root
 from shader_compiler_fixture import spirv
 
@@ -68,13 +68,25 @@ def check_inspection(ycxx, scope, env):
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
     assert plan['schema'] == 1 and plan['target'] == 'app', plan
+    definition = plan['definition']
+    dependencies = [
+        dependency_edge(definition, 'app', 'scene', 'runtime_assets', 'artifact("scene", "bundle")',
+                        output='bundle'),
+        dependency_edge(definition, 'app', 'release_note', 'runtime_assets', 'artifact("release_note", "note")',
+                        output='note'),
+        dependency_edge(definition, 'scene', 'shader_inventory', 'plan_inputs', 'artifact("shader_inventory", "list")',
+                        output='list', binding='inventory'),
+    ]
     for name in SHADERS:
         binding = f'shader_{name}'
         item = fact(plan, 'input', 'scene', f'artifacts/{binding}/{name}.spv')
         assert item['name'] == binding, item
         assert item['origin'] == f'artifact("compile_{name}", "spirv")', item
+        dependencies.append(dependency_edge(definition, 'scene', compile_key(name), 'inputs',
+                                            'shaders.bundle "scene"', output='spirv', binding=binding))
     asset = fact(plan, 'runtime-asset', 'app', BUNDLE)
     assert asset['name'] == 'scene.bundle' and asset['origin'] == 'artifact("scene", "bundle")', asset
+    check_dependency_graph(plan, dependencies)
 
 
 def check_external_actions(events, *executed, failed=()):

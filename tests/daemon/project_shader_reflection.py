@@ -12,7 +12,9 @@ import tempfile
 
 from project_build import action_keys, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import fact
+from project_inspection import (
+    check_dependency_graph, check_value_bindings_html, dependency_edge, fact, scope_state,
+)
 from project_shader_bundle import check_external_actions, check_native_reused, publication
 from runtime_dir import runtime_root
 from shader_reflection_fixture import REJECT, digest, spirv
@@ -22,7 +24,8 @@ EXAMPLE = Path(__file__).resolve().parents[2] / 'examples/project-build/shader-r
 FIXTURE = Path(__file__).resolve().with_name('shader_reflection_fixture.py')
 SHADERS = {'vertex': 'shaders/triangle.vert', 'fragment': 'shaders/triangle.frag'}
 FRAGMENT = SHADERS['fragment']
-EXPORT = 'fragment_reflection.layout'
+PRODUCER = 'fragment_reflection <b data-value-probe="1">&'
+EXPORT = f'{PRODUCER}.layout'
 SCHEMA = 'shader.descriptors.v1'
 EXE = '.ycxx/out/app'
 BUNDLE = '.ycxx/assets/app/scene.bundle'
@@ -34,6 +37,9 @@ def prepare(scope, journal):
     fixture = FIXTURE.read_text(encoding='utf-8')
     manifest = scope / 'build.ycxx'
     definition = manifest.read_text(encoding='utf-8')
+    # The rule forwards the target name, so exercise escaped names in the plan without changing the rule.
+    assert definition.count('"fragment_reflection"') == 2, definition
+    definition = definition.replace('"fragment_reflection"', json.dumps(PRODUCER))
     for tool in ('glslc', 'spirv-cross', 'python3'):
         wrapper = scope / f'{tool}-fixture'
         command = shlex.join([python, '-c', fixture, tool, str(journal)])
@@ -61,16 +67,16 @@ def inspect(ycxx, scope, env, journal, binding=None):
         assert any(row['kind'] == 'unresolved' for row in plan['facts']), plan
         return None
 
-    export = fact(plan, 'value-export', 'fragment_reflection', layout(binding))
+    export = fact(plan, 'value-export', PRODUCER, layout(binding))
     consumer = fact(plan, 'fact-input', 'scene_bindings', layout(binding))
     assert export['name'] == consumer['name'] == 'layout', (export, consumer)
     assert EXPORT in consumer['origin'], consumer
     assert all(term in export['origin'] for term in (EXPORT, 'spirv-cross-fixture',
                                                     'rules/package', 'witness exit 0')), export
     assert re.search(r'artifact module receipt [0-9a-f]{32}', export['origin']), export
-    fact(plan, 'schema', 'fragment_reflection', SCHEMA)
+    fact(plan, 'schema', PRODUCER, SCHEMA)
     edges = {(row['target'], row['name']): row for row in plan['facts'] if row['kind'] == 'input'}
-    reflected = edges['fragment_reflection', 'module']
+    reflected = edges[PRODUCER, 'module']
     packed = edges['scene', 'fragment']
     assert reflected['origin'] == packed['origin'] == 'artifact("fragment", "spirv")', edges
     assert Path(reflected['value']).parts[:2] == ('artifacts', 'module'), reflected
@@ -78,7 +84,62 @@ def inspect(ycxx, scope, env, journal, binding=None):
     assert Path(reflected['value']).name == Path(packed['value']).name, edges
     assert edges['scene', 'vertex']['origin'] == 'artifact("vertex", "spirv")', edges
     fact(plan, 'runtime-asset', 'app', BUNDLE)
-    return export['origin']
+    definition = plan['definition']
+    value_edge = {**dependency_edge(definition, 'scene_bindings', PRODUCER, 'facts',
+                                    f'value({json.dumps(PRODUCER)}, "layout")', binding='layout'),
+                  'export_name': 'layout'}
+    check_dependency_graph(plan, [
+        dependency_edge(definition, 'app', 'scene_bindings', 'generated_headers',
+                        'artifact("scene_bindings", "header")', output='header'),
+        dependency_edge(definition, 'app', 'scene', 'runtime_assets', 'artifact("scene", "bundle")',
+                        output='bundle'),
+        dependency_edge(definition, 'scene', 'vertex', 'inputs', 'shaders.pack "scene"',
+                        output='spirv', binding='vertex'),
+        dependency_edge(definition, 'scene', 'fragment', 'inputs', 'shaders.pack "scene"',
+                        output='spirv', binding='fragment'),
+        dependency_edge(definition, PRODUCER, 'fragment', 'inputs',
+                        f'shaders.reflect {json.dumps(PRODUCER)}', output='spirv', binding='module'),
+    ], value_edges=[value_edge])
+    return plan
+
+
+def check_value_binding_views(ycxx, scope, env, journal, initial, current):
+    before = scope_state(scope)
+    recorded = journal.read_bytes()
+    graph = current['dependency_graph']
+    assert graph['value_edges'] == initial['dependency_graph']['value_edges']
+
+    def show(format_, *args):
+        result = run_client(ycxx, scope, env, 'show', 'app', f'--format={format_}', *args)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    encoded = show('json')
+    assert json.loads(encoded) == current and show('json') == encoded
+    check_value_bindings_html(show('html'), current)
+
+    baseline = scope.parent / 'value-baseline.json'
+    baseline.write_text(json.dumps(initial), encoding='utf-8')
+    args = ('--against', str(baseline))
+    encoded = show('json', *args)
+    assert show('json', *args) == encoded
+    diff = json.loads(encoded)
+    assert diff['dependency_changes'] == [], diff
+    for kind, target in (('value-export', PRODUCER), ('fact-input', 'scene_bindings')):
+        change = {'change': 'changed', 'before': fact(initial, kind, target, layout(1)),
+                  'after': fact(current, kind, target, layout(3))}
+        assert change in diff['changes'], (change, diff)
+    check_value_bindings_html(show('html', *args), current)
+
+    # A schema-1 graph from before value coverage still participates in artifact comparisons.
+    added, *rest = graph['edges']
+    legacy_graph = {'complete': True, 'edges': rest}
+    baseline.write_text(json.dumps({**current, 'dependency_graph': legacy_graph}), encoding='utf-8')
+    legacy_diff = json.loads(show('json', *args))
+    assert legacy_diff['dependency_changes'] == [{'before': [], 'after': [added]}], legacy_diff
+    check_value_bindings_html(show('html', *args), current)
+    assert journal.read_bytes() == recorded, 'value binding inspection ran a shader tool'
+    assert scope_state(scope) == before, 'value binding inspection changed the workspace'
 
 
 def read_journal(journal):
@@ -219,7 +280,7 @@ def check_runtime_only(ycxx, scope, env, journal, fragment):
     events = [json.loads(line) for line in result.stderr.splitlines()]
     check_external_actions(events, 'fragment', 'scene')
     assert not any(event.get('kind') in ('RuleWitness', 'RuleClassifier', 'RuleValue') for event in events), events
-    assert not {'fragment_reflection', 'scene_bindings'} & set(action_keys(events, 'RuleWorker')), events
+    assert not {PRODUCER, 'scene_bindings'} & set(action_keys(events, 'RuleWorker')), events
     check_tools(read_journal(journal)[offset:], 'fragment', 'python3')
     check_bundle(scope, 'runtime_only')
     check_application(scope, None)
@@ -238,7 +299,8 @@ def check_builds(ycxx, scope, env, journal):
     runs = read_journal(journal)
     check_tools(runs, 'vertex', 'fragment', 'spirv-cross', 'python3', fragment=fragment)
     check_application(scope, 1)
-    origin = inspect(ycxx, scope, env, journal, 1)
+    initial = inspect(ycxx, scope, env, journal, 1)
+    origin = fact(initial, 'value-export', PRODUCER, layout(1))['origin']
     installed = publication(scope / EXE)
     installed_bundle = publication(scope / BUNDLE)
 
@@ -263,7 +325,9 @@ def check_builds(ycxx, scope, env, journal):
     check_tools(read_journal(journal)[len(runs):], 'fragment', 'spirv-cross', 'python3', fragment=fragment)
     check_reuse(scope, installed, events)
     check_application(scope, 1)
-    assert inspect(ycxx, scope, env, journal, 1) != origin, 'show kept stale receipt provenance'
+    refreshed = inspect(ycxx, scope, env, journal, 1)
+    assert fact(refreshed, 'value-export', PRODUCER, layout(1))['origin'] != origin, (
+        'show kept stale receipt provenance')
 
     repaired = check_watch(ycxx, scope, env, journal, changed, stable_key)
 
@@ -273,7 +337,8 @@ def check_builds(ycxx, scope, env, journal):
     compiler.write_text(command + '\n# changed compiler identity\n', encoding='utf-8')
     inspect(ycxx, scope, env, journal)
     compiler.write_text(command, encoding='utf-8')
-    inspect(ycxx, scope, env, journal, 3)
+    current = inspect(ycxx, scope, env, journal, 3)
+    check_value_binding_views(ycxx, scope, env, journal, initial, current)
 
     check_runtime_only(ycxx, scope, env, journal, repaired)
 
