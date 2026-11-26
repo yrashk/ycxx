@@ -833,6 +833,30 @@ from the shipped catalogue.
 The independent Astra design review identified the stable export address and
 separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)
 
+### Staged witness tools (#1515)
+
+An `action.observe` can select its tool through an executable artifact input.
+In the staged-witness example the producer copies `analyzer.sh` as its named
+`runner` output while preserving its executable mode.
+
+```text
+action.observe "observed" {
+    tool = input("analyzer")
+    inputs = { analyzer = artifact("runner", "runner") }
+    export = "score"
+    schema = "example.score.v1"
+}
+```
+
+The coordinator stages the producer receipt and invokes the selected copy
+as the witness. Its bytes and executable mode are part of the witness action
+key. The classifier turns the output into a typed `score` row, which the
+header rule consumes with `facts = { score = value("observed", "score") }`.
+An edit that preserves the classified score can reuse header generation
+and native compilation. Build the example with `ycxx build app` and inspect
+the artifact and value links with `ycxx show app --format=html`.
+[Runnable example](../../examples/project-build/staged-witness/README.md)
+
 ### Structured shader reflection
 
 ```text
