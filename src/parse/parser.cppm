@@ -1556,6 +1556,17 @@ public:
     return sema::allocation_name(f, array);
   }
 
+  // From this array suffix to the declarator-id, other array dimensions and parentheses
+  // preserve a direct array member. A pointer or function constructor in between does not.
+  static bool names_array_member(const Level& level) {
+    for (const Level* part = &level; part; part = part->inner.get()) {
+      if ((part != &level && !part->pointers.empty()) || std::ranges::any_of(part->suffixes, &Suffix::function))
+        return false;
+      if (part->named) return true;
+    }
+    return false;
+  }
+
   Level level(bool abstract, bool& ok, bool conversion = false, bool defer_exception = false,
               bool replay_member_array_bounds = false) {
     Level l;
@@ -1640,7 +1651,8 @@ public:
       // In an abstract declarator, a type-name after `(` begins a parameter declaration
       // instead of naming the entity declared ([dcl.ambig.res]).
       bump();
-      l.inner = std::make_unique<Level>(level(abstract, ok));
+      l.inner = std::make_unique<Level>(level(abstract, ok, /*conversion=*/false, /*defer_exception=*/false,
+                                             replay_member_array_bounds));
       ok = expect(Tk::r_paren) && ok;
     } else if (!abstract) {
       s_->diag(pos(), Diag::expected_unqualified_id);
@@ -1711,8 +1723,8 @@ public:
         Suffix s;
         // [dcl.array]: a converted constant expression of integral type. A nested class
         // specialization reads this member's declared type when the class must be complete.
-        const auto replay = replay_member_array_bounds && l.named ? TemplateArgumentReplay::member_array_bound
-                                                                 : TemplateArgumentReplay::none;
+        const auto replay = replay_member_array_bounds && names_array_member(l)
+            ? TemplateArgumentReplay::member_array_bound : TemplateArgumentReplay::none;
         const TemplateArgumentReplayScope bound(*this, replay);
         Ex e = s_->promote(constant_expression());
         sema::Evaluated ev = sema::Evaluator(*s_, questions()).evaluate(e);
