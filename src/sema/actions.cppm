@@ -2282,12 +2282,15 @@ public:
   }
 
   // Whether a prvalue of pointer or `std::nullptr_t` type `from` converts implicitly to the
-  // non-reference type `to`. Function and multi-level pointers and class targets are not modelled;
-  // `failed` when Derived's instantiation failed, which was diagnosed there.
+  // non-reference type `to`. Class targets, and pointers made similar by a nested member pointer
+  // or array, are not modelled; `failed` when Derived's instantiation failed, which was diagnosed
+  // there.
   enum class PointerConversion : u8 { no, yes, unmodelled, failed };
   PointerConversion object_pointer_conversion(QualType from, QualType to, engine::Loc loc) {
     using enum PointerConversion;
     const Types& ts = types();
+    from = ts.canonical(from);
+    to = ts.canonical(to);
     // A null pointer value converts to any pointer type; to `bool` only by direct-initialization
     // ([conv.ptr]/1, [conv.bool]).
     if (ts.is(from, Builtin::nullptr_t)) {
@@ -2298,18 +2301,22 @@ public:
     if (ts.is_arithmetic(to) || ts.is_enum(to) || ts.is(to, Builtin::nullptr_t) || ts.is_member_pointer(to))
       return no;
     if (!ts.is_pointer(to)) return unmodelled;
+    // Similar pointers whose levels add cv-qualifiers ([conv.qual]), or a pointer to a noexcept
+    // function to one to the same function without it ([conv.fctptr]).
+    if (qualification_convertible(from, to) || function_indirection_convertible(from, to)) return yes;
     const QualType source = ts.canonical(ts.pointee(from)), target = ts.canonical(ts.pointee(to));
-    if (ts.is_function(source) || ts.is_function(target) || ts.is_pointer(source) || ts.is_pointer(target) ||
-        ts.is_member_pointer(source) || ts.is_member_pointer(target))
-      return unmodelled;
+    // Only object pointers convert to `cv void*` or a base ([conv.ptr]).
+    if (ts.is_function(source) || ts.is_function(target)) return no;
     // Every conversion here adds cv-qualifiers to the pointee, never removes them ([conv.qual]).
     // An array's are its elements' ([basic.type.qualifier]/3).
     if (!cv_within(object_cv(source), object_cv(target))) return no;
     const QualType s = object_unqualified(source), t = object_unqualified(target);
-    if (s == t || ts.is_void(t)) return yes;  // the same type, or an object type to `cv void*`
-    // A known bound converts to an unknown one, also nested ([conv.qual]).
-    if (ts.is_array(s) || ts.is_array(t)) return unmodelled;
-    if (!ts.is_class(s) || !ts.is_class(t)) return no;
+    if (ts.is_void(t)) return yes;  // an object type to `cv void*`
+    if (!ts.is_class(s) || !ts.is_class(t)) {
+      // Pointers that differ below their pointer levels are unrelated, unless an array of unknown
+      // bound or a member pointer there makes them similar ([conv.qual]).
+      return similar_types(from, to).has_value() ? no : unmodelled;
+    }
     // Derived* to Base* needs a complete Derived whose Base is accessible and unambiguous
     // ([conv.ptr]/3); without one, the pointer types are unrelated.
     const EntityId derived = ts.class_of(s), base = ts.class_of(t);
@@ -2323,6 +2330,50 @@ public:
       case BasePath::unknown: return unmodelled;
     }
     std::unreachable();
+  }
+  // Whether `a` and `b` are similar ([conv.qual]/2), for the pointer levels qualification
+  // conversions walk: none when an array or a member pointer below them may make them so.
+  std::optional<bool> similar_types(QualType a, QualType b) {
+    const Types& ts = types();
+    a = ts.canonical(a);
+    b = ts.canonical(b);
+    while (ts.is_pointer(a) && ts.is_pointer(b)) {
+      a = ts.canonical(ts.pointee(a));
+      b = ts.canonical(ts.pointee(b));
+    }
+    if (same_unqualified(a, b)) return true;
+    if ((ts.is_array(a) && ts.is_array(b)) || (ts.is_member_pointer(a) && ts.is_member_pointer(b))) return std::nullopt;
+    return false;
+  }
+  // Whether a prvalue of the arithmetic, pointer or `std::nullptr_t` type `from` converts
+  // implicitly to the type `to` of the same kinds ([conv]). `from` comes from `declval`, never a
+  // null pointer constant ([conv.ptr]/1).
+  PointerConversion scalar_conversion(QualType from, QualType to, engine::Loc loc) {
+    const Types& ts = types();
+    if (ts.is_pointer(from) || ts.is(from, Builtin::nullptr_t)) return object_pointer_conversion(from, to, loc);
+    return ts.is_arithmetic(to) ? PointerConversion::yes : PointerConversion::no;
+  }
+  // Whether the reference type `reference` to an arithmetic, pointer or `std::nullptr_t` type
+  // binds to an lvalue (else xvalue) of such a type `source` ([dcl.init.ref]/5).
+  PointerConversion scalar_reference_binding(QualType source, bool lvalue, QualType reference, engine::Loc loc) {
+    using enum PointerConversion;
+    Types& ts = types();
+    const TypeRec r = ts.rec(reference);
+    const QualType target = ts.canonical(r.inner);
+    // cv1 T1 is reference-compatible with cv2 T2 when a pointer to cv2 T2 converts to a pointer to
+    // cv1 T1 by a standard conversion sequence ([dcl.init.ref]/4); for these types, by a
+    // qualification conversion.
+    const QualType from_pointer = ts.pointer(source), to_pointer = ts.pointer(target);
+    const bool compatible = qualification_convertible(from_pointer, to_pointer);
+    if (!r.rvalue_ref && lvalue && compatible) return yes;           // /5.1
+    if (!r.rvalue_ref && object_cv(target) != Cv::const_) return no;  // /5.2
+    if (!lvalue && compatible) return yes;                            // /5.3
+    // /5.4.2: the source converted to a prvalue of T1, materialized. A reference-related T1 and T2
+    // (similar here) need cv1 at least cv2, and an rvalue reference no lvalue.
+    const auto related = similar_types(from_pointer, to_pointer);
+    if (!related) return unmodelled;
+    if (*related && (!cv_within(object_cv(source), object_cv(target)) || (r.rvalue_ref && lvalue))) return no;
+    return scalar_conversion(object_unqualified(source), object_unqualified(target), loc);
   }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
   Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {
@@ -2347,20 +2398,19 @@ public:
     const bool source_lvalue = ts.is_reference(from) && !ts.rec(from).rvalue_ref;
     const bool target_reference = ts.is_reference(to);
     const bool rvalue_target = target_reference && ts.rec(to).rvalue_ref;
-    const bool binds_rvalue = rvalue_target || Types::cv(to_object) == Cv::const_;
-    const auto binds_directly = [&] {
-      return cv_within(Types::cv(from_object), Types::cv(to_object)) && (source_lvalue ? !rvalue_target : binds_rvalue);
-    };
-    // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
-    // throw ([conv.ptr], [conv.qual], [conv.bool]).
-    if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t))) {
-      switch (object_pointer_conversion(from_object, to, loc)) {
+    const auto answer = [&](PointerConversion c) -> Ex {
+      switch (c) {
         case PointerConversion::no: return bool_literal(false, begin, end);
         case PointerConversion::yes: return bool_literal(true, begin, end);
         case PointerConversion::failed: return {NodeId::none, begin, end};
         case PointerConversion::unmodelled: return unsupported();
       }
-    }
+      std::unreachable();
+    };
+    // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
+    // throw ([conv.ptr], [conv.qual], [conv.bool]).
+    if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t)))
+      return answer(object_pointer_conversion(from_object, to, loc));
     if (op == ast::DepOp::is_convertible && ts.is_class(from_object) && ts.is_class(to_object)) {
       const EntityId derived = ts.class_of(from_object), base = ts.class_of(to_object);
       if (derived == base || is_union_type(from_object) != false || is_union_type(to_object) != false)
@@ -2376,20 +2426,24 @@ public:
       if (!base_record) return unsupported();
       // The classes are reference-related, so an invalid direct binding cannot fall back to
       // a user-defined conversion or a converted temporary ([dcl.init.ref]).
-      if (target_reference) return bool_literal(binds_directly(), begin, end);
+      if (target_reference) {
+        const bool binds_rvalue = rvalue_target || Types::cv(to_object) == Cv::const_;
+        return bool_literal(cv_within(Types::cv(from_object), Types::cv(to_object)) &&
+                                (source_lvalue ? !rvalue_target : binds_rvalue),
+                            begin, end);
+      }
       if (supports_base_value_conversion(*base_record, from_object, source_lvalue))
         return bool_literal(true, begin, end);
       return unsupported();
     }
-    if ((!from_void && !ts.is_arithmetic(from_object)) || (!to_void && !ts.is_arithmetic(to_object))) return unsupported();
+    const auto scalar = [&](QualType t) {
+      return ts.is_arithmetic(t) || ts.is_pointer(t) || ts.is(t, Builtin::nullptr_t);
+    };
+    if ((!from_void && !scalar(from_object)) || (!to_void && !scalar(to_object))) return unsupported();
     if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
-    if (!target_reference) return bool_literal(true, begin, end);
-
-    // Different arithmetic types require conversion to a temporary of the target type.
-    if (Types::unqualified(from_object) != Types::unqualified(to_object))
-      return bool_literal(binds_rvalue, begin, end);
-
-    return bool_literal(binds_directly(), begin, end);
+    // These conversions and bindings do not throw either.
+    if (!target_reference) return answer(scalar_conversion(from_object, to_object, loc));
+    return answer(scalar_reference_binding(from_object, source_lvalue, to, loc));
   }
   // `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
   // ([meta.unary.prop]): T is a reference and `T t = VAL<U>;` (or `T t(VAL<U>)`) binds t to a temporary,

@@ -696,8 +696,8 @@ written default member initializer are value-initialized.
   operands, including dependent operands in supported class-template bases and variable-template
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
-  cv `void` and object pointers (derived-to-base, `void*`, added qualifiers, `bool`), including
-  dependent operands in the same template contexts.
+  cv `void`, object and multi-level pointers (derived-to-base, `void*`, qualification conversions,
+  `bool`) and references to pointers, including dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
