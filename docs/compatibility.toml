@@ -105,11 +105,11 @@ status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §1.1, §2.4, [intro.object]"
 prior = "Treat a record with an ordinary no_unique_address field as POD for base layout."
-spec = "Allow reuse of base tail padding when an otherwise POD base has a potentially overlapping field."
-gcc = "Same as spec."
-clang = "Reserve the base's tail padding for the ordinary field tested on both x86-64 Linux and AArch64 Darwin."
+spec = "Reserve the full size of an otherwise POD base with a potentially overlapping field, as required by the finalization step in Itanium §2.4."
+gcc = "Reuse base tail padding when the tested otherwise POD base has a potentially overlapping field."
+clang = "Same as spec for the tested ordinary field on x86-64 Linux and AArch64 Darwin."
 probe = 'struct B { int n; [[no_unique_address]] char c; }; struct D : B { char more; };'
-evidence = ["tests/daemon/compatibility.py"]
+evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types"]
 
 [[divergence]]
 id = "dependent-variable-template-symbol"

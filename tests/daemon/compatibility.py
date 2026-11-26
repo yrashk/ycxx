@@ -1074,7 +1074,7 @@ int use() { return transform(7); }
                 'DELETED_DESTRUCTOR': 12,
                 'ASSIGNMENT_TEMPLATE': 12,
                 'PRIVATE_MEMBERS': 12 if darwin_clang else 8,
-                'OVERLAPPING_MEMBER': 12 if mode == 'clang' else 8,
+                'OVERLAPPING_MEMBER': 8 if mode == 'gcc' else 12,
             }
             for case, size in sizes.items():
                 invoke(target, *flags, '-D' + case, f'-DEXPECTED={size}', '-fsyntax-only', 'tail-padding.cpp')
@@ -1847,10 +1847,10 @@ int main() {
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
-        peer = clang if mode == 'clang' else gxx
-        if not peer:
-            continue
         for feature in ('PRIVATE_MEMBERS', 'OVERLAPPING_MEMBER'):
+            peer = clang if mode == 'clang' or (mode == 'spec' and feature == 'OVERLAPPING_MEMBER') else gxx
+            if not peer:
+                continue
             definition = '-D' + feature
             subprocess.run([peer, '-std=c++26', definition, '-c', 'tail-peer.cpp', '-o', 'tail-peer.o'],
                            cwd=scope, check=True, capture_output=True, timeout=40)

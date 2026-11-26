@@ -12326,10 +12326,11 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       return !base || (base->pod && (rec.fields.empty() || base->fields.empty()));
     });
   } else {
-    // The Itanium rule uses the C++03 aggregate layout, with an exception for overlapping fields.
+    // The Itanium rule uses the C++03 aggregate layout. Section 2.4 finalization reserves
+    // the full size of an otherwise POD record even with potentially overlapping fields.
     rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
       return rec.access_of(f.entity) == ast::Access::public_ &&
-             (compatibility_ == ast::Compatibility::clang || !f.no_unique_address);
+             (compatibility_ != ast::Compatibility::gcc || !f.no_unique_address);
     });
   }
   if (!user_copy_assignment || defaulted_assignment)
