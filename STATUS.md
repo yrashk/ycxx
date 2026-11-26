@@ -4009,6 +4009,11 @@ Construction and destruction phases and broader receiver layouts remain tracked 
   `override`, return types and noexcept conditions to its specializations when its base is
   written there (`may_override_dependent_base`, `validate_override`). `instantiating_bases_` gives
   a specialization's members its substituted base while they are analysed.
+- Clang mode diagnoses a nondefining self-typed static data member at a template definition
+  that directly declares a pure virtual function. It also checks self-typed static data members
+  when a demanded specialization is abstract. A directly written template-id keeps the tested
+  Clang acceptance. Abstractness for layout and type traits is determined for the specialization. [[class.abstract]](https://eel.is/c++draft/class.abstract)
+  · [[class.static.data]](https://eel.is/c++draft/class.static.data) · [#1485](https://github.com/yrashk/ycxx/issues/1485)
 - An implicit specialization has no key function: its table, RTTI and the members of its slots are
   weak. `instantiate_all` requires the slots' definitions only when the unit emits a constructor
   or destructor that installs the table, or a key function that owns it ([temp.inst]). Synthesized

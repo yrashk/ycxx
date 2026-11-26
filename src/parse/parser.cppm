@@ -48,6 +48,7 @@ struct DeclSpec {
   QualType type{};
   std::optional<u32> constrained_auto_at;  // the concept's name in a constrained placeholder
   bool has_type = false;
+  bool written_type_template_id = false;
   bool is_static = false;
   bool is_extern = false;
   bool is_inline = false;
@@ -697,10 +698,12 @@ public:
     auto qualified_specifier = [&] {
       const auto diags = s_->diag_count();
       const auto alias_failures = alias_constraint_failures_;
-      if (auto q = qualified_type(0, true);
+      bool terminal_template_id = false;
+      if (auto q = qualified_type(0, true, /*type_only=*/false, nullptr, &terminal_template_id);
           q && (in_type_id || kind(q->second) != Tk::l_paren || function_pointer_declarator_ahead(q->second) ||
                 (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
         cls = q->first;
+        d.written_type_template_id = terminal_template_id;
         take_qualified(q->second);
         return true;
       }
@@ -860,7 +863,9 @@ public:
         const auto alias_failures = alias_constraint_failures_;
         const auto diagnosed = s_->diagnosed_constant_calls;
         const auto diags = s_->diag_count();
-        auto q = qualified_type_ahead() ? qualified_type(0, true) : std::nullopt;
+        bool terminal_template_id = false;
+        auto q = qualified_type_ahead() ? qualified_type(0, true, /*type_only=*/false, nullptr, &terminal_template_id)
+                                        : std::nullopt;
         if (!q || any_type()) {
           if (alias_constraint_failures_ == alias_failures && diagnosed == s_->diagnosed_constant_calls &&
               (q || !s_->has_error_since(diags)))
@@ -869,6 +874,7 @@ public:
           goto done;
         }
         cls = q->first;
+        d.written_type_template_id = terminal_template_id;
         take_qualified(q->second);
         continue;
       }
@@ -879,7 +885,8 @@ public:
         if (qualified_ahead(1)) {
           bump();
           const std::size_t diags = s_->diag_count();
-          auto q = qualified_type(0, /*checked=*/true, /*type_only=*/true);
+          bool terminal_template_id = false;
+          auto q = qualified_type(0, /*checked=*/true, /*type_only=*/true, nullptr, &terminal_template_id);
           if (!q || !s_->types().is_class(q->first) || s_->is_union_type(q->first) != (k == Tk::kw_union) ||
               any_type()) {
             if (s_->diag_count() == diags) s_->diag(at, Diag::expected_type_specifier);
@@ -887,6 +894,7 @@ public:
             goto done;
           }
           cls = q->first;
+          d.written_type_template_id = terminal_template_id;
           take_qualified(q->second);
           continue;
         }
@@ -982,6 +990,7 @@ public:
               goto done;
             }
             cls = t;
+            d.written_type_template_id = true;
             continue;  // the arguments are consumed
           }
           // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]).
