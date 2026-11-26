@@ -77,6 +77,8 @@ Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
+The plan's **Value bindings** section links each resolved binding to its
+use in `build.ycxx`.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
 owned names. The shader bundle plans its modules from a generated inventory

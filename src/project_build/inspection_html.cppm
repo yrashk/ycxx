@@ -259,7 +259,7 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
   out += "</tbody></table></section>\n";
 }
 
-void append_dependency_detail(std::string& out, std::string_view label, const std::optional<std::string>& value) {
+void append_dependency_detail(std::string& out, std::string_view label, std::optional<std::string_view> value) {
   if (!value) return;
   out += R"(<span class="origin">)";
   out += label;
@@ -341,6 +341,38 @@ void append_dependencies(std::string& out, const DependencyGraphInspection& grap
     escaped(out, edge.producer);
     out += "</code>";
     append_dependency_detail(out, "Output", edge.output);
+    out += "</td><td>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_value_bindings(std::string& out, std::span<const PlanValueDependencyEdge> edges,
+                           bool complete, std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="value-bindings"><h2 id="value-bindings">Value bindings</h2>)";
+  if (!complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved value bindings so far.</p>)";
+  if (edges.empty()) {
+    out += R"(<p class="empty">)";
+    out += complete ? "No value bindings." : "No resolved value bindings yet.";
+    out += "</p></section>\n";
+    return;
+  }
+  out += R"(<table class="facts dependencies" aria-labelledby="value-bindings">
+  <thead><tr><th scope="col">Consumer</th><th scope="col">Usage</th><th scope="col">Producer</th><th scope="col">Declared at</th></tr></thead><tbody>
+)";
+  for (const auto& edge : edges) {
+    out += "<tr><td><code>";
+    escaped(out, edge.consumer);
+    out += "</code></td><td><code>";
+    escaped(out, edge.usage);
+    out += "</code>";
+    append_dependency_detail(out, "Binding", edge.binding);
+    out += "</td><td><code>";
+    escaped(out, edge.producer);
+    out += "</code>";
+    append_dependency_detail(out, "Export", edge.export_name);
     out += "</td><td>";
     append_dependency_location(out, edge.location, lines);
     out += "</td></tr>\n";
@@ -695,7 +727,11 @@ std::string render_inspection_html(const PlanInspection& inspection,
     append_changes(out, *changes, lines);
   }
   if (dependency_changes) append_dependency_changes(out, *dependency_changes, lines);
-  if (inspection.dependency_graph) append_dependencies(out, *inspection.dependency_graph, lines);
+  if (inspection.dependency_graph) {
+    const auto& graph = *inspection.dependency_graph;
+    append_dependencies(out, graph, lines);
+    if (graph.value_edges) append_value_bindings(out, *graph.value_edges, graph.complete, lines);
+  }
   append_facts(out, inspection.facts, lines);
   out += "</div>";
   append_manifest(out, definition);

@@ -3363,6 +3363,13 @@ named input edges also give the consumer binding. Unresolved rules can yield
 an incomplete graph with the edges resolved so far. The HTML report shows
 these records under **Dependencies**, with links into the manifest.
 
+The `dependency_graph.value_edges` array records resolved typed export
+bindings (#1477). A value edge names the consumer, usage (`capabilities`
+or `facts`), binding, producer, and export, with the manifest location of
+the `value(...)` reference. Graph completeness applies to both edge arrays.
+HTML plans and comparisons show current edges under **Value bindings**,
+with source links.
+
 `ycxx show --against` compares occurrence counts by consumer, usage,
 producer, output, and binding when both plans have complete dependency
 graphs (#1464).
