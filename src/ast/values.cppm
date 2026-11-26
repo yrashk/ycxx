@@ -220,6 +220,7 @@ struct [[=dependent]] VDepVariable {
 // A call to a named immediate function. The arguments are explicit types for a function
 // template without function arguments, or ordinary values for a non-template function.
 struct [[=dependent]] VDepCall {
+  QualType result_type;
   EntityId callee;
   SeqId<TemplateArg> args;
 };
@@ -282,6 +283,7 @@ enum class DepOp : u8 {
   reference_converts_from_temporary,
   alignof_type,  // replayed from the written dependent base argument
   array_rank,
+  is_trivial, is_pod,
 };
 
 constexpr bool returns_size_type(DepOp op) {

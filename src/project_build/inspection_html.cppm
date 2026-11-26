@@ -3,6 +3,16 @@ export module ycxx.build.inspection_html;
 
 import std;
 import ycxx.build.inspection_model;
+import ycxx.build.module_graph_diff;
+
+export namespace ycxx::build {
+
+struct ModuleGraphComparison {
+  const ModuleGraphInspection& before;
+  const ModuleGraphChanges& changes;
+};
+
+}  // namespace ycxx::build
 
 namespace ycxx::build {
 namespace {
@@ -58,6 +68,37 @@ constexpr std::string_view styles = R"HTML(
   .before code { color: #a0333a; }
   .after code { color: #116749; }
   .empty { padding: .9rem 1.1rem; color: var(--muted); }
+  .module-summary, .module-notice { padding: .75rem 1.1rem; overflow-wrap: anywhere; }
+  .module-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .25rem 1rem; }
+  .module-status, .module-meta { color: var(--muted); font-size: .83rem; }
+  .module-notice { background: #f8f7f2; border-top: 1px solid var(--border); }
+  .module-notice h3 { font-size: .92rem; margin: 0 0 .25rem; }
+  .module-notice ul { margin: .25rem 0 0; padding-left: 1.2rem; }
+  .module-unit { border-top: 1px solid var(--border); scroll-margin-block: .65rem; }
+  .module-unit summary { padding: .65rem 1.1rem; cursor: pointer; overflow-wrap: anywhere; }
+  .module-unit summary .module-meta { margin-left: .45rem; }
+  .module-unit code, .module-notice code { white-space: pre-wrap; }
+  .module-directives { margin: 0 1.1rem .7rem 2.15rem; padding: 0; list-style: none; }
+  .module-directives > li { padding: .4rem .55rem; border-left: 2px solid #dbe2ea;
+    overflow-wrap: anywhere; scroll-margin-block: .65rem; }
+  .module-unit:target > summary, .module-directives > li:target { background: #e5f1f3; }
+  .module-directive { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .1rem .7rem; }
+  .module-site { display: block; color: var(--muted); }
+  .module-candidates { margin: .2rem 0 0; padding-left: 1.15rem; }
+  .module-candidates li { padding: .06rem 0; }
+  .module-change-group { padding: .65rem 1.1rem; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+  .module-change-group h3 { margin: 0 0 .3rem; font-size: .95rem; }
+  .module-change-group > ul { margin: 0; padding: 0; list-style: none; }
+  .module-change { padding: .65rem 0; }
+  .module-change + .module-change { border-top: 1px solid #e8edf2; }
+  .module-change-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .65rem; margin-bottom: .32rem; }
+  .module-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+  .module-side { display: block; min-width: 0; padding: .5rem .65rem; border: 1px solid #e8edf2; border-radius: .4rem; }
+  .module-side.before { background: #f9fafc; }
+  .module-side.after { background: #f2f8f8; }
+  .module-side > .side-label, .module-side > .module-status, .module-detail-label { display: block; }
+  .module-side code { color: inherit; white-space: pre-wrap; }
+  .module-side-items { margin: .2rem 0 0; padding-left: 1.15rem; }
   .manifest { position: sticky; top: 1rem; background: #182537; color: #ecf4ff; border-color: #24374e; }
   .manifest h2 { border-color: #34475d; }
   .source-scroll { overflow: auto; max-height: calc(100vh - 8rem); border-radius: 0 0 .75rem .75rem; }
@@ -75,6 +116,7 @@ constexpr std::string_view styles = R"HTML(
   @media (max-width: 31rem) {
     .facts th, .facts td, .changes li { padding-inline: .6rem; }
     .facts th:first-child { width: 24%; }
+    .module-sides { grid-template-columns: minmax(0, 1fr); }
   }
 </style>
 )HTML";
@@ -144,6 +186,12 @@ void append_owner(std::string& out, const PlanFact& fact) {
   out += "</span>";
 }
 
+void append_action(std::string& out, std::string_view change) {
+  if (change == "added") out += R"(<span class="action added">Added</span>)";
+  else if (change == "removed") out += R"(<span class="action removed">Removed</span>)";
+  else out += R"(<span class="action changed">Changed</span>)";
+}
+
 void append_changes(std::string& out, const std::vector<PlanChange>& changes, std::size_t lines) {
   out += R"(<section class="panel" aria-labelledby="changes"><h2 id="changes">Plan changes</h2>)";
   if (changes.empty()) {
@@ -155,9 +203,7 @@ void append_changes(std::string& out, const std::vector<PlanChange>& changes, st
     if (!change.before && !change.after) continue;
     const PlanFact& fact = change.after ? *change.after : *change.before;
     out += "<li><div>";
-    if (change.change == "added") out += R"(<span class="action added">Added</span>)";
-    else if (change.change == "removed") out += R"(<span class="action removed">Removed</span>)";
-    else out += R"(<span class="action changed">Changed</span>)";
+    append_action(out, change.change);
     append_owner(out, fact);
     out += "</div><div>";
     if (change.before && change.after) {
@@ -201,6 +247,300 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
   out += "</tbody></table></section>\n";
 }
 
+std::string_view module_label(std::string_view value) {
+  using Label = std::pair<std::string_view, std::string_view>;
+  constexpr Label labels[] = {
+      {"interface_unit", "interface unit"}, {"implementation_unit", "implementation unit"},
+      {"exported_import", "export import"}, {"generated_inputs_unavailable", "generated inputs unavailable"},
+      {"preprocessing_incomplete", "preprocessing incomplete"}, {"unresolved_partition", "unresolved partition"},
+      {"external_or_unresolved", "external or unresolved"},
+  };
+  const auto found = std::ranges::find(labels, value, &Label::first);
+  return found == std::ranges::end(labels) ? value : found->second;
+}
+
+void append_module_site(std::string& out, const ModuleSourceLocation& location) {
+  escaped(out, location.path);
+  std::format_to(std::back_inserter(out), ":{}:{}", location.line, location.column);
+}
+
+using ModuleDeclarations = std::map<std::pair<std::size_t, std::size_t>, const ModuleDeclarationInspection*>;
+using ModuleSources = std::map<std::size_t, std::string_view>;
+
+struct ModuleSites {
+  ModuleDeclarations declarations;
+  ModuleSources sources;
+};
+
+ModuleSites index_module_sites(const ModuleGraphInspection& graph) {
+  ModuleSites sites;
+  for (const auto& unit : graph.units) {
+    sites.sources.emplace(unit.id, unit.source);
+    for (const auto& declaration : unit.declarations)
+      sites.declarations.emplace(std::pair{unit.id, declaration.directive_index}, &declaration);
+  }
+  return sites;
+}
+
+void append_module_site_link(std::string& out, const ModuleSourceLocation& location, std::string_view kind,
+                             std::size_t unit, std::size_t index, bool link) {
+  if (link) std::format_to(std::back_inserter(out), R"(<a href="#module-{}-{}-{}">)", kind, unit, index);
+  out += "<code>";
+  append_module_site(out, location);
+  out += "</code>";
+  if (link) out += "</a>";
+}
+
+void append_module_source_link(std::string& out, std::string_view source, std::size_t unit, bool link) {
+  if (link) std::format_to(std::back_inserter(out), R"(<a href="#module-unit-{}">)", unit);
+  out += "<code>";
+  escaped(out, source);
+  std::format_to(std::back_inserter(out), R"(</code> <span class="module-meta">· Unit {}</span>)", unit);
+  if (link) out += "</a>";
+}
+
+void append_module_candidates(std::string& out, const std::vector<ModuleCandidateInspection>& candidates,
+                              const ModuleDeclarations& declarations, bool link = true) {
+  if (candidates.empty()) return;
+  out += R"(<ul class="module-candidates">)";
+  for (const auto& candidate : candidates) {
+    const auto [unit, index] = candidate;
+    out += "<li>";
+    append_module_site_link(out, declarations.at({unit, index})->location, "declaration", unit, index, link);
+    std::format_to(std::back_inserter(out), R"( <span class="module-meta">· Unit {}</span></li>)", unit);
+  }
+  out += "</ul>";
+}
+
+void append_module_directive(std::string& out, std::string_view kind, std::string_view name,
+                             const ModuleSourceLocation& location, std::string_view status = {}) {
+  out += R"(<div class="module-directive"><code>)";
+  escaped(out, module_label(kind));
+  out += ' ';
+  escaped(out, name);
+  out += "</code>";
+  if (!status.empty()) {
+    out += R"(<span class="module-status">)";
+    escaped(out, module_label(status));
+    out += "</span>";
+  }
+  out += R"(</div><code class="module-site">)";
+  append_module_site(out, location);
+  out += "</code>";
+}
+
+void append_module_unit(std::string& out, const ModuleUnitInspection& unit,
+                        std::span<const ModuleImportInspection* const> imports, const ModuleDeclarations& declarations) {
+  const bool has_directives = !unit.declarations.empty() || !imports.empty();
+  std::format_to(std::back_inserter(out), R"(<details class="module-unit" id="module-unit-{}"{}><summary><code>)",
+                 unit.id, has_directives || unit.scan != "complete" ? " open" : "");
+  escaped(out, unit.source);
+  std::format_to(std::back_inserter(out), R"(</code><span class="module-meta">Unit {})", unit.id);
+  if (unit.scan != "complete") {
+    out += " · ";
+    escaped(out, module_label(unit.scan));
+  }
+  out += "</span></summary>";
+  if (has_directives) {
+    out += R"(<ul class="module-directives" role="list">)";
+    for (const auto& declaration : unit.declarations) {
+      std::format_to(std::back_inserter(out), R"(<li id="module-declaration-{}-{}">)", unit.id, declaration.directive_index);
+      append_module_directive(out, declaration.kind, declaration.name, declaration.location);
+      out += "</li>";
+    }
+    for (const auto* import : imports) {
+      std::format_to(std::back_inserter(out), R"(<li id="module-import-{}-{}">)", unit.id, import->directive_index);
+      append_module_directive(out, import->kind, import->name, import->location, import->status);
+      append_module_candidates(out, import->candidates, declarations);
+      out += "</li>";
+    }
+    out += "</ul>";
+  } else if (unit.scan == "complete") {
+    out += R"(<p class="empty">No named-module directives.</p>)";
+  }
+  out += "</details>\n";
+}
+
+void append_module_graph(std::string& out, const ModuleGraphInspection& graph, const ModuleSites& sites) {
+  out += R"(<section class="panel" aria-labelledby="module-graph"><h2 id="module-graph">Module graph</h2>)";
+  out += R"(<p class="module-summary"><code>)";
+  escaped(out, graph.native_target);
+  out += R"(</code><span class="module-status">)";
+  out += graph.complete ? "Complete" : "Incomplete";
+  out += "</span></p>";
+  if (graph.units.empty()) {
+    out += R"(<p class="empty">No C++ translation units.</p></section>)";
+    return;
+  }
+
+  std::map<std::size_t, std::vector<const ModuleImportInspection*>> imports;
+  for (const auto& import : graph.imports) imports[import.unit_id].push_back(&import);
+
+  if (!graph.conflicts.empty()) {
+    out += R"(<div class="module-notice"><h3>Provider conflicts</h3><ul>)";
+    for (const auto& conflict : graph.conflicts) {
+      out += "<li><code>";
+      escaped(out, conflict.name);
+      out += "</code>";
+      append_module_candidates(out, conflict.candidates, sites.declarations);
+      out += "</li>";
+    }
+    out += "</ul></div>";
+  }
+  if (!graph.cycles.empty()) {
+    out += R"(<div class="module-notice"><h3>Cyclic components</h3><ul>)";
+    for (const auto& cycle : graph.cycles) {
+      std::string_view separator;
+      out += "<li>";
+      for (const auto unit : cycle) {
+        out += separator;
+        append_module_source_link(out, sites.sources.at(unit), unit, true);
+        separator = ", ";
+      }
+      out += "</li>";
+    }
+    out += "</ul></div>";
+  }
+  for (const auto& unit : graph.units) {
+    std::span<const ModuleImportInspection* const> edges;
+    if (const auto found = imports.find(unit.id); found != imports.end()) edges = found->second;
+    append_module_unit(out, unit, edges, sites.declarations);
+  }
+  out += "</section>\n";
+}
+
+struct ModuleSide {
+  const ModuleSites& sites;
+  bool current;
+};
+
+using ModuleSides = std::array<ModuleSide, 2>;
+
+void append_changed_import(std::string& out, const ModuleImportInspection& edge, ModuleSide side) {
+  out += R"(<span class="module-status">)";
+  escaped(out, module_label(edge.kind));
+  out += " · ";
+  escaped(out, module_label(edge.status));
+  out += "</span>";
+  append_module_site_link(out, edge.location, "import", edge.unit_id, edge.directive_index, side.current);
+  std::format_to(std::back_inserter(out), R"( <span class="module-meta">· Unit {}</span>)", edge.unit_id);
+  if (!edge.candidates.empty()) out += R"(<span class="module-meta module-detail-label">Provider candidates</span>)";
+  append_module_candidates(out, edge.candidates, side.sites.declarations, side.current);
+}
+
+void append_changed_unit(std::string& out, const ModuleUnitInspection& unit, ModuleSide side) {
+  append_module_source_link(out, unit.source, unit.id, side.current);
+  out += R"(<span class="module-status">)";
+  escaped(out, module_label(unit.scan));
+  out += "</span>";
+  if (unit.configuration && !unit.configuration->include_dirs.empty()) {
+    out += R"(<span class="module-meta module-detail-label">Include path order</span><ol class="module-side-items">)";
+    for (const auto& directory : unit.configuration->include_dirs) {
+      out += "<li><code>";
+      escaped(out, directory);
+      out += "</code></li>";
+    }
+    out += "</ol>";
+  }
+  if (unit.declarations.empty()) return;
+  out += R"(<ul class="module-side-items">)";
+  for (const auto& declaration : unit.declarations) {
+    out += "<li><code>";
+    escaped(out, module_label(declaration.kind));
+    out += ' ';
+    escaped(out, declaration.name);
+    out += "</code><br>";
+    append_module_site_link(out, declaration.location, "declaration", unit.id, declaration.directive_index, side.current);
+    out += "</li>";
+  }
+  out += "</ul>";
+}
+
+void append_changed_cycle(std::string& out, const std::vector<std::size_t>& members, ModuleSide side) {
+  out += R"(<ul class="module-side-items">)";
+  for (const auto unit : members) {
+    out += "<li>";
+    append_module_source_link(out, side.sites.sources.at(unit), unit, side.current);
+    out += "</li>";
+  }
+  out += "</ul>";
+}
+
+template <class Record, class Render>
+void append_module_change(std::string& out, const ModuleChange<Record>& change, const ModuleSides& sides,
+                          std::string_view subject, Render render) {
+  out += R"(<li class="module-change"><div class="module-change-heading">)";
+  append_action(out, change.change);
+  if (!subject.empty()) {
+    out += "<code>";
+    escaped(out, subject);
+    out += "</code>";
+  }
+  out += R"(</div><div class="module-sides">)";
+  if (change.before) {
+    out += R"(<div class="module-side before"><span class="side-label">Before</span>)";
+    render(out, *change.before, sides[0]);
+    out += "</div>";
+  }
+  if (change.after) {
+    out += R"(<div class="module-side after"><span class="side-label">After</span>)";
+    render(out, *change.after, sides[1]);
+    out += "</div>";
+  }
+  out += "</div></li>\n";
+}
+
+template <class Record, class Subject, class Render>
+void append_module_change_group(std::string& out, std::string_view title,
+                                std::span<const ModuleChange<Record>> changes, const ModuleSides& sides,
+                                Subject subject, Render render) {
+  if (changes.empty()) return;
+  out += R"(<section class="module-change-group"><h3>)";
+  escaped(out, title);
+  out += R"(</h3><ul role="list">)";
+  for (const auto& change : changes)
+    append_module_change(out, change, sides, subject(change.after ? *change.after : *change.before), render);
+  out += "</ul></section>\n";
+}
+
+void append_module_comparison(std::string& out, const ModuleGraphComparison& comparison,
+                              const ModuleGraphInspection& current, const ModuleSites& current_sites) {
+  const auto& changes = comparison.changes;
+  out += R"(<section class="panel" aria-labelledby="module-changes"><h2 id="module-changes">Module changes</h2>)";
+  out += R"(<p class="module-summary"><span>Before <code>)";
+  escaped(out, comparison.before.native_target);
+  out += R"(</code></span><span>After <code>)";
+  escaped(out, current.native_target);
+  out += "</code></span></p>";
+  if (changes.unavailable) {
+    out += R"(<p class="module-notice"><strong>Module comparison unavailable.</strong> The saved snapshot lacks configuration identities for a source with multiple units.</p></section>)";
+    return;
+  }
+  if (changes.matching)
+    out += R"(<p class="module-notice">Older graph units were matched by source path.</p>)";
+  if (changes.imports.empty() && changes.units.empty() && changes.conflicts.empty() && changes.cycles.empty() &&
+      !changes.completeness) {
+    out += R"(<p class="empty">No semantic module changes.</p></section>)";
+    return;
+  }
+
+  const auto saved_sites = index_module_sites(comparison.before);
+  const ModuleSides sides{{{saved_sites, false}, {current_sites, true}}};
+  const auto unnamed = [](const auto&) { return std::string_view{}; };
+  const auto name = [](const auto& change) -> std::string_view { return change.name; };
+  append_module_change_group(out, "Import changes", std::span{changes.imports}, sides, name, append_changed_import);
+  append_module_change_group(out, "Translation unit changes", std::span{changes.units}, sides, unnamed, append_changed_unit);
+  append_module_change_group(out, "Provider conflict changes", std::span{changes.conflicts}, sides, name,
+      [](std::string& html, const ModuleConflictInspection& conflict, ModuleSide side) {
+        append_module_candidates(html, conflict.candidates, side.sites.declarations, side.current);
+      });
+  append_module_change_group(out, "Cycle changes", std::span{changes.cycles}, sides, unnamed, append_changed_cycle);
+  if (changes.completeness)
+    append_module_change_group(out, "Scan completeness", std::span{&*changes.completeness, 1}, sides, unnamed,
+        [](std::string& html, bool complete, ModuleSide) { html += complete ? "Complete" : "Incomplete"; });
+  out += "</section>\n";
+}
+
 void append_manifest(std::string& out, std::string_view text) {
   out += R"(<section class="panel manifest" aria-labelledby="manifest"><h2 id="manifest">build.ycxx</h2>
 <div class="source-scroll" tabindex="0" role="region" aria-labelledby="manifest"><pre><code>)";
@@ -222,7 +562,8 @@ void append_manifest(std::string& out, std::string_view text) {
 export namespace ycxx::build {
 
 std::string render_inspection_html(const PlanInspection& inspection,
-                                   const std::optional<std::vector<PlanChange>>& changes = std::nullopt) {
+                                   const std::vector<PlanChange>* changes = nullptr,
+                                   const std::optional<ModuleGraphComparison>& modules = std::nullopt) {
   std::string out = R"(<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -236,7 +577,14 @@ std::string render_inspection_html(const PlanInspection& inspection,
   const std::string_view definition = inspection.definition;
   const auto lines = static_cast<std::size_t>(std::ranges::count(definition, '\n'))
                      + (!definition.empty() && definition.back() != '\n');
-  if (changes) append_changes(out, *changes, lines);
+  if (inspection.module_graph) {
+    const auto sites = index_module_sites(*inspection.module_graph);
+    if (modules) append_module_comparison(out, *modules, *inspection.module_graph, sites);
+    if (changes) append_changes(out, *changes, lines);
+    append_module_graph(out, *inspection.module_graph, sites);
+  } else if (changes) {
+    append_changes(out, *changes, lines);
+  }
   append_facts(out, inspection.facts, lines);
   out += "</div>";
   append_manifest(out, definition);

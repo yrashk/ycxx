@@ -215,8 +215,36 @@ separate identity per triple. Read-only inspection shows the argument and its
 manifest location. Value traces show the resolved argv position and origin.
 `host_action` package recipes build the rule package for the host.
 
-Modules, declared host and target toolchains, and broader project layouts grow
-coverage in #1259. Package acquisition and version solving sit outside the build.
+Named-module discovery reads the preprocessor's marked module and import
+directives before the native front end runs (#1349). It uses the registered
+unit's target, include paths, and generated-file view. Each unit contributes
+its declaration and named imports to a resident graph. The graph's value omits
+source locations, so moving a directive can update its provenance without
+changing the graph. Discovery reports dependency facts. Named-module
+compilation and BMI support are tracked in #319.
+
+Read-only inspection rescans available sources with the same configuration
+once their rules resolve. A scan that consulted a generated file, including
+a negative include probe, is marked pending in the local plan. The build
+trace can show that unit once its actions provide the virtual inputs.
+
+Provider resolution connects written named imports to reachable interface
+units and named partitions for the selected target (#1353). A primary
+implementation unit does not declare a provider. Repeated registrations of
+one translation unit count as one provider. Imports with no matching
+declaration are external or unresolved. Provider conflicts are visible even
+without an import, and only unambiguous edges enter cycle analysis. The
+reported cycles list the members of each cyclic component.
+
+The resident resolver depends on the location-free module graph. A separate
+report pairs its edges with physical C++ source locations. Read-only plans
+use the same resolver. When a scan is pending, unique or missing matches
+remain provisional and cycles describe the known graph. The compiler work
+that uses these dependency facts for module semantics and BMIs is tracked in
+#319.
+
+Declared host and target toolchains and broader project layouts grow coverage
+in #1259. Package acquisition and version solving sit outside the build.
 
 ## Shader bundles and runtime assets (#1258)
 
@@ -307,6 +335,110 @@ It reads recently admitted rule expansions and verifies the package and declared
 read observations. A rule with no current expansion appears as unresolved.
 Source output always reads the authored definition directly. Inspection runs no
 tools and reports generator inputs and tools by their planned paths.
+
+### Structured named-module graph (#1363)
+
+`ycxx show app --format=json` includes `module_graph` for a resolved plan under
+a supported native configuration. A plan with no C++ translation units has an
+empty graph. The field is absent while rule expansion is unresolved or when no
+native configuration is available.
+The graph reports `native_target` as the selected target triple. `complete`
+indicates whether every unit scan is complete. The graph contains `units`,
+`imports`, `conflicts`, and `cycles` arrays.
+
+- A unit has `id`, `source`, `scan`, and `declarations`. A translation unit
+  registered more than once appears once. Different configurations of the same
+  source have distinct IDs. `scan` is `complete`, `generated_inputs_unavailable`,
+  or `preprocessing_incomplete`. The optional `configuration` records the
+  logical `source` path and ordered `include_dirs`.
+- A declaration has `directive_index`, `kind` (`interface_unit` or
+  `implementation_unit`), `name`, and `location`. An import adds `unit_id`,
+  `status`, and `candidates` and has kind `import` or `exported_import`.
+- Each import or conflict candidate identifies a declaration with
+  `unit_id` and `directive_index`. Unit IDs are zero-based integers scoped to
+  one snapshot. IDs and declaration indexes can be sparse. Look up declarations
+  by their `directive_index` field.
+- Conflicts have a `name` and `candidates`, including conflicts with no matching
+  import. Each cycle is an array of unit IDs in one cyclic component of the
+  known graph.
+
+| Import status | Meaning |
+| --- | --- |
+| `resolved` | One candidate in a complete graph. |
+| `provisional` | One known candidate in an incomplete graph. |
+| `ambiguous` | Multiple known candidates. |
+| `pending` | No known candidate in an incomplete graph. |
+| `unresolved_partition` | No candidate for a partition import in a complete graph. |
+| `external_or_unresolved` | No candidate for a named module import in a complete graph. |
+
+Each `location` has `path`, `line`, and `column` for the first keyword of the
+directive. Lines and byte columns are one-based and refer to the physical file.
+Paths within the workspace are relative to it. Moving a directive refreshes
+its provenance while preserving its dependencies. Schema 1 retains `facts` and
+`show --against` compares those semantic facts, so earlier schema-1 snapshots
+still work. The module-provider example joins these records to compare both
+target variants. [Module-provider example](../../examples/project-build/module-providers/README.md)
+
+### Module graph in HTML (#1378)
+
+`ycxx show app --format=html > plan.html` renders the same optional graph as a
+**Module graph** section in the standalone report. Each configured translation
+unit has a panel for its declarations and imports, with physical source
+locations and import statuses. Candidate links jump to the exact declarations
+in the report. Incomplete scan notes identify the affected units. Conflicts
+link to their candidate declarations and each cyclic component links to its units.
+
+With `--against`, **Plan changes** compares the saved snapshot's semantic
+facts with the current plan. **Module graph** follows that comparison and shows
+the current plan's graph. A resolved plan with a supported native configuration
+and zero C++ translation units shows an empty graph. The section is omitted
+while rule expansion is unresolved or when no native configuration is available.
+
+### Module graph comparisons (#1383)
+
+`ycxx show app --against before.json --format=json` includes `module_changes`
+when both snapshots contain a module graph. Its `units`, `imports`, `conflicts`,
+and `cycles` arrays contain records with `change` (`added`, `removed`, or
+`changed`) and the applicable `before` and `after` records from the original
+graphs. Resolve candidate references and cycle members in their respective
+snapshots. If graph completeness changes, `completeness` carries `change`
+(`changed`) and the `before` and `after` booleans. In an incomplete graph,
+removed entries can reflect a loss of scan coverage.
+
+Units match by `configuration.source` and the ordered
+`configuration.include_dirs`. The target triple may differ between snapshots.
+Paths inside the workspace are relative to it. Per-target virtual source and
+include paths use the common `.ycxx/virtual` root for matching.
+Unit changes cover scan state and named declarations. Repeated imports of the
+same kind and name in a unit pair by occurrence order. Import changes cover
+resolution status and the set of candidate declarations. Conflicts match by
+module name and cycles by their set of configured units. A body-only edit or a
+moved directive produces empty change arrays when the observed graph facts agree.
+
+For an older graph with units that lack `configuration`, unambiguous source
+paths allow source-only matching. The result sets `matching` to
+`legacy_source_only`. Ambiguous source matches produce empty change arrays and
+set `unavailable` to `ambiguous_legacy_configuration`. The plan's `changes`
+array contains the semantic fact comparison in either case. Snapshots saved
+without a graph still produce the original fact comparison.
+
+### Module graph comparisons in HTML (#1390)
+
+`ycxx show app --against before.json --format=html > changes.html` shows
+**Module changes** above **Plan changes** and the current **Module graph**
+when both plans have graphs. It uses the same semantic comparison as JSON.
+Before entries show sites from the saved snapshot. After entries link to the
+current imports, provider declarations, and translation units. The comparison
+also shows scan completeness, changes to individual unit scans, conflicts,
+and cycles. A partial scan can change which providers are observable.
+
+An older graph with unambiguous unit paths can compare by source path. The
+report identifies that fallback and explains when repeated source paths make a
+comparison unavailable. An available comparison with equal semantic results
+shows **No semantic module changes.** A schema-1 snapshot without a graph
+still shows the fact comparison and the current graph when available.
+Inspection is read-only. Named-module compilation and BMI support are tracked
+in [#319](https://github.com/yrashk/ycxx/issues/319).
 
 ## Native rule packages (#1257)
 

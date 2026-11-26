@@ -2160,7 +2160,7 @@ clauses = ['temp.param', 'temp.arg.nontype']
 std = 'C++20'
 ftm = '__cpp_nontype_template_args'
 status = 'partial'
-note = 'Flat structural class arguments, parameter objects and guarded integral member-alias projections. Floating-point arguments and further structural forms remain open.'
+note = 'Flat structural class arguments, parameter objects, guarded integral member-alias projections and record-valued immediate calls in alias replay. Floating-point arguments and further structural forms remain open.'
 probe = '''
 struct P { int x, y; };
 template<P p> int sum() { return p.x + p.y; }
@@ -2420,7 +2420,8 @@ group = 'const'
 clauses = ['expr.const.core']
 std = 'C++20'
 ftm = '__cpp_constexpr'
-status = 'missing'
+status = 'partial'
+note = 'Ordinary constexpr virtual calls with supported scalar or void results work on completed fieldless local objects with implicit default construction and trivial destruction. The externally linked namespace-scope class has no base or one direct public nonvirtual fieldless root base.'
 probe = '''
 struct B { constexpr virtual int f() const { return 1; } }; struct D : B { constexpr int f() const override { return 2; } };
 constexpr int g() { D d; const B& b = d; return b.f(); }
@@ -2621,8 +2622,8 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. Other object-model traits remain partial'
-issues = [218, 211, 1082]
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. __is_trivial and __is_pod evaluate non-record operands, including in supported dependent bases and variable template initializers. Other object-model traits remain partial'
+issues = [218, 211, 1082, 1318]
 probe = '''
 enum E { e };
 int main() { return (__is_same(int, int) && __is_enum(E) && !__is_same(int, long)) ? 0 : 1; }
@@ -2636,7 +2637,7 @@ clauses = ['support.srcloc']
 std = 'C++20'
 detect = '\bsource_location\b'
 status = 'partial'
-note = 'Direct `__builtin_LINE()` and presumed invocation lines for supported ordinary omitted arguments. The descriptor and line-dependent immediate evaluation remain in #327.'
+note = 'Direct `__builtin_LINE()` and the pinned libycxx descriptor capture ordinary invocation locations. The descriptor is supported on Linux x86-64. More immediate-default contexts and other targets remain in #327.'
 probe = '''
 int main() { return __builtin_LINE() == 1 ? 0 : 1; }
 '''

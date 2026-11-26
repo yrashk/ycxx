@@ -139,6 +139,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V})]],
   or_ [[=pure({V, V}, {V})]],
   xor_ [[=pure({V, V}, {V})]],
+  ctz [[=pure({V}, {V})]],  // trailing zero bits; zero input yields poison
   icmp [[=pure({V, V}, {V}).imms({pred})]],  // integers or pointers; result i1
   select [[=pure({V, V, V}, {V})]],
 
@@ -459,6 +460,9 @@ std::expected<void, std::string> verify(const Function& f) {
           break;
         case Op::neg:
           if (!is_int(r) || t(0) != r) return at("operand and result must be one integer type");
+          break;
+        case Op::ctz:
+          if ((r != Type::i32 && r != Type::i64) || t(0) != r) return at("operand and result must both be i32 or both i64");
           break;
         case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv:
           if (!is_float(r) || t(0) != r || t(1) != r) return at("operands and result must be one floating type");

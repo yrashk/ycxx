@@ -14,6 +14,9 @@ class TypeFacts {
  public:
   TypeFacts(ast::Interners& in, const ast::Target& target) : in_(&in), target_(&target) {}
 
+  // The constant evaluator requests checked bodies, including those of reached callees.
+  static constexpr bool evaluating_constants = false;
+
   ast::Interners& interners() const { return *in_; }
   const ast::Target& target() const { return *target_; }
 

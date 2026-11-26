@@ -31,6 +31,8 @@ enum class TypeTrait : std::uint8_t {
   has_unique_object_representations,
   // Queries returning the target size type.
   array_rank,
+  // Deprecated predicates with bounded support.
+  is_trivial, is_pod,
 };
 
 struct TypeTraitInfo {
@@ -103,6 +105,10 @@ inline constexpr std::array type_traits{
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_copyable", .trait = TypeTrait::is_trivially_copyable, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_trivial", .trait = TypeTrait::is_trivial, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_pod", .trait = TypeTrait::is_pod, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{"__is_constructible", TypeTrait::is_constructible, 1, false, false, true},
     TypeTraitInfo{"__is_nothrow_constructible", TypeTrait::is_nothrow_constructible, 1, false, false, true},
     TypeTraitInfo{"__is_trivially_constructible", TypeTrait::is_trivially_constructible, 1, false, false, true},
@@ -149,9 +155,10 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // sema's (`sema::string_functions`).
 enum class BuiltinFunction : std::uint8_t {
   fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
-  source_line,
+  source_line, source_location, ctzg,
 };
 inline constexpr std::string_view builtin_line_name = "__builtin_LINE";
+inline constexpr std::string_view builtin_source_location_name = "__builtin_source_location";
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -173,6 +180,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
+    BuiltinFunctionInfo{"__builtin_ctzg", BuiltinFunction::ctzg},
     BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memcpy", BuiltinFunction::library},
@@ -189,6 +197,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{.name = "__builtin_add_overflow", .function = BuiltinFunction::add_overflow, .advertised = false},
     BuiltinFunctionInfo{.name = "__builtin_mul_overflow", .function = BuiltinFunction::mul_overflow, .advertised = false},
     BuiltinFunctionInfo{builtin_line_name, BuiltinFunction::source_line},
+    BuiltinFunctionInfo{builtin_source_location_name, BuiltinFunction::source_location},
 };
 inline constexpr std::string_view builtin_prefix = "__builtin_";
 // The C library function a `library` builtin calls.
@@ -223,6 +232,7 @@ constexpr bool lacking_builtin(std::string_view name) { return std::ranges::cont
 
 // A built-in with a type operand and a member designator rather than a call argument list.
 inline constexpr std::string_view builtin_offsetof_name = "__builtin_offsetof";
+inline constexpr std::string_view builtin_bit_cast_name = "__builtin_bit_cast";
 
 // The built-in templates ycxx implements (docs/EXTENSIONS.md): Clang's
 // `__make_integer_seq<Seq, T, N>`, `Seq<T, 0, …, N-1>`, which libycxx's `make_integer_sequence`

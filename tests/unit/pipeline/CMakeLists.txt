@@ -104,6 +104,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
             ${PROJECT_SOURCE_DIR}/deps/libycxx)
+  # PARITY: by design: checks native x86-64 ELF linkage and symbols. Darwin runs tests/own.
+  add_test(NAME unit.linux_deduced_callback
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_deduced_callback.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_array_delete
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_array_delete.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
@@ -145,6 +149,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_nontrivial_result
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_nontrivial_result.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
+  # PARITY: by design: exchanges empty result objects with native System V AMD64 peers.
+  add_test(NAME unit.linux_empty_record_transport
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_empty_record_transport.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
@@ -185,6 +193,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_builtin_line
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_line.py
             $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own/builtins/builtin-line.run.cpp)
+  # PARITY: by design: the own run test covers Darwin. This links its x86-64 ELF object
+  # with the native Linux driver (#327).
+  add_test(NAME unit.linux_source_location_descriptor
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_source_location_descriptor.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx
+            ${PROJECT_SOURCE_DIR}/tests/own/headers/source-location-descriptor.run.cpp)
   # PARITY: by design: links and runs x86-64 ELF objects with native peers.
   add_test(NAME unit.linux_virtual_member_final
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_member_final.py
@@ -245,6 +259,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_archive
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_archive.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR})
+  # PARITY: by design: runs native Linux x86-64 executables and checks GNU ELF properties (#1367).
+  add_test(NAME unit.linux_elf_gnu_property
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_gnu_property.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR} ${CMAKE_READELF})
   add_test(NAME unit.linux_archive_output
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_archive_output.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_NM} ${CMAKE_LINKER} ${CMAKE_C_COMPILER})

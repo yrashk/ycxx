@@ -59,6 +59,8 @@ struct Allowance {
   bool function_conversion = false;
 };
 
+enum class AliasSubstitution { ordinary, type_default, signature };
+
 class Templates {
 public:
   // `classes` is the unit's class records (#115), which a dependent name's lookup reads.
@@ -276,11 +278,15 @@ public:
       auto args = substitute_args(ins().seqs.elements(r.args), b);
       if (!args) return std::nullopt;
       // Validate the written arguments before the enclosing specialization is interned.
-      const bool dependent = std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); });
-      if (!dependent && !apply_template(r.entity, *args, /*substituting_default=*/true)) return std::nullopt;
+      const auto is_dependent = [&](const TemplateArg& a) { return w_->arg_dependent(a); };
+      const bool dependent = std::ranges::any_of(*args, is_dependent);
+      const auto use = r.alias_type_default ? AliasSubstitution::type_default : AliasSubstitution::signature;
+      const bool check_now = !dependent ||
+          (use == AliasSubstitution::signature && !std::ranges::all_of(*args, is_dependent));
+      if (check_now && !apply_template(r.entity, *args, use)) return std::nullopt;
       auto result = substitute(r.inner, b);
       if (!result) return std::nullopt;
-      return types().add_cv(dependent ? types().deferred_alias(r.entity, *args, *result) : *result, cv);
+      return types().add_cv(dependent ? types().deferred_alias(r.entity, *args, *result, r.alias_type_default) : *result, cv);
     }
     case TypeKind::builtin_spec: {
       auto args = substitute_args(ins().seqs.elements(r.args), b);
@@ -543,6 +549,8 @@ public:
     // The token-owning replay checks completeness and diagnoses a concrete operand.
     case ast::DepOp::is_aggregate:
     case ast::DepOp::is_trivially_copyable:
+    case ast::DepOp::is_trivial:
+    case ast::DepOp::is_pod:
     case ast::DepOp::is_implicit_lifetime:
     case ast::DepOp::has_unique_object_representations:
     case ast::DepOp::is_destructible:
@@ -627,7 +635,7 @@ public:
     return out;
   }
   // One type or value argument, substituted.
-  std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b) {
+  std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b, bool default_argument = false) {
     // A template: itself, or the argument of the template template parameter it is.
     if (a.kind == TemplateArgKind::template_) {
       if (a.templ == EntityId::none && types().kind(a.type) == TypeKind::dep_name) {
@@ -679,6 +687,9 @@ public:
       return converted_value(value_arg(ins().values.get<ast::VInt>(*value).type, *value), t);
     }
     if (ins().values.is<ast::VDepCall>(a.value)) {
+      const auto result_type = ins().values.get<ast::VDepCall>(a.value).result_type;
+      if (default_argument && immediate_default_constant && types().is_integral(t) && types().is_integral(result_type))
+        return substitute_call_value(a.value, b, t);
       auto value = substitute_call_value(a.value, b);
       if (!value) return std::nullopt;
       if (ins().values.is_dependent(value->value) && !needs_class_value_check(value->type, t, value->value))
@@ -796,6 +807,8 @@ public:
       case ast::DepOp::is_member_function_pointer:
       case ast::DepOp::is_aggregate:
       case ast::DepOp::is_trivially_copyable:
+      case ast::DepOp::is_trivial:
+      case ast::DepOp::is_pod:
       case ast::DepOp::is_implicit_lifetime:
       case ast::DepOp::has_unique_object_representations:
       case ast::DepOp::is_destructible:
@@ -1813,7 +1826,7 @@ public:
   // template's specialization, an alias template's type with the arguments substituted
   // ([temp.alias]/2); none when the arguments do not fit ([temp.deduct.general]/8).
   std::optional<QualType> apply_template(EntityId templ, std::span<const TemplateArg> written,
-                                         bool substituting_default = false) {
+                                         AliasSubstitution use = AliasSubstitution::ordinary) {
     if (!template_decl) return std::nullopt;
     std::vector<TemplateArg> args = flatten(written);  // `TT<args>` keeps its own head's packs
     auto decl = template_decl(templ);
@@ -1831,7 +1844,7 @@ public:
     if (!full) return std::nullopt;
     if (decl->kind == ast::DeclKind::type_alias) {
       auto bindings = Bindings::of(ps.empty() ? 0 : ps[0].depth, *full);
-      if (alias_type) return alias_type(*decl, *full, bindings, substituting_default);
+      if (alias_type) return alias_type(*decl, *full, bindings, use);
       return substitute(decl->type, bindings);
     }
     return types().class_type(specialize_class(templ, *full));
@@ -1885,7 +1898,14 @@ public:
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
     if (needs_class_value_check(a.type, t, a.value)) {
-      if (types().canonical(Types::unqualified(a.type)) != t || !structural_class_parameter(t)) return std::nullopt;
+      if (!structural_class_parameter(t)) return std::nullopt;
+      if (ins().values.is<ast::VDepCall>(a.value)) {
+        const auto result = ins().values.get<ast::VDepCall>(a.value).result_type;
+        // The expression is still value-dependent. The call retains its own nominal
+        // result type for the conversion when an alias use demands the argument.
+        return types().is_class(result) ? std::optional(value_arg(t, a.value)) : std::nullopt;
+      }
+      if (types().canonical(Types::unqualified(a.type)) != t) return std::nullopt;
       // A direct reference to another class parameter retains its known type until substitution.
       if (ins().values.is<ast::VDepParam>(a.value) &&
           ins().values.get<ast::VDepParam>(a.value).depth != dependent_depth)
@@ -1966,7 +1986,7 @@ public:
         d.type = types().canonical(*s);
       } else if (ins().values.is<ast::VDepOp>(d.value) || ins().values.is<ast::VDepVariable>(d.value) ||
                  ins().values.is<ast::VDepCall>(d.value)) {
-        auto s = substitute_arg(d, bindings(depth, out));
+        auto s = substitute_arg(d, bindings(depth, out), /*default_argument=*/true);
         if (!s) return std::nullopt;
         d = *s;
       } else if (ins().values.is<ast::VDepParam>(d.value)) {
@@ -2301,14 +2321,15 @@ private:
     return concept_constant ? concept_constant(ref.concept_, *args) : std::nullopt;
   }
 
-  std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b) {
+  std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b, std::optional<QualType> default_target = {}) {
     auto call = ins().values.get<ast::VDepCall>(v);
     auto args = substitute_args(ins().seqs.elements(call.args), b);
     if (!args) return std::nullopt;
     if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
       call.args = ins().intern_seq(std::span<const TemplateArg>(*args));
-      return value_arg(types().builtin(Builtin::dependent), ins().intern_value(call));
+      return value_arg(default_target.value_or(call.result_type), ins().intern_value(call));
     }
+    if (default_target) return immediate_default_constant(call.callee, *args, *default_target);
     return call_constant ? call_constant(call.callee, *args) : std::nullopt;
   }
 
@@ -2520,7 +2541,10 @@ public:
   std::function<std::optional<TemplateArg>(QualType, NameId)> member_constant;
   std::function<std::optional<ConstId>(EntityId, std::span<const TemplateArg>)> concept_constant;
   std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>)> call_constant;
-  std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>, const Bindings&, bool)> alias_type;
+  // A directly used default gets converted to its parameter's type with diagnostics at the use.
+  std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>, QualType)> immediate_default_constant;
+  std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>,
+                                        const Bindings&, AliasSubstitution)> alias_type;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
   std::function<std::optional<QualType>(EntityId)> variable_specialization_type;
   std::function<void(EntityId, QualType)> demand_variable;

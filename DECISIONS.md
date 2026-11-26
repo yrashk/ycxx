@@ -32,8 +32,9 @@ reasoning; do not leave decisions only in issue threads.
      ranlib index where the system linker reads member symbol tables (#925).
    - arm64 macOS executables link libycxx's runtime by default, after the operands: the build's
      `libycxx.a` and `libycxx-abi.a`, the names libycxx's link options force undefined, and
-     libgcc's `libemutls_w.a` from the GCC that built them, since GCC on Darwin lowers
-     `thread_local` to emulated TLS. `-nostdlib++` leaves them out (#842). *Rejected:* building
+     runtime members from the GCC that built them. `libemutls_w.a` serves GCC's emulated
+     `thread_local` (#842), and the `___ashlti3` and `___lshrti3` members of `libgcc.a` serve
+     optimized floating-point `to_chars` (#1130). `-nostdlib++` leaves them out. *Rejected:* building
      libycxx with Clang for native TLV (ycxx's linker has no thread-local sections yet, and GCC
      is the bootstrap compiler, §3.3), and an emulated-TLS runtime of our own (an ABI only
      libgcc documents by its behaviour). When ycxx builds libycxx (§3.4), its own TLS lowering

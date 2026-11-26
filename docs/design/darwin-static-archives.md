@@ -2,8 +2,8 @@
 
 [#842](https://github.com/yrashk/ycxx/issues/842) adds explicit `.a` operands to arm64 macOS
 executable links, the counterpart of the [Linux archive inputs](linux-static-archives.md) (#388).
-libycxx's runtime (`libycxx.a`, `libycxx-abi.a`) and GCC's `libemutls_w.a` are Darwin archives,
-and a ycxx program has to link them.
+The default link includes the libycxx runtime (`libycxx.a`, `libycxx-abi.a`), GCC's `libemutls_w.a`,
+and a Darwin archive of the two `libgcc.a` shift members called by optimized `to_chars` (#1130).
 
 ## Driver snapshots
 

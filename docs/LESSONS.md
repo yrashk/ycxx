@@ -121,6 +121,26 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     #1209 found the `temp.friend-3` XPASS, which needs both #1194 and #1204.
   - Learned on #1165 and #1209, 2026-11-24.
 
+- **Read the jobs behind a green or red status.** The hourly sweep looked only at PR checks, so the
+  nightly failed on at least six nights unnoticed (#1331). A red CI run on `main` had skipped the
+  macOS tests, because a step before them got a 502 (#1356); it was first reported as "the tests
+  passed". #1303 was green while a destructor silently never ran.
+  - Do: check the nightly in each sweep, and read the failing step and what was skipped after it
+    (`gh run view N --json jobs`) before saying what passed. Mark a green PR with a known P0 as a draft.
+  - Learned on #1331, #1356 and #1303.
+- **Changes made after the review carry the next bug.** On #1303 each narrow review of a post-review
+  fix found a P0 or P1. One of a hand-resolved merge found a P0 that, by its reading, was there before
+  the merge, so earlier reviews had missed it.
+  - Do: limit such a review to the new diff, have it probe with programs on the built binary, keep
+    the probes, and rerun them on the fix. Agree a stop rule first: a new P0 or P1 in a fix is
+    reverted or diagnosed, not patched and reviewed again. Whether this binds everyone is #1357.
+  - Learned on #1303 and #1166.
+- **Old worktrees' builds fill the disk.** A full build is nearly 4 GB, and one checkout's worktrees
+  held about 174 GB of them on 2026-11-25, mostly merged and unchanged. #1303's build stopped with
+  "No space left on device".
+  - Do: check `df` before a new full build, and reuse a build directory. A rule for cleanup is #1357.
+  - Learned on #1303.
+
 - **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
   was pushed to `claude/byvalue-116` after the coordinator had merged #233, so it never reached
   main (the same trap as #198, from the other side).
@@ -206,11 +226,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     stage's six timed-out CTests passed when run alone. At load 87 every stage timed out, and
     CI on a head containing `main` became the combined test.
   - Rule: AGENTS.md, "While working".
-  - The same holds for the first build of a fresh worktree. On #295, edits made while it built went
-    into the binary meant to show the new tests failing. A sibling worktree's binary of `main`
-    served instead: check its commit with `git merge-base --is-ancestor`, copy it to the
-    scratchpad, and run it as `YCXX=<copy> tools/test …`. Two `cmake --build` runs started in
-    one build directory also collide, and one stops with "subcommand failed".
+  - Load is not the whole cause. The 10 s program timeouts (`unit.policies_*`) also failed whole
+    gates of #1294 and #1306, one of them started at load 5. #1295's and #1304's gates passed on the
+    same Mac the same day. #1123 measured about 10 s for the first launch of a new executable; why
+    is not established.
 
 ## Working with Fable subagents
 
@@ -475,6 +494,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
     filter moves the rows under it (#636's one P1).
   - Learned on #635 and #636.
+- **Trace the signal and its wakeup separately when a PTY resize hangs under ThreadSanitizer.**
+  `TIOCSWINSZ` succeeded and the browser got `SIGWINCH` while blocked in `select`. The handler
+  wrote to the self-pipe only after keyboard input woke the browser again.
+  - Do: follow the PTY request, signal delivery, and self-pipe read and write with `strace -f`.
+    Reuse the browser's terminal code and PTY harness in a small instrumented probe. A standalone
+    selector without the browser's clipboard path passed even though the integration test hung.
+  - Learned on #1375.
 - **Show a terminal UI's change as pictures, rendered from a pty.** Polishing the trace browser's
   layout (#1119) needed screenshots at fixed sizes, before and after, for the user to steer.
   - Do: run the program under Python's `pty.fork` with `TIOCSWINSZ` set, send keys with pauses,
@@ -595,6 +621,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   failed. With no `main` binary, seeing the new tests fail meant saving the edits as a patch,
   restoring `src`, rebuilding and reapplying. Start the build, write the tests and read code while
   it runs, then edit. If you must edit early, build `main` in its own `YCXX_BUILD_DIR`.
+  - On #295, edits made during that build went into the binary meant to show the new tests failing.
+    A sibling worktree's binary of `main` served instead: check its commit with
+    `git merge-base --is-ancestor`, copy it to the scratchpad, and run it as
+    `YCXX=<copy> tools/test …`. Two `cmake --build` runs started in one build directory also
+    collide, and one stops with "subcommand failed".
 - **A mutation that does not build leaves the old binary under test.** On #647 a mutation
   left a variable unused, `-Werror` stopped the build, and the test passed against the
   previous, correct binary. The "surviving" mutation looked like a test gap.

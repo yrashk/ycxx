@@ -156,6 +156,10 @@ enum class Diag : std::uint32_t {
   default_arg_not_allowed [[=message{Severity::error, "a default argument is not allowed here"}]],
   default_arg_not_yet_defined [[=message{Severity::error, "the selected default argument has not yet been defined"}]],
   default_arg_source_line_immediate [[=message{Severity::error, "an immediate invocation that observes the call-site line of a default argument is not supported yet"}]],
+  default_arg_source_location_immediate [[=message{Severity::error, "an immediate invocation that observes the call-site location of a default argument is not supported yet"}]],
+  source_location_default_member [[=message{Severity::error, "source location in a default member initializer is not supported yet"}]],
+  source_location_target [[=message{Severity::error, "__builtin_source_location is not supported on this target"}]],
+  source_location_descriptor [[=message{Severity::error, "__builtin_source_location requires the std::source_location::__impl descriptor"}]],
   conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
   expected_namespace_name [[=message{Severity::error, "expected a namespace name"}]],
   nested_namespace_inline [[=message{Severity::error, "a nested namespace definition cannot be 'inline'"}]],
@@ -175,6 +179,8 @@ enum class Diag : std::uint32_t {
   constinit_automatic [[=message{Severity::error, "'constinit' can only declare a variable with static storage duration"}]],
   constinit_function [[=message{Severity::error, "'constinit' can only declare a variable"}]],
   expected_string_literal [[=message{Severity::error, "expected a string literal"}]],
+  pretty_function_context [[=message{Severity::error, "__PRETTY_FUNCTION__ is supported only in namespace-scope function bodies"}]],
+  pretty_function_spelling [[=message{Severity::error, "cannot spell this function or template argument for __PRETTY_FUNCTION__"}]],
   unevaluated_string [[=message{Severity::error, "this string cannot have an encoding prefix or a suffix"}]],
   consteval_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'consteval' and not"}]],
   constexpr_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'constexpr' and not"}]],
@@ -335,6 +341,7 @@ enum class Diag : std::uint32_t {
   // [temp]
   invalid_template_parameter_type [[=message{Severity::error, "a non-type template parameter must have a structural type"}]],
   template_args_mismatch [[=message{Severity::error, "the template arguments do not match the parameters of '{0:n}'"}]],
+  template_argument_narrowing [[=message{Severity::error, "narrowing conversion of {0:i} from '{1:t}' to '{2:t}' in a template argument"}]],
   not_a_template [[=message{Severity::error, "'{0:n}' is not a template"}]],
   instantiation_depth [[=message{Severity::error, "template instantiations nest more than {0} deep"}]],
   nested_too_deeply [[=message{Severity::error, "nested too deeply to analyse: half of the stack is in use"}]],
@@ -371,6 +378,11 @@ enum class Diag : std::uint32_t {
   not_a_concept [[=message{Severity::error, "'{0:n}' is not a concept"}]],
   not_a_type_concept [[=message{Severity::error, "'{0:n}' is not a type concept"}]],
   concept_constrained [[=message{Severity::error, "the concept '{0:n}' cannot have associated constraints"}]],
+  bit_cast_object [[=message{Severity::error, "'__builtin_bit_cast' requires an object type, but this operand has type '{0:t}'"}]],
+  bit_cast_array_result [[=message{Severity::error, "'__builtin_bit_cast' cannot produce a value of array type '{0:t}'"}]],
+  bit_cast_incomplete [[=message{Severity::error, "'__builtin_bit_cast' requires a complete operand type, but '{0:t}' is incomplete"}]],
+  bit_cast_nontrivial [[=message{Severity::error, "'__builtin_bit_cast' requires a trivially copyable type, but '{0:t}' is not"}]],
+  bit_cast_size [[=message{Severity::error, "'__builtin_bit_cast' requires equal sizes, but '{0:t}' and '{1:t}' have sizes {2} and {3}"}]],
   offsetof_type [[=message{Severity::error, "offsetof requires a complete class type, but '{0:t}' is not one"}]],
   offsetof_member [[=message{Severity::error, "offsetof requires a direct non-static data member named '{0:n}' in '{1:t}'"}]],
   offsetof_bit_field [[=message{Severity::error, "offsetof cannot be applied to a bit-field"}]],
@@ -380,6 +392,8 @@ enum class Diag : std::uint32_t {
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   builtin_overflow_operand [[=message{Severity::error, "checked integer builtin requires an argument of type '{0:t}', got '{1:t}'"}]],
+  builtin_ctzg_operand [[=message{Severity::error, "the supported form of '__builtin_ctzg' requires an 'unsigned int' operand but got '{0:t}'"}]],
+  builtin_ctzg_fallback [[=message{Severity::error, "'__builtin_ctzg' with a fallback argument is not supported yet"}]],
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
   va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer, pointer and double subset"}]],
@@ -436,6 +450,8 @@ enum class Diag : std::uint32_t {
   implicit_lifetime_unsupported [[=message{Severity::error, "'__builtin_is_implicit_lifetime' for '{0:t}' is not supported yet"}]],
   unique_object_representations_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__has_unique_object_representations'"}]],
   unique_object_representations_unsupported [[=message{Severity::error, "'__has_unique_object_representations' for '{0:t}' is not supported yet"}]],
+  trivial_or_pod_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
+  trivial_or_pod_unsupported [[=message{Severity::error, "'{1:n}' for '{0:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -509,7 +525,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::standard_layout_unsupported) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
          id == diag_id(Diag::implicit_lifetime_unsupported) ||
          id == diag_id(Diag::unique_object_representations_incomplete) ||
-         id == diag_id(Diag::unique_object_representations_unsupported);
+         id == diag_id(Diag::unique_object_representations_unsupported) ||
+         id == diag_id(Diag::trivial_or_pod_incomplete) || id == diag_id(Diag::trivial_or_pod_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
@@ -525,7 +542,7 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete) ||
          id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
-         id == diag_id(Diag::unique_object_representations_incomplete);
+         id == diag_id(Diag::unique_object_representations_incomplete) || id == diag_id(Diag::trivial_or_pod_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {
@@ -552,7 +569,7 @@ std::string render(Diag d, std::span<const std::uint64_t> args, Spell&& spell) {
     std::uint64_t v = n < args.size() ? args[n] : 0;
     char how = spec.size() > 2 ? spec[2] : 'd';
     if (how == 'k') out += lex::spelling(lex::Tk(v));
-    else if (how == 'n' || how == 't' || how == 'c' || how == 'r') out += spell(how, v);
+    else if (how == 'n' || how == 't' || how == 'c' || how == 'i' || how == 'r') out += spell(how, v);
     else out += std::format("{}", v);
     i = close;
   }

@@ -52,7 +52,7 @@ struct BodyAt {
 
 // The region as sema reads it (#947): its tokens without byte offsets, expansion sites,
 // `space_before` flags or error details. Each token keeps its file for grouping a header's items.
-// A unit with __builtin_LINE also observes its presumed lines (#327).
+// Source-location builtins also observe their presumed positions (#327).
 struct PpTokens {
   using Key = pp::FileId;
   using Value = pp::Region;
@@ -109,7 +109,7 @@ struct FrontResult {
 engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
 
 // One translation unit from its source file (`TuSource::file`), analysed, from `PpTokens` and the
-// items. Only units with the source-line builtin depend on presumed line numbers.
+// items. Only units with a source-location builtin depend on presumed positions.
 struct TuSema {
   using Key = TuId;
   using Value = SemaResult;
@@ -588,8 +588,9 @@ using UnwindNodes = ast::closed_list<
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
     ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid,
-    ast::DynamicCastPointer>;
-using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
+    ast::DynamicCastPointer, ast::BitCast>;
+using UnwindAggregateNodes =
+    ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren, ast::BitCast>;
 
 enum class UnwindContext { function, cleanup_initializer, default_member };
 
@@ -648,6 +649,8 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
         if (context != UnwindContext::default_member) return false;
       } else if constexpr (std::is_same_v<T, ast::Materialize>) {
         if (!world.types.is_class(n.info.type) || n.destructor != EntityId::none || n.extended) return false;
+      } else if constexpr (std::is_same_v<T, ast::BitCast>) {
+        if (!n.supported) return false;
       } else if constexpr (std::is_same_v<T, ast::Call>) {
         if (n.callee.id == ast::NodeId::none) return false;
         if (n.function == EntityId::none) {
@@ -1761,6 +1764,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
+    if (!program.emits_instance(in->spec)) continue;
     // An immediate constructor's calls are all folded ([expr.const]): a constructor template's
     // specialization, or a constructor of a class template's specialization.
     const auto& entity = world.entities.rec(in->spec);
@@ -1825,7 +1829,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   // The variable template specializations instantiated ([temp.inst]/7), with their constants.
   for (const parse::Program::VarInstance& v : program.variable_instances()) {
-    if (!v.cell.diags.empty()) continue;
+    if (!v.cell.diags.empty() || !program.emits_instance(v.spec)) continue;
     const ast::ItemSema& is = v.cell.value;
     closures_of(is.closures, program.id(v.item), 0, true);
     for (std::size_t i = 0; i < ins.seqs.size(is.decls); ++i) {
@@ -1842,8 +1846,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   // The static data members of class template specializations that are defined in the class
   // (constexpr or inline, [class.static.data]/4) and used, with their constants.
-  for (const parse::Program::MemberClosures& m : program.member_closures())
-    closures_of(m.value.closures, program.id(m.item), 0, true);
+  for (const auto& initializer : program.member_initializers())
+    if (initializer.emits_closures())
+      closures_of(initializer.closures, program.id(initializer.item), 0, true);
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
@@ -1854,14 +1859,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if (dr.decl >= ins.seqs.size(is.decls)) continue;
       ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
       if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
-      // One whose initializer waits for a use is defined when it was used ([temp.inst]/3).
-      ast::ConstId value = dr.value;
-      if (program.is_lazy_member(d.entity)) {
-        if (!std::ranges::contains(program.used_members(), d.entity)) continue;
-        value = program.member_init(d.entity);
-      }
+      // The checked declaration can survive even when its replayed initializer has no native use.
+      const bool lazy = program.is_lazy_member(d.entity);
+      if (lazy && !program.used_member(d.entity)) continue;
       ast::Loc at{program.id(m.item), c.at};
       declare(d, at);
+      if (lazy && !program.emits_lazy_member(d.entity)) continue;
+      const ast::ConstId value = lazy ? program.member_init(d.entity) : dr.value;
       tu.variables.push_back({d.entity, d.type, value, at});
       if (value != ast::ConstId::none) tu.variables.back().coalesced = weak_inline_variable(d);
     }
@@ -2257,6 +2261,8 @@ engine::query_task<pp::Region> PpTokens::run(engine::Ctx& cx, pp::FileId file) {
   out.locs.resize(full.locs.size());
   for (std::size_t i = 0; i < full.locs.size(); ++i) out.locs[i].file = full.site(i).file;
   out.presumed_lines = full.presumed_lines;
+  out.presumed_sites = full.presumed_sites;
+  out.presumed_files = full.presumed_files;
   out.names = full.names;
   out.literals = full.literals;
   out.files = full.files;

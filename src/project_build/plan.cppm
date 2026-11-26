@@ -97,7 +97,7 @@ ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_vi
                                 std::span<const RuleExpansion> expansions, std::string_view native_triple = {});
 std::expected<PlanInspection, std::string> inspect_project(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
-    std::string_view native_triple = {});
+    std::string_view native_triple, ProjectPlan& resolved);
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
     std::optional<Fp128>* definition = nullptr, ProjectWatchState* watch = nullptr,
@@ -1326,11 +1326,12 @@ ProjectWatchState watch_project(const fs::path& cwd, std::string_view target,
 
 std::expected<PlanInspection, std::string> inspect_project(
     const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
-    std::string_view native_triple) {
+    std::string_view native_triple, ProjectPlan& resolved) {
   PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {}};
   try {
     auto plan = read_project(cwd, target, nullptr, &inspection, expansions, nullptr, native_triple);
     if (!plan) return std::unexpected(std::move(plan.error()));
+    resolved = std::move(*plan);
   } catch (const RuleDemand&) {
     // The unresolved fact was recorded where the planner first needed the rule.
   }

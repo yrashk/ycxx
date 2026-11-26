@@ -675,10 +675,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
     else the Command Line Tools' SDK, looked up once per process outside the engine.
   - `:runtime` (configured by CMake): what a Darwin link includes by default after its operands
-    (#842): this build's `libycxx.a` and `libycxx-abi.a`, `libemutls_w.a` from the GCC that built
-    them (GCC on Darwin lowers `thread_local` to `___emutls_get_address`), and the names
-    libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
-    `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
+    (#842): this build's `libycxx.a` and `libycxx-abi.a`, GCC's `libemutls_w.a` for emulated TLS,
+    the two GCC shift helpers `___ashlti3` and `___lshrti3` for optimized `to_chars` (#1130),
+    and the names libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read
+    from its `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
     A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's
@@ -829,8 +829,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
   argument not trivial for calls passes by the address of the caller's object. A naturally laid
   out one-byte empty class trivial for calls uses no register or stack slot in a fixed direct
-  call. The callee still has a distinct parameter object. Trivially copyable arguments of more
-  than two eightbytes and empty class results remain tracked in
+  call. The callee still has a distinct parameter object. A result with the same layout,
+  including a captureless closure, carries zero ABI value components in a fixed direct call.
+  The callee evaluates the return operand and the caller keeps the result object in its own
+  storage when used. Other empty records and trivial stack arguments remain tracked in
   [#641](https://github.com/yrashk/ycxx/issues/641). SSE records are tracked in
   [#642](https://github.com/yrashk/ycxx/issues/642). Records with source layout directives
   native layout does not apply stay out of memory passing, including records that contain
@@ -976,6 +978,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- Static x86-64 ELF links validate the canonical GNU property note for `FEATURE_1_AND` with
+  IBT and SHSTK bits. The linker intersects the masks of ordinary objects and selected archive
+  members, treating an unmarked object as zero. A zero intersection produces an executable
+  without a GNU property note or segment. A nonzero intersection is diagnosed.
+  [#1367](https://github.com/yrashk/ycxx/issues/1367) · [#1376](https://github.com/yrashk/ycxx/issues/1376)
 - An arm64 macOS link can include explicit Darwin `.a` operands (BSD `#1/<n>` names and a
   `__.SYMDEF`, `__.SYMDEF SORTED` or `_64` ranlib index first), with the system linker's
   selection rules: every ordinary object comes first, an archive serves names referenced
@@ -2450,6 +2457,10 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Namespace alias substitution checks dependent qualified type arguments written in the alias
+  body even when the result discards them. Forwarded aliases retain the check while its bindings
+  are dependent. Type requirements and function-template return deduction use the same
+  definition-point lookup ([temp.alias], #1311).
 - Direct uses of namespace alias-template IDs in non-template code outside requires-expressions
   check the alias template's associated constraints before expanding its type when every argument
   is an explicit non-dependent type. Type-constraints and the template-head's requires-clause
@@ -2520,6 +2531,13 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
+- `__is_trivial(T)` and `__is_pod(T)` give a `bool` prvalue after removing all array extents,
+  including an unknown outer bound. They give true for scalar elements and false for references,
+  functions and cv `void`. They diagnose incomplete class and enumeration elements. Supported
+  class-template bases and variable-template initializers replay dependent operands at demand.
+  Complete class and union evaluation depends on the special-member facts in
+  [#1303](https://github.com/yrashk/ycxx/issues/1303). `__has_builtin` answers 0 while support is
+  partial ([depr.meta.types], [dcl.enum], #1318).
 - `__has_unique_object_representations(T)` peels array extents, including an unknown outer
   bound. It returns true for narrow character types, and false for modeled standard floats,
   references, functions and cv `void`. Incomplete class and enum operands have a dedicated
@@ -2660,6 +2678,15 @@ hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover
 address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
 global, and a rejected rvalue.
 
+## Bit-cast expressions (#1359)
+
+`__builtin_bit_cast` reads a written destination type-id and preserves both operands through
+template substitution. The evaluated subset covers initialized unsigned scalars and gap-free
+flat records described by the target's size, byte order and member offsets. Result storage is
+independent, including when the cast is discarded. Constant evaluation uses the existing
+flat-record storage checks. Evaluated x87, padding and the remaining constant-evaluation
+layouts stay in #330. The pinned x87 template branch parses when discarded.
+
 ## String length builtin (#531)
 
 `__builtin_strlen` supports unqualified direct calls with one argument implicitly converted to
@@ -2669,6 +2696,14 @@ scan's reads indeterminately sequenced with the caller's other evaluations ([int
 and diagnoses reads past the end of an unterminated array in a required constant expression
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
+
+## Trailing-zero count builtin (#1381)
+
+`__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
+operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
+after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
+Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
+Other unsigned operand types and the optional fallback argument remain in #248.
 
 ## C library string and memory builtins (#248, #1093, #1170)
 
@@ -2754,15 +2789,37 @@ the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as a
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
 
-## Source line builtin (#327)
+## Function spelling for type ordering (#1361)
+
+`__PRETTY_FUNCTION__` in a namespace-scope function body is a static `const char[N]` lvalue.
+Function template definitions defer the text and array bound until the selected body is
+replayed. The NUL-terminated text uses canonical argument types and qualified names, so
+aliases of a type have the same spelling. It distinguishes nested types, qualifications,
+indirections, and class template arguments in the supported domain. The spelling uses the
+declared signature, including any return placeholder. Constant evaluation and native code
+use the same storage path as a string literal.
+
+Spelling is supported for the standard fundamental types, 128-bit integers, named classes
+and enums with named scopes, and their array, function, pointer and reference forms. Argument
+lists can include packs, named templates and integral, floating or null pointer values.
+Other arguments diagnose an unsupported spelling when the body is instantiated.
+[#1361](https://github.com/yrashk/ycxx/issues/1361)
+
+## Source location builtins (#327)
 
 `__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
 source line, including through macro expansion and `#line`. An omitted ordinary function
 argument evaluates its default with the invocation line, which nested defaults inherit.
 The interpreter and native code share the same scoped evaluation. Translation units with the
-builtin track presumed lines in their semantic input. The full `std::source_location` facility
-continues in [#327](https://github.com/yrashk/ycxx/issues/327).
+builtin track presumed lines in their semantic input.
 [Design](docs/design/source-line-defaults.md)
+
+Linux x86-64 supports the pinned libycxx `std::source_location::current()` descriptor
+for ordinary omitted arguments. The descriptor stores the presumed filename, line,
+one-based byte column and enclosing function in translation-unit-local storage.
+Resident results observe edits to presumed filenames and columns as well as lines.
+Constructor and default member initializer anchoring, and broader immediate-default
+contexts, remain in [#327](https://github.com/yrashk/ycxx/issues/327).
 
 ## Basic Linux asm statements (#950)
 
@@ -2802,6 +2859,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
   return-type-requirement, also a qualified concept) and nested requirements, checked in place:
   false in a templated entity when a requirement is invalid, ill-formed elsewhere.
+  During substitution with bound template arguments, a decisive failure ends the
+  requirement sequence before later dependent checks. A separately instantiated class
+  still emits a hard error when a reached requirement needs it (#1283).
 - **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
   instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
 - **`static_assert` in a template definition** (#241, P2593, [dcl.pre]): a non-dependent condition
@@ -3233,6 +3293,53 @@ includes the resolved plan and its definition.
 Use the same `--target` option to read the chosen variant and its target
 provenance. The trace carries the compiler target for the request.
 
+Named-module discovery runs before native semantic analysis through
+`ModuleDirectives` and `ModuleGraph` (#1349). It follows the marked module
+and import directives in each unit's selected preprocessing view. The graph
+omits occurrence locations, so moving a directive can refresh provenance
+without changing the dependencies. Read-only plans show physical source
+locations and mark scans that probe declared generated outputs as pending
+(#1354). Build traces include these units once the virtual inputs are available.
+Named-module semantics and BMI support are tracked in #319.
+
+`ModuleProviders` resolves written imports within the reachable module
+graph before native compilation (#1353). It reports missing, unique and
+ambiguous providers and finds cyclic components among unique edges.
+`ModuleProviderReport` and read-only inspection add physical import and
+provider locations. A location-only edit can update the report while
+reusing provider resolution. Incomplete read-only scans make missing or
+unique matches provisional.
+
+`ycxx show <target> --format=json` includes an optional `module_graph` for
+resolved plans under a native configuration (#1363). It records configured
+translation units, scan states, named directives with physical source locations,
+provider candidates, conflicts, and cyclic components. Its unit IDs are local
+to each snapshot.
+Schema-1 plan comparisons continue to use semantic facts.
+
+The standalone HTML plan renders that inspection data under **Module graph**
+(#1378). Configured translation unit panels group declarations and imports with
+physical locations and links to candidate declarations. The section identifies
+incomplete scans, provider conflicts, and cyclic components. With `--against`,
+it shows the current plan's graph below **Plan changes**.
+
+JSON plan comparisons include `module_changes` when both snapshots contain a
+module graph (#1383). Units match by logical source and ordered include paths,
+so provider changes can be compared across target variants. The comparison
+reports changes to units, imports, conflicts, cycles, and scan completeness.
+Body-only edits and moved source sites preserve the semantic results. Older
+graphs can use source-only matching when their unit paths are unambiguous.
+
+HTML comparisons show these semantic differences in **Module changes** when
+both plans contain graphs (#1390). The report shows before and after provider
+locations, resolution and scan states, conflicts, and cycles. After entries
+link to the corresponding imports, declarations, and units in the current
+graph. The section identifies source-only matches and explains when an older
+graph lacks enough configuration information to compare. An available
+comparison with equal semantic results reports no module changes. Earlier
+schema-1 snapshots without a graph still show **Plan changes** and the current
+**Module graph** when available.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe
@@ -3388,9 +3495,10 @@ request it serves.
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
 - The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
   given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
-  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
-  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
-  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. An
+  interrupted terminal wait also checks the size, so a deferred handler cannot stall the redraw
+  (#1375). Fatal signals restore the terminal, then re-raise. The tree has columns (time, worker,
+  alloc and retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
   summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
   width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
   divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
@@ -3507,7 +3615,7 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   a parameter, a template argument or a base; in a statement, a member of a dependent one is a type
   only after `typename` ([temp.res.general]). A namespace-scope alias template whose type has such an operand with
   no representation (`typename decltype(select<T>())::type`, with a deduced return type) is read
-  again when it is named with known arguments (`AliasCallPattern::unrepresented`). A class
+  again when it is named with known arguments (`AliasCallPattern::Kind::unrepresented`). A class
   template's member declaration can call an earlier static member of the class, also with
   explicit template arguments: a deduced return type comes from the member's instantiation, made
   while the class is instantiated (`members_so_far`). That body cannot name a member declared
@@ -3732,6 +3840,23 @@ dynamic type. Immediate members remain absent from native vtables.
 Construction and destruction phases, persisted base references, and richer receiver
 layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 
+## Evaluated ordinary virtual calls (#322)
+
+An ordinary virtual call with a supported scalar or void result can dispatch through
+a complete local polymorphic object in constant evaluation, including through a
+base reference in a constexpr helper ([class.virtual], [expr.const]). The object
+has completed implicit default construction and has implicit trivial destruction.
+This supports fieldless externally linked namespace-scope classes with no base
+or one direct public nonvirtual fieldless root base. The statically selected
+member supplies the arguments' defaults. Its final overrider must be constexpr
+and defined before the evaluation, including when the statically selected
+member is pure or lacks a constexpr specifier. Explicit qualification selects the
+named function. Both native targets keep ordinary vtable dispatch.
+
+Construction and destruction phases and broader receiver layouts remain tracked in
+[#322](https://github.com/yrashk/ycxx/issues/322) and
+[#25](https://github.com/yrashk/ycxx/issues/25).
+
 ## Virtual functions: general single inheritance (#309, 2026-11-24)
 
 - Both targets compile, link and run ordinary non-template polymorphic classes with external
@@ -3763,7 +3888,8 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
   An override must agree with its base declaration on `consteval`. Immediate declarations count
   toward polymorphism and pure final overriders. The vtable retains its header and contains only
   ordinary virtual entries. Immediate definitions are checked and have no native symbol.
-  Evaluated calls and immediate virtual assignments remain unsupported.
+  Evaluated immediate calls have the completed-local profile described above.
+  Immediate virtual assignments remain tracked in #1097.
   [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
   declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
@@ -3785,8 +3911,9 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
   them (`Program::emitted_on_use`).
   [[temp.inst]](https://eel.is/c++draft/temp.inst) · [#1153](https://github.com/yrashk/ycxx/issues/1153)
 - Not yet: specializations for TU-local types (blocked in `dynamic_member`, #1155), classes nested
-  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
-  #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
+  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public
+  or multiple bases, `delete` through a virtual destructor (#293, #931), covariant returns,
+  `typeid` (#294), broader constant evaluation of polymorphic objects (#322, #25),
   virtual bases (#310); follow-ups are listed in #309.
   [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)
 
@@ -3894,9 +4021,20 @@ cover the body boundary, key changes, and restoration. [#1248](https://github.co
 Ordinary member aliases can project a structural parameter's public integral fields into
 scalar template arguments. A guarded conditional uses its typed selected operand, so the
 result selects the same specialization as the corresponding literal. The resident fixtures
-check field-order and named-guard edits against cold compilation. General member alias
-template replay and record-valued immediate calls remain in #317. The separate dependent
-static operand in the pinned libycxx ratio header stays in #209.
+check field-order and named-guard edits against cold compilation.
+
+An alias can use `Box<detail::make<T, U>()>` when the immediate call returns a named
+flat structural aggregate with public integral fields. Partial alias replay keeps the
+qualified producer and its type arguments until the value is needed. Evaluation uses
+the selected producer specialization and canonicalizes the result with equivalent
+named and braced records. The resident fixture checks producer and specialization edits
+against cold compilation. The Linux x86-64 ELF tests check the shared argument spelling
+with GCC and Clang.
+
+General member alias template replay remains in #317. Argument erasure during alias
+substitution is tracked in #1311 and namespace-qualified explicit specialization
+syntax in #1261. The pinned libycxx ratio header first reaches the separate named
+static argument tracked in #1301 and #209.
 
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 
@@ -3975,6 +4113,9 @@ static operand in the pinned libycxx ratio header stays in #209.
   template member specialization instantiated where it is named ([temp.inst]/8); its own body
   sees the type once a return deduced it. The back end and the interpreter get the deduced type
   with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+  An unevaluated use of a non-constexpr static function of a class template specialization
+  checks the member and its required callees when deducing the return type. An evaluated call
+  or an emitted function address also demands a native definition. [#1272](https://github.com/yrashk/ycxx/issues/1272)
 - **Linux direct calls:** the AMD64 ABI check uses the callee definition's deduced signature
   when the declaration still needs its result type. The definition is already in the translation
   unit. Calls can return supported `auto` and `decltype(auto)` results, including references and
@@ -4629,6 +4770,15 @@ Each is removed once ycxx compiles itself.
   - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
     daemon's `socket_address`.
   - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
+
+
+## Dependent immediate calls in template defaults (#1327)
+
+An integral non-type template parameter default can call an eligible `consteval`
+function with earlier non-type parameters. The unqualified or namespace-qualified
+call selects its overload in the declaration context. Substituting an omitted
+argument evaluates the selected call and checks the converted constant expression
+for the destination parameter type. Explicit template arguments skip the default.
 
 ## Milestones
 

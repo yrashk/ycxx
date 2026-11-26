@@ -5,6 +5,7 @@
 export module ycxx.pipeline;
 
 export import :lines;
+export import :module_discovery;
 export import :mangle;
 export import :back;
 export import :front;

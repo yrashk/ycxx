@@ -14,11 +14,11 @@ name: oracles
 on:
   pull_request:
     paths: ['tests/draft/**', 'tests/own/**', 'tests/driver/**', 'tools/draft-examples', 'tools/test',
-            '.github/workflows/oracles.yml', '.github/actions/setup/**']
+            '.github/workflows/oracles.yml', '.github/actions/setup/**', '.github/actions/setup-linux-oracle/**']
   push:
     branches: [main]
     paths: ['tests/draft/**', 'tests/own/**', 'tests/driver/**', 'tools/draft-examples', 'tools/test',
-            '.github/workflows/oracles.yml', '.github/actions/setup/**']
+            '.github/workflows/oracles.yml', '.github/actions/setup/**', '.github/actions/setup-linux-oracle/**']
   workflow_dispatch:
 
 concurrency:

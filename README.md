@@ -43,6 +43,16 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 inspect that variant.
 Use `target_triple()` in a declared action's `args` to pass the selected triple
 to a host tool that generates a target-specific input.
+The build trace and resolved plan show named C++ module imports, their
+project providers, ambiguity, and cycles for the selected target.
+Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
+report to follow links from imports to their provider declarations.
+Use `ycxx show app --format=json` to read these dependencies and their physical
+source locations as a structured `module_graph`. Run
+`ycxx show app --against before.json --format=html > changes.html` to compare
+module dependencies with a saved JSON plan and follow links into the current
+graph. Named-module compilation and BMI support are tracked in
+[#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
@@ -80,7 +90,9 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. A class template's ordinary member alias can use those fields directly or in a
-guarded integral argument such as `V.ok ? V.num : 0`.
+guarded integral argument such as `V.ok ? V.num : 0`. An alias template can
+use a namespace-qualified `consteval` call with explicit type arguments to
+produce the structural argument, as in `Box<detail::make<T, U>()>`.
 [#317](https://github.com/yrashk/ycxx/issues/317)
 
 An explicitly specialized class can name a flat structural argument directly, as in
@@ -185,6 +197,11 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 
+With the pinned libycxx headers, ordinary `std::source_location::current()` calls on
+Linux x86-64 capture the presumed filename, line, byte column and enclosing function.
+The recorded location remains available after the call returns.
+[#327](https://github.com/yrashk/ycxx/issues/327)
+
 `-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
 ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
 
@@ -195,9 +212,10 @@ effect. [#982](https://github.com/yrashk/ycxx/issues/982)
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. Fixed direct calls also support ordinary one-byte empty
-classes as parameters. Larger results and classes that are not trivial for calls (with a
-user-provided copy constructor or destructor) pass through memory, as on macOS.
+16 bytes and must be trivial for calls. Fixed direct calls also support naturally laid out
+one-byte empty classes as parameters and results, including captureless closure results.
+Larger results and supported classes that are not trivial for calls pass through memory, as
+on macOS.
 [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an
@@ -219,6 +237,10 @@ after the inputs that reference its members, and include at least one source or 
 Resident links reread explicit archives on each request.
 [#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
 [#951](https://github.com/yrashk/ycxx/issues/951)
+
+Static x86-64 ELF links accept supported objects and selected archive members with GNU IBT and
+SHSTK properties when the inputs have no such feature in common.
+[#1367](https://github.com/yrashk/ycxx/issues/1367)
 
 For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
 `__PIC__` and `__pic__` as `2`, and `-fpic` defines them as `1`. arm64 Darwin code is always
@@ -617,6 +639,9 @@ written default member initializer are value-initialized.
   `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
   of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
   [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
+- `__PRETTY_FUNCTION__` in ordinary namespace-scope function bodies gives a static,
+  NUL-terminated spelling. A function template includes the canonical arguments of its
+  specialization, as needed by libycxx's type comparisons. [#1361](https://github.com/yrashk/ycxx/issues/1361)
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
@@ -628,6 +653,8 @@ written default member initializer are value-initialized.
   constraints. [#908](https://github.com/yrashk/ycxx/issues/908)
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
+  A failed dependent type requirement can end substitution before later requirements
+  instantiate their types. [#1283](https://github.com/yrashk/ycxx/issues/1283)
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Directly
   written namespace alias-template IDs check constraints before expansion in non-template code
@@ -730,6 +757,9 @@ written default member initializer are value-initialized.
   [#257](https://github.com/yrashk/ycxx/issues/257)
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive
   until the end of the full-expression on each executed path. [#902](https://github.com/yrashk/ycxx/issues/902)
+  Ordinary virtual calls dispatch on a completed fieldless local object with implicit default
+  construction, including through its single public nonvirtual base. The final overrider must
+  be constexpr and defined before evaluation. [#322](https://github.com/yrashk/ycxx/issues/322)
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)
@@ -776,6 +806,8 @@ written default member initializer are value-initialized.
   `intmax_t` result during constant evaluation. [#1077](https://github.com/yrashk/ycxx/issues/1077)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
+  Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
+  expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
@@ -998,9 +1030,9 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
   The pinned library work includes scalar type traits in class-template bases and variable
-  templates, including narrow-character object representations and supported reference-temporary
-  queries
-  ([#218](https://github.com/yrashk/ycxx/issues/218)).
+  templates, including triviality and POD queries for non-record types, narrow-character object
+  representations, and supported reference-temporary queries
+  ([#218](https://github.com/yrashk/ycxx/issues/218), [#1318](https://github.com/yrashk/ycxx/issues/1318)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,

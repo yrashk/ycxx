@@ -1,0 +1,17 @@
+name: setup-linux-oracle
+description: Install Clang 23 and lld from apt.llvm.org for the Linux oracle and ABI peers.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo_cmd=()
+        if [ "$EUID" -ne 0 ]; then sudo_cmd=(sudo); fi
+        "${sudo_cmd[@]}" apt-get install -y -qq wget gnupg lsb-release >/dev/null
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key |
+          "${sudo_cmd[@]}" tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+        codename=$(lsb_release -cs)
+        printf 'deb http://apt.llvm.org/%s/ llvm-toolchain-%s-23 main\n' "$codename" "$codename" |
+          "${sudo_cmd[@]}" tee /etc/apt/sources.list.d/llvm.list >/dev/null
+        "${sudo_cmd[@]}" apt-get update -qq
+        "${sudo_cmd[@]}" apt-get install -y -qq clang-23 lld-23 >/dev/null

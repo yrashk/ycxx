@@ -171,11 +171,20 @@ struct DeleteArray {
 };
 
 // Built-in functions handled during evaluation (docs/EXTENSIONS.md).
-enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable, add_overflow, mul_overflow };
+enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable, add_overflow, mul_overflow, ctz };
 struct BuiltinCall {
   ExprInfo info;
   BuiltinOp op;
   [[=indeterminately_sequenced]] ChildList args;
+};
+
+// The written destination type and source expression of __builtin_bit_cast.
+struct BitCast {
+  ExprInfo info;
+  QualType destination;
+  [[=sequenced]] Child source;
+  u32 type_at;
+  bool supported;
 };
 
 // A folded __builtin_constant_p result. The operand is retained for expression analysis,
@@ -277,11 +286,19 @@ struct ExplicitDestroy {
   [[=sequenced]] Child object;  // the object's address
 };
 
-// A virtual call on an opaque root. The slot is relative to the table's address point.
+// The ABI slot relative to the table's address point, and the statically selected member
+// that supplies the default arguments.
+struct VirtualMemberSelection {
+  u32 slot;
+  EntityId function = EntityId::none;  // none for peer-only virtual call profiles
+  constexpr bool operator==(const VirtualMemberSelection&) const = default;
+};
+
+// An unqualified ordinary virtual call ([class.virtual]).
 struct VirtualMemberCall {
   ExprInfo info;
   QualType callee;  // pointer to the ABI function type, which includes the receiver parameter
-  u32 slot;
+  SeqId<VirtualMemberSelection> selection;  // one record keeps the payload within the inline budget
   [[=sequenced(0)]] Child object;
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
@@ -510,12 +527,20 @@ struct SourceLine {
   u32 lexical_line;
 };
 
-// A default expression that observes the invocation line, including through nested defaults.
-// The declaration leaves the line unset. Use of the argument supplies a presumed line.
-struct SourceLineContext {
+// A source-location descriptor pointer in a default argument. Its value is bound at the call.
+struct SourceLocation {
+  ExprInfo info;
+};
+
+// A default expression that observes the invocation site, including through nested defaults.
+// The declaration records the observations; use of the argument supplies the values.
+struct DefaultSourceContext {
   ExprInfo info;
   [[=sequenced]] Child arg;
-  u32 line;
+  bool observes_line = false;
+  u32 line = 0;
+  EntityId descriptor_type = EntityId::none;
+  ConstId descriptor_address = ConstId::none;
 };
 
 // ---------------------------------------------------------------- declarations (item trees)
@@ -634,7 +659,8 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
-                          ConstantProbe, ThreeWay, SourceLine, SourceLineContext, ImmediateVirtualCall>;
+                          ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation,
+                          ImmediateVirtualCall, BitCast>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -60,6 +60,7 @@ enum class ObjectFormat : u8 { macho, elf };
 // preconditions are checked by each operation's own analysis.
 enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
+  source_location_descriptor = std::uint64_t{1} << 5,
   peer_typed_dynamic_cast = std::uint64_t{1} << 1,
   hosted_trivial_class_throw = std::uint64_t{1} << 4,
   namespace_hidden_asm = std::uint64_t{1} << 2,
@@ -95,6 +96,8 @@ struct Target {
   // Whether all code for the target is position independent, whatever the options say: `__PIC__`
   // and `__pic__` are then always 2, as Clang has them on arm64 Darwin.
   bool always_pic = false;
+  // Standard unsigned integers have eight-bit bytes, pure binary values and no padding.
+  bool little_endian_unsigned_integers = false;
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
@@ -306,6 +309,7 @@ inline constexpr Target aarch64_darwin{
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
     .always_pic = true,
+    .little_endian_unsigned_integers = true,
 };
 
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
@@ -337,7 +341,9 @@ inline constexpr Target x86_64_linux{
                          std::to_underlying(NativeOperation::hosted_trivial_class_throw) |
                          std::to_underlying(NativeOperation::peer_typed_dynamic_cast) |
                          std::to_underlying(NativeOperation::namespace_hidden_asm) |
-                         std::to_underlying(NativeOperation::breakpoint_statement_asm),
+                         std::to_underlying(NativeOperation::breakpoint_statement_asm) |
+                         std::to_underlying(NativeOperation::source_location_descriptor),
+    .little_endian_unsigned_integers = true,
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {

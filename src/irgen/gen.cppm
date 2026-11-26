@@ -598,14 +598,20 @@ class Gen {
   }
 
   template <class Body>
-  auto with_source_line(At a, Body&& f) {
-    const auto context = get<ast::SourceLineContext>(a);
+  auto with_default_source(At a, Body&& f) {
+    const auto context = get<ast::DefaultSourceContext>(a);
     struct Restore {
       uint32_t& line;
-      uint32_t saved;
-      ~Restore() { line = saved; }
-    } restore{source_line_, source_line_};
+      uint32_t saved_line;
+      ast::ConstId& descriptor;
+      ast::ConstId saved_descriptor;
+      ~Restore() {
+        line = saved_line;
+        descriptor = saved_descriptor;
+      }
+    } restore{source_line_, source_line_, source_descriptor_, source_descriptor_};
     if (source_line_ == 0) source_line_ = context.line;
+    if (source_descriptor_ == ast::ConstId::none) source_descriptor_ = context.descriptor_address;
     return f(child(a, context.arg));
   }
 
@@ -746,7 +752,11 @@ class Gen {
       if (result_ && r.value.id != NodeId::none) {
         // A class result initializes the caller's object ([stmt.return], [dcl.init.general]/16.6).
         full_expression([&] {
-          initialize(*result_, value, false);
+          // The immediate evaluator can return a record after sequencing a static member's receiver.
+          const At written = strip_parens(value);
+          const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
+                                get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
+          initialize(*result_, value, false, sequence);
           return 0;
         });
       } else if (r.value.id != NodeId::none) {
@@ -851,13 +861,27 @@ class Gen {
            class_prvalue(info(e));
   }
 
+  // Follow the value of a class selection so a discarded bit cast still has
+  // a result object. A supported cast proves trivial destruction for the result type.
+  bool has_bit_cast_result(At e) {
+    e = strip_parens(e);
+    if (is<ast::BitCast>(e)) {
+      const auto cast = get<ast::BitCast>(e);
+      return cast.supported && class_prvalue(cast.info);
+    }
+    if (!class_selection(e)) return false;
+    if (is<ast::OrderedBinary>(e)) return has_bit_cast_result(child(e, get<ast::OrderedBinary>(e).rhs));
+    const auto choice = get<ast::Conditional>(e);
+    return has_bit_cast_result(child(e, choice.then_)) || has_bit_cast_result(child(e, choice.else_));
+  }
+
   // A later aggregate initializer clause can run before earlier temporaries are destroyed.
   // Check the whole initializer for throwing evaluation and cleanup when it contains a selection.
   bool selects_class_initializer(At e) {
     e = strip_parens(e);
     if (class_selection(e)) return true;
     if (is<ast::DefaultArg>(e)) return selects_class_initializer(child(e, get<ast::DefaultArg>(e).arg));
-    if (is<ast::SourceLineContext>(e)) return selects_class_initializer(child(e, get<ast::SourceLineContext>(e).arg));
+    if (is<ast::DefaultSourceContext>(e)) return selects_class_initializer(child(e, get<ast::DefaultSourceContext>(e).arg));
     if (is<ast::DefaultMemberInit>(e))
       return selects_class_initializer(child(e, get<ast::DefaultMemberInit>(e).init));
     if (!is<ast::InitList>(e)) return false;
@@ -959,7 +983,7 @@ class Gen {
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
     if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
-    if (is<ast::SourceLineContext>(e)) return value_initializes(child(e, get<ast::SourceLineContext>(e).arg));
+    if (is<ast::DefaultSourceContext>(e)) return value_initializes(child(e, get<ast::DefaultSourceContext>(e).arg));
     if (is<ast::OrderedBinary>(e)) {
       const auto binary = get<ast::OrderedBinary>(e);
       if (binary.op == ast::OrderedOp::comma) return value_initializes(child(e, binary.rhs));
@@ -1135,8 +1159,8 @@ class Gen {
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class);
     if (is<ast::DefaultArg>(e))
       return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class); });
-    if (is<ast::SourceLineContext>(e))
-      return with_source_line(e, [&](At arg) { initialize(p, arg, zeroed, select_class); });
+    if (is<ast::DefaultSourceContext>(e))
+      return with_default_source(e, [&](At arg) { initialize(p, arg, zeroed, select_class); });
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
@@ -1161,6 +1185,10 @@ class Gen {
     }
     if (is<ast::CtorCall>(e)) return call_constructor(p.ptr, e, zeroed);
     if (is<ast::ThreeWay>(e)) return three_way(p, e);
+    if (is<ast::BitCast>(e) && cls(p.type) == TypeClass::record) {
+      bit_cast(e, p);
+      return;
+    }
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
       // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
@@ -1243,21 +1271,29 @@ class Gen {
 
   // A temporary ([class.temporary]): initialized from a prvalue, ended with the full-expression
   // or, when a reference it is bound to extends it, with that reference's scope.
-  Place materialize(At a) {
-    auto m = get<ast::Materialize>(a);
-    if (m.extended == 1 && (selecting_initializer_ || branches_ > 0))
-      unsupported(a, "requiring lifetime extension in a conditional operand or class initializer selection");
-    At v = child(a, m.operand);
-    bool zeroed = value_initializes(v);
-    Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
-    initialize(p, v, zeroed);
+  Place materialize_value(At site, At value, ast::QualType type,
+                          ast::EntityId destructor = ast::EntityId::none,
+                          uint32_t extended = 0, bool select_class = false) {
+    Position here(*this, site.offset);
+    if (extended == 1 && (selecting_initializer_ || branches_ > 0))
+      unsupported(site, "requiring lifetime extension in a conditional operand or class initializer selection");
+    bool zeroed = value_initializes(value);
+    Place p = begin_object(type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
+    initialize(p, value, zeroed, select_class);
     begin_lifetime(p);
-    Ending end{p, m.destructor, ir::Storage::temporary};
-    if (m.extended == 1) scopes_.back().push_back(end);
-    else if (temps_.empty()) unsupported(a, "outside a full-expression");
-    else if (branches_ > 0 && m.destructor != ast::EntityId::none) unsupported(a, "with a destructor, created conditionally");
+    Ending end{p, destructor, ir::Storage::temporary};
+    if (extended == 1) scopes_.back().push_back(end);
+    else if (temps_.empty()) unsupported(site, "outside a full-expression");
+    else if (branches_ > 0 && destructor != ast::EntityId::none) unsupported(site, "with a destructor, created conditionally");
     else temps_.back().push_back(end);
     return p;
+  }
+
+  Place materialize(At a, bool select_class = false) {
+    const auto m = get<ast::Materialize>(a);
+    const At value = child(a, m.operand);
+    return materialize_value(a, value, m.info.type, m.destructor, m.extended,
+                             select_class || has_bit_cast_result(value));
   }
 
   // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
@@ -1265,7 +1301,7 @@ class Gen {
   Place class_source(At e) {
     while (is<ast::Paren>(e) || is<ast::DefaultArg>(e))
       e = child(e, is<ast::Paren>(e) ? get<ast::Paren>(e).operand : get<ast::DefaultArg>(e).arg);
-    if (is<ast::SourceLineContext>(e)) return with_source_line(e, [&](At arg) { return class_source(arg); });
+    if (is<ast::DefaultSourceContext>(e)) return with_default_source(e, [&](At arg) { return class_source(arg); });
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
@@ -1680,14 +1716,20 @@ class Gen {
   void discard(At a) {
     if (a.id == NodeId::none) return;
     // A discarded three-way comparison: only its operands' evaluations remain.
-    if (const At s = strip_parens(a); is<ast::ThreeWay>(s)) {
-      const auto tw = get<ast::ThreeWay>(s);
-      unsequenced(std::array{child(s, tw.lhs), child(s, tw.rhs)}, [&](std::size_t, At o) { discard(o); });
+    const At written = strip_parens(a);
+    if (is<ast::ThreeWay>(written)) {
+      const auto tw = get<ast::ThreeWay>(written);
+      unsequenced(std::array{child(written, tw.lhs), child(written, tw.rhs)},
+                  [&](std::size_t, At operand) { discard(operand); });
       return;
     }
     const auto expr = info(a);
     if (expr.category == ast::ValueCategory::prvalue) {
-      rvalue_or_void(a);
+      if (class_prvalue(expr) && has_bit_cast_result(written)) {
+        materialize_value(written, written, expr.type, ast::EntityId::none, /*extended=*/0, /*select_class=*/true);
+      } else {
+        rvalue_or_void(a);
+      }
       return;
     }
     // Discarding a nonvolatile direct field designator does not read its value.
@@ -1745,6 +1787,7 @@ class Gen {
         return 2;
     }
     int e = is<ast::DynamicCastVoid>(a) || is<ast::DynamicCastPointer>(a) ? 1 : 0;
+    if (is<ast::BitCast>(a) && is_lvalue(child(a, get<ast::BitCast>(a).source))) e = 1;
     if (is<ast::ImplicitConversion>(a)) {
       auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue && !is_nullptr(c.info.type)) e = 1;
@@ -1779,11 +1822,16 @@ class Gen {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) unsupported(a, "with a pointer-to-member value");
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::ConstantProbe>(a)) return int_constant(t, get<ast::ConstantProbe>(a).proved);
+    if (is<ast::BitCast>(a)) return bit_cast(a);
     if (is<ast::SourceLine>(a))
       return int_constant(t, source_line_ != 0 ? source_line_ : get<ast::SourceLine>(a).lexical_line);
+    if (is<ast::SourceLocation>(a)) {
+      if (source_descriptor_ == ast::ConstId::none) unsupported(a, "without a bound source location");
+      return constant(t, source_descriptor_);
+    }
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
-    if (is<ast::SourceLineContext>(a)) return with_source_line(a, [&](At arg) { return rvalue_or_void(arg); });
+    if (is<ast::DefaultSourceContext>(a)) return with_default_source(a, [&](At arg) { return rvalue_or_void(arg); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::DynamicCastVoid>(a)) return dynamic_cast_void(a);
     if (is<ast::DynamicCastPointer>(a)) return dynamic_cast_pointer(a);
@@ -1853,6 +1901,7 @@ class Gen {
       const auto args = ast_.children(b.args);
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::ctz: return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))});
         case ast::BuiltinOp::strlen: {
           const At arg = child(a, args[0]);
           return string_length(t, info(arg).type, rvalue(arg));
@@ -1881,6 +1930,71 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  // Sema proved that the fields fill both representations in target byte order. Use
+  // ordinary typed reads and initialization so both evaluation paths check the same objects.
+  std::optional<ValueId> bit_cast(At a, std::optional<Place> into = {}) {
+    const auto cast = get<ast::BitCast>(a);
+    if (!cast.supported || (cls(cast.info.type) == TypeClass::record && !into))
+      throw Unsupported{"evaluating __builtin_bit_cast with this object representation"};
+
+    struct FieldValue {
+      ast::QualType type;
+      ValueId value;
+      uint32_t bits;
+    };
+    std::vector<FieldValue> source;
+    const At operand = child(a, cast.source);
+    const auto from_type = info(operand).type;
+    auto add_field = [&](ast::QualType type, ValueId value) {
+      source.push_back({type, value, facts_.integer(type).width});
+    };
+    if (cls(from_type) == TypeClass::record) {
+      const Place from = is<ast::Materialize>(operand)
+          ? materialize(operand, /*select_class=*/true) : lvalue(operand);
+      const auto owner = facts_.class_entity(from_type);
+      for (uint32_t i = 0; const auto field = facts_.field_type(owner, i); ++i)
+        add_field(*field, load(subobject(from, ir::Step::field, i, *field)));
+    } else {
+      add_field(from_type, is_lvalue(operand) ? load_glvalue(operand, from_type) : rvalue(operand));
+    }
+
+    // Each step consumes a contiguous slice of the current source field. Logical shifts
+    // discard earlier bits, and conversion and left shift discard bits above the result field.
+    std::size_t source_index = 0;
+    uint32_t consumed = 0;
+    auto result_field = [&](ast::QualType type) {
+      const auto width = facts_.integer(type).width;
+      ValueId result{};
+      for (uint32_t written = 0; written < width;) {
+        const auto& field = source[source_index];
+        auto value = field.value;
+        if (consumed != 0)
+          value = shift(false, field.type, value, int_constant(facts_.int_type(), consumed));
+        value = arithmetic(field.type, type, value);
+        if (written == 0) {
+          result = value;
+        } else {
+          value = shift(true, type, value, int_constant(facts_.int_type(), written));
+          result = pure(ir::Op::or_, type, {result, value});
+        }
+        const auto count = std::min(width - written, field.bits - consumed);
+        written += count;
+        consumed += count;
+        if (consumed == field.bits) {
+          ++source_index;
+          consumed = 0;
+        }
+      }
+      return result;
+    };
+
+    if (!into) return result_field(cast.info.type);
+    const auto owner = facts_.class_entity(into->type);
+    for (uint32_t i = 0; const auto field = facts_.field_type(owner, i); ++i)
+      store(subobject(*into, ir::Step::field, i, *field), result_field(*field));
+    return std::nullopt;
   }
 
   ValueId dynamic_cast_void(At a) {
@@ -2271,8 +2385,8 @@ class Gen {
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
-          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) ||
-          is<ast::SourceLine>(a) || is<ast::SourceLineContext>(a)))
+          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) || is<ast::BitCast>(a) ||
+          is<ast::SourceLine>(a) || is<ast::SourceLocation>(a) || is<ast::DefaultSourceContext>(a)))
       return false;
     bool proven = true;
     ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {
@@ -2503,14 +2617,20 @@ class Gen {
   }
   // Itanium ABI §3.2.4: the address point sits at offset zero in this root subobject.
   std::optional<ValueId> virtual_member_call(At a) {
-    if (fn_.thunk) unsupported(a, "in constant evaluation");
     const auto c = get<ast::VirtualMemberCall>(a);
+    const auto selection = in_.seqs.at(c.selection, 0);
+    if constexpr (F::evaluating_constants) {
+      if (selection.function != ast::EntityId::none && c.info.category == ast::ValueCategory::prvalue &&
+          !class_prvalue(c.info) && !facts_.ellipsis_after(selection.function))
+        return evaluated_virtual_call(a, c.info, selection.function, c.object, c.args, ir::VirtualCallKind::ordinary);
+    }
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
     const ValueId receiver = rvalue(child(a, c.object));
     const auto table_type = facts_.pointer_to(c.callee);
     const auto receiver_type = facts_.pointer_to(table_type);
     const ValueId vptr = pure(ir::Op::ptr_cast, receiver_type, {receiver}, {word(ty(receiver_type))});
     const ValueId table = load({vptr, table_type});
-    const ValueId index = int_constant(facts_.ptrdiff_type(), c.slot);
+    const ValueId index = int_constant(facts_.ptrdiff_type(), selection.slot);
     const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.callee))});
     std::vector<ValueId> args{load({slot, c.callee}), receiver};
     // Records by value need the by-value bits and result object of `member_call`; sema admits
@@ -2524,21 +2644,27 @@ class Gen {
     }
     return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
   }
-  std::optional<ValueId> immediate_virtual_call(At a) {
-    const auto call = get<ast::ImmediateVirtualCall>(a);
-    std::vector<ValueId> args{rvalue(child(a, call.object))};
-    for (ast::Child arg : ast_.children(call.args)) {
+  std::optional<ValueId> evaluated_virtual_call(At a, ast::ExprInfo info, ast::EntityId function,
+                                                ast::Child object, ast::ChildList arguments, ir::VirtualCallKind kind) {
+    Position here(*this, a.offset);
+    std::vector<ValueId> args{rvalue(child(a, object))};
+    for (ast::Child arg : ast_.children(arguments)) {
       At x = child(a, arg);
-      if (argument_object(x)) unsupported(a, "of an immediate virtual function with a by-value class argument");
+      if (argument_object(x)) unsupported(a, "of a virtual function with a by-value class argument");
       args.push_back(argument(x));
     }
     if (args.size() > 32) unsupported(a, "with more than 32 arguments");
-    const auto result = result_type(call.info);
+    const auto result = result_type(info);
     const ir::Ty value[] = {vty(result)};
     const bool has_value = cls(result) != TypeClass::void_;
-    const std::uint64_t imms[] = {word(call.function), call.qualified};
-    const auto n = stateful(ir::Op::call_immediate_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
+    const std::uint64_t imms[] = {word(function), word(kind)};
+    const auto n = stateful(ir::Op::call_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
     return has_value ? std::optional(b_.result(n, 1)) : std::nullopt;
+  }
+  std::optional<ValueId> immediate_virtual_call(At a) {
+    const auto call = get<ast::ImmediateVirtualCall>(a);
+    const auto kind = call.qualified ? ir::VirtualCallKind::qualified_immediate : ir::VirtualCallKind::immediate;
+    return evaluated_virtual_call(a, call.info, call.function, call.object, call.args, kind);
   }
 
   bool member_call_expression(At a) {
@@ -2725,7 +2851,7 @@ class Gen {
     }
     if (is<ast::Paren>(a)) return lvalue(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return lvalue(child(a, get<ast::DefaultArg>(a).arg)); });
-    if (is<ast::SourceLineContext>(a)) return with_source_line(a, [&](At arg) { return lvalue(arg); });
+    if (is<ast::DefaultSourceContext>(a)) return with_default_source(a, [&](At arg) { return lvalue(arg); });
     if (is<ast::Unary>(a)) {
       auto u = get<ast::Unary>(a);
       At o = child(a, u.operand);
@@ -2891,6 +3017,7 @@ class Gen {
   bool in_aggregate_default_ = false;        // evaluating a selected default member initializer
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
   uint32_t source_line_ = 0;                 // outermost active default argument's invocation line
+  ast::ConstId source_descriptor_ = ast::ConstId::none;  // its descriptor address
 };
 
 template <Facts F>
