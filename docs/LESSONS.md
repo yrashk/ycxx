@@ -658,6 +658,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **A point is not an item.** `Program::is_complete(c, item)` and its kin also get points past
+  the item table (`end()`, an instantiation point). On #117 a helper that walked `items[k].parent`
+  from such a point read past the table, and the `<iostream>` run segfaulted with no diagnostic
+  (exit 139, an empty log that first read as "0 errors"). Bound-check any per-item helper a point
+  can reach, and check a compiler run's exit status before its error count.
+- **Items inside bodies need their owner in their identity.** Local classes (#117) are items whose
+  scope paths name no function, so same-shaped classes of two functions got one id: `instance()`
+  threw, diagnostics landed in the other function, and group reuse switched off. The review found
+  it with two functions; a test with one local class per program could not.
 - **Deferred analysis reads committed parameter lists.** On #713, the exception-specification
   replay read a declaration copied by `Program::declared` before its item committed. A draft
   `SeqId<ParamSema>` happened to name a different parameter list in the global interner.
