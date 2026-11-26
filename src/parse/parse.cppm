@@ -2830,7 +2830,11 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   if (!dmi) return std::nullopt;
   const auto& entity = p_->world().entities.rec(field);
   const auto arguments = p_->class_args_.find(std::to_underlying(entity.scope));
-  if (fallback && (arguments == p_->class_args_.end() || !caller.types().is_scalar(entity.type))) return std::nullopt;
+  auto& types = caller.types();
+  const bool array_fallback = fallback && dmi->braced && !types.is_dependent(entity.type) &&
+                              sema::Evaluator::constant_record_char_array(types, entity.type);
+  if (fallback && !array_fallback && (arguments == p_->class_args_.end() || !types.is_scalar(entity.type)))
+    return std::nullopt;
   if (dmi->invalid) return NodeId::none;
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
@@ -2887,6 +2891,14 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
     return NodeId::none;
   }
   if (fallback) {
+    // A stored value also initializes runtime objects. Only fold array elements whose values are
+    // independent of evaluation mode, including the value-initialized tail ([dcl.init.aggr]).
+    if (array_fallback) {
+      if (!replay.as<ast::InitList>(init)) return std::nullopt;
+      if (!std::ranges::all_of(replay.list_elements(init), [&](Ex element) {
+            return replay.as<ast::Literal>(element).has_value() || replay.as<ast::ValueInit>(element).has_value();
+          })) return std::nullopt;
+    }
     const auto value = sema::Evaluator(replay, source).evaluate_initializer(init).value;
     if (instantiation_failed()) return NodeId::none;
     if (!value) return std::nullopt;

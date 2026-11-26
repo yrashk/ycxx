@@ -1437,6 +1437,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Function-template bodies replay defaults of ordinary non-template scalar aggregates, for named
   objects and aggregate expressions. Newly replayed runtime defaults use the same nonthrowing
   operation check. [#846](https://github.com/yrashk/ycxx/issues/846)
+- A selected braced default member initializer with literal character elements for a fixed
+  one-dimensional `char` array supplies the complete array value, including omitted elements.
+  Ordinary classes and class-template specializations can use it during implicit default and
+  aggregate initialization ([class.mem.general], [dcl.init.aggr], [temp.inst]).
+  [#1192](https://github.com/yrashk/ycxx/issues/1192)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
