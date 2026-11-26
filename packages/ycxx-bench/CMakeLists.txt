@@ -39,6 +39,11 @@ endif()
 
 add_executable(ycxx-bench-demo demo.cpp)
 target_link_libraries(ycxx-bench-demo PRIVATE YCXXBench::bench)
+# The demo imports std itself. CMake 3.31 does not find its installed module source
+# through the benchmark library alone. In-tree, the compiler supplies its own std.
+if(NOT DEFINED YCXX_BENCH_OPTIONS_TARGET)
+  target_link_libraries(ycxx-bench-demo PRIVATE ycxx::modules)
+endif()
 set_target_properties(ycxx-bench-demo PROPERTIES
   CXX_EXTENSIONS OFF
   CXX_SCAN_FOR_MODULES ON

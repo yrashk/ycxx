@@ -37,12 +37,17 @@ cmake_minimum_required(VERSION 3.30)
 project(MyBenchmark LANGUAGES CXX)
 find_package(YCXXBench 0.1 CONFIG REQUIRED)
 add_executable(my_benchmark main.cpp)
-target_link_libraries(my_benchmark PRIVATE YCXXBench::bench)
+target_link_libraries(my_benchmark PRIVATE YCXXBench::bench ycxx::modules)
 ```
 
-For a source dependency, use `add_subdirectory(vendor/ycxx-bench)` in place
-of `find_package(YCXXBench)`. This uses an existing `ycxx::modules` target or
-finds libycxx on `CMAKE_PREFIX_PATH`. Link the same benchmark target.
+For a source dependency, replace `find_package(YCXXBench)` with the following
+in the consumer's CMake project and link the same targets. The example links
+`ycxx::modules` directly because its source imports `std`.
+
+```cmake
+find_package(libycxx 0.1 CONFIG REQUIRED)
+add_subdirectory(vendor/ycxx-bench)
+```
 
 ```cpp
 import std;

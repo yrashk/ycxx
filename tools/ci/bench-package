@@ -10,6 +10,7 @@ trap 'rm -rf "$scratch"' EXIT
 toolchain="$repo/deps/libycxx/cmake/ycxx-toolchain.cmake"
 libycxx="$scratch/stage/libycxx"
 bench="$scratch/stage/bench"
+cmake --version
 
 # The in-tree libycxx has install rules disabled and enables compiler-specific
 # reflection flags. Use a standalone install, with the same source-module
