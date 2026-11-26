@@ -1371,7 +1371,13 @@ std::expected<void, std::string> prepare_project(
                agree_on_shared_host_files(*planning_producers->hosts, *witness_producers.hosts);
       };
       const auto stage_witness = [&]() -> std::expected<StagedProducers, std::string> {
-        auto staged = witness_producers.stage(current_witness_recipe, [&](const auto& files) {
+        if (planning_producers && !current_planning()) return staging_failure(changed_witness().error());
+        const auto current_staging_recipe = [&] {
+          // The producer guard can invalidate an obsolete expansion while the
+          // read restaging itself stays outside the guard.
+          return current_witness_recipe() && (!planning_producers || planning_producers->current());
+        };
+        auto staged = witness_producers.stage(current_staging_recipe, [&](const auto& files) {
           watch_hosts(prepared.rules.pending_host_files, files);
         }, changed_witness);
         if (staged || superseded || !planning_producers) return staged;
@@ -1507,13 +1513,8 @@ bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const Pr
     if (!current_rule(cwd, toolchain, prepared.rules.observations[i], prepared.rules.expansions[i],
                       std::span(prepared.rules.expansions).first(i), packages, files, prepared.native_triple))
       return false;
-  return true;
-}
-
-bool current_deferred_host_planning(const fs::path& cwd, const RuleToolchain& toolchain,
-                                    const PreparedProject& prepared) {
-  ObservedPackageStamps packages;
-  ObservedHostFiles files;
+  // An upstream action can belong to a witness demand whose planning inputs
+  // changed while the demand was deferred.
   return std::ranges::all_of(prepared.deferred_host_planning, [&](const auto& entry) {
     const auto& deferred = entry.second;
     return current_rule_inputs(cwd, toolchain, deferred.observation,
@@ -2170,9 +2171,6 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                                     use_compiler, resolve_arguments, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
     if (superseded || !current_rules(cwd, toolchain, planned)) continue;
-    // An upstream failure can belong to a witness demand whose planning inputs
-    // changed while the demand was deferred. Retry before reporting that failure.
-    if (!prepared && !current_deferred_host_planning(cwd, toolchain, planned)) continue;
     write_rule_snapshot(cwd, target, planned.rules, native_triple);
     if (watch) {
       report.watch_stamp =
