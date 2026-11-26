@@ -87,6 +87,7 @@ export enum class Flag : std::uint8_t {
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
+  observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }

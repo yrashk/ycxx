@@ -620,7 +620,11 @@ struct Ops {
     }
     return m.jump(f, n, 0);
   }
-  static Flow consteval_br(M& m, Frame& f, N n) { return m.jump(f, n, constant(m) ? 0 : 1); }
+  static Flow consteval_br(M& m, Frame& f, N n) {
+    // `if consteval` lets the program see that it is constant-evaluated ([stmt.if]/5).
+    if (constant(m) && has(f, n, ir::Flag::observes_context)) m.observed_constant_context_ = true;
+    return m.jump(f, n, constant(m) ? 0 : 1);
+  }
 
   // Returns to the caller, whose call node receives the state, then the values.
   static Flow ret(M& m, Frame& f, N n) {

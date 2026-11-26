@@ -1347,7 +1347,7 @@ class Gen {
     ir::BlockId then_b = new_block(), join = new_block();
     ir::BlockId else_b = s.else_.id != NodeId::none ? new_block() : join;
     ir::SuccRef succs[] = {edge(s.negated ? else_b : then_b), edge(s.negated ? then_b : else_b)};
-    emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
+    emit(ir::Op::consteval_br, {}, {}, {}, ir::bit(ir::Flag::observes_context), succs);
     live_ = false;
     enter(then_b);
     substmt(child(a, s.then_));

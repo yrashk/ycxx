@@ -1454,6 +1454,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   #118, and constant evaluation of the object remains #1140
   (`tests/own/templates/array-default-member/`).
   [#1418](https://github.com/yrashk/ycxx/issues/1418)
+- The interpreter reports when an `if consteval` took its consteval edge
+  (`Outcome::observed_constant_context`, from the `observes_context` flag on its `consteval_br`).
+  A default member initializer's value that observed it is not kept at declaration. The use-site
+  fold keeps it only in a constant context, because a runtime initialization is not manifestly
+  constant-evaluated ([expr.const], [stmt.if]). Those runtime uses are diagnosed until they are
+  evaluated at run time.
+  [#1459](https://github.com/yrashk/ycxx/issues/1459)
 - In non-template code, ordinary scalar aggregates replay written defaults in braced expressions,
   `T()` value initialization, result objects, and aggregate arguments. The expanded runtime path
   checks built-in scalar operations and ordinary calls for nonthrowing behavior. IR binds receiver
