@@ -3592,6 +3592,8 @@ public:
   }
   sema::ConstId written_atom(Ex e) {
     if (const auto operand = written_operators_.find(e.id); operand != written_operators_.end()) return operand->second;
+    if (writing_constraint_atom_)
+      if (auto closure = s_->as<ast::Lambda>(e)) return s_->ins().intern_value(ast::VWrittenLambda{closure->closure});
     if (auto local = s_->as<ast::LocalRef>(e)) {
       const auto parameter = written_requires_parameters_.find(local->local);
       if (parameter != written_requires_parameters_.end()) return s_->ins().intern_value(parameter->second);

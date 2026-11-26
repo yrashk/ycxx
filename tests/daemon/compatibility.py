@@ -3842,6 +3842,58 @@ struct S {
                 subprocess.run([scope / 'nested-call'], cwd=scope, check=True, timeout=20)
 
 
+def lambda_constraint_expression_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'constraint-lambda.cpp').write_text('''\
+#ifdef ORDER
+int ordinary() { return [] { return 1; }(); }
+template<class T> requires ([] { return true; }()) int unused(T n) { return n; }
+template<class T> requires ([] { return true; }()) int first(T n) { return n; }
+namespace N { template<class T> int second(T n) requires ([] { return true; }()) { return n; } }
+template<class T> requires requires { [] { return 1; }(); } int third(T n) { return n; }
+int use() {
+  int a = third(3);
+  int b = first(1);
+  int c = N::second(2);
+  return a + b + c;
+}
+#else
+template<class T> requires ([](T n) { return n == 3; }(T(3))) int f(T n) { return n; }
+int use() { return f(7); }
+#endif
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        signatures = ('_Z1fIiQclL3$_0EcvT_Li3EEEiS1_', '_Z5firstIiQclL3$_2EEEiT_',
+                      '_Z5thirdIiQrqXclL3$_1EEEEiT_', '_ZN1N6secondIiEEiT_QclLNS_3$_3EEE') if mode == 'clang' else (
+                      '_Z1fIiQclLUlT_E_EcvS0_Li3EEEiS0_', '_Z5firstIiQclLUlvE0_EEEiT_',
+                      '_Z5thirdIiQrqXclLUlvE2_EEEEiT_', '_ZN1N6secondIiEEiT_QclLNS_UlvE1_EEE')
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for variant, names in (([], signatures[:1]), (['-DORDER'], signatures[1:])):
+                command = [target, '-fcompat=' + mode, *variant, '-c', 'constraint-lambda.cpp', '-o', 'constraint-lambda.o']
+                outputs = []
+                for env in (world.cold, world.daemon):
+                    result = world.cxx(command, scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, variant, result)
+                    outputs.append((scope / 'constraint-lambda.o').read_bytes())
+                assert outputs[0] == outputs[1], (mode, target, variant)
+                exposed = outputs[1].split(b'\0')
+                for name in names:
+                    assert (prefix + name).encode() in exposed, (mode, target, variant, name, exposed)
+                peer = clang if mode == 'clang' else gxx
+                native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+                if peer and native:
+                    symbol = prefix + names[0]
+                    (scope / 'constraint-lambda-caller.cpp').write_text(f'''\
+extern "C" int call(int) asm("{symbol}");
+int main() {{ return call(19) != 19; }}
+''')
+                    subprocess.run([peer, '-std=c++26', 'constraint-lambda-caller.cpp', 'constraint-lambda.o',
+                                    '-o', 'constraint-lambda'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'constraint-lambda'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3881,6 +3933,7 @@ def main():
         static_lambda_conversion(world, gxx)
         constrained_lambda_conversions(world, gxx)
         nested_template_symbols(world, gxx)
+        lambda_constraint_expression_symbols(world, gxx)
         lambda_conversion_symbols(world, gxx)
         floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.

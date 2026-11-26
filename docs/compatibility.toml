@@ -610,6 +610,19 @@ probe = 'namespace N { template<class T> requires (sizeof(T) > 0) int f(T n) { r
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF with -fabi-compat-version=0 and upstream Clang 23.1.6 ELF and Mach-O symbols for global, namespace and class members, written headings and trailing clauses, and constrained, placeholder, and template template parameters"]
 
 [[divergence]]
+id = "constraint-lambda-expression-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.lambda], Itanium C++ ABI §5.1.6.2 and §5.1.8, constraint mangling proposal"
+prior = "Encode a lambda in a written constraint with the opaque constraint fingerprint."
+spec = "Use the published expression and structural closure productions for a lambda operand, with source-order ordinals of matching signatures."
+gcc = "Encode the closure type structurally as LU...E. The tested same-signature declarations consume ordinals in source order, including a declaration that no specialization uses. Named-scope head omission is covered separately."
+clang = "Use the private closure type as L3$_0E and retain its namespace when applicable. A referenced written constraint uses the next private ordinal in definition and reference traversal. The tested earlier ordinary native closure contributes to this counter and still has its own function-local name."
+limits = "Covers captureless lambdas in simple calls, dependent parameter calls, simple requirements, and namespaced trailing clauses. Ordinary function-local closure names are tracked separately."
+probe = 'template<class T> requires ([] { return true; }()) int f(T n) { return n; }'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols for unused declarations, namespace qualifiers, reordered calls, and calls following an ordinary function-local closure"]
+
+[[divergence]]
 id = "constrained-operator-expression-symbol"
 status = "shared"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

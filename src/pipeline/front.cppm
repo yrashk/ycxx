@@ -1654,6 +1654,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const auto& d = decls[i];
       declare(d, at[i]);
+      if (d.kind == ast::DeclKind::function) {
+        collect_constraint_lambdas(ins, d.head_constraint.expression, tu.written_constraint_lambdas);
+        collect_constraint_lambdas(ins, d.trailing_constraint.expression, tu.written_constraint_lambdas);
+      }
       record_class_rtti_abi(d, k);
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
           (attributed || ins.seqs.size(d.annotations) != 0) &&
@@ -2206,6 +2210,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
+    tu.written_constraint_lambdas.append_range(p.tu.written_constraint_lambdas);
     for (const auto& [specialization, spelling] : p.tu.class_template_spellings) {
       auto [it, added] = tu.class_template_spellings.try_emplace(specialization, spelling);
       if (!added && label_order(spelling.first) < label_order(it->second.first)) it->second = spelling;

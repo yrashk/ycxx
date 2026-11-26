@@ -376,6 +376,11 @@ struct VWrittenFold {
   ConstId second;
 };
 
+// A lambda expression in a written constraint names its closure type.
+struct VWrittenLambda {
+  EntityId closure;
+};
+
 struct VWrittenCallee {
   NameId name;
   EntityId resolved;
@@ -464,7 +469,7 @@ using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack, VConstraintTemplate,
                                VDepCall, VDepMember, VDepConcept, VConceptParameter, VConstraintEnum, VDepField, VDepConditional,
                                VRequiresExpression, VRequiresParameter, VWrittenTrait, VWrittenNew, VWrittenDelete, VWrittenOperator, VWrittenCallee, VWrittenMember,
-                               VWrittenFold, VFoldConstraint>;
+                               VWrittenFold, VWrittenLambda, VFoldConstraint>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

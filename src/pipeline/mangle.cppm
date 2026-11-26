@@ -116,6 +116,9 @@ std::expected<std::string, std::string> mangled_specialization(const ast::Intern
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
 
+// The closure types named by a written constraint, in expression order.
+void collect_constraint_lambdas(const ast::Interners& in, ast::ConstId expression, std::vector<ast::EntityId>& closures);
+
 // The symbol of an entity: the mangled name or identifier with the platform prefix, if any.
 std::expected<std::string, std::string> symbol_name(const ast::Interners& in, std::string_view name, ast::QualType type,
                                                     bool is_function, ast::LangLinkage lang,
@@ -129,6 +132,29 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
 }  // namespace ycxx::pipeline
 
 namespace ycxx::pipeline {
+
+void collect_constraint_lambdas(const ast::Interners& in, ast::ConstId expression, std::vector<ast::EntityId>& closures) {
+  if (expression == ast::ConstId::none) return;
+  ast::dispatch<ast::ValueKinds>(in.values.kind(expression), [&]<class T>(std::type_identity<T>) {
+    const auto value = in.values.get<T>(expression);
+    if constexpr (std::is_same_v<T, ast::VWrittenLambda>) {
+      closures.push_back(value.closure);
+    } else {
+      auto visit = [&](this auto&& walk, const auto& object) -> void {
+        ast::for_each_ref(object, [&]<class H>(const H& handle) {
+          if constexpr (std::is_same_v<H, ast::ConstId>) {
+            collect_constraint_lambdas(in, handle, closures);
+          } else if constexpr (std::is_same_v<H, ast::SeqId<ast::ConstId>> ||
+                               std::is_same_v<H, ast::SeqId<ast::TemplateArg>> ||
+                               std::is_same_v<H, ast::SeqId<ast::WrittenRequirement>>) {
+            for (const auto& element : in.seqs.elements(handle)) walk(element);
+          }
+        });
+      };
+      visit(value);
+    }
+  });
+}
 
 // Itanium §5.1.5.2, <builtin-type>.
 std::optional<std::string_view> builtin_code(ast::Builtin b) {
@@ -885,6 +911,21 @@ class Mangler {
       auto second = expression(fold.second);
       if (!second) return second;
       return result + *second;
+    }
+    if (in_.values.is<ast::VWrittenLambda>(v)) {
+      const auto closure = in_.values.get<ast::VWrittenLambda>(v).closure;
+      ClassName named = classes_ ? classes_(closure) : ClassName{};
+      if (!named.closure) return std::unexpected("an unnamed closure in a written constraint");
+      std::string scope;
+      if (named.scope != ast::EntityId::none) {
+        auto qualifier = prefix(named.scope);
+        if (!qualifier) return qualifier;
+        scope = *qualifier;
+      }
+      auto name = closure_component(named);
+      if (!name) return name;
+      candidates_.push_back((std::uint64_t{1} << 32) | std::to_underlying(closure));
+      return "L" + delimit_name(scope + *name, named.scope) + "E";
     }
     if (in_.values.is<ast::VWrittenDelete>(v)) {
       const auto deletion = in_.values.get<ast::VWrittenDelete>(v);

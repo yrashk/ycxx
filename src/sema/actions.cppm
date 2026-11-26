@@ -5658,18 +5658,22 @@ public:
                                           ast::RefQual::none, spec.nonthrowing);
     // The closure's identity: its enclosing entity, signature and ordinal among the closures of
     // that entity and signature completed before it (docs/design/closures.md, decision 2).
-    Fp128 sig = ast::seed("ycxx.sema.closure");
-    if (owner && owner->discriminator != Fp128{}) sig = ast::mix(sig, owner->discriminator);
-    for (QualType p : types().rec(call_type).params) sig = ast::mix(sig, types().fp(types().canonical(p)));
-    sig = ast::mix(sig, u64(spec.variadic));
-    // The <lambda-sig> declares the explicit template parameters only (`Ty`, `Tp`), so they and
-    // the invented ones of `auto` parameters make different signatures.
-    for (const ast::TemplateParamSema& h : spec.head)
-      if (h.name != invented_name()) {
-        sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
-        if (h.type_constraint != ConstId::none) sig = ast::mix(sig, ins().values.fp(h.type_constraint));
-      }
-    if (spec.head_constraint.tokens != Fp128{}) sig = ast::mix(sig, spec.head_constraint.tokens);
+    const auto signature = [&](Fp128 discriminator) {
+      Fp128 sig = ast::seed("ycxx.sema.closure");
+      if (discriminator != Fp128{}) sig = ast::mix(sig, discriminator);
+      for (QualType p : types().rec(call_type).params) sig = ast::mix(sig, types().fp(types().canonical(p)));
+      sig = ast::mix(sig, u64(spec.variadic));
+      // The <lambda-sig> records explicit template parameters in addition to the parameter types.
+      for (const ast::TemplateParamSema& h : spec.head)
+        if (h.name != invented_name()) {
+          sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
+          if (h.type_constraint != ConstId::none) sig = ast::mix(sig, ins().values.fp(h.type_constraint));
+        }
+      if (spec.head_constraint.tokens != Fp128{}) sig = ast::mix(sig, spec.head_constraint.tokens);
+      return sig;
+    };
+    const Fp128 abi_signature = signature({});
+    const Fp128 sig = owner && owner->discriminator != Fp128{} ? signature(owner->discriminator) : abi_signature;
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
@@ -5697,6 +5701,7 @@ public:
     cr.lambda_head_constraint = spec.head_constraint;
     cr.lambda_trailing_constraint = spec.trailing_constraint;
     cr.lambda_constraint_depth = depth;
+    cr.lambda_signature = abi_signature;
     LambdaFrame f;
     f.closure = w_->entities.entity(std::move(cr));
     EntityRec call{EntityKind::function, ins().names.intern("operator()"), call_type, LangLinkage::cxx, linkage, {}, f.closure};

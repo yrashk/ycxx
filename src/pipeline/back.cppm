@@ -281,6 +281,7 @@ struct TranslationUnit {
   // The declared heads of class templates whose own arguments may appear in symbols.
   std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
   std::map<EntityId, std::pair<ast::Loc, ast::SeqId<ast::TemplateArg>>> class_template_spellings{};
+  std::vector<EntityId> written_constraint_lambdas;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -2670,6 +2671,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   const sema::World* closure_world = universe().world_for(target);
+  std::map<EntityId, std::uint32_t> written_closure_numbers;
+  if (closure_world) {
+    std::map<Fp128, std::uint32_t> signature_counts;
+    for (const EntityId closure : tu.written_constraint_lambdas) {
+      if (written_closure_numbers.contains(closure)) continue;
+      const auto& record = closure_world->entities.rec(closure);
+      written_closure_numbers.emplace(closure, signature_counts[record.lambda_signature]++);
+    }
+  }
   auto private_closure_owner = [&](EntityId closure) -> std::optional<EntityId> {
     if (closure == EntityId::none || !closure_world) return std::nullopt;
     const auto* record = closure_world->entities.find(closure);
@@ -2687,10 +2697,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     return owner.id;
   };
   std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
+  std::uint32_t next_constraint_closure_number = 0;
   auto note_closure = [&](EntityId closure) {
     if (private_closure_numbers.contains(closure)) return;
-    if (auto owner = private_closure_owner(closure))
+    if (written_closure_numbers.contains(closure)) {
+      private_closure_numbers.emplace(closure, next_constraint_closure_number++);
+    } else if (auto owner = private_closure_owner(closure)) {
       private_closure_numbers.emplace(closure, next_private_closure_number[*owner]++);
+      if (by_id.at(ir::raw(*owner))->linkage != ast::Linkage::internal) ++next_constraint_closure_number;
+    }
   };
   auto note_type = [&](this auto&& visit, ast::QualType type) -> void {
     const auto t = closure_world->types.rec(type);
@@ -2716,6 +2731,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     else if (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value)
       note_type(arg.type);
   };
+  auto note_constraint = [&](const ast::WrittenConstraint& constraint) {
+    if (constraint.expression == ast::ConstId::none || written_closure_numbers.empty()) return;
+    std::vector<EntityId> written;
+    collect_constraint_lambdas(in, constraint.expression, written);
+    for (const EntityId closure : written) note_closure(closure);
+  };
   const bool defer_closures = compatibility != ast::Compatibility::spec && !tu.has_raw_linkage_names &&
                               tu.asm_hidden_symbols.empty();
   std::vector<FnKey> fns;
@@ -2739,7 +2760,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (found != by_id.end()) {
         note_closure(found->second->scope);
         for (const auto& arg : found->second->template_args) note_argument(arg);
+        note_constraint(found->second->template_head_constraint);
         note_type(found->second->type);
+        note_constraint(found->second->template_trailing_constraint);
       }
     }
   };
@@ -2955,11 +2978,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       auto spelling = tu.class_template_spellings.find(c);
       if (spelling != tu.class_template_spellings.end()) n.args = in.seqs.elements(spelling->second.second);
     }
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
+    const auto written = written_closure_numbers.find(c);
+    if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
+        (r.scope != EntityId::none || written != written_closure_numbers.end())) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
-      n.closure_number = r.ordinal;
+      n.closure_number = written == written_closure_numbers.end() ? r.ordinal : written->second;
       n.closure_head = r.closure_head;
       n.closure_constraint = r.lambda_head_constraint;
       n.closure_constraint_depth = r.lambda_constraint_depth;
@@ -2985,7 +3010,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         } else {
           n.closure_variable = fe.id;
         }
-      } else if (w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
+      } else if (r.scope != EntityId::none && w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
         n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
       }
     }
