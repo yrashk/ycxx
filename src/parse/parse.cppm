@@ -6030,6 +6030,10 @@ private:
     }
     // A member typedef ([class.mem], [dcl.typedef]): each declarator a type nested in the class.
     if (spec.is_typedef) {
+      if (spec.explicit_at) {
+        s_.diag(*spec.explicit_at, Diag::explicit_placement);
+        return bad();
+      }
       if (alignment) {
         s_.diag(alignment->at, Diag::attributes_not_allowed);
         return bad();
