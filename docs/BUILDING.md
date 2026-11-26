@@ -65,6 +65,8 @@ CMake target names are `ycxxc*` and our options are `YCXXC_*`, because libycxx o
 
 ## Linking ycxx into a C++ application
 
+See the [embedder guide](EMBEDDING.md) for a complete CMake consumer and examples of the component APIs.
+
 Use CMake with GCC 16.2, Ninja, and the same C++ standard library as your ycxx build.
 The source targets include `ycxx::engine`, `ycxx::preprocessor`, `ycxx::frontend`,
 `ycxx::ir`, `ycxx::object`, `ycxx::linker`, `ycxx::compiler`, and `ycxx::project_build`.

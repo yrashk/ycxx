@@ -728,6 +728,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     field of that type, not only with uses after the closing brace.
   - Learned on #306.
 
+- **A query that every lookup asks must not start analyses.** On #1150 a `Questions` hook that
+  unqualified name lookup calls (`dependent_member_using`) ran `item_sema` on the class's using items
+  to be sure they were recorded. On `<iostream>` it re-entered an item whose analysis was running
+  (a contract violation in `item_sema`). The own tests all passed, and the crash was in a worker,
+  so lldb showed no stack.
+  - Do: have such a hook read only what is recorded, and rely on the order the definition
+    analyses items in (member items before bodies). Run the `<iostream>` hello program after every
+    change to lookup, not only the gate.
+  - Learned on #1150.
+
 ## Evidence and tests
 
 - **Map a header chain past its first wall with an overlay, and check both gates.** Every
@@ -1012,6 +1022,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
+- **Lifting a "not supported" rejection exposes the item splitter's token guesses.** The splitter
+  read `requires` after any `&&` as a requires-expression. While templated members with `&&` were
+  rejected, that guess was never reached. Once #311 accepted them, `int a() && requires (C) { … }`
+  took its `(…)` and `{…}` as the expression's parts and ran the next member's body: a silent
+  miscompile that every own test missed and an independent review caught.
+  - Do: when a gate stops rejecting a token form, grep `items.cppm` for that token and test the
+    new form followed by each thing that can come next (a requires-clause, `noexcept`, `->`,
+    `= 0`, `= delete`, a body, another member).
+  - Learned on #311.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
@@ -1084,3 +1103,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`
   (`find_program(... clang++)`), not `${CMAKE_CXX_COMPILER}`.
   - Learned on #650.
+- **A tentative parse decides on syntax diagnostics, not on errors or on where it stopped.** The
+  first #1190 version took a template argument as a type-id only if its parse gave no error. That
+  accepted the ill-formed type-id `IC<P(P(p))[1]>` as an expression and hid type errors behind
+  expression diagnostics. The second version took "the parse reached `>`" instead. But the
+  declarator parser reports `unexpected identifier` and then keeps going to the argument's end,
+  so `bool(&g)` stayed a type-id.
+  - Do: use `Sema::has_syntax_error_since` (expected or unexpected tokens) together with the end
+    position. When both readings fail, report the diagnostics of the reading the grammar prefers.
+  - Learned on #1190.

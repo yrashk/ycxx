@@ -1549,17 +1549,27 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   specializations retain strong definitions. [#1051](https://github.com/yrashk/ycxx/issues/1051)
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
   in the interpreter (#25). In-class member functions are weak definitions on both targets (#422, #124).
-- First-declaration deleted copy assignments can carry a ref-qualifier. Other class-template
-  member ref-qualifiers and defaulted assignment remain open.
+- First-declaration deleted copy assignments can carry a ref-qualifier. Defaulted assignment
+  remains open. Other ref-qualified members are under #311 below.
 
 ## Ref-qualified member functions (#311)
 
 - Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
   receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
   names encode the ref qualifier for mixed-object calls.
+- Members of namespace-scope class templates, their nested classes, partial and explicit
+  specializations and member templates keep their ref-qualifier through instantiation, and
+  calls rank the implicit object parameter by the object's value category. Out-of-class
+  definitions of members and member templates match on the ref-qualifier, and a redeclaration
+  that corresponds only after instantiation is diagnosed. A member function template's Itanium
+  `<nested-name>` encodes the ref-qualifier, checked against Clang's symbols in both link
+  directions.
 - GCC mode also permits an unqualified nonstatic member or conversion to overload its
   ref-qualified counterpart. Spec and Clang modes diagnose the corresponding declarations.
-- Ref-qualified virtual calls and broader template cases remain open.
+- Ref-qualified virtual calls and joint ranking of ref-qualified member and nonmember operators
+  remain open here. Ref-qualified members of local classes wait for local classes
+  ([#117](https://github.com/yrashk/ycxx/issues/117)); out-of-class definitions of
+  nested-class members of class templates wait for [#1187](https://github.com/yrashk/ycxx/issues/1187).
 
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
 
@@ -1583,11 +1593,23 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
-- Ordinary constructors can spell bare `explicit` in class, in either order with `constexpr`.
+- Constructors and constructor templates, in ordinary classes and class templates, can spell
+  `explicit` or `explicit(constant-expression)` in class, in either order with `constexpr`.
   A matching out-of-class definition inherits the property. Copy-initialization excludes these
   constructors. Direct initialization includes them. Copy-list-initialization ranks them and
   diagnoses an explicit winner, including a default constructor or a temporary for a reference
-  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
+  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157, #715).
+  The condition is a contextually converted constant expression of type `bool`, and narrowing
+  is diagnosed. A condition that depends on a class template's parameters is evaluated when the
+  member is instantiated. One that is value-dependent on a constructor template's own parameters
+  is kept as an atom and read again after deduction, once the template's constraints are
+  satisfied. A substitution failure there fails deduction, and an explicit specialization leaves
+  copy-initialization ([temp.deduct.general], [over.match.funcs.general]). Conversion functions
+  (#339) and deduction guides (#316) do not take the specifier yet.
+- Constructor templates take part in overload resolution only when their associated
+  constraints are satisfied ([temp.deduct.general]/5, #1398). An atom spelled in a member of a
+  class template specialization, such as a member template's constraint, reads the enclosing
+  class's parameters with the specialization's arguments.
 - Both native targets coalesce eligible inline complete-object constructors across translation
   units. This covers in-class bodies and out-of-class bodies marked inline by a declaration
   ([dcl.inline], [basic.def.odr]). Translation-unit-local classes retain local constructor
@@ -1659,8 +1681,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit or defaulted nontrivial constructor, conditional
-  `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
+  member subobject whose class has an implicit or defaulted nontrivial constructor, and other
+  `= default` forms (#157, #244). A pack expansion in a mem-initializer is #1400.
 
 - Ordinary explicit class returns copy-initialize from an eligible named local or
   parameter as an xvalue, including parenthesized names. A written move constructor
@@ -2326,8 +2348,8 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   specialization work.
 - Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
   as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
-- Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
-  `h<E(5)>()`, which the template-argument parser takes for a type-id (#810).
+- Tests: `tests/own/templates/enum-parameters/`. A functional cast as a template argument,
+  `h<E(5)>()`, is an expression (#810, `tests/own/templates/functional-cast-argument-tentative.accept.cpp`).
 
 ## Pack-index-specifiers (#297)
 
@@ -2660,8 +2682,14 @@ session's.*
   `cv void*` targets with added pointee qualifiers, Derived* to Base* through an accessible,
   unambiguous base of a complete Derived (an incomplete one gives false; virtual functions do not
   matter), the null pointer value, and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]). An
-  array pointee's qualifiers are its elements'. Function, member and multi-level pointers and
-  conversions to an array of unknown bound are diagnosed. Supported class-template bases and variable-template initializers
+  array pointee's qualifiers are its elements'. Multi-level pointers convert by qualification
+  conversions, with each level that adds qualifiers below const ones only, and a pointer to a
+  noexcept function converts to one to the plain function ([conv.fctptr]). References to
+  arithmetic, pointer and `std::nullptr_t` types follow [dcl.init.ref]/5: direct binding of a
+  reference-compatible operand (a qualification conversion of pointers to them), otherwise a
+  converted temporary for a const lvalue or rvalue reference, never for a reference-related
+  (similar) operand (/5.4, CWG2352; Clang 23 differs, GCC 16 agrees) (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
+  sources, are diagnosed (#1399). Supported class-template bases and variable-template initializers
   replay dependent operands and check class completeness at the demand. Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
@@ -2780,13 +2808,19 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
-## Trailing-zero count builtin (#1381)
+## Trailing-zero count builtins (#1381, #1479)
 
 `__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
 operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
 after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
 Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
 Other unsigned operand types and the optional fallback argument remain in #248.
+
+`__builtin_ctz` uses the same lowering after implicitly converting its single argument to
+`unsigned int`. The result type is `int` and `__has_builtin` answers 1. Spec and Clang
+modes diagnose a reached zero operand in a required constant expression. GCC mode yields the
+width of `unsigned int` during constant evaluation. At run time the GNU builtin's zero
+operand has undefined behavior. The other fixed-width spellings remain in #248.
 
 ## C library string and memory builtins (#248, #1093, #1170)
 
@@ -3361,6 +3395,12 @@ exports and their consumers are scoped by triple. Package bootstrap recipes
 continue to describe host builds. Inspection shows the argument source and
 the action trace shows its position and resolved word.
 
+Project generators and rule witnesses can use `host_triple()` in their
+arguments to get the canonical host triple independently of target selection
+(#1534). Receipts key on the resolved argument, so builds for different
+targets can share an action with identical resolved arguments and inputs.
+Inspection and traces identify the host selector.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
@@ -3554,12 +3594,23 @@ Inspection reports current helper identity or availability without launching
 the action. The Make adapter uses these declarations for its C compiler and
 archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
+Rule witnesses also accept `tool_inputs`. A helper change invalidates the
+witness receipt, and an equal classified value preserves downstream reuse.
+The staged-witness walkthrough passes an absolute helper path to its
+analyzer and watches helper-only edits. [#1526](https://github.com/yrashk/ycxx/issues/1526)
+
 A rule-emitted generator can select an executable artifact with
 `tool = input("name")` (#1505). The producer's named output is staged using
 its bytes and executable mode, which enter the consumer's ordinary action
 identity. Inspection reports the staged path and selector and links the
 input edge to the producer. The staged tool example watches an executable
 script that writes a generated C++ header.
+
+A witness can also use `tool = input("name")` to run a staged executable
+artifact (#1515). The staged-witness example classifies the generated
+analyzer's stdout into a typed score and generates a C++ constant from it.
+An analyzer edit with the same score updates the witness evidence and
+reuses the header and native build.
 
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
@@ -3762,10 +3813,19 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   decltype-specifier as a mem-initializer-id (#1286) are missing. Namespace-scope function template signatures,
   variable template types and default arguments with an unrepresented operand stay dependent (#1269).
   Tests: `tests/own/templates/decltype-*`, `tests/own/inherit/decltype-base*` (#1243).
-- **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
-  type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
-  are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
-  `R(A...)` with a type parameter `R` is #1186.
+- **Functional casts as template arguments** (`function_type_argument_ahead`,
+  `tentative_type_argument`): `T(…)` is a type-id only if it can be a function type
+  ([temp.arg.general]/2, [dcl.ambig.res]/2). T is a simple-type keyword, a typedef-name, a class
+  or enumeration name, a class template-id, a qualified type name or a `typename`-specifier.
+  The token lookahead settles most shapes: `bool(x) || y`, `int(3) + 1`, `bool(T::value)`, `U(3)`
+  and `typename T::type{4}` are expressions, and `int()` and `void(...)` are types. When the
+  parentheses begin with a ptr-operator, a `(`, attributes or a type name, the argument is parsed
+  tentatively as a type-id. It is one if that parse ends at the argument's end with no new
+  error. Otherwise the parser's position, diagnostics and deferred-check counters are restored and
+  the argument is read as an expression: `bool(&g)`, `int((n))`, `int(E{2})` and `int(auto(3))`
+  are expressions, while `int(&)[3]`, `U(int)` and `int(*(int))` stay types (#1190, #810).
+  `bool(S{})` with a conversion function parses, but conversion functions are #339. `R(A...)` with
+  a type parameter `R` is #1186.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
@@ -4700,6 +4760,39 @@ for calls and for selection against a static function-pointer target.
   internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
+
+## Member using-declarations of base member functions (#1150, 2026-11-26)
+
+- `using B::f;`, `using B::operator();` and `using B::operator T;` in a class's
+  member-specification ([namespace.udecl]) name member functions of a base class, direct or
+  indirect, of an ordinary class, a class template or a partial specialization
+  (`member_using_declarator` in parse.cppm). A dependent base (`using Fn::operator();`) is named
+  again by each specialization's analysis of the member item. What lookup in the base finds is
+  kept in `Program::member_usings_` by (member item, class entity).
+- `Program::introduce_members` puts them in `ClassRec::introduced` once the class's own members are
+  known. It leaves out those that one of the class's own member functions hides or overrides: the
+  same name, parameter-type-list, cv-qualifier and ref-qualifier (/11). A conversion function also
+  compares its conversion type. A member function template also compares its template-head's
+  parameter kinds and depths (a class template's member template never hides an ordinary base's:
+  #1437). A constrained declaration hides nothing. The using-declaration's access goes in
+  `ClassRec::access` (/16). A data member or member type of the same name conflicts with it.
+- In a template definition, a name taken from a dependent base (`using Fn::name;`) is
+  type-dependent ([temp.dep.expr]/3; `Program::dependent_member_usings_`), so unqualified calls of
+  it are resolved in each specialization. In an incomplete class (a static member's initializer, a
+  `static_assert`), lookup also finds what earlier using-declarations introduced (`members_before`),
+  and a static initializer's call ranks every earlier declaration of the name.
+- Lookup (`direct_member`, `member_functions`) finds them as members of the class, so they join
+  its overload set ([over.match.funcs.general]/4). A call selecting one converts the object to
+  the declaring base subobject, whatever the base's access, and a virtual one dispatches through
+  that base's table.
+- A call of a class object finds `operator()` in a base too ([over.call.object]), through the base
+  subobject unless every candidate is static.
+- Checks: the nominated class is a base (/3), the member exists and each function is accessible
+  (/14), and a declarator is not repeated in its class.
+- Not yet: member types, data members and enumerators (#1425); inheriting constructors and pack
+  expansions `using Fs::operator()...;` (#308). Conversions do not consider a class with bases
+  (#339). Operator expressions do not find a base's member operators (#1426), and overloaded
+  `operator[]` is not supported (#219). Access to an inherited injected-class-name is not checked (#1427).
 
 ## Pointer-to-member types and declarators (#238)
 

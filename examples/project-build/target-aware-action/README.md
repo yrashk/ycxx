@@ -1,39 +1,54 @@
-# Generate a header for the selected target
+# Generate headers for the host and selected target
 
-The `target_header` action passes `target_triple()` to a host shell script as
-one argument. The script generates `build_target.hh` with the score from
-`score.txt`. A `static_assert` checks the architecture and platform macros
-of the compiler that consumes the header. This connects the generator argument
-to the actual target of the native build.
+Both generators run on the host. The `host_header` action passes
+`host_triple()` to a shell command and records it as a C++ constant in
+`build_host.hh`. The `target_header` action passes `target_triple()` to
+`generate-header.sh` to write the selected target and the score from
+`score.txt` into `build_target.hh`. A `static_assert` in that header checks
+that the consuming compiler's architecture and platform match the selected
+target. [Build definition](build.ycxx)
 
-From this directory, with `ycxx` on `PATH`, copy the workspace and build both
-target configurations.
+From this directory on x86-64 Linux or arm64 macOS with `ycxx` on `PATH`,
+copy the workspace and build for the host and the other supported target.
 
 ```sh
 example=$(mktemp -d "${TMPDIR:-/tmp}/ycxx-target-action.XXXXXX")
 cp build.ycxx generate-header.sh main.cc score.txt "$example"
 cd "$example"
 
-ycxx build app --target=x86_64-pc-linux-gnu --trace-engine=json 2> linux.jsonl
-ycxx build app --target=arm64-apple-darwin --trace-engine=json 2> darwin.jsonl
-file .ycxx/targets/x86_64-pc-linux-gnu/out/app .ycxx/targets/arm64-apple-darwin/out/app
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64) alternate=arm64-apple-darwin ;;
+    Darwin:arm64) alternate=x86_64-pc-linux-gnu ;;
+esac
 
-ycxx show app --target=x86_64-pc-linux-gnu --format=html > linux-plan.html
-ycxx show app --target=arm64-apple-darwin --format=html > darwin-plan.html
+ycxx build app --trace-engine=json 2> host.jsonl
+ycxx build app --target="$alternate" --trace-engine=json 2> alternate.jsonl
+file .ycxx/out/app ".ycxx/targets/$alternate/out/app"
+
+ycxx show app --format=html > host-plan.html
+ycxx show app --target="$alternate" --format=html > alternate-plan.html
 ```
 
-Open both plans to see the resolved target argument and the generated header
-input on `app`. Each explicit build produces an executable in its own target
-directory. Rebuilding either target with the same inputs reuses its action.
+Open both plans and find `host_header` and `target_header` in **Plan facts**.
+The `argv` rows show the resolved triple and link its selector to the
+manifest. The host triple is the same in both reports. The selected target
+switches in `alternate-plan.html`.
 
-On x86-64 Linux, run `.ycxx/targets/x86_64-pc-linux-gnu/out/app`. On arm64
-macOS, run `.ycxx/targets/arm64-apple-darwin/out/app`. Each exits with status
-`42` on its matching host.
+Compare the generator trace events.
+
+```sh
+grep '"kind":"ExternalAction"' host.jsonl alternate.jsonl
+```
+
+The first build runs both generators. The second reuses the
+`host_header` receipt and runs `target_header` with the other triple. The
+default executable at `.ycxx/out/app` runs on the host and exits with status
+`42`. The explicit executable runs on its selected platform.
 
 ## Watch the host target
 
 Run watch in a second terminal in the copied workspace. The default build
-also passes its canonical target triple to the generator.
+passes the canonical host triple to both generators.
 
 ```sh
 ycxx build app --watch --trace-engine=interactive

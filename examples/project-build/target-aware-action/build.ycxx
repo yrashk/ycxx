@@ -1,3 +1,10 @@
+generate "host_header" {
+    tool = "/bin/sh"
+    args = ["-c", "printf '#pragma once\\ninline constexpr char build_host[] = \"%s\";\\n' \"$1\" > \"$2\"",
+            "host-header", host_triple(), output("header")]
+    outputs = { header = "build_host.hh" }
+}
+
 generate "target_header" {
     tool = "/bin/sh"
     args = [input("script"), target_triple(), input("score"), output("header")]
@@ -7,5 +14,5 @@ generate "target_header" {
 
 cpp.executable "app" {
     sources = ["main.cc"]
-    generated_headers = [artifact("target_header", "header")]
+    generated_headers = [artifact("host_header", "header"), artifact("target_header", "header")]
 }

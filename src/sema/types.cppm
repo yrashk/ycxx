@@ -156,6 +156,10 @@ public:
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
     return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
   }
+  bool is_plain_auto(QualType type) const {
+    const auto r = rec(type);
+    return r.kind == TypeKind::placeholder && !r.decltype_auto && r.entity == EntityId::none;
+  }
   // Whether a declared type holds a placeholder still to be deduced ([dcl.type.auto.deduct]): as
   // the type, or as what it points or refers to, an array's element or a function's return type.
   bool has_placeholder(QualType q) const {
@@ -544,10 +548,12 @@ public:
       r.wide = negative ? i.bits.hi != ~u64{0} || i64(i.bits.lo) >= 0 : i.bits.hi != 0;
     } else if (v.is<ast::VFloat>(c)) {
       auto f = v.get<ast::VFloat>(c);
-      r.kind = ValueKind::floating;
       r.type = f.type;
       r.bits = f.bits.lo;
-      r.real = ast::float_double(*ins_, *target_, c);
+      if (ast::computes(ast::float_format(*ins_, *target_, f.type))) {
+        r.kind = ValueKind::floating;
+        r.real = ast::float_double(*ins_, *target_, c);
+      }
     } else if (v.is<ast::VString>(c)) {
       auto s = v.get<ast::VString>(c);
       r.kind = ValueKind::string;
@@ -625,6 +631,8 @@ struct EntityRec {
   // A closure type of a template's definition, outside function bodies: a dependent type, which
   // each instantiation's own closure types replace (docs/design/closures.md).
   bool closure_pattern = false;
+  // The head of a captureless generic lambda's synthesized static invoker template.
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
 };
@@ -784,6 +792,9 @@ struct MemberDeclRec {
   bool is_final = false;
   bool is_pure = false;
   bool is_consteval = false;  // an immediate function ([dcl.constexpr])
+  // A trailing requires-clause or a template's constraints: it corresponds to no unconstrained
+  // declaration ([basic.scope.scope]/4, [namespace.udecl]/11).
+  bool constrained = false;
 };
 
 struct NestedType {
@@ -881,6 +892,12 @@ struct ClassRec {
   EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
+  // The base member functions its using-declarations introduce ([namespace.udecl]/1), each as
+  // its base declares it (`entity` is the base's), except those a member of its own with the
+  // same name, parameter-type-list, cv-qualification and ref-qualifier hides or overrides
+  // (/11). Lookup finds them as members of this class ([class.member.lookup]); access is the
+  // using-declaration's (/16), in `access`.
+  std::vector<MemberDeclRec> introduced;
   // Member alias templates ([temp.alias], [temp.mem]): `type` is the pattern, at the member's own
   // depth; named only with arguments (`Sema::member_alias_template`), so not among `types`.
   std::vector<NestedType> alias_templates;

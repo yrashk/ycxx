@@ -1915,7 +1915,11 @@ class Gen {
       const auto args = ast_.children(b.args);
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
-        case ast::BuiltinOp::ctz: return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::ctz:
+        case ast::BuiltinOp::ctz_gcc_zero: {
+          const auto flags = b.op == ast::BuiltinOp::ctz_gcc_zero ? ir::bit(ir::Flag::ctz_gcc_zero) : ir::Flags{0};
+          return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))}, {}, flags);
+        }
         case ast::BuiltinOp::nansl: {
           const ir::Ty result[] = {vty(t)};
           const std::uint64_t fn[] = {word(ir::BuiltinFn::nansl)};
