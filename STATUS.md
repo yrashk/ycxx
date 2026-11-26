@@ -3361,6 +3361,14 @@ named input edges also give the consumer binding. Unresolved rules can yield
 an incomplete graph with the edges resolved so far. The HTML report shows
 these records under **Dependencies**, with links into the manifest.
 
+`ycxx show --against` compares occurrence counts by consumer, usage,
+producer, output, and binding when both plans have complete dependency
+graphs (#1464).
+JSON includes before and after edge records for each changed count. HTML
+shows those counts under **Dependency changes** and links current sites to
+the manifest. Moved references preserve the count, and older snapshots
+without a dependency graph can still compare plan facts.
+
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
 with their declared rule kinds and source locations. JSON includes the same

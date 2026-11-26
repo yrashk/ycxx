@@ -45,7 +45,8 @@ Use `ycxx show --targets` to list the workspace's declared target names and rule
 kinds before a build. Add `--format=html` for a catalog with links to their
 declarations in the manifest.
 Use `ycxx show app --format=html` to follow resolved library and named
-artifact dependencies back to their declarations.
+artifact dependencies back to their declarations. Add `--against before.json`
+to compare dependency counts with a saved JSON plan.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
