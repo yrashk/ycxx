@@ -1877,8 +1877,8 @@ probe = '''
 struct S { int f() & { return 1; } int f() && { return 2; } };
 int main() { S s; return s.f() + S().f() - 3; }
 '''
-issues = [311, 339]
-note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Namespace-scope class templates support ref-qualified deleted copy assignment. Ref-qualified virtual calls and broader template cases remain open'
+issues = [311, 339, 117, 1187]
+note = 'Members of namespace-scope classes and class templates, their nested classes and member templates, and conversion functions distinguish lvalue and rvalue receivers, through instantiation and out-of-class definitions. Ref-qualified virtual calls, joint ranking of ref-qualified member and nonmember operators, ref-qualified members of local classes (#117) and out-of-class definitions of nested-class members of class templates (#1187) remain open'
 
 [[feature]]
 id = 'class-deducing-this'

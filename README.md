@@ -194,6 +194,11 @@ Class templates at namespace scope can delete their copy assignment on its first
 declaration, including with an lvalue or rvalue ref-qualifier. Specializations retain the deleted
 overload. [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
 
+Member functions and member templates of class templates can carry `&` and `&&` ref-qualifiers,
+as in `T base() &&` next to `const T& base() const&`. Calls choose the overload by the object's
+value category, and members defined outside the class keep their qualifier.
+[#311](https://github.com/yrashk/ycxx/issues/311)
+
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
 

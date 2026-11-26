@@ -1010,6 +1010,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
     namespace-scope typedef, variable and function template whose type begins with it.
   - Learned on #211.
+- **Lifting a "not supported" rejection exposes the item splitter's token guesses.** The splitter
+  read `requires` after any `&&` as a requires-expression. While templated members with `&&` were
+  rejected, that guess was never reached. Once #311 accepted them, `int a() && requires (C) { … }`
+  took its `(…)` and `{…}` as the expression's parts and ran the next member's body: a silent
+  miscompile that every own test missed and an independent review caught.
+  - Do: when a gate stops rejecting a token form, grep `items.cppm` for that token and test the
+    new form followed by each thing that can come next (a requires-clause, `noexcept`, `->`,
+    `= 0`, `= delete`, a body, another member).
+  - Learned on #311.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address

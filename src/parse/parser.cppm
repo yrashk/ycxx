@@ -1197,7 +1197,8 @@ public:
       d.ref_at = d.name_at;
     }
     if (!abstract && !typedef_ && function_type && !conversion && !defer_ref_check &&
-        !(d.qualified && d.scope.type && s_->types().is_class(*d.scope.type)))
+        !(d.qualified && d.scope.type &&
+          (s_->types().is_class(*d.scope.type) || s_->types().is_dependent(*d.scope.type))))
       d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
       skip_attributes(&d.attributes, attr_gnu);
