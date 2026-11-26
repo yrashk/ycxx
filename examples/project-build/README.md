@@ -10,6 +10,9 @@ out of the checkout and build it there.
 | [Target-aware action](target-aware-action/README.md) | [build.ycxx](target-aware-action/build.ycxx) | Pass host and target triples through arguments or environment variables and inspect receipt reuse. |
 | [Staged tool](staged-tool/README.md) | [build.ycxx](staged-tool/build.ycxx) | Run a generated executable to produce a C++ header, then edit the executable under watch. |
 | [Native host tool](native-host-tool/README.md) | [build.ycxx](native-host-tool/build.ycxx) | Compile a host scanner to generate a C++ header and reuse it across native targets. |
+| [Host C++ libraries](host-cxx-libraries/README.md) | [build.ycxx](host-cxx-libraries/build.ycxx) | Build a host scanner and cross-target app with shared library dependencies, then watch a transitive header edit. |
+| [Host generated headers](host-generated-headers/README.md) | [build.ycxx](host-generated-headers/build.ycxx) | Give a host scanner a generated header and compare edits that preserve or change its bytes. |
+| [Host generated sources](host-generated-sources/README.md) | [build.ycxx](host-generated-sources/build.ycxx) | Generate a host scanner's C++ source and sibling header, then trace equal and changed outputs. |
 | [Native host witness](native-host-witness/README.md) | [build.ycxx](native-host-witness/build.ycxx) | Classify a host scanner's exit status and watch an included header change the typed score. |
 | [Host producer witness](host-producer-witness/README.md) | [build.ycxx](host-producer-witness/build.ycxx) | Build a host scanner, generate a witness executable through two actions, and trace its score into a cross-target app. |
 | [Host planning input](host-planning-inputs/README.md) | [build.ycxx](host-planning-inputs/build.ycxx) | Plan a custom rule from a host-generated inventory and compare edits with equal and changed bytes. |

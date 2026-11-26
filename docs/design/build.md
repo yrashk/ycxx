@@ -249,6 +249,58 @@ and staged witness tools. Ordinary generator chains can also run them
 upstream of a generated planning input.
 [Native host tool example](../../examples/project-build/native-host-tool/README.md)
 
+### Libraries for native host tools (#1576)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["shared"]
+}
+```
+
+Host executable dependencies are disk-backed `cpp.library` declarations.
+Each executable collects its own reachable sources and public include
+directories. In a diamond, both dependency paths remain visible in the
+plan and the shared library contributes its sources once per executable.
+The same library declaration can supply both the host scanner and a
+foreign-target app. The scanner's source and include observations cover its
+library translation units, so edits can wake watch and refresh the staged
+host image.
+[Shared library diamond example](../../examples/project-build/host-cxx-libraries/README.md)
+
+### Generated headers on a native host executable (#1579)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    generated_headers = [artifact("scanner_config", "header")]
+}
+```
+
+The declared producer and its ordinary predecessors run before the host
+compile. That action chain must be independent of project-built native host
+tools. Generators keep the requesting plan's argument selectors. C++ still
+compiles the executable for the host.
+
+Each admitted producer directory exposes the declared output names and
+their exact bytes through the executable's own include configuration.
+The immutable snapshot uses stable logical paths under `.ycxx/host/virtual`.
+Host sources, inherited library includes, and other real paths keep the
+ordinary disk view. The selected app has its own generated include view.
+Equal visible files preserve the host compile, and equal linked executable
+bytes preserve consuming generator receipts. The coordinator shares staged
+producer outputs across ordinary builds, planning inputs, and witnesses.
+[Generated host header example](../../examples/project-build/host-generated-headers/README.md)
+
+The same producer restriction applies to artifacts in a host executable's
+`sources` list. Such a translation unit reads its main file from the host
+snapshot, and quoted includes can find declared siblings in its logical
+directory. Disk sources and generated artifacts can be mixed in authored
+order. Diagnostics refer to the logical source path and use the snapshot
+bytes. Planning and witness receipts observe real disk includes, including
+misses, and can persist an empty disk observation when the tool is generated.
+[Generated host source example](../../examples/project-build/host-generated-sources/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and

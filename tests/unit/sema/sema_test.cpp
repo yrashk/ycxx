@@ -312,7 +312,6 @@ void invalid_declaration_annotations() {
 void unsupported_bit_fields() {
   for (std::string_view source : {
            "struct F { unsigned a : 0; };",
-           "struct F { unsigned a : 33; };",
            "struct F { unsigned a : -1; };",
            "struct F { unsigned a : 3.0; };",
            "int n; struct F { unsigned a : n; };",
@@ -320,7 +319,6 @@ void unsupported_bit_fields() {
            "struct F { unsigned (a) : 1; };",
            "struct F { volatile int a : 1; };",
            "using I = const int; struct F { I a : 1; };",
-           "struct F { long a : 1; };",
            "struct F { static int a : 1; };",
            "struct F { unsigned a : 1 = 1; };",
            "union F { unsigned a : 1; };",
@@ -330,6 +328,8 @@ void unsupported_bit_fields() {
            "struct __attribute__((packed)) F { unsigned a : 1; };"}) {
     check(!Analysed(source).diags().empty(), source);
   }
+  check(Analysed("struct F { unsigned a : 33; };").diags().empty(), "an over-width unsigned bit-field");
+  check(Analysed("struct F { long a : 1; };").diags().empty(), "a long bit-field");
   for (std::string_view source : {
            "unsigned* test(F& f) { return &(f.a); }",
            "unsigned* test(F& f) { return &(f.a = 1); }",

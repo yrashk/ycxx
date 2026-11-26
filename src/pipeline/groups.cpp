@@ -383,6 +383,10 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       }
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
         for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
+      if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.wide_bit_width != 0; }))
+        for (const sema::FieldRec& f : fields)
+          shape.wide_bit_fields.push_back({f.wide_bit_width,
+              ast::over_width_bit_field_alignment(world.target, program.compatibility(), f.wide_bit_width)});
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.explicit_alignment != 0; }))
         for (const sema::FieldRec& f : fields) shape.field_alignments.push_back(f.explicit_alignment);
       shape.union_ = record.union_;
