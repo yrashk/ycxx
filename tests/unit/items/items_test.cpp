@@ -399,6 +399,17 @@ void local_classes() {
   // The owner's identity and body hash are its own tokens': unchanged by the cut.
   auto plain = split("int f() {\n  int x;\n}\n");
   check(plain.top(0).members.empty(), "no class-specifier, no members");
+  check(split("auto f() { auto l = []() -> const struct S { return {}; }; }").top(0).members.empty(),
+        "a cv-qualified trailing return type is no class-specifier");
+  // Same-shaped local classes of different functions, or of sibling blocks, are distinct items.
+  auto same = split("int f() { struct A { int g() { return 1; } }; return 0; }\n"
+                    "int h() { struct A { int g() { return 1; } }; { struct A { int g() { return 1; } }; } return 0; }\n");
+  const Item& fa = same[same.top(0).members[0]];
+  const Item& ha = same[same.top(1).members[0]];
+  const Item& hb = same[same.top(1).members[1]];
+  check(fa.id != ha.id && ha.id != hb.id && same[fa.members[0]].id != same[ha.members[0]].id &&
+            same[ha.members[0]].id != same[hb.members[0]].id,
+        "local items' ids include their owner's");
 }
 
 int main() {

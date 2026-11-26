@@ -281,7 +281,8 @@ public:
       // reach the namespace past it.
       if (its[k].local_owner != items::none) {
         x.in_class[k] = false;
-        const std::string level = std::format("(local {})", k);
+        // Named by its id, not its position: an edit elsewhere changes no item's level.
+        const std::string level = std::format("(local {:016x}{:016x})", its[k].id.hi, its[k].id.lo);
         x.ns_of[k] = x.ns_of[p].empty() ? level : x.ns_of[p] + "::" + level;
         x.eff_ns[k] = x.eff_ns[p].empty() ? level : x.eff_ns[p] + "::" + level;
       }
@@ -501,6 +502,14 @@ public:
       const auto it = class_items_.find(std::to_underlying(c));
       if (it == class_items_.end() || item < it->second || item > last_member(it->second)) return classes_.is_defined(c);
     }
+    // So is a class nested in one, outside the local class ([class.local]/3: also a local class).
+    if (const auto it = class_items_.find(std::to_underlying(c)); it != class_items_.end())
+      if (const u32 root = local_class_item(it->second); root != items::none && root != it->second &&
+                                                         (item < root || item > last_member(root))) {
+        if (!classes_.is_defined(c) && std::ranges::find(running_, class_def_key(it->second)) == running_.end())
+          class_def(it->second);
+        return classes_.is_defined(c);
+      }
     // Elsewhere, a local class's item is where the block that defines it is: in a function body, a
     // complete-class context of the classes around it ([class.mem.general]/7).
     {
@@ -594,14 +603,14 @@ public:
   }
   // How many local classes of `scope` named `name`, other than `self`, are known.
   u32 local_class_ordinal(EntityId scope, NameId name, EntityId self = EntityId::none) const {
-    u32 n = 0;
+    std::set<EntityId> known;  // a class declared, then defined, is one class
     auto count = [&](EntityId e) {
       const sema::EntityRec& r = w_->entities.rec(e);
-      if (e != self && r.scope == scope && r.name == name) ++n;
+      if (e != self && r.scope == scope && r.name == name) known.insert(e);
     };
     for (const auto& [k, l] : local_classes_) count(l.entity);
     for (EntityId e : local_declared_) count(e);
-    return n;
+    return u32(known.size());
   }
   // An elaborated-type-specifier `class-key identifier` that names no visible class, in a block:
   // it declares a local class in that block ([basic.scope.pdecl]/7, [dcl.type.elab]).
@@ -9564,6 +9573,15 @@ std::optional<Parser::LocalClass> Program::define_local_class(u32 owner, u32 ind
       name = w_->ins.names.intern(n.name);
       break;
     }
+  // `typedef struct { … } T;`: the class has T for its name for linkage purposes ([dcl.typedef]/9).
+  if (name == s.no_name()) {
+    u32 j = index;
+    while (j > items_->items[owner].begin && (r_->tokens[j - 1].kind == Tk::kw_const || r_->tokens[j - 1].kind == Tk::kw_volatile)) --j;
+    const u32 after = items_->items[c].end;
+    if (j > items_->items[owner].begin && r_->tokens[j - 1].kind == Tk::kw_typedef && after < r_->tokens.size() &&
+        r_->tokens[after].kind == Tk::identifier)
+      name = w_->ins.names.intern(r_->name(r_->tokens[after]));
+  }
   // In a templated function's specialization, the class is instantiated with it ([temp.inst]/3):
   // its members are the definition's, analysed again with the arguments bound.
   if (!block->templated && !block->template_scopes.empty()) {

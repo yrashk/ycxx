@@ -11,6 +11,12 @@ inline auto unnamed() {
   b.v += a.v - 3;
   return b;
 }
+inline auto typedef_named() {
+  typedef struct {
+    int v;
+  } T;  // T names the class for linkage ([dcl.typedef]/9)
+  return T{6};
+}
 template <class T> auto in_template() {
   struct B { T v; };
   return B{5};
@@ -20,3 +26,4 @@ int peer_first(decltype(first()) a) { return a.v; }
 int peer_second(decltype(second()) a) { return a.v; }
 int peer_unnamed(decltype(unnamed()) a) { return a.v; }
 int peer_template(decltype(in_template<int>()) a) { return a.v; }
+int peer_typedef(decltype(typedef_named()) a) { return a.v; }

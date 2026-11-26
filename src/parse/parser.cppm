@@ -6845,6 +6845,16 @@ public:
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement(bool no_prefix_attributes) {
     u32 begin = pos();
+    // `class-key identifier ;` declares a class in the block, unless the block has declared it
+    // ([dcl.type.elab]/2, [basic.scope.pdecl]/7): a local class.
+    if (body && is_class_key(kind()) && kind(1) == Tk::identifier && kind(2) == Tk::semi && declare_class) {
+      const NameId n = name_of(tok(1));
+      if (!s_->innermost_block_type(n)) declare_class(n, kind(), begin + 1);
+      bump();
+      bump();
+      bump();
+      return s_->node(ast::ExprStmt{}, begin, pos());
+    }
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);

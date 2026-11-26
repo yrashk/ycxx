@@ -3019,6 +3019,10 @@ public:
       for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
         if (alias.name == n) return Scope{alias.ns, std::nullopt};
     }
+    // A namespace alias of the blocks around a local class ([class.local]).
+    for (const OuterBlock* b = outer(); b; b = b->outer.get())
+      for (const OuterBlock::Name& nm : b->names)
+        if (nm.name == n && nm.kind == OuterBlock::Name::Kind::namespace_alias) return Scope{nm.ns, std::nullopt};
     const bool search_local_aliases = !search_block_import_types;
     if (enum_qualifier_at) {
       std::optional<EntityId> ns;
@@ -3410,6 +3414,8 @@ public:
   std::vector<EntityId> directives() const {
     std::vector<EntityId> r;
     for (const auto& [depth, ns] : block_directives_) r.push_back(ns);
+    // A local class's members are in the blocks around it too ([namespace.udir]/2, [class.local]).
+    for (const OuterBlock* b = outer(); b; b = b->outer.get()) r.insert(r.end(), b->directives.begin(), b->directives.end());
     return r;
   }
   void using_declaration(const Scope& s, NameId n, u32 at_) {
@@ -6435,8 +6441,8 @@ public:
 
   // The block a local class whose member is being analysed is in; none elsewhere. A replay of
   // such a member's part (a default member initializer, a default argument) asks its questions.
-  std::shared_ptr<const OuterBlock> outer_block;
-  const OuterBlock* outer() {
+  mutable std::shared_ptr<const OuterBlock> outer_block;
+  const OuterBlock* outer() const {
     if (!outer_block && !outer_asked_) outer_block = q_->local_outer_block();
     outer_asked_ = true;
     return outer_block.get();
@@ -13742,7 +13748,7 @@ private:
     QualType type;
   };
   std::vector<BlockType> block_types_;
-  bool outer_asked_ = false;  // `outer` asked the questions for the block around a local class
+  mutable bool outer_asked_ = false;  // `outer` asked the questions for the block around a local class
   std::map<u32, std::unique_ptr<Braced>> braced_args_;  // by placeholder node: a braced list argument
   std::map<u32, QualType> declared_types_;  // by DeclRef node: the declared type of what it names
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef

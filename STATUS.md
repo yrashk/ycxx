@@ -1668,11 +1668,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (`EntityRec::local_class`), numbered among its local classes of that name in token order; its
   name in the block; and the class itself through `ItemAnalysis` and `class_def`, so constructors,
   destructors, default member initializers, special members, emission and constant evaluation are
-  those of any class. Unnamed local classes and declarators after the `}` work, as does
-  `struct X* p;` naming no class, which declares a local class a later definition completes
-  ([basic.scope.pdecl]).
-- Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations,
-  `using enum`s, static locals, and constants for their values. An automatic variable is usable
+  those of any class. Unnamed local classes (named by a typedef for linkage) and declarators
+  after the `}` work, as do `struct X;` and `struct X* p;` naming no class, which declare a
+  local class a later definition completes ([basic.scope.pdecl]). Local items' ids include their
+  owner's, so same-shaped classes of different functions stay distinct.
+- Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations
+  and using-directives, namespace aliases, `using enum`s, static locals, and constants for their
+  values. An automatic variable is usable
   only unevaluated ([basic.def.odr]). Lookup reaches the block after the local class and before
   the function's class ([basic.lookup.unqual]), including a class still being defined around a
   lambda in a static member's initializer. Access is the function's ([class.local]/1).
@@ -1687,13 +1689,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   guards and `tuple_cat` plan compile; its ctype and errno tables wait on constant evaluation of
   class and array subobjects (#1140).
 - Tests: `tests/own/local-classes` (39 spec-only, Clang 23 and GCC 16 agree; 3 for libycxx's
-  shapes), `tests/own/abi/local-class-names.run.cpp` (a Clang peer), `unit.items` (the
+  shapes and 1 from the review), `tests/own/abi/local-class-names.run.cpp` (a Clang peer), `unit.items` (the
   splitter), and the δ tests `s1-locals-scopes` and `s1-elaborated`.
 - Not yet: block-scope enumerations ([#1442](https://github.com/yrashk/ycxx/issues/1442)), a
   member class of a local class defined later in the block
   ([#1443](https://github.com/yrashk/ycxx/issues/1443)), local classes with virtual functions
-  ([#1155](https://github.com/yrashk/ycxx/issues/1155)), and constant evaluation of local
-  aggregates with class or array members ([#1140](https://github.com/yrashk/ycxx/issues/1140)).
+  ([#1155](https://github.com/yrashk/ycxx/issues/1155)), constant evaluation of local
+  aggregates with class or array members ([#1140](https://github.com/yrashk/ycxx/issues/1140)),
+  which uses of an enclosing constant are odr-uses, shared with lambdas
+  ([#1447](https://github.com/yrashk/ycxx/issues/1447)), and the discriminators where Clang and
+  GCC disagree ([#1448](https://github.com/yrashk/ycxx/issues/1448)).
   [[class.local]](https://eel.is/c++draft/class.local) · [#117](https://github.com/yrashk/ycxx/issues/117)
 
 ## Nested classes of class templates (#1187)

@@ -459,7 +459,10 @@ void Splitter::local_classes(u32 k, u32 from, u32 to) {
   for (u32 j = from; j < to; ++j) {
     if (!is_class_key(kind(j))) continue;
     // `enum class E`, a trailing return type `-> struct S {…}`, `new struct S{…}`: no class-head.
-    if (j > from && (kind(j - 1) == Tk::kw_enum || kind(j - 1) == Tk::arrow || kind(j - 1) == Tk::kw_new)) continue;
+    u32 before = j;  // past cv-qualifiers: `-> const struct S {`
+    while (before > from && (kind(before - 1) == Tk::kw_const || kind(before - 1) == Tk::kw_volatile)) --before;
+    if (j > from && (kind(j - 1) == Tk::kw_enum || (before > from && (kind(before - 1) == Tk::arrow || kind(before - 1) == Tk::kw_new))))
+      continue;
     const u32 open = local_class_open(j, to);
     if (open == none) continue;
     // An anonymous union or struct in a block declares its members in the block
@@ -1254,12 +1257,15 @@ Items split(const pp::Region& r, Fp128 file) {
   Splitter(r, out).top();
   Names names(r, out);
   for (u32 k : out.top) names.run(k);
-  // Ids: siblings in order, so an ordinal counts the earlier ones with the same hash.
-  auto ids = [&](this auto& self, const std::vector<u32>& list) -> void {
+  // Ids: siblings in order, so an ordinal counts the earlier ones with the same hash. The items
+  // inside a function body or declaration (local classes, their members) also hash that
+  // owner's id, since their scope paths name no function (docs/design/local-classes.md).
+  auto ids = [&](this auto& self, const std::vector<u32>& list, Fp128 owner) -> void {
     std::map<std::pair<std::uint64_t, std::uint64_t>, u32> seen;
     for (u32 k : list) {
       Hasher h;
       h.fp(item_seed).fp(file);
+      if (owner != Fp128{}) h.fp(owner);
       h.uint(static_cast<std::uint64_t>(out.items[k].scope.size())).bytes(out.items[k].scope);
       if (out.items[k].unnamed_type_ordinal != none) h.uint(out.items[k].unnamed_type_ordinal);
       decl_tokens(out, k, [&](u32 j) { hash_token(h, r, r.tokens[j]); });
@@ -1273,10 +1279,12 @@ Items split(const pp::Region& r, Fp128 file) {
         for (u32 j = it.body_begin; j < it.body_end; ++j) hash_token(b, r, r.tokens[j]);
         it.body = b.finish();
       }
-      self(it.members);
+      const bool owns_locals = it.kind == ItemKind::function || it.kind == ItemKind::declaration ||
+                               it.kind == ItemKind::consteval_block || it.local_owner != none || owner != Fp128{};
+      self(it.members, owns_locals ? it.id : Fp128{});
     }
   };
-  ids(out.top);
+  ids(out.top, Fp128{});
   return out;
 }
 

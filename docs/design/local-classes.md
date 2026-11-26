@@ -14,15 +14,16 @@ DECISIONS §6.5); the session checked them against Clang 23 and GCC 16 and wrote
    body like a closure (closures.md decision 6), which would be a second class path;
    sharing the body's `Sema`, which is gone when member bodies are analysed lazily.
 2. **ast.md §4.4 is amended for local class definitions only.** §4.4 objects to ids that depend on
-   the body. A local item's id is its file, scope path, own tokens and ordinal (items.cppm), so it
-   survives edits elsewhere in the body, as §4.5 says of any item. Block variables, bindings,
+   the body. A local item's id is its file, scope path, its owner's id, own tokens and ordinal
+   (items.cppm), so it survives edits elsewhere in the body, as §4.5 says of any item, and two
+   same-shaped local classes of different functions are different items. Block variables, bindings,
    lambdas and elaborated declarations in blocks stay data of the body.
 3. **The local item's shape.** `Item::local_owner` is the item whose function body (or
    declaration, for a lambda in an initializer) holds it, which is also its parent; the owner
    lists it among its members, so items stay in preorder. The item is the class-specifier only,
    from its class-key to its `}`: the declarators after it are the block's. Its scope path has a
    `(local)` segment no source name spells, and the name index gives it a namespace level of its
-   own, `ns::(local k)`, so no lookup from outside its block finds its names.
+   own, named by its id, so no lookup from outside its block finds its names.
 4. **The splitter's test.** In a function body, a consteval block, or a declaration's tokens, a
    class-key (not after `enum`, `->` or `new`) followed by attributes, an unqualified name or
    none, `final`, then `{` or a base-clause and `{`. An anonymous union or struct (`union { … };`)
@@ -37,8 +38,10 @@ DECISIONS §6.5); the session checked them against Clang 23 and GCC 16 and wrote
    function it is local to (closures.md decision 3: the innermost lambda's `operator()`, or the
    specialization being instantiated), `local_class` set, and `head` mixing its ordinal: the
    earlier local classes of that function with its name, in token order. Unnamed classes count
-   among the function's unnamed ones. *Rejected:* closures' completion order (Itanium numbers
-   lambdas that way, not local classes).
+   among the function's unnamed ones; `typedef struct { … } T;` names the class `T`
+   ([dcl.typedef]/9). *Rejected:* closures' completion order (Itanium numbers lambdas that way,
+   not local classes). Where Clang and GCC number differently (a forward declaration, a
+   typedef-named class), ycxx follows GCC for now (#1448).
 7. **Linkage** is a closure's (closures.md decision 4): external when the function's definition
    may appear in several units (inline, defined in its class, a specialization), else internal.
 8. **Mangling** is the Itanium `<local-name>`: `Z <encoding> E <name> [<discriminator>]`, with
@@ -47,7 +50,8 @@ DECISIONS §6.5); the session checked them against Clang 23 and GCC 16 and wrote
    against Clang 23 objects (`tests/own/abi/local-class-names.run.cpp`).
 9. **The block, as recorded** (`sema::OuterBlock`, taken at the class-head): its names innermost
    first and one per name (locals with constants' values, block types, using-declarations,
-   namespace aliases), its `using enum`s and directives, the template-heads and arguments, the
+   namespace aliases, which qualified names use too), its `using enum`s and using-directives (which
+   namespace lookup from the members uses), the template-heads and arguments, the
    function and its class, and the enclosing local class's own block. Names declared later in the
    block are invisible to the class, as [basic.scope.pdecl] says.
 10. **Lookup from a member** goes: its blocks, the local class (and classes nested in it), the
@@ -66,14 +70,16 @@ DECISIONS §6.5); the session checked them against Clang 23 and GCC 16 and wrote
     items analysed again with the arguments bound (`replay_class`), and their bodies instantiate
     as class template members do ([temp.inst]/3). The block's template-heads are the local items'
     `enclosing_heads`.
-13. **A block's elaborated-type-specifier** naming no class (`struct X* p;`) declares an incomplete
-    local class in the block ([basic.scope.pdecl]/7); a definition later in the same block
-    completes that entity ([class.name]).
+13. **A block's elaborated-type-specifier** naming no class (`struct X* p;`), or `struct X;` unless
+    the block already declares X, declares an incomplete local class in the block
+    ([basic.scope.pdecl]/7, [dcl.type.elab]); a definition later in the same block completes that
+    entity ([class.name]).
 14. **Restrictions** diagnosed on a local class's members: member templates ([temp.mem]/2), static
     data members ([class.static.data]) and friend function definitions ([class.friend]/6).
 
 ## Not yet
 
 Block-scope enumerations (#1442); a member class of a local class defined later in the block
-(#1443); local classes with virtual functions (#1155). Constant evaluation of objects with class
+(#1443); local classes with virtual functions (#1155); which uses of an enclosing constant are
+odr-uses, shared with lambdas (#1447). Constant evaluation of objects with class
 or array subobjects (#1140) limits local aggregates of those shapes in constant expressions too.
