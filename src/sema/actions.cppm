@@ -10376,7 +10376,11 @@ public:
         // A contributing class ends the search, so every previously visited class can be skipped.
         std::set<EntityId> visited;
         if (!has_default && std::ranges::any_of(fields, [&](const FieldRec& field) {
-              return default_deleted(field.type) || gcc_union_variant_prevents_implicit_default(field.type, visited);
+              const QualType element = types().innermost_array_element(field.type);
+              const ClassRec* variant = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+              // Preserve the immediate variant's exemption. The narrower proof applies below it.
+              return variant && !variant->trivial_defaulted_default_ctor &&
+                     (gcc_union_variant_prevents_implicit_default(field.type, visited) || default_deleted(field.type));
             })) {
           diag(begin, Diag::deleted_constructor, t);
           return fail;
