@@ -399,6 +399,8 @@ void append_value(std::string& out, const Value& value) {
       out += ')';
     } else if constexpr (std::same_as<T, TargetTriple>) {
       out += "target_triple()";
+    } else if constexpr (std::same_as<T, HostTriple>) {
+      out += "host_triple()";
     } else if constexpr (std::same_as<T, ProbeRef>) {
       fail(value.location, "probe() requires a named rule capability binding");
     } else if constexpr (std::same_as<T, ValueRef>) {
@@ -937,7 +939,7 @@ class Planner {
                           std::span<const EmbeddedInput> embedded = {}, bool observer = false) {
     if (sdk_header)
       check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args", "probe_flags", "probe_inputs"});
-    else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment"});
+    else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment", "tool_inputs"});
     else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "tool_inputs"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     if (inspection_ && observer)
@@ -1059,13 +1061,17 @@ class Planner {
         if (const auto* text = std::get_if<std::string>(&value.data)) {
           if (inspection_) argv_fact(*text, "declared in args");
           plan.action.args.push_back({literal, *text});
-        } else if (std::holds_alternative<TargetTriple>(value.data)) {
-          if (sdk_header) fail(value.location, "target_triple() is only available in project action arguments");
+        } else if (const bool for_host = std::holds_alternative<HostTriple>(value.data);
+                   for_host || std::holds_alternative<TargetTriple>(value.data)) {
+          const auto kind = for_host ? host_triple : target_triple;
+          const auto selector = triple_arg_selector(kind);
+          if (sdk_header) fail(value.location, std::format("{} is only available in project action arguments", selector));
+          const bool use_host = for_host || native_triple_.empty();
           const auto* host = pp::native_target;
-          if (native_triple_.empty() && !host) fail(value.location, "no default native target for this host");
-          const auto triple = native_triple_.empty() ? host->triple : native_triple_;
-          if (inspection_) argv_fact(triple, "target_triple()");
-          plan.action.args.push_back({target_triple, std::string(triple)});
+          if (use_host && !host) fail(value.location, "no default native target for this host");
+          const auto triple = use_host ? host->triple : native_triple_;
+          if (inspection_) argv_fact(triple, selector);
+          plan.action.args.push_back({kind, std::string(triple)});
         } else if (const auto* input_name = std::get_if<InputArg>(&value.data)) {
           const auto binding = std::ranges::find(plan.inputs, input_name->name, &ActionInput::name);
           if (binding != plan.inputs.end()) {
@@ -1084,7 +1090,7 @@ class Planner {
           if (inspection_) argv_fact("outputs/" + binding->filename, std::format("output({:?})", binding->name));
           plan.action.args.push_back({output, output_name->name});
         } else {
-          fail(value.location, "expected a string, input(name), output(name) or target_triple()");
+          fail(value.location, "expected a string, input(name), output(name), target_triple() or host_triple()");
         }
       }
     }

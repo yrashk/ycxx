@@ -695,6 +695,7 @@ class Lowering {
       case Op::ctz: {
         auto t = result_type();
         if (!t) return fail(t.error());
+        // GCC's zero result is a constant-evaluation extension. Runtime zero is undefined.
         out(n, 0, emit1(Op2::ctz, *t, {in(n, 0)}));
         return {};
       }

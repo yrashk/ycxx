@@ -67,6 +67,36 @@ struct Base { int value; char byte; template<class T> Base& operator=(T); };
 struct Base { private: int value; char byte; };
 #elif defined(OVERLAPPING_MEMBER)
 struct Base { int value; [[no_unique_address]] char byte; };
+#elif defined(PROTECTED_MEMBERS)
+struct Base { protected: int value; char byte; };
+#elif defined(MIXED_ACCESS)
+struct Base { int value; private: char byte; };
+#elif defined(DEFAULT_MEMBER_INITIALIZER)
+struct Base { int value = 0; char byte; };
+#elif defined(FIRST_DEFAULT_CONSTRUCTOR)
+struct Base { int value; char byte; Base() = default; };
+#elif defined(LATE_DEFAULT_CONSTRUCTOR)
+struct Base { int value; char byte; Base(); };
+Base::Base() = default;
+#elif defined(LATE_DEFAULT_ASSIGNMENT)
+struct Base { int value; char byte; Base& operator=(const Base&); };
+Base& Base::operator=(const Base&) = default;
+#elif defined(LATE_DEFAULT_DESTRUCTOR)
+struct Base { int value; char byte; ~Base(); };
+Base::~Base() = default;
+#elif defined(CONST_MEMBER)
+struct Base { const int value; char byte; };
+#elif defined(REFERENCE_MEMBER)
+struct Base { int& value; char byte; };
+#elif defined(ARRAY_MEMBER)
+struct Private { private: int value; char byte; };
+struct Base { Private array[2]; char byte; };
+#elif defined(EMPTY_BASE)
+struct Empty {};
+struct Base : Empty { int value; char byte; };
+#elif defined(NESTED_OVERLAPPING_MEMBER)
+struct Plain { int value; char byte; };
+struct Base { [[no_unique_address]] Plain member; char byte; };
 #else
 struct Base { int value; char byte; };
 #endif
@@ -390,7 +420,6 @@ SYMBOLS = {
     'typed': ('_Z5typedIiTnT_Li4EEiv', '_Z5typedIiLi4EEiv'),
     'empty-values': ('_Z12empty_valuesIiTpTnT_JEEiv', '_Z12empty_valuesIiJEEiv'),
     'member': ('_Z6memberIiEi3UseIN1YIT_E5applyEE', '_Z6memberIiEi3UseIsr1YIT_EE5applyE'),
-    'closure': ('_ZZ7closureiENUliE_8__invokeEi', '_ZZ7closureiENUliE_4_FUNEi'),
     'closure-prefix': ('_ZNK2ltIiEMUliE_clEi', '_ZNK2ltIiEUliE_clEi'),
     'function-pointer': ('_Z9convertedIXcvPFivEadL_Z6targetvEEEiv', '_Z9convertedIXadL_Z6targetvEEEiv'),
 }
@@ -681,6 +710,60 @@ static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
 static_assert(__builtin_memchr(&left, 0x31, sizeof(left)) == &left);
 #endif
 ''')
+    (world.scope / 'memory-long-double.cpp').write_text('''\
+constexpr long double one = 1.0L;
+#ifdef X87
+constexpr long double slight = 1.0000000000000000001084202172485504434007L;
+constexpr long double midpoint = 1.0000000000000000000542101086242752217003726400434970855712890625L;
+constexpr long double full = 0x1.fffffffffffffffep-1000L;
+constexpr long double huge = 1.0e4000L;
+constexpr long double zero = 0.0L, least = 0x1p-16445L;
+constexpr long double half_least = 0x1p-16446L;
+constexpr long double above_half_least = 0x1.0000000000000002p-16446L;
+constexpr long double first_normal = 0x1p-16382L;
+constexpr long double tie_to_normal = 0x0.ffffffffffffffffp-16382L;
+static_assert(sizeof(one) == 16 && sizeof(huge) == 16);
+#ifndef CONTROL
+static_assert(__builtin_memcmp(&one, &slight, sizeof one) < 0);
+static_assert(__builtin_memcmp(&one, &midpoint, sizeof one) == 0);
+static_assert(__builtin_memcmp(&zero, &half_least, sizeof zero) == 0);
+static_assert(__builtin_memcmp(&least, &above_half_least, sizeof least) == 0);
+static_assert(__builtin_memcmp(&first_normal, &tie_to_normal, sizeof first_normal) == 0);
+static_assert(__builtin_memchr(&one, 0xff, 10) != nullptr);
+static_assert(__builtin_memchr(&full, 0, 10) == nullptr);
+static_assert(__builtin_memchr(&full, 0, sizeof full) != nullptr);
+#endif
+#else
+constexpr long double two = 2.0L;
+static_assert(sizeof(one) == 8);
+#ifndef CONTROL
+static_assert(__builtin_memcmp(&one, &two, sizeof one) > 0);
+static_assert(__builtin_memchr(&one, 0x3f, sizeof one) != nullptr);
+#endif
+#endif
+''')
+    (world.scope / 'memory-union-object.cpp').write_text('''\
+union Sample { unsigned char first; unsigned long long second; };
+constexpr Sample value{1}, larger{2}, empty{};
+#if defined(INACTIVE)
+static_assert(empty.second == 0);
+#elif defined(LOCAL)
+constexpr bool test() {
+  Sample local{1};
+  return __builtin_memchr(&local, 1, sizeof local) == &local;
+}
+static_assert(test());
+#elif defined(BYTES)
+static_assert(__builtin_memcmp(&value, &larger, sizeof value) < 0);
+static_assert(__builtin_memchr(&value, 1, sizeof value) == &value.first);
+static_assert(__builtin_memchr(&value, 0, 1) == nullptr);
+static_assert(__builtin_memchr(&value, 0, sizeof value) != nullptr);
+#else
+static_assert(value.first == 1 && empty.first == 0);
+constexpr bool test() { Sample local{5}; return local.first == 5; }
+static_assert(test());
+#endif
+''')
     (world.scope / 'memory-record-object.cpp').write_text('''\
 struct Padded { char tag; unsigned word; };
 struct Tail { unsigned word; char tag; };
@@ -710,6 +793,60 @@ static_assert(__builtin_memcmp(padding, padding, 50) == 0);
 static_assert(__builtin_memchr(&low, 3, sizeof low) == &low);
 static_assert(__builtin_memchr(&low, 0x11, sizeof low) == &low.word);
 static_assert(__builtin_memchr(&tail, 0, sizeof tail) != nullptr);
+#endif
+''')
+    (world.scope / 'memory-nested-record.cpp').write_text('''\
+struct Inner { char tag; unsigned word; };
+struct Outer { char head; Inner inner[2]; unsigned tail; };
+constexpr Outer left{13, {{15, 17}, {19, 21}}, 25};
+constexpr Outer right{13, {{15, 17}, {19, 21}}, 26};
+static_assert(left.inner[1].word == 21 && right.tail == 26);
+#ifdef BYTE_READ
+static_assert(__builtin_memcmp(&left, &right, sizeof left) < 0);
+static_assert(__builtin_memcmp(&left.inner, &right.inner, sizeof left.inner) == 0);
+static_assert(__builtin_memchr(&left, 21, sizeof left) == &left.inner[1].word);
+static_assert(__builtin_memchr(&left, 0, sizeof left) != nullptr);
+#endif
+''')
+    (world.scope / 'constexpr-empty-union.cpp').write_text('''\
+struct Variant { unsigned word; constexpr Variant() : word(17) {} };
+union U { Variant first; unsigned other; };
+constexpr U value{};
+static_assert(value.first.word == EXPECTED);
+''')
+    (world.scope / 'constexpr-union-destruction.cpp').write_text('''\
+void runtime_only();
+struct Variant {
+  unsigned word;
+  mutable unsigned scratch;
+  constexpr Variant() : word(17), scratch(3) {}
+  constexpr ~Variant() {}
+};
+union U {
+  Variant first;
+  unsigned later;
+#if defined(NON_CONSTEXPR)
+  ~U() {}
+#elif defined(CONDITIONAL)
+  constexpr ~U() { if (first.word == 17) runtime_only(); }
+#elif defined(BAD)
+  constexpr ~U() { if (first.word == 17 || first.word == 0) runtime_only(); }
+#elif defined(MUTABLE_READ)
+  constexpr ~U() { if (first.scratch != 3) {} }
+#elif defined(MUTABLE_WRITE)
+  constexpr ~U() { ++first.scratch; }
+#elif defined(WRITE)
+  constexpr ~U() { ++first.word; }
+#else
+  constexpr ~U() {}
+#endif
+};
+#ifdef LOCAL
+constexpr unsigned read() { constexpr U value{}; return value.first.word; }
+static_assert(read() == EXPECTED);
+#else
+constexpr U value{};
+static_assert(value.first.word == EXPECTED);
 #endif
 ''')
     (world.scope / 'memory-pointer-object.cpp').write_text('''\
@@ -793,6 +930,10 @@ static_assert(__builtin_memcmp(past, past, 5) == 0);
 #endif
 ''')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
+    ctz_fixtures = Path(__file__).with_name('builtin_ctz')
+    ctz_cases = ('zero-literal.cpp', 'zero-parameter.cpp')
+    for case in ctz_cases:
+        shutil.copyfile(ctz_fixtures / case, world.scope / case)
     (world.scope / 'void-cast.cpp').write_text('''\
 #ifdef SINGLETON
 constexpr int value = 37;
@@ -1075,6 +1216,18 @@ int use() { return transform(7); }
                 'ASSIGNMENT_TEMPLATE': 12,
                 'PRIVATE_MEMBERS': 12 if darwin_clang else 8,
                 'OVERLAPPING_MEMBER': 8 if mode == 'gcc' else 12,
+                'PROTECTED_MEMBERS': 12 if darwin_clang else 8,
+                'MIXED_ACCESS': 8,
+                'DEFAULT_MEMBER_INITIALIZER': 8,
+                'FIRST_DEFAULT_CONSTRUCTOR': 12,
+                'LATE_DEFAULT_CONSTRUCTOR': 8,
+                'LATE_DEFAULT_ASSIGNMENT': 8,
+                'LATE_DEFAULT_DESTRUCTOR': 8,
+                'CONST_MEMBER': 12,
+                'REFERENCE_MEMBER': 16,
+                'ARRAY_MEMBER': 24 if darwin_clang else 20,
+                'EMPTY_BASE': 12 if darwin_clang else 8,
+                'NESTED_OVERLAPPING_MEMBER': 12 if mode == 'gcc' else 16,
             }
             for case, size in sizes.items():
                 invoke(target, *flags, '-D' + case, f'-DEXPECTED={size}', '-fsyntax-only', 'tail-padding.cpp')
@@ -1094,6 +1247,10 @@ int use() { return transform(7); }
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
         for target in (LINUX, DARWIN):
+            for case in ctz_cases:
+                diagnostic = invoke(target, *flags, '-fsyntax-only', case, status=mode != 'gcc')[2]
+                if mode != 'gcc':
+                    assert b'counting trailing zeros with a zero operand' in diagnostic, diagnostic
             invoke(target, *flags, '-DNULL_ZERO', '-fsyntax-only', 'memcmp-identity.cpp')
             for case in ('', 'NULL_RANGE', 'INT_RANGE', 'PAST_END', 'LOCAL'):
                 case_flags = ['-D' + case] if case else []
@@ -1108,10 +1265,28 @@ int use() { return transform(7); }
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-array-object.cpp', status=1)
             for case in ('FLOAT', 'DOUBLE', 'ENUM'):
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-scalar-object.cpp', status=mode != 'gcc')
+            long_double = ['-DX87'] if target == LINUX else []
+            invoke(target, *flags, *long_double, '-DCONTROL', '-fsyntax-only', 'memory-long-double.cpp')
+            invoke(target, *flags, *long_double, '-fsyntax-only', 'memory-long-double.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-fsyntax-only', 'memory-union-object.cpp')
+            invoke(target, *flags, '-DBYTES', '-fsyntax-only', 'memory-union-object.cpp', status=mode != 'gcc')
+            for case in ('LOCAL', 'INACTIVE'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-union-object.cpp', status=1)
             for case in ('', 'ARRAY', 'REUSE', 'LOCAL'):
                 args = ['-D' + case] if case else []
                 invoke(target, *flags, *args, '-fsyntax-only', 'memory-record-object.cpp',
                        status=mode != 'gcc' or case in ('REUSE', 'LOCAL'))
+            invoke(target, *flags, '-fsyntax-only', 'memory-nested-record.cpp')
+            invoke(target, *flags, '-DBYTE_READ', '-fsyntax-only', 'memory-nested-record.cpp', status=mode != 'gcc')
+            union_expected = 0 if mode == 'gcc' else 17
+            invoke(target, *flags, f'-DEXPECTED={union_expected}', '-fsyntax-only', 'constexpr-empty-union.cpp')
+            cases = {'': 0, 'WRITE': 0, 'NON_CONSTEXPR': 1, 'BAD': 1,
+                     'CONDITIONAL': mode != 'gcc', 'MUTABLE_READ': mode != 'gcc', 'MUTABLE_WRITE': mode != 'gcc'}
+            for case, status in cases.items():
+                definition = [f'-D{case}'] if case else []
+                for scope in ([], ['-DLOCAL']):
+                    invoke(target, *flags, f'-DEXPECTED={union_expected}', *definition, *scope,
+                           '-fsyntax-only', 'constexpr-union-destruction.cpp', status=status)
             for case in ('', 'NON_NULL', 'LOCAL'):
                 args = ['-D' + case] if case else []
                 invoke(target, *flags, *args, '-fsyntax-only', 'memory-pointer-object.cpp',
@@ -1249,6 +1424,9 @@ def mangling(world):
             use_second = mode == ('clang' if key in ('index', 'member') else 'gcc')
             assert alternatives[use_second].encode() in names, (mode, key, sorted(names)[-45:])
             assert alternatives[not use_second].encode() not in names, (mode, key)
+        closure = {'spec': 'UliE_8__invoke', 'gcc': 'UliE_4_FUN', 'clang': '3$_08__invoke'}
+        for candidate, component in closure.items():
+            assert (f'_ZZ7closureiEN{component}Ei'.encode() in names) == (mode == candidate), (mode, names)
         assert b'_Z14different_headITtTyE3TwoEiv' in names, (mode, sorted(names)[-45:])
 
     source = '''\
@@ -1271,6 +1449,288 @@ int labelled(int v) { return v; }
         assert result == (0, b'', b''), result
         names = (scope / 'asm.o').read_bytes().split(b'\0')
         assert b'_first' in names and b'_next' not in names, [name for name in names if name.startswith(b'_')]
+
+
+def private_closure_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'private-closures.cpp').write_text('''\
+using F = int(*)(int);
+using L = int(*)(long);
+F direct(int flag) {
+  auto unused = [](int n) { return n; };
+  auto a = [](int n) { return n + 1; };
+  auto b = [](long n) { return int(n) + 2; };
+  auto c = [](int n) { return n + 3; };
+  int v = a(flag);
+  L fn = b;
+  if (flag && v == 1 && fn(0) == 2) return c;
+  return a;
+}
+static F internal(int flag);
+F internal(int flag) {
+  auto unused = [](int n) { return n; };
+  auto a = [](int n) { return n + 1; };
+  auto b = [](long n) { return int(n) + 2; };
+  auto c = [](int n) { return n + 3; };
+  L fn = b;
+  if (flag && fn(0) == 2) return a;
+  return c;
+}
+template<class T> int consume(T value) { return value(1); }
+int needs_type() {
+  auto a = [](int n) { return n; };
+  auto b = [](int n) { return n+2; };
+  F f = b;
+  return f(2) + consume(a);
+}
+static inline F file_inline() { return [](int v) { return v + 4; }; }
+template<class T> static F file_template(T) { return [](int v) { return v + 5; }; }
+struct Out { static F member(); static F inside() { return [](int v) { return v + 6; }; } };
+F Out::member() { return [](int v) { return v + 7; }; }
+extern "C" F c_owner() { return [](int v) { return v + 8; }; }
+extern "C" int exercise() {
+  return direct(0)(0) + internal(0)(0) + needs_type() + file_inline()(0) + file_template(0)(0)
+      + Out::inside()(0) + Out::member()(0) + c_owner()(0);
+}
+''')
+    (scope / 'private-closure-caller.cpp').write_text('extern "C" int exercise();\n'
+                                                     'int main() { return exercise() != 39; }\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        invoker = '4_FUN' if mode == 'gcc' else '8__invoke'
+        local = 'L' if mode != 'spec' else ''
+        direct = ('3$_0', '3$_1', '3$_2') if mode == 'clang' else ('UliE0_', 'UllE_', 'UliE1_')
+        internal = ('3$_1', '3$_0', '3$_2') if mode == 'clang' else direct
+        expected = []
+        for owner, components in (('6directi', direct), (local + '8internali', internal)):
+            for component, parameter in zip(components, 'ili'):
+                expected += [f'_ZZ{owner}EN{component}{invoker}E{parameter}', f'_ZZ{owner}ENK{component}clE{parameter}']
+        expected += [
+            f'_Z7consumeIZ10needs_typevE{"3$_1" if mode == "clang" else "UliE_"}EiT_',
+            f'_ZZ{local}11file_inlinevENUliE_{invoker}Ei',
+            f'_ZZ{"L" if mode == "clang" else ""}13file_templateIiEPFiiET_ENUliE_{invoker}Ei',
+            f'_ZZN3Out6insideEvENUliE_{invoker}Ei',
+            f'_ZZN3Out6memberEvEN{"3$_0" if mode == "clang" else "UliE_"}{invoker}Ei',
+            f'_ZZ{"7c_ownerv" if mode == "spec" else "7c_owner"}EN{"3$_0" if mode == "clang" else "UliE_"}{invoker}Ei',
+        ]
+        command = ['-fcompat=' + mode, '-c', 'private-closures.cpp', '-o', 'private-closures.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            binaries = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx([target, *command], scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                binaries.append((scope / 'private-closures.o').read_bytes())
+            assert binaries[0] == binaries[1], (mode, target)
+            names = set(binaries[0].split(b'\0'))
+            for symbol in expected:
+                assert (prefix + symbol).encode() in names, (mode, target, symbol, sorted(n for n in names if b'_ZZ' in n))
+            if mode != 'spec':
+                for owner in ('6directi', local + '8internali'):
+                    unused = '3$_3' if mode == 'clang' else 'UliE_'
+                    assert (prefix + f'_ZZ{owner}ENK{unused}clEi').encode() not in names, (mode, target, names)
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                peer = clang if mode == 'clang' else gxx
+                if peer:
+                    subprocess.run([peer, '-std=c++26', 'private-closure-caller.cpp', 'private-closures.o',
+                                    '-o', 'private-closures'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'private-closures'], cwd=scope, check=True, timeout=20)
+
+
+def generic_invoker_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'generic-invoker.cpp').write_text('''\
+using I = int(*)(int);
+using R = int(*)(const int&);
+using B = int(*)(int, int);
+using M = int(*)(int, long);
+using N = int(*)(int) noexcept;
+using V = void(*)(int);
+inline I typed() { return []<class T>(T v) -> T { return v; }; }
+inline I fixed() { return [](auto v) -> int { return v; }; }
+inline R lref() { return [](const auto& v) { return v; }; }
+inline B same() { return []<class T>(T a, T b) { return a + b; }; }
+inline M multi() { return []<class T, class U>(T a, U b) { return a+int(b); }; }
+inline I mut() { return [](auto v) mutable { return v; }; }
+inline N noex() { return [](auto v) noexcept { return v; }; }
+inline I drop_noex() { return [](auto v) noexcept { return v; }; }
+inline V vvoid() { return [](auto v) -> void { (void)v; }; }
+inline M packed() { return []<class... T>(T... v) { return static_cast<int>((v + ...)); }; }
+inline I defaulted() { return []<class T, int N=7>(T v) { return v + N; }; }
+inline I inferred() { return [](auto v) { return v; }; }
+I private_generic() {
+  auto unused = [](auto v) { return v; };
+  return [](auto v) { return v + 1; };
+}
+extern "C" int exercise() {
+  int val = 2;
+  vvoid()(0);
+  return typed()(1) + fixed()(1) + lref()(val) + same()(1, 2) + multi()(1, 2L)
+      + mut()(1) + noex()(1) + drop_noex()(1) + packed()(1, 2L) + defaulted()(1) + inferred()(1);
+}
+''')
+    (scope / 'generic-invoker-constant.cpp').write_text('''\
+constexpr auto lim = []<class T>(T n) { return n + 2; };
+using Fn = int(*)(int);
+#if defined(CAPTURE)
+Fn bad() { return [n = 2](auto v) { return v + n; }; }
+#elif defined(RETURN_TYPE)
+Fn bad() { return [](auto v) -> long { return v; }; }
+#elif defined(NOEXCEPT)
+using Safe = int(*)(int) noexcept;
+Safe bad() { return [](auto v) { return v; }; }
+#else
+constexpr Fn fn = lim;
+static_assert(fn(4) == 6);
+constexpr int run(int (*f)(int), int n) { return f(n); }
+constexpr int run_lambda() { return run([](auto n) { return n + 3; }, 4); }
+static_assert(run_lambda() == 7);
+#endif
+''')
+    (scope / 'generic-invoker-caller.cpp').write_text('''\
+extern "C" int exercise();
+extern "C" int invoker(int) __asm__(INVOKER);
+int main() { return exercise() != 25 || invoker(8) != 8; }
+''')
+    cases = (
+        ('5typedvENUlTyT_E_', 'IiEES_S_', 'IiEES_S_'),
+        ('5fixedvENUlT_E_', 'IiEEiS_', 'IiEEiS_'),
+        ('4lrefvENUlRKT_E_', 'IiEEDTcldtdeLKPKS2_0EonclIS_EscS1_fp_EES1_', 'IiEEDaS1_'),
+        ('4samevENUlTyT_S_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_scS5_fp0_EES_S_', 'IiEEDaS_S_'),
+        ('5multivENUlTyTyT_T0_E_', 'IilEEDTcldtdeLKPKS1_0EonclIS_S0_EscOS_fp_scOS0_fp0_EES_S0_', 'IilEEDaS_S0_'),
+        ('3mutvENUlT_E_', 'IiEEDTcldtdeLKPS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+        ('4noexvENUlT_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+        ('9drop_noexvENUlT_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+        ('5vvoidvENUlT_E_', 'IiEEvS_', 'IiEEvS_'),
+        ('6packedvENUlTpTyDpT_E_', 'IJilEEEDTcldtdeLKPKS1_0EonclIJS0_EEspscOS_fp_EES0_', 'IJilEEEDaS0_'),
+        ('9defaultedvENUlTyTniT_E_', 'IiLi7EEEDTcldtdeLKPKS0_0EonclIS_XT0_EEscOS_fp_EES_', 'IiLi7EEEDaS_'),
+        ('8inferredvENUlT_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+    )
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    private = {
+        'spec': '_ZZ15private_genericvENUlT_E0_8__invokeIiEEDaS_',
+        'gcc': '_ZZ15private_genericvENUlT_E0_4_FUNIiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_',
+        'clang': '_ZZ15private_genericvEN3$_08__invokeIiEEDaT_',
+    }
+    for mode in MODES:
+        invoker = '4_FUN' if mode == 'gcc' else '8__invoke'
+        names = tuple(f'_ZZ{owner}{invoker}{gcc if mode == "gcc" else other}' for owner, gcc, other in cases)
+        flags = ['-fcompat=' + mode]
+        command = [*flags, '-c', 'generic-invoker.cpp', '-o', 'generic-invoker.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx([target, *command], scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'generic-invoker.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            symbols = outputs[0].split(b'\0')
+            for name in (*names, private[mode]):
+                assert (prefix + name).encode() in symbols, (mode, target, name, [s for s in symbols if b'_ZZ' in s])
+            for case in ('', 'CAPTURE', 'RETURN_TYPE', 'NOEXCEPT'):
+                define = ['-D' + case] if case else []
+                args = [target, *flags, *define, '-fsyntax-only', 'generic-invoker-constant.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=30) for env in (world.cold, world.daemon))
+                assert cold == warm and cold[0] == bool(case), (mode, target, case, cold, warm)
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                definition = f'-DINVOKER="{prefix}{names[-1]}"'
+                peer = clang if mode == 'clang' else gxx
+                if not peer:
+                    continue
+                subprocess.run([peer, '-std=c++26', definition, 'generic-invoker-caller.cpp', 'generic-invoker.o',
+                                '-o', 'generic-invoker'], cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'generic-invoker'], cwd=scope, check=True, timeout=20)
+
+
+def dependent_variable_spellings(world, gxx):
+    scope = world.scope
+    declarations = '''\
+template<bool> struct Box {};
+template<bool> struct Other {};
+template<bool> struct Extra {};
+namespace Ns::Inner { template<class T, int = 5> constexpr bool arg = true; }
+namespace Alias = Ns::Inner;
+namespace OuterAlias = Ns;
+namespace Same = OuterAlias::Inner;
+using Ns::Inner::arg;
+'''
+    written = (
+        ('inside', 'Box', 'Alias::arg<T>', 'sr5AliasE', ''),
+        ('earlier', 'Box', 'Ns::Inner::arg<T>', 'sr2Ns5InnerE', ''),
+        ('other', 'Other', 'Ns::Inner::arg<T>', 'sr2Ns5InnerE', ''),
+        ('extra', 'Extra', 'Same::arg<T>', 'sr4SameE', ''),
+        ('combined', 'Box', 'Ns::Inner::arg<T, 5>', 'sr2Ns5InnerE', 'Li5E'),
+        ('global', 'Other', '::Alias::arg<T>', 'gssr5AliasE', ''),
+        ('nested', 'Extra', 'OuterAlias::Inner::arg<T>', 'sr10OuterAlias5InnerE', ''),
+        ('bare', 'Extra', 'arg<T>', '', ''),
+        ('not_outer', 'Box', '!Ns::Inner::arg<T>', 'sr2Ns5InnerE', ''),
+        ('not_alias', 'Box', '!Alias::arg<T>', 'sr5AliasE', ''),
+    )
+    functions = [f'template<class T> int {fn}({box}<{arg}>)' for fn, box, arg, _, _ in written]
+    define = '\n'.join(f'{signature} {{ return {i}; }}' for i, signature in enumerate(functions, 1))
+    call = ' + '.join(f'{fn}<int>({box}<{"false" if arg.startswith("!") else "true"}>{{}})' for fn, box, arg, *_ in written)
+    (scope / 'variable-spelling-caller.cpp').write_text(declarations + ';\n'.join(functions) +
+                                                        f';\nint main() {{ return ({call}) != 55; }}\n')
+    (scope / 'variable-redeclaration.cpp').write_text(declarations + '''\
+#ifdef BARE
+template<class T> void redeclare(Box<arg<T>>) {}
+#elif defined(EXPLICIT_DEFAULT)
+template<class T> void redeclare(Box<Alias::arg<T, 5>>) {}
+#else
+template<class T> void redeclare(Box<::Alias::arg<T>>) {}
+#endif
+template<class T> void redeclare(Box<Ns::Inner::arg<T>>) {}
+''')
+    command = ['-c', 'variable-spelling.cpp', '-o', 'variable-spelling.o']
+    unit = scope / 'variable-spelling.cpp'
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for early in ('', 'template<class T> using First = Box<Ns::Inner::arg<T>>;\n',
+                          'template<class T> void first() { using First = Box<Ns::Inner::arg<T>>; }\n',
+                          'template<class T> struct First { using Shape = Box<Ns::Inner::arg<T>>; };\n', ''):
+                first_canonical = bool(early)
+                unit.write_text(declarations + early + define + f'\nint instantiate() {{ return {call}; }}\n')
+                outputs = []
+                for env in (world.daemon, world.cold):
+                    result = world.cxx([target, *flags, *command], scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, first_canonical, result)
+                    outputs.append((scope / 'variable-spelling.o').read_bytes())
+                assert outputs[0] == outputs[1], (mode, target, first_canonical)
+                names = outputs[0].split(b'\0')
+                for fn, box, arg, scope_name, default in written:
+                    if mode == 'gcc':
+                        scope_name, default = '', 'Li5E'
+                    elif mode == 'clang':
+                        if fn in ('inside', 'earlier'):
+                            scope_name = 'sr2Ns5InnerE' if first_canonical else 'sr5AliasE'
+                        elif fn == 'global':
+                            scope_name = 'sr2Ns5InnerE'
+                        elif fn == 'nested':
+                            scope_name = 'sr4SameE'
+                        elif fn == 'not_alias':
+                            scope_name = 'sr2Ns5InnerE'
+                    negation = 'nt' if arg.startswith('!') else ''
+                    expected = f'{prefix}_Z{len(fn)}{fn}IiEi{len(box)}{box}IX{negation}{scope_name}3argIT_{default}EEE'.encode()
+                    assert expected in names, (mode, target, first_canonical, expected, [n for n in names if b'3arg' in n])
+            for case in ('GLOBAL_ALIAS', 'BARE', 'EXPLICIT_DEFAULT'):
+                status = mode == 'gcc' or (mode == 'clang' and case == 'GLOBAL_ALIAS')
+                results = [world.cxx([target, *flags, f'-D{case}', '-fsyntax-only', 'variable-redeclaration.cpp'],
+                                     scope, env, timeout=30) for env in (world.cold, world.daemon)]
+                assert results[0] == results[1] and results[0][0] == status, (mode, target, case, results)
+                if status:
+                    assert b'redefinition' in results[0][2], results
+
+        peer = gxx if mode == 'gcc' else clang if mode == 'clang' else None
+        if peer:
+            outcome = world.cxx([*flags, *command], scope, world.daemon, timeout=40)
+            assert outcome == (0, b'', b''), (mode, outcome)
+            subprocess.run([peer, '-std=c++26', 'variable-spelling-caller.cpp', 'variable-spelling.o', '-o', 'variable-spelling'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'variable-spelling'], cwd=scope, check=True, timeout=20)
 
 
 def mixed_class_calls(world, gxx):
@@ -1810,6 +2270,75 @@ def template_argument_prefixes(world, gxx):
             subprocess.run([scope / 'prefix-link'], cwd=scope, check=True, timeout=20)
 
 
+def placeholder_template_prefixes(world, gxx):
+    scope = world.scope
+    templates = (
+        ('template<auto V> int single()', 'static_cast<int>(V)'),
+        ('template<auto... Values> int pack()', '(0 + ... + Values)'),
+        ('template<auto V = 9L> int fallback()', 'static_cast<int>(V)'),
+        ('template<auto A, auto B = A> int inherits()', 'static_cast<int>(A + B)'),
+        ('template<auto N> int deduced(const char (&)[N])', 'static_cast<int>(N)'),
+    )
+    calls = 'single<4>() + single<4u>() + pack<>() + pack<2, 3L, true>() + fallback<>() + inherits<7u>() + deduced("xyz")'
+    definitions = '\n'.join(f'{signature} {{ return {value}; }}' for signature, value in templates)
+    declarations = '\n'.join(signature + ';' for signature, _ in templates)
+    (scope / 'placeholder-provider.cpp').write_text(definitions + f'\nint instantiate() {{ return {calls}; }}\n')
+    (scope / 'placeholder-consumer.cpp').write_text(declarations + f'\nint main() {{ return {calls} - 41; }}\n')
+    (scope / 'placeholder-array.cpp').write_text('''\
+template<auto N> int gather(const char (&)[N]);
+#ifdef LARGE
+extern char array[2147483648ULL];
+#else
+extern char array[2147483647ULL];
+#endif
+int use() { return gather(array); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        empty = '' if mode == 'gcc' else 'TpTnDa'
+        array_type = 'i' if mode == 'gcc' else 'm'
+        symbols = (
+            '_Z6singleITnDaLi4EEiv',
+            '_Z6singleITnDaLj4EEiv',
+            f'_Z4packI{empty}JEEiv',
+            '_Z4packITpTnDaJLi2ELl3ELb1EEEiv',
+            '_Z8fallbackITnDaLl9EEiv',
+            '_Z8inheritsITnDaLj7ETnDaLj7EEiv',
+            f'_Z7deducedITnDaL{array_type}4EEiRAT__Kc',
+        )
+        command = [*flags, '-c', 'placeholder-provider.cpp', '-o', 'placeholder-provider.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for env in (world.cold, world.daemon):
+                outcome = world.cxx([target, *command], scope, env, timeout=40)
+                assert outcome == (0, b'', b''), (mode, target, outcome)
+                names = (scope / 'placeholder-provider.o').read_bytes().split(b'\0')
+                for symbol in symbols:
+                    assert (prefix + symbol).encode() in names, (mode, target, symbol, [n for n in names if b'_Z' in n])
+                array_cmd = [target, *flags, '-c', 'placeholder-array.cpp', '-o', 'placeholder-array.o']
+                for large in (False, True):
+                    args = [*array_cmd, '-DLARGE'] if large else array_cmd
+                    result = world.cxx(args, scope, env, timeout=30)
+                    if large and mode == 'gcc':
+                        assert result[0] == 1, (mode, target, result)
+                        continue
+                    assert result == (0, b'', b''), (mode, target, result)
+                    bound = 2147483648 if large else 2147483647
+                    symbol = f'{prefix}_Z6gatherITnDaL{array_type}{bound}EEiRAT__Kc'.encode()
+                    names = (scope / 'placeholder-array.o').read_bytes().split(b'\0')
+                    assert symbol in names, (mode, target, symbol, [n for n in names if b'_Z' in n])
+        peer = gxx if mode == 'gcc' else clang
+        if peer:
+            result = world.cxx(command, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([peer, '-std=c++26', '-c', 'placeholder-consumer.cpp', '-o', 'placeholder-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([gxx, 'placeholder-provider.o', 'placeholder-consumer.o', '-o', 'placeholder-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'placeholder-link'], cwd=scope, check=True, timeout=20)
+
+
 def mixed_source_location(world, gxx):
     scope = world.scope
     (scope / 'descriptor-peer.cpp').write_text('''\
@@ -1860,8 +2389,8 @@ int main() {
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
-        for feature in ('PRIVATE_MEMBERS', 'OVERLAPPING_MEMBER'):
-            peer = clang if mode == 'clang' or (mode == 'spec' and feature == 'OVERLAPPING_MEMBER') else gxx
+        for feature in ('PRIVATE_MEMBERS', 'OVERLAPPING_MEMBER', 'NESTED_OVERLAPPING_MEMBER'):
+            peer = clang if mode == 'clang' or (mode == 'spec' and feature != 'PRIVATE_MEMBERS') else gxx
             if not peer:
                 continue
             definition = '-D' + feature
@@ -1874,6 +2403,289 @@ int main() {
                 subprocess.run([gxx, 'tail-reader.o', 'tail-peer.o', '-o', 'tail-calls'],
                                cwd=scope, check=True, capture_output=True, timeout=40)
                 subprocess.run([scope / 'tail-calls'], cwd=scope, check=True, timeout=20)
+
+
+def concrete_transform_signatures(world):
+    scope = world.scope
+    (scope / 'concrete-transform.cpp').write_text('''\
+enum E : int { item = 7 };
+#if defined(TRAILING)
+template<class T> auto f(T n) -> __remove_cv(const int) { return n; }
+#elif defined(PARAMETER)
+template<class T> int apply(__remove_cv(const int) x) { return x; }
+template<class T> int f(T n) { return apply<T>(n); }
+#elif defined(UNDERLYING)
+template<class T> __underlying_type(E) f(T n) { return n; }
+#elif defined(ORDINARY_ALIAS)
+using Alias = __remove_cv(const int);
+template<class T> Alias f(T n) { return n; }
+#elif defined(ALIAS_TEMPLATE)
+template<class T> using Alias = __remove_cv(const int);
+template<class T> Alias<T> f(T n) { return n; }
+#elif defined(BOUND_ALIAS)
+template<class T> using Alias = __remove_cv(const int);
+template<class T> Alias<int> f(T n) { return n; }
+#elif defined(CHAINED_ALIAS)
+template<class A> using Inner = __remove_cv(const int);
+template<class B> using Alias = Inner<B>;
+template<class T> Alias<T> f(T n) { return n; }
+#elif defined(PARTIAL_ALIAS)
+template<class X, class Y> using Alias = __remove_cv(Y);
+template<class T> Alias<T, const int> f(T n) { return n; }
+#elif defined(POINTER_ALIAS)
+int value = 7;
+template<class X, class Y> using Alias = __remove_cv(Y)*;
+template<class T> Alias<T, const int> f(T) { return &value; }
+#elif defined(MEMBER_ALIAS)
+template<class X> struct S { template<class Y> using Alias = __remove_cv(const int); };
+template<class T> typename S<T>::template Alias<T> f(T n) { return n; }
+#elif defined(CLASS_ARGUMENT) || defined(GUARD_CLASS_ARGUMENT)
+template<class T> struct Result { T value; };
+template<class T> Result<__remove_cv(const int)> f(T n) {
+#if defined(GUARD_CLASS_ARGUMENT)
+  static T value = n;
+  return {value};
+#else
+  return {n};
+#endif
+}
+#elif defined(CLASS_ALIAS)
+template<class X, class Y> struct Result { Y value; };
+template<class X> using Alias = Result<X, __remove_cv(const int)>;
+template<class T> Alias<T> f(T n) { return {n}; }
+#elif defined(GUARD_DYNAMIC) || defined(GUARD_UNINSTANTIATED)
+template<class T> __remove_cv(const int) f(T n) { static int value = n; return value; }
+#elif defined(GUARD_UNUSED)
+template<class T> __remove_cv(const int) f(T n) { static int value = n; return n; }
+#elif defined(GUARD_DISCARDED)
+template<class T> __remove_cv(const int) f(T n) {
+  if constexpr (sizeof(T) == 1) { static int value = n; return value; }
+  return n;
+}
+#elif defined(GUARD_DEPENDENT)
+template<class T> __remove_cv(T) f(T n) { static T value = n; return value; }
+#elif defined(GUARD_CONSTANT)
+template<class T> __remove_cv(const int) f(T n) { static constexpr int value = 1; return n + value; }
+#elif defined(ORDINARY_MEMBER)
+template<class T> struct S { __remove_cv(const int) apply(int n) { return n; } };
+template<class T> int f(T n) { S<T> s; return s.apply(n); }
+#elif defined(MEMBER_TEMPLATE)
+struct S { template<class T> static __remove_cv(const int) apply(T n) { return n; } };
+template<class T> int f(T n) { return S::apply(n); }
+#elif defined(BODY)
+template<class T> int f(T n) { __remove_cv(const int) value = n; return value; }
+#elif defined(HEADER_EXTENSION)
+template<class T> __remove_const(const int) f(T n) { return n; }
+#elif defined(OVERLOAD)
+template<class T> __remove_cv(const int) f(T n);
+template<class T> int f(T n) { return n; }
+#else
+template<class T> __remove_cv(const int) f(T n) { return n; }
+#endif
+#if defined(GUARD_UNINSTANTIATED)
+int use() { return 7; }
+#elif defined(POINTER_ALIAS)
+int use() { return *f(7); }
+#elif defined(CLASS_ARGUMENT) || defined(CLASS_ALIAS) || defined(GUARD_CLASS_ARGUMENT)
+int use() { return f(7).value; }
+#else
+int use() { return f(7); }
+#endif
+''')
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        for target in (LINUX, DARWIN):
+            emitted_cases = ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ALIAS_TEMPLATE', 'MEMBER_TEMPLATE',
+                             'CHAINED_ALIAS', 'PARTIAL_ALIAS', 'POINTER_ALIAS', 'CLASS_ARGUMENT', 'CLASS_ALIAS',
+                             'GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT', 'GUARD_CONSTANT',
+                             'GUARD_UNUSED', 'GUARD_DISCARDED')
+            folded = ('ORDINARY_ALIAS', 'BOUND_ALIAS', 'MEMBER_ALIAS', 'ORDINARY_MEMBER', 'BODY', 'HEADER_EXTENSION',
+                      'GUARD_UNINSTANTIATED')
+            for case in (*emitted_cases, *folded, 'OVERLOAD'):
+                opts = [target, *flags, *(['-D' + case] if case else [])]
+                syntax = [*opts, '-fsyntax-only', 'concrete-transform.cpp']
+                native = [*opts, '-c', 'concrete-transform.cpp', '-o', 'concrete-transform.o']
+                ambiguous = mode == 'gcc' and case == 'OVERLOAD'
+                emitted = mode == 'gcc' and case in emitted_cases
+                guard = mode == 'gcc' and case in ('GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT', 'GUARD_UNUSED')
+                for command, reject in ((syntax, ambiguous or guard), (native, ambiguous or emitted)):
+                    cold = world.cxx(command, scope, world.cold, timeout=40)
+                    resident = world.cxx(command, scope, world.daemon, timeout=40)
+                    assert cold == resident and resident[0] == int(reject), (mode, target, case, cold, resident)
+                    if reject and emitted:
+                        assert b'built-in type trait' in resident[2], (mode, target, case, resident)
+
+
+def constraint_expression_symbols(world, gxx):
+    scope = world.scope
+    declarations = '''\
+struct A {
+  static constexpr bool value = true;
+  static constexpr int number = 3;
+  constexpr int f() const noexcept { return 1; }
+  int member;
+};
+template<class T> struct Trait { static constexpr bool value = true; };
+template<class T> constexpr bool check() { return true; }
+namespace N {
+  template<class T> constexpr bool check() { return true; }
+  constexpr bool yes = true;
+  constexpr bool read(int x) { return x != 0; }
+}
+namespace Alias = N;
+'''
+    # The differences here use GCC's primary symbols with its legacy aliases disabled.
+    heads = (
+        ('(T::value)', 'srT_5value', '', ''),
+        ('(Trait<T>::value)', 'sr5TraitIT_EE5value', 'sr5TraitIT_E5value', 'S2_'),
+        ('(check<T>())', 'cl5checkIT_EE', '', ''),
+        ('(::N::check<T>())', 'clgssr1NE5checkIT_EE', 'cl5checkIT_EE', ''),
+        ('(Alias::check<T>())', 'clsr5AliasE5checkIT_EE', 'cl5checkIT_EE', ''),
+        ('(noexcept(T{}))', 'nxtlT_E', '', ''),
+        ('(T::value ? true : false)', 'qusrT_5valueLb1ELb0E', '', ''),
+        ('(bool(T::value))', 'cvbsrT_5value', '', ''),
+        ('(static_cast<bool>(T::number))', 'scbsrT_6number', '', ''),
+        ('((~T::number != 0) && ((-T::number) < 0))', 'aanecosrT_6numberLi0EltngsrS1_6numberLi0E', '', ''),
+        ('(N::yes)', 'L_ZN1NL3yesEE', '', 'T_'),
+        ('(N::read(T::number))', 'clL_ZN1N4readEiEsrT_6numberE', 'cl4readsrT_6numberE', 'S1_'),
+        ('(T::number > 0 && sizeof(T{}) > 0)', 'aagtsrT_6numberLi0EgtsztlS1_ELi0E', '', ''),
+        ('requires { T::number; }', 'rqXsrT_6numberE', '', ''),
+        ('requires(T t) { t.f(); }', 'rQT__Xcldt{arg}1fEE', '', ''),
+        ('requires(T t) { t.member; }', 'rQT__Xdt{arg}6memberE', '', ''),
+        ('requires(T* p) { p->member; }', 'rQPT__Xpt{arg}6memberE', '', ''),
+        ('requires(T* p) { { *p }; p[0]; }', 'rQPT__Xde{arg}Xix{arg}Li0EE', '', ''),
+        ('requires(T a) { { a.f() } noexcept; }', 'rQT__Xcldt{arg}1fENE', '', ''),
+    )
+    trailing = (
+        ('(sizeof(x) > 0)', 'gtsz{arg}Li0E'),
+        ('(noexcept(x.f()))', 'nxcldt{arg}1fE'),
+    )
+    signatures = [f'template<class T> requires {condition} int h{i:02}(T)' for i, (condition, *_) in enumerate(heads)]
+    signatures += [f'template<class T> int t{i:02}(T x) requires {condition}' for i, (condition, _) in enumerate(trailing)]
+    main = ' + '.join([f'h{i:02}(A{{}})' for i in range(len(heads))] + [f't{i:02}(A{{}})' for i in range(len(trailing))])
+    (scope / 'expression-constraints.cpp').write_text(declarations +
+        '\n'.join(f'{signature} {{ return 1; }}' for signature in signatures) +
+        f'\nint force() {{ return {main}; }}\n')
+    (scope / 'expression-constraints-caller.cpp').write_text(declarations +
+        ';\n'.join(signatures) + f';\nint main() {{ return ({main}) != {len(signatures)}; }}\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        command = ['-fcompat=' + mode, '-c', 'expression-constraints.cpp', '-o', 'expression-constraints.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for env in (world.cold, world.daemon):
+                outcome = world.cxx([target, *command], scope, env, timeout=40)
+                assert outcome == (0, b'', b''), (mode, target, outcome)
+                names = (scope / 'expression-constraints.o').read_bytes().split(b'\0')
+                for i, (_, expression, gcc, result) in enumerate(heads):
+                    parameter = result if i == 10 or (mode == 'gcc' and result) else 'S2_' if i == 11 else 'S1_'
+                    encoded = (gcc if mode == 'gcc' and gcc else expression).format(arg='fL0p_' if mode == 'clang' else 'fp_')
+                    symbol = f'{prefix}_Z3h{i:02}I1AQ{encoded}Ei{parameter}'.encode()
+                    assert symbol in names, (mode, target, symbol, [n for n in names if b'_Z3h' in n])
+                for i, (_, expression) in enumerate(trailing):
+                    encoded = expression.format(arg='fL0p_' if mode == 'gcc' else 'fp_')
+                    symbol = f'{prefix}_Z3t{i:02}I1AEiT_Q{encoded}'.encode()
+                    assert symbol in names, (mode, target, symbol, [n for n in names if b'_Z3t' in n])
+        peer = gxx if mode == 'gcc' else clang if mode == 'clang' else None
+        if peer:
+            args = ['-fabi-compat-version=0'] if mode == 'gcc' else []
+            compiled = world.cxx(command, scope, world.daemon, timeout=40)
+            assert compiled == (0, b'', b''), (mode, compiled)
+            subprocess.run([peer, '-std=c++26', *args, 'expression-constraints-caller.cpp', 'expression-constraints.o',
+                            '-o', 'expression-constraints'], cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'expression-constraints'], cwd=scope, check=True, timeout=20)
+
+
+def overlapping_member_layout(world, gxx):
+    scope = world.scope
+    shape = '''\
+struct Empty {};
+struct WithEmpty { int value; char byte; [[no_unique_address]] Empty a, b; };
+struct OnlyEmpty { [[no_unique_address]] Empty a, b; };
+struct Member { int value; char byte; ~Member() noexcept {} };
+struct WithMember { [[no_unique_address]] Member word; char last; };
+static_assert(sizeof(WithEmpty) == 8 && __builtin_offsetof(WithEmpty, a) == 0 && __builtin_offsetof(WithEmpty, b) == 5);
+static_assert(sizeof(OnlyEmpty) == 2 && __builtin_offsetof(OnlyEmpty, a) == 0 && __builtin_offsetof(OnlyEmpty, b) == 1);
+static_assert(sizeof(WithMember) == 8 && __builtin_offsetof(WithMember, last) == 5);
+'''
+    (scope / 'overlap-reader.cpp').write_text(shape + '''\
+extern "C" int read_overlapping(const WithMember& value) {
+  return value.word.value + value.word.byte + value.last;
+}
+''')
+    (scope / 'overlap-peer.cpp').write_text(shape + '''\
+extern "C" int read_overlapping(const WithMember&);
+int main() { return read_overlapping({{17, 19}, 23}) != 59; }
+''')
+    subprocess.run([gxx, '-std=c++26', '-c', 'overlap-peer.cpp', '-o', 'overlap-peer.o'],
+                   cwd=scope, check=True, capture_output=True, timeout=40)
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-c', 'overlap-reader.cpp', '-o', 'overlap-reader.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                    subprocess.run([gxx, 'overlap-reader.o', 'overlap-peer.o', '-o', 'overlap-calls'],
+                                   cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'overlap-calls'], cwd=scope, check=True, timeout=20)
+
+
+def late_defaulted_special_members(world, gxx):
+    scope = world.scope
+    (scope / 'const-defaulted.cpp').write_text('''\
+struct First { int value; char byte; First() = default; };
+#ifdef CHECK_CONST
+const First plain;
+#else
+int first() { First value{}; return value.value; }
+#endif
+''')
+    (scope / 'late-defaulted.cpp').write_text('''\
+struct Ctor { int value = 17; char byte = 19; Ctor() noexcept; };
+struct Assign { int value; char byte; Assign& operator=(const Assign&) noexcept; };
+struct DerivedAssign : Assign { char tail; };
+struct Dtor { int value; char byte; ~Dtor() noexcept; };
+static_assert(sizeof(DerivedAssign) == 8);
+#if defined(PROVIDER)
+Ctor::Ctor() noexcept = default;
+Assign& Assign::operator=(const Assign&) noexcept = default;
+Dtor::~Dtor() noexcept = default;
+extern "C" int read_late_assignment(const DerivedAssign& value) { return value.value + value.byte + value.tail; }
+#else
+extern "C" int read_late_assignment(const DerivedAssign&);
+int main() {
+  Ctor ctor;
+  Dtor dtor{7, 11};
+  DerivedAssign dst{{0, 0}, 23};
+  const Assign src{31, 37};
+  Assign& result = static_cast<Assign&>(dst).operator=(src);
+  return ctor.value + ctor.byte + dtor.value + dtor.byte != 54 ||
+         &result != &dst || dst.tail != 23 || read_late_assignment(dst) != 91;
+}
+#endif
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            for options, rejected in (([], False), (['-DCHECK_CONST'], True)):
+                args = [target, '-fcompat=' + mode, *options, '-fsyntax-only', 'const-defaulted.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == int(rejected), (mode, target, cold, warm)
+            command = [target, '-fcompat=' + mode, '-DPROVIDER', '-c', 'late-defaulted.cpp', '-o', 'late-defaulted.o']
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'late-defaulted.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                peer = clang if mode == 'clang' else gxx
+                if not peer:
+                    continue
+                subprocess.run([peer, '-std=c++26', 'late-defaulted.cpp', 'late-defaulted.o', '-o', 'late-defaulted'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'late-defaulted'], cwd=scope, check=True, timeout=20)
 
 
 def compile_database(world):
@@ -1909,6 +2721,9 @@ def main():
     try:
         pid = preprocess_and_syntax(world)
         mangling(world)
+        private_closure_symbols(world, gxx)
+        generic_invoker_symbols(world, gxx)
+        dependent_variable_spellings(world, gxx)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)
@@ -1918,6 +2733,8 @@ def main():
         mixed_darwin_class_calls(world, gxx)
         mixed_class_alignment(world, gxx)
         mixed_tail_padding(world, gxx)
+        overlapping_member_layout(world, gxx)
+        late_defaulted_special_members(world, gxx)
         mixed_constraints(world, gxx)
         function_language_linkage(world, gxx)
         mixed_abstract_result(world, gxx)
@@ -1927,8 +2744,11 @@ def main():
         bound_pack_index_symbols(world, gxx)
         operator_constraints(world, gxx)
         requires_expression_symbols(world, gxx)
+        constraint_expression_symbols(world, gxx)
         template_argument_prefixes(world, gxx)
+        placeholder_template_prefixes(world, gxx)
         mixed_source_location(world, gxx)
+        concrete_transform_signatures(world)
         compile_database(world)
         world.same_daemon('compatibility modes', pid)
     finally:
