@@ -348,7 +348,7 @@ class Gen {
     std::uint64_t imms[] = {std::to_underlying(e.storage)};
     stateful(ir::Op::dealloc, {}, ops, imms);
   }
-  void begin_bypassed(At at, const Ending& e) {
+  void begin_bypassed(At at, const Ending& e, ir::Flags flags = 0) {
     // Sema has rejected bypassing nonvacuous initialization ([stmt.dcl]/2).
     if (!e.vacuous_local) unsupported(at, "past a declaration");
     if (!planned_bypasses_) {
@@ -356,7 +356,7 @@ class Gen {
       return;
     }
     Place p = begin_object(e.place.type, ir::Init::erroneous);
-    begin_lifetime(p);
+    begin_lifetime(p, flags);
     store(jump_bindings_.at(*e.vacuous_local), p.ptr);
   }
   // Calls `destructor` on the object at `p`; an array's elements, the last first ([class.dtor]).
@@ -1635,7 +1635,7 @@ class Gen {
       if (live_) br(target);
       enter(b->second);
       for (const auto& scope : entered)
-        for (const Ending& e : scope) begin_bypassed(a, e);
+        for (const Ending& e : scope) begin_bypassed(a, e, ir::bit(ir::Flag::switch_bypassed_lifetime));
       br(target);
     } else if (live_) {
       br(target);

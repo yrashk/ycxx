@@ -438,8 +438,10 @@ Tk classify_number(Literal& l, Tables& names, R&& report) {
       // position of the first nonzero digit, scaled, plus the exponent.
       long long magnitude = 0;
       if (auto nz = digits.find_first_not_of('0'); nz != digits.npos) {
+        l.nonzero_float_spelling = true;
         magnitude = static_cast<long long>(digits.size() - nz) * (hex ? 4 : 1);
       } else if (auto fz = fraction.find_first_not_of('0'); fz != fraction.npos) {
+        l.nonzero_float_spelling = true;
         magnitude = -static_cast<long long>(fz) * (hex ? 4 : 1);
       }
       long long e = 0;

@@ -60,6 +60,7 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   choices through the translation unit's `-fcompat=spec|gcc|clang` setting. Keep the draft
   expectation in `spec` mode and check every affected mode, including both cold and resident
   compilation when the choice changes a cached result.
+  Record confirmed behavior that requires an unsupported language feature and name the prerequisite.
 - Keep the extensions in [docs/EXTENSIONS.md](docs/EXTENSIONS.md) available in every mode.
   System and libycxx headers rely on these extensions and their feature probes. Record any
   mode-dependent behavior of an extension in the compatibility table.
