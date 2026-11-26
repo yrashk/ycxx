@@ -117,6 +117,7 @@ struct Item {
   ItemKind kind = ItemKind::declaration;
   u32 begin = 0;  // the item's tokens in the region: [begin, end)
   u32 end = 0;
+  u32 gnu_extension_tokens = 0;  // leading declaration markers included in [begin, end)
   // A function's body ([dcl.fct.def.general] function-body: a ctor-initializer and compound
   // statement, a function-try-block, `= default;` or `= delete…;`), or a consteval block's
   // compound statement: [body_begin, body_end). Empty when body_begin == body_end.
@@ -142,6 +143,7 @@ struct Item {
   Fp128 body;         // the body's tokens; zero without a body
   bool operator==(const Item&) const = default;
 
+  u32 declaration_begin() const { return begin + gnu_extension_tokens; }
   bool has_body() const { return body_end > body_begin; }
   // The number of tokens in the declaration part (ast.md §3.1): everything but the body.
   u32 decl_length() const { return end - begin - (body_end - body_begin); }
@@ -362,6 +364,10 @@ u32 Splitter::item(u32 parent, const std::string& scope, u32& unnamed_types) {
   u32 k = add(parent, scope);
   u32 j = i_;
   at(k).begin = j;
+  if (parent == none || at(parent).kind != ItemKind::class_def) {
+    while (kind(j) == Tk::kw___extension__) ++j;
+    at(k).gnu_extension_tokens = j - i_;
+  }
   if (kind(j) == Tk::semi) {
     at(k).kind = ItemKind::empty;
     at(k).end = i_ = j + 1;
@@ -486,6 +492,7 @@ bool begins_declaration_only(Tk t) {
   switch (t) {
   case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum: case Tk::kw_namespace:
   case Tk::kw_template: case Tk::kw_using: case Tk::kw_static_assert: case Tk::kw_export:
+  case Tk::kw___extension__:
     return true;
   default: return false;
   }
@@ -759,7 +766,6 @@ private:
     it.names.push_back({std::move(n), at - it.begin, static_cast<u32>(it.names.size()), flags});
   }
 
-  // The first token after attributes, `export`, `extern "C"` and template-heads.
   // A GNU attribute or asm label, `__attribute__((…))` or `__asm(…)`, which no name is in
   // (docs/EXTENSIONS.md).
   bool gnu_extension(u32 n) const {
@@ -767,9 +773,10 @@ private:
            (kind(n) == Tk::kw_asm || is_name(n, "__attribute__") || is_name(n, "__asm") || is_name(n, "__asm__"));
   }
 
+  // The first token after the declaration marker, attributes, linkage and template-heads.
   u32 start_of(u32 k) const {
     const Item& it = out_.items[k];
-    u32 j = it.begin;
+    u32 j = it.declaration_begin();
     for (;;) {
       Tk t = kind(j);
       if (t == Tk::l_square && kind(j + 1) == Tk::l_square) j = match(j);
@@ -791,7 +798,7 @@ private:
   // first in the enclosing namespace.
   void namespace_names(u32 k) {
     Item& it = out_.items[k];
-    for (u32 n = it.begin; n < it.brace_begin; ++n) {
+    for (u32 n = it.declaration_begin(); n < it.brace_begin; ++n) {
       // Past attributes: `[[…]]`, and GNU `__attribute__((…))` (docs/EXTENSIONS.md).
       if (kind(n) == Tk::l_square || (kind(n) == Tk::identifier && kind(n + 1) == Tk::l_paren)) {
         n = match(kind(n) == Tk::l_square ? n : n + 1) - 1;  // the loop steps past the closer

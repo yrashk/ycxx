@@ -3149,6 +3149,14 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   warning rules and errors are unaffected. Direct invocations still reject unsupported
   warning controls. [#1014](https://github.com/yrashk/ycxx/issues/1014)
 
+## GNU declaration marker in glibc `<strings.h>` (#791)
+
+- A leading `__extension__` is accepted at a namespace-scope declaration boundary in all
+  compatibility modes. The item splitter and parser use the declaration after the marker for
+  lookup, scope and C linkage. The source token remains in the item and its identity.
+- A marker within a declaration or expression is diagnosed.
+  See `docs/EXTENSIONS.md`.
+
 ## GNU pointer qualifiers in glibc declarations (#384)
 
 - The parser accepts `__restrict` and `__restrict__` after `*` in pointer declarators

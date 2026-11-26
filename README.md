@@ -652,6 +652,8 @@ written default member initializer are value-initialized.
 - parenthesized direct initialization from functional conversions such as `S b(S(1));` and
   `Holder h(Tag(n), 2);`, including an additive expression inside a grouped operand as in
   `Holder h(Tag(n), Tag(n + 1));`. [#769](https://github.com/yrashk/ycxx/issues/769) · [#813](https://github.com/yrashk/ycxx/issues/813)
+- the leading GNU `__extension__` marker on namespace-scope declarations, including glibc's
+  `ffsll` in a C-linkage block. [#791](https://github.com/yrashk/ycxx/issues/791)
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …), and the 128-bit integer types `__int128` and

@@ -177,8 +177,10 @@ enum class Tk : u8 {
   // GNU pointer qualifiers (docs/EXTENSIONS.md).
   kw___restrict,
   kw___restrict__,
-  // The GNU 128-bit integer type specifier (docs/EXTENSIONS.md, #1172). Keep it the last keyword.
+  // The GNU 128-bit integer type specifier (docs/EXTENSIONS.md, #1172).
   kw___int128,
+  // GNU declaration marker (docs/EXTENSIONS.md, #791). Keep it the last keyword.
+  kw___extension__,
   embed,  // a phase-4 resource, unpacked when materializing parser tokens
 };
 
@@ -241,7 +243,7 @@ inline constexpr std::array<std::string_view, tk_count> tk_names = [] {
 constexpr std::string_view spelling(Tk k) { return tk_spellings[std::to_underlying(k)]; }
 constexpr std::string_view name(Tk k) { return tk_names[std::to_underlying(k)]; }
 
-constexpr bool is_keyword(Tk k) { return k >= Tk::kw_alignas && k <= Tk::kw___int128; }
+constexpr bool is_keyword(Tk k) { return k >= Tk::kw_alignas && k <= Tk::kw___extension__; }
 constexpr bool is_punctuator(Tk k) { return k >= Tk::l_brace && k <= Tk::hashhash; }
 constexpr bool is_literal(Tk k) { return k >= Tk::int_lit && k <= Tk::string_lit; }
 constexpr bool is_pp_only(Tk k) {
@@ -251,7 +253,7 @@ constexpr bool is_pp_only(Tk k) {
 // The keyword spelled `s`, if any ([lex.key]).
 constexpr std::optional<Tk> keyword(std::string_view s) {
   constexpr auto table = [] {
-    std::array<std::pair<std::string_view, Tk>, std::to_underlying(Tk::kw___int128) - std::to_underlying(Tk::kw_alignas) + 1> t{};
+    std::array<std::pair<std::string_view, Tk>, std::to_underlying(Tk::kw___extension__) - std::to_underlying(Tk::kw_alignas) + 1> t{};
     for (std::size_t i = 0; i < t.size(); ++i) {
       Tk k = Tk(std::to_underlying(Tk::kw_alignas) + i);
       t[i] = {tk_spellings[std::to_underlying(k)], k};
