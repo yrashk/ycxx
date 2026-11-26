@@ -937,7 +937,7 @@ class Planner {
                           std::span<const EmbeddedInput> embedded = {}, bool observer = false) {
     if (sdk_header)
       check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args", "probe_flags", "probe_inputs"});
-    else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment"});
+    else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment", "tool_inputs"});
     else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "tool_inputs"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     if (inspection_ && observer)
