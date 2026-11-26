@@ -7631,6 +7631,14 @@ public:
         Templates t = templates();
         auto targs = t.deduce_call(td, shapes, {}, m.defaults);
         if (!targs) continue;
+        // Unsatisfied associated constraints fail deduction ([temp.deduct.general]/5), before the
+        // explicit-specifier is substituted.
+        if (td.constraints != ConstId::none) {
+          std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+          auto nf = t.substitute_constraint(td.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, *targs));
+          auto sat = nf ? q_->satisfied(*nf) : std::optional<bool>(false);
+          if (sat && !*sat) continue;
+        }
         auto st = t.specialization_type(td, *targs);
         if (!st) continue;
         Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults};

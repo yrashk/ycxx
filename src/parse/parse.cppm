@@ -10850,6 +10850,18 @@ public:
       if (ins.seqs.size(d.template_params) > 0) s_.template_scopes.push_back(ins.seqs.elements(d.template_params));
     }
     sema::Templates t = s_.templates();
+    // Spelled in a member of a class template specialization (a member template's constraint or
+    // explicit-specifier): the enclosing class templates' parameters have the specialization's
+    // arguments, as when the member was instantiated ([temp.inst]).
+    for (EntityId c = atom_.lookup_class; c != EntityId::none; c = p_->world().entities.rec(c).scope) {
+      const auto kind = p_->world().entities.rec(c).kind;
+      if (kind != sema::EntityKind::class_ && kind != sema::EntityKind::class_template) break;
+      if (auto args = p_->class_args_.find(std::to_underlying(c)); args != p_->class_args_.end()) {
+        s_.template_args = args->second;
+        break;
+      }
+    }
+    if (s_.template_args.levels.size() > atom_.depth) s_.template_args.levels[atom_.depth].clear();
     s_.template_args.levels.resize(atom_.depth + 1);
     for (ConstId e : ins.seqs.elements(atom_.mapping))
       s_.template_args.levels[atom_.depth].push_back(e == ConstId::none ? std::nullopt : std::optional(t.mapping_arg(e)));
