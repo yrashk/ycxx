@@ -116,6 +116,31 @@ struct PresumedSource {
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
+// What the members of a local class see of the block that encloses its definition, as of its
+// class-head (docs/design/local-classes.md): the block's names, innermost first and one per name;
+// the class whose scope follows the block's ([basic.lookup.unqual]); and, for a class local to a
+// member function of a local class, that class's own enclosing block.
+struct OuterBlock {
+  struct Name {
+    enum class Kind : u8 { local, type, using_, namespace_alias };
+    Kind kind = Kind::local;
+    NameId name{};
+    ast::LocalRec local{};
+    std::optional<ConstId> value;  // a constant's
+    QualType type{};
+    std::vector<ast::DeclSema> decls;
+    EntityId ns = EntityId::none;
+  };
+  EntityId function = EntityId::none;  // the enclosing function, or lambda's function call operator
+  EntityId cls = EntityId::none;       // the class the function is a member of, if any
+  std::vector<Name> names;
+  std::vector<EntityId> using_enums;  // innermost first
+  std::vector<EntityId> directives;
+  std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
+  Bindings template_args;
+  bool templated = false;  // in a template's definition: the class is a templated entity
+  std::shared_ptr<const OuterBlock> outer;
+};
 class Questions {
 public:
   virtual bool exceptions_enabled() const { return true; }
@@ -138,6 +163,8 @@ public:
   virtual u32 presumed_line(engine::Loc) { return 0; }
   virtual PresumedSource presumed_source(engine::Loc) { return {}; }
   virtual bool in_default_member_initializer() const { return false; }
+  // The block around the local class whose member is analysed here ([class.local]), if any.
+  virtual std::shared_ptr<const OuterBlock> local_outer_block() { return nullptr; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
@@ -719,6 +746,11 @@ public:
           if (hit.found) return hit.type;
         }
       }
+    }
+    // Past a local class, the block enclosing it ([class.local]).
+    if (bool hidden = false; outer()) {
+      if (auto t = outer_block_class_name(name, elaborated, hidden)) return t;
+      if (hidden) return std::nullopt;
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
     // reports the optional's payload as possibly uninitialized after the `!found` checks (#748).
@@ -6055,7 +6087,7 @@ public:
     const EntityRec* r = w.entities.find(f);
     if (!r || r->scope == EntityId::none) return false;
     const EntityRec* c = w.entities.find(r->scope);
-    return c && c->kind == EntityKind::class_ && w.ins.names.spelling(c->name).empty();
+    return c && c->kind == EntityKind::class_ && !c->local_class && w.ins.names.spelling(c->name).empty();
   }
 
   // ------------------------------------------------------------ the function being defined
@@ -6389,6 +6421,168 @@ public:
   // The function whose body is being analysed, none outside one: a friend of a class may name its
   // private members ([class.friend]/2).
   EntityId current_function = EntityId::none;
+
+  // ------------------------------------------------------------ local classes ([class.local])
+
+  // The block a local class whose member is being analysed is in; none elsewhere. A replay of
+  // such a member's part (a default member initializer, a default argument) asks its questions.
+  std::shared_ptr<const OuterBlock> outer_block;
+  const OuterBlock* outer() {
+    if (!outer_block && !outer_asked_) outer_block = q_->local_outer_block();
+    outer_asked_ = true;
+    return outer_block.get();
+  }
+  // Whether `c` is a local class: a class whose scope is a function ([class.local]).
+  bool is_local_class(EntityId c) const {
+    if (c == EntityId::none) return false;
+    const EntityRec& r = w_->entities.rec(c);
+    return r.kind == EntityKind::class_ && r.local_class;
+  }
+  // The enclosing block, for a local class defined here.
+  // The function a local class defined here is local to: the enclosing function, or the innermost
+  // lambda's function call operator ([class.local], docs/design/closures.md decision 3).
+  EntityId local_scope() const { return lambdas_.empty() ? current_function : lambdas_.back().call; }
+  // The type a block-scope declaration of `name` in the innermost block gives it, if any.
+  std::optional<QualType> innermost_block_type(NameId name) const {
+    for (const BlockType& t : block_types_)
+      if (t.depth + 1 == scopes_.size() && t.name == name) return t.type;
+    return std::nullopt;
+  }
+  OuterBlock outer_block_here() {
+    OuterBlock b;
+    b.function = local_scope();
+    b.cls = current_class;
+    std::set<u32> seen;
+    for (std::size_t d = scopes_.size(); d-- > 0;) {
+      const u32 ctx = context_of(d);
+      for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p) {
+        if (p->first == no_name() || (p->second & capture_bit) || !seen.insert(std::to_underlying(p->first)).second) continue;
+        OuterBlock::Name n;
+        n.name = p->first;
+        n.local = ctx == lambdas_.size() ? locals_[p->second] : lambdas_[ctx].outer_locals[p->second];
+        n.local.decl = NodeId::none;
+        const auto& values = ctx == lambdas_.size() ? local_values_ : lambdas_[ctx].outer_values;
+        if (p->second < values.size()) n.value = values[p->second];
+        b.names.push_back(std::move(n));
+      }
+      for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
+        if (t->depth == d && seen.insert(std::to_underlying(t->name)).second)
+          b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none});
+      for (const BlockUsing& u : block_usings_)
+        if (u.depth == d && seen.insert(std::to_underlying(u.name)).second) {
+          OuterBlock::Name n;
+          n.kind = OuterBlock::Name::Kind::using_;
+          n.name = u.name;
+          n.decls = u.decls;
+          if (u.type_index) n.type = u.decls[*u.type_index].type;
+          b.names.push_back(std::move(n));
+        }
+      for (const BlockAlias& a : block_aliases_)
+        if (a.depth == d && seen.insert(std::to_underlying(a.name)).second)
+          b.names.push_back({OuterBlock::Name::Kind::namespace_alias, a.name, {}, std::nullopt, {}, {}, a.ns});
+      for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
+        if (u->first == d) b.using_enums.push_back(u->second);
+      for (const auto& [depth, ns] : block_directives_)
+        if (depth == d) b.directives.push_back(ns);
+    }
+    b.template_scopes = template_scopes;
+    b.template_args = template_args;
+    b.templated = in_pattern();
+    b.outer = outer() ? outer_block : nullptr;
+    return b;
+  }
+  // The name `name` of the block enclosing the local class `cls` whose member is analysed, as an
+  // expression: a static local names its variable; an automatic one is no odr-use only in an
+  // unevaluated operand, or as a constant's value ([basic.def.odr]/5, /10; [class.local]/1).
+  std::optional<Ex> outer_block_expr(const OuterBlock& b, NameId name, u32 begin, u32 end, bool callee) {
+    for (const OuterBlock::Name& n : b.names) {
+      if (n.name != name) continue;
+      switch (n.kind) {
+      case OuterBlock::Name::Kind::type:
+        diag(begin, Diag::type_as_expression, name);
+        return Ex{NodeId::none, begin, end};
+      case OuterBlock::Name::Kind::namespace_alias:
+        diag(begin, Diag::expected_expression);
+        return Ex{NodeId::none, begin, end};
+      case OuterBlock::Name::Kind::using_:
+        return decls_expr(std::vector<ast::DeclSema>(n.decls), true, name, begin, end, callee, true);
+      case OuterBlock::Name::Kind::local: break;
+      }
+      const ast::LocalRec& l = n.local;
+      if (l.entity != EntityId::none) {  // a static or thread_local local ([basic.stc])
+        ExprInfo info{types().referee(l.type), ValueCategory::lvalue, 0};
+        return node(ast::DeclRef{info, l.entity}, begin, end, info);
+      }
+      if (unevaluated > 0) {
+        QualType declared = local_declared_type(l);
+        ExprInfo info{types().referee(declared), ValueCategory::lvalue, 0};
+        Ex e = node(ast::Dependent{info, b_->list(std::vector<Child>{})}, begin, end, info);
+        declared_types_[std::to_underlying(e.id)] = declared;
+        return e;
+      }
+      if (n.value && !types().is_reference(l.type) && types().is_scalar(l.type))
+        return literal(Types::unqualified(l.type), *n.value, ValueCategory::prvalue, begin, end);
+      diag(begin, Diag::local_class_odr_use, name);
+      return Ex{NodeId::none, begin, end};
+    }
+    for (EntityId e : b.using_enums)
+      if (auto r = find_enumerator(e, name, begin, end)) return *r;
+    return std::nullopt;
+  }
+  // The outermost class enclosing class `c` ([class.nest]), `c` itself at namespace or block scope.
+  EntityId outermost_class(EntityId c) const {
+    while (enclosing_class(c) != EntityId::none) c = enclosing_class(c);
+    return c;
+  }
+  // Unqualified lookup past the classes enclosing a local class's member: the blocks enclosing
+  // the local classes, each followed by the classes of its function ([basic.lookup.unqual]).
+  std::optional<Ex> outer_block_value(NameId name, u32 begin, u32 end, bool callee) {
+    EntityId last = outermost_class(current_class);
+    for (const OuterBlock* b = outer(); b && is_local_class(last); b = b->outer.get()) {
+      if (auto r = outer_block_expr(*b, name, begin, end, callee)) return r;
+      last = EntityId::none;
+      for (EntityId k = b->cls; k != EntityId::none; k = enclosing_class(k)) {
+        last = k;
+        if (class_rec(k)) {
+          if (auto r = class_member(k, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
+        } else if (auto r = enclosing_prefix_value(k, name, begin, end, begin, /*unqualified=*/true, callee)) {
+          return *r;  // a class being defined: its members declared so far
+        }
+      }
+    }
+    return std::nullopt;
+  }
+  std::optional<QualType> outer_block_class_name(NameId name, bool elaborated, bool& hidden) {
+    EntityId last = outermost_class(current_class);
+    for (const OuterBlock* b = outer(); b && is_local_class(last); b = b->outer.get()) {
+      if (auto t = outer_block_type(*b, name, elaborated, hidden)) return t;
+      if (hidden) return std::nullopt;
+      last = EntityId::none;
+      for (EntityId k = b->cls; k != EntityId::none; k = enclosing_class(k)) {
+        last = k;
+        if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
+        if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
+          if (auto r = nested_member(k, name, true)) return r->first.type;
+        } else if (auto hit = enclosing_prefix_type(k, name, std::nullopt, elaborated); hit.found) {
+          // A class being defined: its members declared so far ([basic.scope.class]).
+          if (!hit.type) hidden = true;
+          return hit.type;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+  // The same for a type-name: the type, or none after `hidden` when a non-type hides it.
+  std::optional<QualType> outer_block_type(const OuterBlock& b, NameId name, bool elaborated, bool& hidden) const {
+    for (const OuterBlock::Name& n : b.names) {
+      if (n.name != name) continue;
+      if (n.kind == OuterBlock::Name::Kind::type) return n.type;
+      if (n.kind == OuterBlock::Name::Kind::using_ && n.type != QualType{}) return n.type;
+      if (!elaborated) hidden = true;
+      return std::nullopt;
+    }
+    return std::nullopt;
+  }
   // A static initializer or assertion looks up names in the class prefix and its bases.
   struct ClassPrefixScope {
     Sema& sema;
@@ -6444,6 +6638,12 @@ public:
     if (current_function != EntityId::none && befriended(current_function)) return true;
     for (EntityId k = current_class; k != EntityId::none; k = w_->entities.rec(k).scope) {
       const EntityRec& r = w_->entities.rec(k);
+      // A local class has the access of the function it is in ([class.local]/1).
+      if (r.kind == EntityKind::function || r.kind == EntityKind::function_template || r.kind == EntityKind::constructor ||
+          r.kind == EntityKind::destructor) {
+        if (befriended(k)) return true;
+        continue;
+      }
       if (r.kind != EntityKind::class_ && r.kind != EntityKind::class_template) break;
       if (k == c || befriended(k)) return true;
       int paths = 0;
@@ -8362,6 +8562,7 @@ public:
         }
       }
     }
+    if (auto r = outer_block_value(name, begin, end, callee)) return *r;
     if (namespace_lambda && namespace_lambda->name == name)
       return undeduced_namespace_lambda(name, begin, end);
     std::vector<ast::DeclSema> found;
@@ -13527,6 +13728,7 @@ private:
     QualType type;
   };
   std::vector<BlockType> block_types_;
+  bool outer_asked_ = false;  // `outer` asked the questions for the block around a local class
   std::map<u32, std::unique_ptr<Braced>> braced_args_;  // by placeholder node: a braced list argument
   std::map<u32, QualType> declared_types_;  // by DeclRef node: the declared type of what it names
   std::map<u32, std::vector<ast::DeclSema>> overloads_;  // by draft overload-set DeclRef

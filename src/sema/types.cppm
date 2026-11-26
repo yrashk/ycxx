@@ -613,9 +613,13 @@ struct EntityRec {
   // An unnamed enumeration's first enumerator and canonical underlying `type` denote it for
   // linkage purposes ([dcl.enum]/12). Neither binds the type's name in source lookup.
   std::optional<NameId> enum_linkage_name{};
-  // A closure type of a template's definition, outside function bodies: a dependent type, which
-  // each instantiation's own closure types replace (docs/design/closures.md).
+  // A closure type of a template's definition, outside function bodies, or a local class of a
+  // template's definition: a dependent type, which each instantiation's own replaces
+  // (docs/design/closures.md, docs/design/local-classes.md).
   bool closure_pattern = false;
+  // A local class ([class.local]): `scope` is its function; `ordinal` numbers the local classes of
+  // that function with its name, in token order (Itanium C++ ABI §5.1.6 discriminators).
+  bool local_class = false;
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
 };
@@ -1337,6 +1341,7 @@ struct World {
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
       if (r.enum_linkage_name) return std::string("(unnamed enum)");
       std::string n(ins.names.spelling(r.name));
+      if (n.empty() && r.local_class) return std::string("(unnamed class)");
       return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])
     };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };

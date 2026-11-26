@@ -276,6 +276,15 @@ public:
         x.eff_ns[k] = ns ? inner_eff[p] : x.eff_ns[p];
         x.namespace_visibility[k] = x.namespace_visibility[p];
       }
+      // A local class's names are in a level of its own, inside its function's namespace: no
+      // lookup from outside its block finds them by name ([class.local]); its members' lookups
+      // reach the namespace past it.
+      if (its[k].local_owner != items::none) {
+        x.in_class[k] = false;
+        const std::string level = std::format("(local {})", k);
+        x.ns_of[k] = x.ns_of[p].empty() ? level : x.ns_of[p] + "::" + level;
+        x.eff_ns[k] = x.eff_ns[p].empty() ? level : x.eff_ns[p] + "::" + level;
+      }
       if (its[k].kind != ItemKind::namespace_def) continue;
       // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
       // a component makes it transparent to lookup ([namespace.def]/7). Component i is declared
@@ -480,6 +489,23 @@ public:
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
   bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
+    // A local class is complete past its definition, which its block's analysis completed at its
+    // `}` ([class.local]); within it, as any class is.
+    if (const auto* entity = w_->entities.find(c); entity && entity->local_class) {
+      const auto it = class_items_.find(std::to_underlying(c));
+      if (it == class_items_.end() || item < it->second || item > last_member(it->second)) return classes_.is_defined(c);
+    }
+    // Elsewhere, a local class's item is where the block that defines it is: in a function body, a
+    // complete-class context of the classes around it ([class.mem.general]/7).
+    {
+      const auto def = class_items_.find(std::to_underlying(c));
+      for (u32 l = local_class_item(item); l != items::none; l = local_class_item(item)) {
+        if (def != class_items_.end() && def->second >= l && def->second <= last_member(l)) break;  // within it
+        item = items_->items[l].local_owner;
+        body = body || items_->items[item].kind == ItemKind::function;
+        own = false;
+      }
+    }
     // A closure is complete once its class record is published. It has no source declaration
     // to look up, and the variable owning a namespace lambda is still being deduced here.
     if (const auto* entity = w_->entities.find(c);
@@ -539,6 +565,90 @@ public:
     while (!items_->items[k].members.empty()) k = items_->items[k].members.back();
     return k;
   }
+
+  // Local classes ([class.local], docs/design/local-classes.md), by item: the entity their block's
+  // analysis gave them, and what that block declared before their class-head.
+  struct LocalClass {
+    EntityId entity = EntityId::none;
+    std::shared_ptr<const sema::OuterBlock> block;
+  };
+  std::map<u32, LocalClass> local_classes_;
+  std::set<u32> local_owners_analysed_;  // the items whose analysis `local_class` asked for
+  std::set<EntityId> local_declared_;     // local classes an elaborated-type-specifier declared
+  // A local class's entity: its function's `ordinal`-th local class of its name.
+  EntityId local_class_entity(sema::Sema& s, EntityId scope, NameId name, u32 ordinal, bool pattern) {
+    sema::EntityRec r{sema::EntityKind::class_, name, {}, LangLinkage::cxx, s.closure_linkage(scope), {}, scope};
+    r.head = ast::mix(ast::seed("ycxx.sema.local-class"), u64(ordinal));
+    r.ordinal = ordinal;
+    r.local_class = true;
+    // In a template's definition the class is a templated entity: a dependent type, which each
+    // specialization's own class replaces ([temp.dep.type]/9).
+    r.closure_pattern = pattern;
+    return w_->entities.entity(std::move(r));
+  }
+  // How many local classes of `scope` named `name`, other than `self`, are known.
+  u32 local_class_ordinal(EntityId scope, NameId name, EntityId self = EntityId::none) const {
+    u32 n = 0;
+    auto count = [&](EntityId e) {
+      const sema::EntityRec& r = w_->entities.rec(e);
+      if (e != self && r.scope == scope && r.name == name) ++n;
+    };
+    for (const auto& [k, l] : local_classes_) count(l.entity);
+    for (EntityId e : local_declared_) count(e);
+    return n;
+  }
+  // An elaborated-type-specifier `class-key identifier` that names no visible class, in a block:
+  // it declares a local class in that block ([basic.scope.pdecl]/7, [dcl.type.elab]).
+  std::optional<QualType> declare_local_class(sema::Sema& s, NameId name, Tk key, u32 at) {
+    const EntityId scope = s.local_scope();
+    if (scope == EntityId::none) return std::nullopt;
+    const EntityId e = local_class_entity(s, scope, name, local_class_ordinal(scope, name), s.in_pattern());
+    local_declared_.insert(e);
+    classes_.record_class_key(e, key == Tk::kw_union);
+    const QualType type = w_->types.class_type(e);
+    s.local_type_alias(name, type, at);
+    return type;
+  }
+  // The local class item that is or encloses item `k`, none if there is none.
+  u32 local_class_item(u32 k) const {
+    if (k >= items_->items.size()) return items::none;  // a point past the items (`end()`)
+    for (; k != items::none; k = items_->items[k].parent)
+      if (items_->items[k].local_owner != items::none) return k;
+    return items::none;
+  }
+  // Local class item `k`'s record. Its block, the body or declaration part of the item that owns
+  // it, is analysed first: its analysis defines the class.
+  const LocalClass* local_class(u32 k) {
+    if (auto it = local_classes_.find(k); it != local_classes_.end()) return &it->second;
+    const u32 owner = items_->items[k].local_owner;
+    // Once: an owner whose analysis does not reach the class (an error before it) defines none.
+    if (!local_owners_analysed_.insert(owner).second) return nullptr;
+    if (items_->items[owner].kind == ItemKind::declaration) {
+      if (std::ranges::find(running_, owner) == running_.end()) item_sema(owner);
+    } else if (std::ranges::none_of(running_bodies_, [&](const Running& r) { return r.item == owner; })) {
+      analyze_body(owner);
+    }
+    auto it = local_classes_.find(k);
+    return it == local_classes_.end() ? nullptr : &it->second;
+  }
+  // The local classes of templated functions' specializations ([temp.inst]/3), by entity: the
+  // class item they are instantiated from, and the specialization's block around it.
+  struct LocalInstance {
+    u32 item;
+    std::shared_ptr<const sema::OuterBlock> block;
+  };
+  std::map<u32, LocalInstance> local_instances_;
+  // The block around the local class that is or encloses item `k`: that of `spec`, a local class
+  // specialization whose member `k` is being instantiated, else the definition's.
+  std::shared_ptr<const sema::OuterBlock> local_block(u32 k, EntityId spec = EntityId::none) {
+    const u32 l = local_class_item(k);
+    if (l == items::none) return nullptr;
+    if (auto it = local_instances_.find(std::to_underlying(spec)); spec != EntityId::none && it != local_instances_.end())
+      return it->second.block;
+    const LocalClass* local = local_class(l);
+    return local ? local->block : nullptr;
+  }
+  std::optional<Parser::LocalClass> define_local_class(u32 owner, u32 index, sema::Sema& s, u32 at);
 
   // `visible_decls(::, name, at item)` (§B2): the global-namespace declarations of `name` in the
   // items before `item`, and in `item` itself when `self`.
@@ -1165,6 +1275,12 @@ public:
       item_sema(item);
       return o->second;
     }
+    // A local class and its members are in the scope of the template-heads around its block
+    // ([class.local], [temp.pre]/8: templated entities); local classes have no heads of their own.
+    if (local_class_item(item) != items::none) {
+      const auto block = local_block(item);
+      return block ? block->template_scopes : std::vector<std::vector<ast::TemplateParamSema>>{};
+    }
     std::vector<std::vector<ast::TemplateParamSema>> r;
     u32 parent = items_->items[item].parent;
     if (parent != items::none && items_->items[parent].kind == ItemKind::class_def && items_->items[parent].template_depth > 0) {
@@ -1227,8 +1343,14 @@ public:
     if (it == decls_.end()) return std::nullopt;
     std::optional<ast::DeclSema> r;
     for (const auto& [k, d] : it->second)
-      if (k <= item) r = completed_declaration(d);
+      if (declared_at(k) <= item) r = completed_declaration(d);
     return r;
+  }
+  // Where item `k`'s declarations are reached in item order: a local class's items are inside the
+  // item whose block defines the class, which names them only after the definition ([class.local]).
+  u32 declared_at(u32 k) const {
+    for (u32 l = local_class_item(k); l != items::none; l = local_class_item(k)) k = items_->items[l].local_owner;
+    return k;
   }
   std::optional<ast::DeclSema> replay_function_decl(EntityId e) {
     ensure_declared(e, end());
@@ -2299,6 +2421,9 @@ public:
   u32 presumed_line(engine::Loc at) override { return p_->presumed_line(at); }
   sema::PresumedSource presumed_source(engine::Loc at) override { return p_->presumed_source(at); }
   bool in_default_member_initializer() const override { return initializer_source.has_value(); }
+  std::shared_ptr<const sema::OuterBlock> local_outer_block() override {
+    return p_->local_block(item_, instantiating != EntityId::none ? instantiating : completing_class);
+  }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {},
                                     bool immediate_call = false) override {
     std::vector<std::string> paths;
@@ -3270,6 +3395,7 @@ public:
   u32 presumed_line(engine::Loc at) override { return at_.presumed_line(at); }
   sema::PresumedSource presumed_source(engine::Loc at) override { return at_.presumed_source(at); }
   bool in_default_member_initializer() const override { return at_.in_default_member_initializer(); }
+  std::shared_ptr<const sema::OuterBlock> local_outer_block() override { return at_.local_outer_block(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
@@ -3439,7 +3565,15 @@ public:
     }
     // A member of a class template is in the scope of the template's head ([basic.scope.temp]).
     for (auto& head : p_->enclosing_heads(item)) s_.template_scopes.push_back(std::move(head));
+    // A local class and its members see the block around it ([class.local]): its names, and the
+    // arguments of a templated function's specialization (`enclosing_heads` has the parameters).
+    if (auto block = p_->local_block(item, inst_ ? inst_->spec : EntityId::none)) {
+      s_.template_args = block->template_args;
+      s_.outer_block = std::move(block);
+    }
     if (inst_) s_.template_args = inst_->args;
+    // A local class in a lambda of the declaration's initializer ([class.local]).
+    ps_.define_class = [this](u32 index) { return p_->define_local_class(k_, index, s_, index - it_->begin); };
     // An elaborated-type-specifier naming no class declares one in the namespace
     // ([basic.scope.pdecl]); its entity is the one its definition will have.
     ps_.qualified_hook = [this](const sema::Sema::Scope& sc) {
@@ -3497,6 +3631,8 @@ public:
   }
 
   void analyse() {
+    // A local class its block never defined (an error came first, and said so) declares nothing.
+    if (const u32 l = p_->local_class_item(k_); l != items::none && !p_->local_class(l)) return;
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
@@ -3513,10 +3649,19 @@ public:
         unsupported_class_alignment();
         break;
       }
+      if (member && local_member_restricted()) break;
       if (member) member_declaration();
       else declaration();
+      if (member && p_->local_class_item(k_) != items::none)
+        for (const ast::DeclSema& d : decls_)
+          if (d.kind == ast::DeclKind::variable && d.storage == ast::Storage::static_) {
+            s_.diag(0, Diag::local_class_static_data_member);  // [class.static.data]
+            bad();
+            break;
+          }
       break;
     case ItemKind::function:
+      if (member && local_member_restricted()) break;
       if (member) member_declaration();
       else declaration();
       break;
@@ -3543,6 +3688,25 @@ public:
       bad();
       break;
     }
+  }
+
+  // What a member of a local class cannot be: a template ([temp.mem]/2), or a friend function
+  // defined in the class ([class.friend]/6). Diagnosed; the member is not declared.
+  bool local_member_restricted() {
+    if (p_->local_class_item(k_) == items::none) return false;
+    if (it_->template_depth > 0) {
+      s_.diag(0, Diag::local_class_member_template);
+      bad();
+      return true;
+    }
+    if (it_->kind == ItemKind::function)
+      for (u32 j = it_->begin; j < it_->body_begin; ++j)
+        if (p_->region().tokens[j].kind == Tk::kw_friend) {
+          s_.diag(j - it_->begin, Diag::local_class_friend_definition);
+          bad();
+          return true;
+        }
+    return false;
   }
 
   // The item's record and tree, from what the analysis left.
@@ -4874,6 +5038,7 @@ private:
   // members of the enclosing class.
   void class_definition() {
     if (!supported_definition_attributes(after_definition_attributes())) return bad();
+    const bool local = it_->local_owner != items::none;  // a local class ([class.local])
     const bool nested = p_->in_class(k_);
     const EntityId owner = inst_ ? inst_->spec : nested ? p_->class_entity(it_->parent) : EntityId::none;
     if (nested && owner == EntityId::none) return bad();
@@ -4930,17 +5095,18 @@ private:
     bool has_named = false;
     if (td)
       if (auto n = typedef_name_after_braces()) named = *n, has_named = true;
-    if (!ps_.is(Tk::identifier) && !has_named) {
+    const bool unnamed_local = local && !ps_.is(Tk::identifier);
+    if (!ps_.is(Tk::identifier) && !has_named && !unnamed_local) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
       return bad();
     }
     const u32 head_index = ps_.index();
-    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named.first;
-    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named.second;
+    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : unnamed_local ? s_.no_name() : named.first;
+    u32 name_at = ps_.is(Tk::identifier) || unnamed_local ? ps_.pos() : named.second;
     if (ps_.is(Tk::identifier)) ps_.bump();
     // `class O::I { … }`: the definition of a class declared in class O ([class.pre]/3).
     EntityId qualified_owner = EntityId::none;
-    if (ps_.is(Tk::coloncolon) && !nested && !template_ && !explicit_ && !td && !alignment) {
+    if (ps_.is(Tk::coloncolon) && !nested && !local && !template_ && !explicit_ && !td && !alignment) {
       ps_.seek(head_index);
       qualified_owner = member_class_qualifier(name, name_at);
       if (qualified_owner == EntityId::none) return bad();
@@ -4983,6 +5149,20 @@ private:
     if (!ps_.is(Tk::l_brace)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
       return bad();
+    }
+    if (local) {
+      // Its entity is the one its block's analysis gave it; its declarators are that block's.
+      const auto* lc = p_->local_class(k_);
+      if (!lc) return bad();
+      ast::DeclSema sem = class_decl(lc->entity, true);
+      sem.linkage = s_.world().entities.rec(lc->entity).linkage;
+      sem.is_final = is_final;
+      sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
+      if (!class_declared(sem, key, name_at)) return bad();
+      s_.own.push_back({name, sem});
+      if (!bases.empty()) p_->set_bases(lc->entity, std::move(bases));
+      if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
+      return;
     }
     if (member_class) {
       if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
@@ -9261,6 +9441,9 @@ private:
 };
 
 const Result<ast::ItemSema>& Program::item_sema(u32 item) {
+  // A local class's items after its block's analysis, which defines the class first.
+  if (!item_cells_[item])
+    if (const u32 l = local_class_item(item); l != items::none) local_class(l);
   if (!item_cells_[item]) {
     // A cycle is an internal error (§A2).
     contract_assert(std::ranges::find(running_, item) == running_.end());
@@ -9271,6 +9454,73 @@ const Result<ast::ItemSema>& Program::item_sema(u32 item) {
     running_.pop_back();
   }
   return *item_cells_[item];
+}
+
+// The local class whose class-specifier is at region token `index` in a block of item `owner`,
+// analysed by `s` ([class.local], docs/design/local-classes.md): its entity is local to the function
+// (or lambda) whose block it is in, numbered among that function's local classes of its name; its
+// name is declared in the block; then the class is defined, as its item.
+std::optional<Parser::LocalClass> Program::define_local_class(u32 owner, u32 index, sema::Sema& s, u32 at) {
+  u32 c = items::none;
+  for (u32 m : items_->items[owner].members)
+    if (items_->items[m].local_owner == owner && items_->items[m].begin == index) c = m;
+  if (c == items::none) return std::nullopt;
+  Parser::LocalClass out{std::nullopt, items_->items[c].end};
+  auto block = std::make_shared<sema::OuterBlock>(s.outer_block_here());
+  const EntityId scope = block->function;
+  if (scope == EntityId::none) {
+    s.diag(at, Diag::not_supported, r_->tokens[index].kind);  // a local class with no function around it
+    return out;
+  }
+  NameId name = s.no_name();
+  for (const items::DeclName& n : items_->items[c].names)
+    if ((n.flags & items::name_flag::type) && !n.name.empty()) {
+      name = w_->ins.names.intern(n.name);
+      break;
+    }
+  // In a templated function's specialization, the class is instantiated with it ([temp.inst]/3):
+  // its members are the definition's, analysed again with the arguments bound.
+  if (!block->templated && !block->template_scopes.empty()) {
+    if (!local_classes_.contains(c)) return out;  // the definition, analysed first, failed
+    EntityId e = EntityId::none;
+    u32 ordinal = 0;
+    for (const auto& [key, l] : local_instances_) {
+      const sema::EntityRec& r = w_->entities.rec(EntityId(key));
+      if (r.scope != scope || r.name != name) continue;
+      if (l.item == c) e = EntityId(key);
+      else ++ordinal;
+    }
+    if (e == EntityId::none) e = local_class_entity(s, scope, name, ordinal, false);
+    const QualType type = w_->types.class_type(e);
+    if (name != s.no_name()) s.local_type_alias(name, type, at + 1);
+    if (!local_instances_.contains(std::to_underlying(e))) {
+      const auto params = block->template_scopes.back();
+      const sema::Bindings args = block->template_args;
+      local_instances_.emplace(std::to_underlying(e), LocalInstance{c, std::move(block)});
+      classes_.record_class_key(e, class_rec_is_union(c));
+      replay_class(e, c, end(), params, args);
+    }
+    if (classes_.is_defined(e)) out.type = type;
+    return out;
+  }
+  EntityId e = EntityId::none;
+  if (auto known = local_classes_.find(c); known != local_classes_.end() && w_->entities.rec(known->second.entity).scope == scope) {
+    e = known->second.entity;
+  } else if (auto declared = name != s.no_name() ? s.innermost_block_type(name) : std::nullopt;
+             declared && w_->types.is_class(*declared) && local_declared_.contains(w_->types.class_of(*declared)) &&
+             !classes_.is_defined(w_->types.class_of(*declared))) {
+    e = w_->types.class_of(*declared);  // declared earlier in this block by `class-key name` ([class.name]/3)
+  } else {
+    e = local_class_entity(s, scope, name, local_class_ordinal(scope, name), block->templated);
+  }
+  local_classes_[c] = {e, std::move(block)};
+  const QualType type = w_->types.class_type(e);
+  if (name != s.no_name()) s.local_type_alias(name, type, at + 1);
+  const auto& head = item_sema(c);
+  if (w_->ins.seqs.size(head.value.decls) == 0) return out;
+  class_def(c);
+  out.type = type;
+  return out;
 }
 
 // The declaration of friend `f` of a class: the one its class template's specialization made
@@ -11067,6 +11317,11 @@ public:
     ps_.set_questions(*q_);
     ps_.body = true;
     at_ = inst_ ? &static_cast<AtInstantiation&>(*q_).pattern_context() : &static_cast<AtItem&>(*q_);
+    // A class-specifier in the body: a local class ([class.local]).
+    ps_.define_class = [this](u32 index) {
+      return p_->define_local_class(k_, index, s_, index - (it_->begin + begin()));
+    };
+    ps_.declare_class = [this](NameId n, Tk key, u32 at) { return p_->declare_local_class(s_, n, key, at); };
     if (!inst_ && generic_) static_cast<AtItem&>(*q_).generic_at_end = true;
   }
 
@@ -11111,6 +11366,12 @@ public:
       s_.set_return_type(signature.inner);
       // A consteval function's body is an immediate function context ([expr.const]).
       if (f->flags & sema::decl_flag::consteval_) s_.immediate_context = 1;
+      // A member of a local class sees the block around the class ([class.local]), and the
+      // arguments of a templated function's specialization.
+      if (auto block = p_->local_block(k_, inst_ ? p_->world().entities.rec(f->entity).scope : EntityId::none)) {
+        s_.template_args = block->template_args;
+        s_.outer_block = std::move(block);
+      }
       // A template's body is in the scope of its template-head ([basic.scope.temp]); an
       // instantiation's, with the arguments bound.
       for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
@@ -13697,7 +13958,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item, bool* diagnosed_failur
   }
   ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second) || !member_body_ready(def->second))
+  if (def == definitions_.end() || declared_at(def->second) > item || (def->second >= item && local_class_item(def->second) == items::none) || !friend_body_ready(def->second) || !member_body_ready(def->second))
     return c;
   if (specialized_destructor && def->second < explicit_specs_.at(key)) return c;
   u32 k = def->second;
@@ -13975,7 +14236,7 @@ std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
   }
   ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
-  if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second) || !member_body_ready(def->second))
+  if (def == definitions_.end() || declared_at(def->second) > item || (def->second >= item && local_class_item(def->second) == items::none) || !friend_body_ready(def->second) || !member_body_ready(def->second))
     return std::nullopt;
   const Result<ast::BodySema>& body = analyze_body(def->second);
   if (!body.value.deduced) return std::nullopt;

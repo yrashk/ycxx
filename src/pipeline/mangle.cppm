@@ -75,6 +75,10 @@ struct ClassName {
   std::optional<std::uint32_t> unnamed_type_ordinal{};
   ast::EntityId closure_variable = ast::EntityId::none;
   std::optional<ast::SeqId<ast::TemplateParamSema>> template_params{};
+  // A local class ([class.local]): the function it is local to (`local`), and its number among
+  // that function's local classes of its name (`closure_number`), or among its unnamed types
+  // (`unnamed_type_ordinal`): a <local-name> with a discriminator (§5.1.6).
+  bool local_class = false;
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -400,6 +404,20 @@ class Mangler {
     }
     if (n.name.empty() && !n.unnamed_type_ordinal)
       return std::unexpected(enumeration ? "an unnamed enumeration in a mangled type" : "a class whose name is unknown");
+    // A local class, or a class nested in one: `Z <encoding> E <entity name> [<discriminator>]`.
+    if (auto root = local_root(e)) {
+      auto l = local_encoding(*root->second.local);
+      if (!l) return l;
+      std::string r = class_component(n);
+      if (e != root->first) {
+        auto p = prefix(n.scope);
+        if (!p) return p;
+        r = "N" + *p + r + "E";
+      }
+      r = "Z" + *l + "E" + r + discriminator(root->second);
+      candidates_.push_back(key);
+      return r;
+    }
     if (n.templ != ast::EntityId::none) {
       // The template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
       auto r = specialization_prefix(e, n);
@@ -441,6 +459,11 @@ class Mangler {
     }
     if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a scope whose name is unknown");
     if (n.templ != ast::EntityId::none) return specialization_prefix(e, n);
+    if (n.local_class) {  // the <local-name>'s function comes before the nested-name it begins
+      std::string r = class_component(n);
+      candidates_.push_back(key);
+      return r;
+    }
     std::string r;
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
@@ -463,6 +486,26 @@ class Mangler {
     auto p = prefix(scope);
     if (!p) return p;
     return delimit_name(*p + component, scope);
+  }
+  // The local class that is class `e` or encloses it, with its name, if there is one.
+  std::optional<std::pair<ast::EntityId, ClassName>> local_root(ast::EntityId e) const {
+    for (int depth = 0; e != ast::EntityId::none && classes_ && depth < 64; ++depth) {
+      ClassName n = classes_(e);
+      if (!n.is_class || n.closure) return std::nullopt;
+      if (n.local_class) {
+        if (!n.local) return std::nullopt;
+        return std::pair{e, std::move(n)};
+      }
+      e = n.scope;
+    }
+    return std::nullopt;
+  }
+  // <discriminator> ::= _ <digit> | __ <number> _: the n-th local class of one name in its function
+  // is numbered n − 2 (§5.1.6). Unnamed types are numbered by their <unnamed-type-name>.
+  static std::string discriminator(const ClassName& local) {
+    if (local.unnamed_type_ordinal || local.closure_number == 0) return "";
+    const std::uint32_t d = local.closure_number - 1;
+    return d < 10 ? "_" + std::to_string(d) : "__" + std::to_string(d) + "_";
   }
   // <unnamed-type-name> ::= Ut [<number>] _ (Itanium ABI §5.1.5.5).
   static std::string class_component(const ClassName& n) {
@@ -506,11 +549,17 @@ class Mangler {
     std::string out = unqualified;
     if (scope != ast::EntityId::none) {
       std::string local;
+      std::string disc;  // a local class's discriminator, after the whole nested-name (§5.1.6)
       if (sc.closure && sc.closure_variable == ast::EntityId::none) {
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;
         local = "Z" + *l + "E";
+      } else if (auto root = local_root(scope)) {
+        auto l = local_encoding(*root->second.local);
+        if (!l) return l;
+        local = "Z" + *l + "E";
+        disc = discriminator(root->second);
       }
       // <nested-name> ::= N [<CV-qualifiers>] <prefix> <unqualified-name> E, the member function's
       // cv-qualifiers in the order r V K (§5.1.5.3).
@@ -525,7 +574,7 @@ class Mangler {
       // A ref-qualifier follows the cv-qualifiers in a nested function name.
       if (f.ref != ast::RefQual::none) cv += f.ref == ast::RefQual::lvalue ? "R" : "O";
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
-      out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);
+      out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope) + disc;
     }
     auto sig = signature(f, false);
     if (!sig) return sig;

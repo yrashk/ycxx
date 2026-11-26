@@ -2535,7 +2535,18 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       auto params = tu.class_template_parameters.find(r.templ);
       if (params != tu.class_template_parameters.end()) n.template_params = params->second;
     }
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
+    if (r.kind == sema::EntityKind::class_ && r.local_class) {
+      // A local class ([class.local]): a <local-name> in its function's encoding (§5.1.6).
+      n.local_class = true;
+      n.closure_number = r.ordinal;
+      if (n.name.empty()) n.unnamed_type_ordinal = r.ordinal;
+      if (auto f = by_id.find(ir::raw(r.scope)); f != by_id.end() && f->second->is_function) {
+        const Entity& fe = *f->second;
+        std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+        n.local = std::make_shared<const LocalFunction>(LocalFunction{
+            fname, fe.type, fe.scope, fe.special != Special::none, fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+      }
+    } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
