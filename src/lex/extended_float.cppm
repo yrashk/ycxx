@@ -1,6 +1,6 @@
 // The x87 representation is needed for a Linux target even when the bootstrap
 // host's long double has a different format.
-export module ycxx.lex:extended_float;
+module ycxx.lex:extended_float;
 
 import std;
 
@@ -99,7 +99,7 @@ std::int64_t binary_order(const Significand& numerator, const Significand& denom
 
 }  // namespace ycxx::lex::detail
 
-export namespace ycxx::lex {
+namespace ycxx::lex {
 
 // [lex.fcon]: round a decimal or hexadecimal literal to the nearest x87 number.
 // A normal number stores its leading bit explicitly. A subnormal has the same
