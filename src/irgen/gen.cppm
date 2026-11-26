@@ -749,20 +749,32 @@ class Gen {
       // A void operand is evaluated and the function returns nothing ([stmt.return]); a
       // reference result is the address of its object. The operand's temporaries end first.
       At value = child(a, r.value);
+      const bool was_selecting = selecting_initializer_;
+      const bool was_selecting_return = selecting_return_;
       if (result_ && r.value.id != NodeId::none) {
+        const At written = strip_parens(value);
+        const bool selection = !F::evaluating_constants && !fn_.thunk &&
+                               is<ast::Conditional>(written) && class_prvalue(info(written));
+        const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
+                              get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
+        if (selection) {
+          selecting_initializer_ = true;
+          selecting_return_ = true;
+        }
         // A class result initializes the caller's object ([stmt.return], [dcl.init.general]/16.6).
         full_expression([&] {
-          // The immediate evaluator can return a record after sequencing a static member's receiver.
-          const At written = strip_parens(value);
-          const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
-                                get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
-          initialize(*result_, value, false, sequence);
+          // The immediate evaluator can also sequence a static member's receiver.
+          initialize(*result_, value, false, selection || sequence);
+          // The selected arm's temporaries join the condition's in this full-expression.
+          if (selection) begin_lifetime(*result_);
           return 0;
         });
       } else if (r.value.id != NodeId::none) {
         v = full_expression([&] { return is_lvalue(value) ? std::optional(address(value)) : rvalue_or_void(value); });
       }
       ret_(v);
+      selecting_initializer_ = was_selecting;
+      selecting_return_ = was_selecting_return;
     } else if (is<ast::If>(a)) {
       if_(a);
     } else if (is<ast::IfConsteval>(a)) {
@@ -960,6 +972,8 @@ class Gen {
       return initialize(p, child(e, comma.rhs), zeroed, true);
     }
     const auto choice = get<ast::Conditional>(e);
+    if (selecting_return_ && (choice.info.flags & ast::Conditional::unchecked_class_copy))
+      unsupported(e, "with an unresolved class copy in a return selection");
     const auto then_value = child(e, choice.then_), else_value = child(e, choice.else_);
     if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
       unsupported(e, "with a non-value arm in a class initializer");
@@ -3006,7 +3020,8 @@ class Gen {
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
-  bool selecting_initializer_ = false;      // local class initializer selection and its cleanup
+  bool selecting_initializer_ = false;      // class initializer selection and its cleanup
+  bool selecting_return_ = false;           // a return selection requires checked class copies
   bool in_aggregate_default_ = false;        // evaluating a selected default member initializer
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
   uint32_t source_line_ = 0;                 // outermost active default argument's invocation line

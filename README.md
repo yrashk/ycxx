@@ -445,7 +445,9 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 Both targets construct a class prvalue selected by the built-in conditional or comma operator
 directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
 The supported nonthrowing initializers keep temporaries alive through later initializer clauses
-and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
+and destroy them in reverse order. A native by-value return can construct the result directly
+from a nonthrowing built-in conditional, including a checked copy from a same-class lvalue.
+[#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a

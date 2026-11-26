@@ -108,6 +108,8 @@ struct Assign {
 // and only one of `then_` and `else_` is evaluated. The condition is converted to bool; the two
 // operands are converted to the result type.
 struct Conditional {
+  // In ExprInfo::flags when a class glvalue used the legacy value conversion.
+  static constexpr u8 unchecked_class_copy = 0x80;
   ExprInfo info;
   [[=sequenced(0)]] Child condition;
   [[=sequenced(1)]] Child then_;

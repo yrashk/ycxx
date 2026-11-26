@@ -2152,7 +2152,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Both the interpreter and native code use the L1 join with nullable temporary addresses. Conditional
   nontrivial destruction and reference lifetime extension remain under [#157](https://github.com/yrashk/ycxx/issues/157).
 
-## Local class prvalue selection (#740)
+## Class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
   aggregate field, or a fixed-array element directly ([expr.cond], [expr.comma], [dcl.init.aggr],
@@ -2163,6 +2163,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   later initializer clauses and are destroyed with the rest of the full-expression's
   temporaries in reverse order ([class.temporary]). Tests in `tests/own/class-selection/`
   check both arms, later sibling initialization, and temporary and object destruction.
+- A native by-value return can initialize its result object from a built-in conditional
+  with nonthrowing evaluation and cleanup. In the supported mixed case, overload
+  resolution copy-initializes a prvalue from the cv-unqualified lvalue arm of the same
+  class. A selected prvalue can initialize the result even when copy and move are deleted.
+  The result's lifetime starts before temporary destruction, which precedes destruction
+  of the function's locals ([stmt.return], [basic.life]).
 - This slice supports nonthrowing initializers and cleanup. More general cleanup during
   unwinding remains in #219. Potentially overlapping subobjects remain under #301 and #304,
   other class initializer contexts under #740, and other conditional temporaries under #157.
