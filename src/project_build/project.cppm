@@ -254,12 +254,13 @@ Fp128 action_key(const GeneratorPlan& generator, const std::vector<ActionInput>&
   const auto key = [&](const Action& recipe) {
     return fingerprint(std::tie(recipe, inputs, generator.tool_fingerprint));
   };
-  if (!std::ranges::contains(action.args, ActionArg::Kind::target_triple, &ActionArg::kind)) return key(action);
+  const auto resolved_triple = [](const ActionArg& arg) { return !triple_arg_selector(arg.kind).empty(); };
+  if (std::ranges::none_of(action.args, resolved_triple)) return key(action);
 
   // The argv word determines the receipt. Keep its provenance on the plan for traces.
   auto recipe = action;
   for (auto& arg : recipe.args)
-    if (arg.kind == ActionArg::Kind::target_triple) arg.kind = ActionArg::Kind::literal;
+    if (resolved_triple(arg)) arg.kind = ActionArg::Kind::literal;
   return key(recipe);
 }
 
@@ -1475,9 +1476,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (tracer->values()) {
         if (witness_exit) event.value = std::format("exit status {}", result.exit_status);
         for (const auto& [index, arg] : std::views::enumerate(action.args)) {
-          if (arg.kind != ActionArg::Kind::target_triple) continue;
+          const auto selector = triple_arg_selector(arg.kind);
+          if (selector.empty()) continue;
           if (!event.value.empty()) event.value += '\n';
-          event.value += std::format("args[{}]: target_triple() = {}", index, arg.value);
+          event.value += std::format("args[{}]: {} = {}", index, selector, arg.value);
         }
       }
       if (event.outcome == engine::Outcome::failed)
