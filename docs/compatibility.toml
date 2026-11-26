@@ -885,17 +885,17 @@ evidence = ["tests/own/builtins/layout-compatible-member-alignment.accept.cpp", 
 
 [[divergence]]
 id = "reference-related-pointer-xvalue"
-status = "recorded"
+status = "partial"
 mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
 reference = "[meta.rel], [dcl.init.ref]/4, [dcl.init.ref]/5.3–5.4, [conv.qual], CWG2352, #1396"
 prior = "The two reference-related pointer xvalues could bind through converted temporaries."
 spec = "Return false for __is_convertible(int*, const int*&&) and __is_convertible(int**, const int* const*&&). The source and target types are reference-related and fail the direct reference-compatibility check. The same rule applies to __is_nothrow_convertible."
 gcc = "Same as spec."
-clang = "Same as spec."
+clang = "Permit the tested reference-related pointer xvalue to bind through a valid qualification conversion to a temporary. The convertibility and nothrow traits report true."
 gcc_observed = "GCC 16.2.0 on x86-64 Linux reports false for both disputed conversions and for __is_nothrow_convertible(int*, const int*&&)."
 clang_observed = "Clang 23.1.6 on x86-64 Linux and arm64 Darwin reports true for the same queries."
-limits = "The two peers both accept the direct-binding controls int* to const int* const&& and int** to const int* const* const&&."
-evidence = ["tests/own/builtins/pointer_reference_related_temporary.accept.cpp", "tests/own/builtins/pointer_reference_convertibility.accept.cpp"]
+limits = "The two peers both accept the direct-binding controls int* to const int* const&& and int** to const int* const* const&&. The probes also cover a named pointer xvalue, a prvalue control, and a multilevel conversion with insufficient qualification."
+evidence = ["tests/own/builtins/pointer_reference_related_temporary.accept.cpp", "tests/own/builtins/pointer_reference_convertibility.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "embed-offset-parameter"

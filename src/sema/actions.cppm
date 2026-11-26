@@ -2602,7 +2602,9 @@ public:
     // and the source is converted to a prvalue of T1 and materialized.
     const auto related = similar_types(from_pointer, to_pointer);
     if (!related) return unmodelled;
-    if (*related) return no;
+    const bool clang_pointer_temporary = compatibility() == ast::Compatibility::clang &&
+                                         !lvalue && r.rvalue_ref && ts.is_pointer(source) && ts.is_pointer(target);
+    if (*related && !clang_pointer_temporary) return no;
     return scalar_conversion(object_unqualified(source), object_unqualified(target), loc);
   }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
@@ -8694,6 +8696,12 @@ public:
     if (!e.glvalue() && types().is_array(t) && same_unqualified(e.type(), t) &&
         cv_within(object_cv(e.type()), object_cv(t)))
       return materialize(e, t, extend);  // [dcl.init.ref]/5.3: a reference-compatible array prvalue
+    if (rr.rvalue_ref && e.cat() == ValueCategory::xvalue && compatibility() != ast::Compatibility::clang &&
+        types().is_pointer(e.type()) && types().is_pointer(t) && similar_types(e.type(), t) == true &&
+        !qualification_convertible(types().pointer(e.type()), types().pointer(t))) {
+      diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
+      return fail;
+    }
     Ex v = convert(e, Types::unqualified(t), at_);
     if (!v.ok() || v.glvalue()) return v;
     return materialize(v, t, extend);

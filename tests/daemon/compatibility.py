@@ -4236,6 +4236,7 @@ def historical_syntax_modes(world, gxx):
         ('builtins/layout-compatible-no-unique-address.accept.cpp', ('spec', 'clang')),
         ('builtins/memchr-written-declaration.reject.cpp', ('gcc',)),
         ('decls/annotations.accept.cpp', ('spec', 'gcc')),
+        ('builtins/pointer_reference_related_temporary.accept.cpp', ('spec', 'gcc')),
     )
     checks = []
     for path, accepted in cases:
@@ -4308,6 +4309,18 @@ static_assert(memcmp("a", "a", 1) == 0);
         ('defined-memchr.cpp', (), '''
 extern "C" const void* memchr(const void* p, int, decltype(sizeof(0))) { return p; }
 static_assert(memchr("abc", 98, 3) != nullptr);
+'''),
+        ('reference-related-conversion.cpp', ('clang',), '''
+static_assert(__is_convertible(int*, const int*&&));
+static_assert(__is_convertible(int**, const int* const*&&));
+static_assert(__is_nothrow_convertible(int*, const int*&&));
+static_assert(!__is_convertible(int*&, const int*&&));
+static_assert(!__is_convertible(int**, const int**&&));
+int f(int* p) { const int*&& r = static_cast<int*&&>(p); return *r; }
+'''),
+        ('pointer-reference-direct-control.cpp', MODES, '''
+int f(int* p) { const int* const&& r = static_cast<int*&&>(p); return *r; }
+int g() { const int*&& r = static_cast<int*>(nullptr); return r != nullptr; }
 '''),
     )
     for name, accepted, source in controls:
