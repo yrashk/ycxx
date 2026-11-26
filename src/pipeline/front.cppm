@@ -1391,11 +1391,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       const auto& pattern = world.entities.rec(r.templ);
       emitted.template_type = pattern.type;
       emitted.generic_invoker_head = pattern.generic_invoker_head;
+      emitted.template_trailing_constraint = pattern.lambda_trailing_constraint;
       const bool invoker = ins.seqs.size(pattern.generic_invoker_head) != 0;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
       if (!invoker && sema::Sema::closure_member(world, r.templ))
         emitted.template_type = world.entities.rec(pattern.scope).type;
-      tu.entities.back().template_args = r.args;
+      emitted.template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
       if (!invoker && pattern.kind == sema::EntityKind::function_template)
         if (auto td = program.declaration(r.templ, program.end())) {
@@ -1433,12 +1434,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       // Its typed return is available to lookup, but calls and address formation require the ABI.
       if (c.flags & sema::closure_flag::polymorphic_result) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
-      for (EntityId f : {c.call, c.invoker}) {
+      for (EntityId f : {c.call, c.invoker, c.conversion}) {
         if (f == EntityId::none) continue;
-        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
+        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, sema::Sema::closure_member_body(c, f), locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
-        if (in_declaration || (c.flags & sema::closure_flag::generic_invoker))
+        if (in_declaration || (c.flags & (sema::closure_flag::generic_invoker | sema::closure_flag::generated_conversion)))
           declaration_closure_member(tu.functions.back());
       }
     }
@@ -1658,6 +1659,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const auto& d = decls[i];
       declare(d, at[i]);
+      if (d.kind == ast::DeclKind::function) {
+        collect_constraint_lambdas(ins, d.head_constraint.expression, tu.written_constraint_lambdas);
+        collect_constraint_lambdas(ins, d.trailing_constraint.expression, tu.written_constraint_lambdas);
+      }
       record_class_rtti_abi(d, k);
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
           (attributed || ins.seqs.size(d.annotations) != 0) &&
@@ -1687,6 +1692,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if ((d.flags & sema::decl_flag::consteval_) && (immediate_free || immediate_constructor) && !it.template_depth &&
           !it.specialization && entity.templ == EntityId::none && can_defer_body(body))
         continue;
+      // GCC defers repeated C-linkage definitions across namespaces until code generation.
+      if (!tu.duplicate_c_definition && program.compatibility() == ast::Compatibility::gcc &&
+          (d.flags & sema::decl_flag::lang_c) && program.function_defined_before(d.entity, k))
+        tu.duplicate_c_definition = at.front().value_or(ast::Loc{program.id(k), 0});
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       tu.functions.back().emit_if_referenced = immediate_if_referenced(d, entity, body);
       namespace flag = sema::decl_flag;
@@ -2211,6 +2220,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
+    tu.written_constraint_lambdas.append_range(p.tu.written_constraint_lambdas);
     for (const auto& [specialization, spelling] : p.tu.class_template_spellings) {
       auto [it, added] = tu.class_template_spellings.try_emplace(specialization, spelling);
       if (!added && label_order(spelling.first) < label_order(it->second.first)) it->second = spelling;
@@ -2235,6 +2245,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       if (variables.insert(v.entity).second) tu.variables.push_back(std::move(v));
     if (tu.main == EntityId::none) tu.main = p.tu.main;
     if (!tu.namespace_destruction) tu.namespace_destruction = p.tu.namespace_destruction;
+    if (!tu.duplicate_c_definition) tu.duplicate_c_definition = p.tu.duplicate_c_definition;
     tu.base_object_variants.insert(p.tu.base_object_variants.begin(), p.tu.base_object_variants.end());
     for (const auto& [function, layouts] : p.base_object_variant_layouts)
       if (uncertain_layouts.empty() || std::ranges::none_of(layouts, [&](EntityId e) { return uncertain_layouts.contains(e); }))

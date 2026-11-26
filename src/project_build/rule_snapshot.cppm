@@ -39,6 +39,7 @@ struct RuleObservation {
   std::optional<Fp128> witness = std::nullopt;
   std::optional<Fp128> planning = std::nullopt;  // producer graph of the generated planning inputs
   std::optional<std::vector<HostFileObservation>> host_files = std::nullopt;
+  std::optional<std::vector<HostFileObservation>> planning_host_files = std::nullopt;
 };
 
 struct RuleSnapshot {
@@ -49,6 +50,7 @@ struct RuleSnapshot {
   std::map<std::string, std::vector<RuleProbeSnapshot>> pending_projections = {};
   std::vector<RuleExpansion> pending_witnesses = {};  // in-memory watch state for deferred or failed witnesses
   std::map<std::string, std::vector<HostFileObservation>> pending_host_files = {};
+  std::map<std::string, std::vector<HostFileObservation>> pending_planning_host_files = {};
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
@@ -63,7 +65,8 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
 namespace ycxx::build {
 namespace {
 
-constexpr int snapshot_version = 1;
+constexpr int snapshot_version = 2;
+constexpr int first_snapshot_version = 1;
 constexpr std::size_t max_snapshot_size = 8 * 1024 * 1024;
 constexpr int directory_flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
 
@@ -198,6 +201,7 @@ struct StoredRule {
   std::optional<std::vector<RulePlanInput>> plan_inputs = std::nullopt;
   std::optional<std::string> planning = std::nullopt;
   std::optional<std::vector<StoredHostFile>> host_files = std::nullopt;
+  std::optional<std::vector<StoredHostFile>> planning_host_files = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -234,6 +238,28 @@ StoredProbe store_probe(const RuleProbeSnapshot& probe) {
           probe.inputs, hex(probe.stamp), probe.facts, store_kind(probe.package.kind)};
 }
 
+std::optional<std::vector<HostFileObservation>> restore_host_files(std::vector<StoredHostFile> saved,
+                                                                   bool allows_empty) {
+  if (saved.empty() && !allows_empty) return std::nullopt;
+  std::vector<HostFileObservation> files;
+  files.reserve(saved.size());
+  for (auto& file : saved) {
+    const auto contents = file.contents ? decode_fp(*file.contents) : std::nullopt;
+    if (!file.path.starts_with('/') || file.path.contains('\0') ||
+        file.contents.has_value() != contents.has_value()) return std::nullopt;
+    files.push_back({std::move(file.path), contents});
+  }
+  return files;
+}
+
+std::vector<StoredHostFile> store_host_files(std::span<const HostFileObservation> observed) {
+  std::vector<StoredHostFile> files;
+  files.reserve(observed.size());
+  for (const auto& file : observed)
+    files.push_back({file.path, file.contents ? std::optional{hex(*file.contents)} : std::nullopt});
+  return files;
+}
+
 }  // namespace
 
 std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
@@ -246,7 +272,10 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
   const auto json = lsp::parse(*text);
   if (!json) return std::nullopt;
   auto saved = lsp::from_json<SnapshotFile>(*json);
-  if (!saved || saved->version != snapshot_version || saved->target != target) return std::nullopt;
+  if (!saved || saved->version < first_snapshot_version || saved->version > snapshot_version ||
+      saved->target != target) return std::nullopt;
+  // A tool built entirely from generated sources can have no disk observations.
+  const bool allows_empty_host_files = saved->version >= 2;
 
   RuleSnapshot result;
   for (auto& item : saved->rules) {
@@ -288,19 +317,14 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     if ((compiler_bindings && projections.empty()) ||
         (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
       return std::nullopt;
-    std::optional<std::vector<HostFileObservation>> host_files;
-    if (item.host_files) {
-      if (!witness || item.host_files->empty()) return std::nullopt;
-      host_files.emplace();
-      for (auto& file : *item.host_files) {
-        const auto contents = file.contents ? decode_fp(*file.contents) : std::nullopt;
-        if (!file.path.starts_with('/') || file.path.contains('\0') ||
-            file.contents.has_value() != contents.has_value()) return std::nullopt;
-        host_files->push_back({std::move(file.path), contents});
-      }
-    }
-    result.observations.push_back(
-        {demand, *package, *invocation, std::move(projections), witness, planning, std::move(host_files)});
+    auto host_files = item.host_files
+        ? restore_host_files(std::move(*item.host_files), allows_empty_host_files) : std::nullopt;
+    auto planning_host_files = item.planning_host_files
+        ? restore_host_files(std::move(*item.planning_host_files), allows_empty_host_files) : std::nullopt;
+    if ((item.host_files && (!witness || !host_files)) ||
+        (item.planning_host_files && (!planning || !planning_host_files))) return std::nullopt;
+    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness, planning,
+                                   std::move(host_files), std::move(planning_host_files)});
     result.expansions.push_back({std::move(demand), std::move(item.definition),
                                  item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
@@ -320,7 +344,8 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     const auto& demand = expansion.demand;
     const bool has_plan_inputs = !demand.plan_inputs.empty();
     if (demand != observed.demand || expansion.definition.empty() ||
-        has_plan_inputs != observed.planning.has_value()) return;
+        has_plan_inputs != observed.planning.has_value() ||
+        (observed.planning_host_files && !observed.planning)) return;
     StoredRule rule{
         demand.target, demand.rule, demand.package.target, demand.package.kind == RulePackageRef::Kind::standard,
         demand.definition, demand.attributes, demand.reads, expansion.definition,
@@ -339,11 +364,8 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
       rule.plan_inputs = demand.plan_inputs;
       rule.planning = hex(*observed.planning);
     }
-    if (observed.host_files) {
-      auto& files = rule.host_files.emplace();
-      for (const auto& file : *observed.host_files)
-        files.push_back({file.path, file.contents ? std::optional{hex(*file.contents)} : std::nullopt});
-    }
+    if (observed.host_files) rule.host_files = store_host_files(*observed.host_files);
+    if (observed.planning_host_files) rule.planning_host_files = store_host_files(*observed.planning_host_files);
     saved.rules.push_back(std::move(rule));
   }
   if (!snapshot.probes.empty()) {

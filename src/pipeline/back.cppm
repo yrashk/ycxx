@@ -199,6 +199,7 @@ struct ClassShape {
   bool trivial_calls = true;
   bool gcc_stack_calls = false;  // GCC's System V MEMORY class for an implicit deletion
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
+  std::vector<std::pair<std::uint8_t, std::uint8_t>> wide_bit_fields{};  // extent and alignment
   std::vector<std::uint32_t> overlapping_fields{};  // [[no_unique_address]] ([intro.object])
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
@@ -265,6 +266,7 @@ struct TranslationUnit {
   // startup array slot.
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
+  std::optional<ast::Loc> duplicate_c_definition;  // GCC mode defers the error to native emission
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
@@ -282,10 +284,10 @@ struct TranslationUnit {
   // The declared heads of class templates whose own arguments may appear in symbols.
   std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
   std::map<EntityId, std::pair<ast::Loc, ast::SeqId<ast::TemplateArg>>> class_template_spellings{};
+  std::vector<EntityId> written_constraint_lambdas;
 };
 
-// What failed, at a location in an item when there is one. Every error here is something the α
-// subset does not support yet: valid code that the front end accepted.
+// What failed during native emission, at a location in an item when there is one.
 struct BackError {
   std::optional<ast::Loc> at;
   std::string message;
@@ -1087,6 +1089,10 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     ast::Placed f = placed(in.canonical(it->fields[i]));
     f.potentially_overlapping = std::ranges::binary_search(it->overlapping_fields, std::uint32_t(i));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
+    if (!it->wide_bit_fields.empty()) {
+      f.wide_bit_width = it->wide_bit_fields[i].first;
+      f.wide_bit_alignment = it->wide_bit_fields[i].second;
+    }
     if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
   }
@@ -1572,12 +1578,15 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
 
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
-  const ast::Target& target = unit_target(cx, k.tu);
+  const auto* source_config = unit_config(cx, k.tu);
+  const ast::Target& target = source_config ? *source_config->target : *universe().target;
   const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
   if (!f.body && !target_is_linux) co_return Lowered{std::nullopt, {}, f.error};
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
+  config.darwin_passes_empty_argument =
+      !target_is_linux && source_config && source_config->compatibility == ast::Compatibility::gcc;
   if (f.body) {
     const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
       return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
@@ -2110,7 +2119,7 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
       if (s.bit_field) {
         if (!in.values.is<ast::VInt>(elems[i])) return std::unexpected("a bit-field initializer is not an integer");
         const auto bits = s.bit_field;
-        auto value = std::uint32_t(in.values.get<ast::VInt>(elems[i]).bits.lo) << bits.shift;
+        auto value = in.values.get<ast::VInt>(elems[i]).bits.lo << bits.shift;
         for (std::uint32_t byte = 0; byte < bits.bytes(); ++byte) {
           auto mask = std::uint8_t(bits.mask() >> (8 * byte));
           auto& dst = out.bytes[offset + s.offset + byte];
@@ -2608,6 +2617,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
+  if (tu.duplicate_c_definition) {
+    errors.push_back({tu.duplicate_c_definition, "repeated definition of a C-linkage function"});
+    co_return co_await locate_errors(cx, id, std::move(out));
+  }
   if (tu.unsupported_typed_dynamic_cast) {
     errors.push_back({tu.unsupported_typed_dynamic_cast,
                       "typed dynamic_cast requires a supported default-visible root and its direct public peer-owned derived class on Linux x86-64"});
@@ -2671,6 +2684,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   const sema::World* closure_world = universe().world_for(target);
+  std::map<EntityId, std::uint32_t> written_closure_numbers;
+  if (closure_world) {
+    std::map<Fp128, std::uint32_t> signature_counts;
+    for (const EntityId closure : tu.written_constraint_lambdas) {
+      if (written_closure_numbers.contains(closure)) continue;
+      const auto& record = closure_world->entities.rec(closure);
+      written_closure_numbers.emplace(closure, signature_counts[record.lambda_signature]++);
+    }
+  }
   auto private_closure_owner = [&](EntityId closure) -> std::optional<EntityId> {
     if (closure == EntityId::none || !closure_world) return std::nullopt;
     const auto* record = closure_world->entities.find(closure);
@@ -2688,10 +2710,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     return owner.id;
   };
   std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
+  std::uint32_t next_constraint_closure_number = 0;
   auto note_closure = [&](EntityId closure) {
     if (private_closure_numbers.contains(closure)) return;
-    if (auto owner = private_closure_owner(closure))
+    if (written_closure_numbers.contains(closure)) {
+      private_closure_numbers.emplace(closure, next_constraint_closure_number++);
+    } else if (auto owner = private_closure_owner(closure)) {
       private_closure_numbers.emplace(closure, next_private_closure_number[*owner]++);
+      if (by_id.at(ir::raw(*owner))->linkage != ast::Linkage::internal) ++next_constraint_closure_number;
+    }
   };
   auto note_type = [&](this auto&& visit, ast::QualType type) -> void {
     const auto t = closure_world->types.rec(type);
@@ -2717,6 +2744,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     else if (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value)
       note_type(arg.type);
   };
+  auto note_constraint = [&](const ast::WrittenConstraint& constraint) {
+    if (constraint.expression == ast::ConstId::none || written_closure_numbers.empty()) return;
+    std::vector<EntityId> written;
+    collect_constraint_lambdas(in, constraint.expression, written);
+    for (const EntityId closure : written) note_closure(closure);
+  };
   const bool defer_closures = compatibility != ast::Compatibility::spec && !tu.has_raw_linkage_names &&
                               tu.asm_hidden_symbols.empty();
   std::vector<FnKey> fns;
@@ -2740,7 +2773,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (found != by_id.end()) {
         note_closure(found->second->scope);
         for (const auto& arg : found->second->template_args) note_argument(arg);
+        note_constraint(found->second->template_head_constraint);
         note_type(found->second->type);
+        note_constraint(found->second->template_trailing_constraint);
       }
     }
   };
@@ -2957,6 +2992,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       auto spelling = tu.class_template_spellings.find(c);
       if (spelling != tu.class_template_spellings.end()) n.args = in.seqs.elements(spelling->second.second);
     }
+    const auto written = written_closure_numbers.find(c);
     if (r.kind == sema::EntityKind::class_ && r.local_class) {
       // A local class ([class.local]): a <local-name> in its function's encoding (§5.1.6).
       n.local_class = true;
@@ -2968,12 +3004,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         n.local = std::make_shared<const LocalFunction>(LocalFunction{
             fname, fe.type, fe.scope, fe.special != Special::none, fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
       }
-    } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
+    } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
+               (r.scope != EntityId::none || written != written_closure_numbers.end())) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
-      n.closure_number = r.ordinal;
+      n.closure_number = written == written_closure_numbers.end() ? r.ordinal : written->second;
       n.closure_head = r.closure_head;
+      n.closure_constraint = r.lambda_head_constraint;
+      n.closure_constraint_depth = r.lambda_constraint_depth;
+      n.static_closure = r.static_closure;
       if (compatibility == ast::Compatibility::clang) {
         note_closure(c);
         if (auto private_number = private_closure_numbers.find(c); private_number != private_closure_numbers.end())
@@ -2996,7 +3036,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         } else {
           n.closure_variable = fe.id;
         }
-      } else if (w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
+      } else if (r.scope != EntityId::none && w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
         n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
       }
     }
@@ -3023,7 +3063,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::virtual_table || e.special == Special::type_info) {
-      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility);
+      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility, target);
       const bool table = e.special == Special::virtual_table;
       if (!encoding) {
         errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
@@ -3035,7 +3075,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
         if (emit_table_type_info && owned->primary_base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility, target);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -3050,7 +3090,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
           dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
         std::optional<std::string> base;
         if (dynamic->base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility, target);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -3065,7 +3105,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::template_parameter_object) {
-      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility);
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility, target);
       if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
       else {
         symbols.push_back({e.id, target_is_linux ? std::move(*name) : "_" + *name, obj::binding::global});
@@ -3082,7 +3122,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility,
+                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility, target,
                          e.trailing_constraint);
     };
     auto name = encode(entry);

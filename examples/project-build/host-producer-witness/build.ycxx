@@ -1,0 +1,31 @@
+use plugin("rules/package") as tools
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+}
+
+generate "analyzer_source" {
+    tool = "/bin/sh"
+    args = [input("script"), input("scanner"), output("executable"), "/bin/chmod"]
+    inputs = { script = "generate-analyzer.sh" scanner = artifact("scanner", "executable") }
+    tool_inputs = { chmod = "/bin/chmod" }
+    outputs = { executable = "analyzer.sh" }
+}
+
+generate "analyzer" {
+    tool = "/bin/cp"
+    args = ["-p", input("program"), output("executable")]
+    inputs = { program = artifact("analyzer_source", "executable") }
+    outputs = { executable = "analyzer.sh" }
+}
+
+tools.observe "observed" {}
+
+tools.header "config" {
+    facts = { score = value("observed", "score") }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

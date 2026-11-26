@@ -1128,3 +1128,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: use `Sema::has_syntax_error_since` (expected or unexpected tokens) together with the end
     position. When both readings fail, report the diagnostics of the reading the grammar prefers.
   - Learned on #1190.
+- **Draft and published AST node handles use separate storage.** The parser can read a draft
+  through its builder. A tree walked after commit uses the interner. The numeric handle does
+  not identify which storage owns it.
+  - Pass the storage context when a helper reads both. For a draft that adopts a published node,
+    look up the adopted node through the builder before reading it from the interner.
+  - The discarded-cast and `noexcept` probes exercise both paths.

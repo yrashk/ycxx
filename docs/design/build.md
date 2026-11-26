@@ -245,9 +245,61 @@ The coordinator verifies the engine revision before launching an action
 that depends on a host build and again before admitting its receipt. Watch
 observes the source and include reads through the same file table as native
 compilation. Host executables are available to ordinary generator recipes
-and direct witness tools. Planning inputs and transitive witness producer
-chains with host dependencies remain in #1259.
+and staged witness tools. Ordinary generator chains can also run them
+upstream of a generated planning input.
 [Native host tool example](../../examples/project-build/native-host-tool/README.md)
+
+### Libraries for native host tools (#1576)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["shared"]
+}
+```
+
+Host executable dependencies are disk-backed `cpp.library` declarations.
+Each executable collects its own reachable sources and public include
+directories. In a diamond, both dependency paths remain visible in the
+plan and the shared library contributes its sources once per executable.
+The same library declaration can supply both the host scanner and a
+foreign-target app. The scanner's source and include observations cover its
+library translation units, so edits can wake watch and refresh the staged
+host image.
+[Shared library diamond example](../../examples/project-build/host-cxx-libraries/README.md)
+
+### Generated headers on a native host executable (#1579)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    generated_headers = [artifact("scanner_config", "header")]
+}
+```
+
+The declared producer and its ordinary predecessors run before the host
+compile. That action chain must be independent of project-built native host
+tools. Generators keep the requesting plan's argument selectors. C++ still
+compiles the executable for the host.
+
+Each admitted producer directory exposes the declared output names and
+their exact bytes through the executable's own include configuration.
+The immutable snapshot uses stable logical paths under `.ycxx/host/virtual`.
+Host sources, inherited library includes, and other real paths keep the
+ordinary disk view. The selected app has its own generated include view.
+Equal visible files preserve the host compile, and equal linked executable
+bytes preserve consuming generator receipts. The coordinator shares staged
+producer outputs across ordinary builds, planning inputs, and witnesses.
+[Generated host header example](../../examples/project-build/host-generated-headers/README.md)
+
+The same producer restriction applies to artifacts in a host executable's
+`sources` list. Such a translation unit reads its main file from the host
+snapshot, and quoted includes can find declared siblings in its logical
+directory. Disk sources and generated artifacts can be mixed in authored
+order. Diagnostics refer to the logical source path and use the snapshot
+bytes. Planning and witness receipts observe real disk includes, including
+misses, and can persist an empty disk observation when the tool is generated.
+[Generated host source example](../../examples/project-build/host-generated-sources/README.md)
 
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
@@ -743,6 +795,24 @@ receipt. Watch follows the generator graph even if it fails or returns an
 invalid inventory. Publication keeps the previous assets until planning,
 the ordinary actions and the native build succeed.
 
+### Host tools upstream of planning inputs (#1574)
+
+The native inventory example builds `scanner` for the host and runs it
+in a generator. A copy action exposes the selected output to the `config`
+rule through `plan_inputs = { inventory = artifact("inventory", "list") }`.
+The worker reads those bytes and emits a generator for a `constexpr` header.
+The app can target a different platform from the scanner.
+
+The coordinator observes the reachable host tools together and records
+source and include lookups, including misses. It revalidates the worker's
+selected bytes before admitting the expansion. Equal bytes preserve the
+worker receipt and update the producer provenance. The coordinator keeps
+planning and witness file evidence separately. When the same rule also
+classifies a witness, both phases must agree on the inputs they share.
+Read-only inspection validates saved evidence, and watch retains failed
+lookups so creating a missing include can wake the build.
+[Host planning input example](../../examples/project-build/host-planning-inputs/README.md)
+
 ## Compiler capability observations
 
 ```sh
@@ -902,6 +972,29 @@ while the witness runs. [Native host witness example](../../examples/project-bui
 The same staged analyzer can call a helper at an absolute host path. Declare
 the path in `tool_inputs` to track helper changes as witness inputs. Equal
 classified scores still reuse the app. [Helper walkthrough](../../examples/project-build/staged-witness/README.md#track-a-helper-executable)
+
+### Witnesses with host producers (#1571)
+
+A staged witness can select an ordinary generator output whose producer
+chain consumes native host executables. The example runs the host
+`scanner` in `analyzer_source` to write an executable script. The
+`analyzer` action copies that script and preserves its mode. The emitted
+`observed` witness selects it through `tool = input("analyzer")` and
+`inputs = { analyzer = artifact("analyzer", "executable") }`.
+The `config` rule consumes the classified score with
+`facts = { score = value("observed", "score") }`.
+
+The coordinator collects the linked images and source and include
+observations of all reachable host tools in one current engine revision
+before staging the producers. It revalidates the recipe and staged inputs
+when files change during generation or classification. Generator and
+witness action keys use the concrete staged bytes and executable mode.
+Equal selected outputs can therefore reuse the witness receipt, which
+stores the exit status, stdout, and stderr. The classifier publishes a
+separate typed value. Equal values preserve reuse for downstream consumers
+such as the header generator. Read-only inspection and watch reobserve
+the reachable host tool inputs.
+[Host producer witness example](../../examples/project-build/host-producer-witness/README.md)
 
 ### Structured shader reflection
 

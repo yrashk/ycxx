@@ -435,6 +435,7 @@ struct Ops {
       object.usable = !unknown;
       object.unknown_reference = unknown && has(f, n, ir::Flag::unknown_reference);
     }
+    if (has(f, n, ir::Flag::switch_bypassed_lifetime)) m.objects_[pl.obj].switch_bypassed = true;
     m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }
@@ -460,11 +461,14 @@ struct Ops {
         !m.in_->types.is<ast::TClass>(m.in_->canonical(pointer.inner)))
       return m.fail(Reason::ill_formed);
     const Value receiver = m.operand(f, n, 1);
-    if (Flow fl = m.locate(receiver, {}, pointer.inner, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+    const bool gcc = m.config_.compatibility == ast::Compatibility::gcc;
+    const auto use = gcc ? M::Use::gcc_member_receiver : M::Use::lifetime;
+    if (Flow fl = m.locate(receiver, {}, pointer.inner, use, false, place); fl != Flow::next) return fl;
     // [class.cdtor] permits calls during construction and destruction. Check a completed
     // lifetime independently of the fields, which the call need not read.
     const auto& object = m.objects_[place.obj];
-    if (object.record_life == M::Life::after || (place.primary_base && object.primary_base_life == M::Life::after))
+    if (!gcc && (object.record_life == M::Life::after ||
+                 (place.primary_base && object.primary_base_life == M::Life::after)))
       return m.fail(Reason::outside_lifetime);
     return Flow::next;
   }

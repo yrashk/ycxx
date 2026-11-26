@@ -13,7 +13,6 @@ from project_inspection import (
     check_dependency_graph, check_dependency_html, check_location, check_target_dependencies_html,
     dependency_edge, fact, scope_state,
 )
-from project_package_probe import prepare as prepare_probe
 from project_shader_bundle import check_external_actions
 from project_targets import (
     DARWIN, LINUX, RAN, build, check_binary, check_target_trace, executable, journal_contents,
@@ -28,7 +27,7 @@ REFERENCE = 'artifact("scanner", "executable")'
 GENERATED_HEADER = 'artifact("scan_config", "header")'
 NOTE = 'artifact("scan_config", "note")'
 STAGED = 'inputs/artifacts/scanner/executable'
-UNSUPPORTED = 'host executable artifacts are not available in rule planning inputs or witnesses'
+PLANNING_UNSUPPORTED = 'host executable artifacts are not available in rule planning inputs'
 EMITTER = r'''#!/bin/sh
 "$1"
 score=$?
@@ -258,9 +257,9 @@ def check_rejection(ycxx, scope, env, journal, expected):
 def check_rejections(ycxx, workspace, env):
     for name, original, changed, expected in (
         ('cycle', f'sources = ["{SCANNER}"]', f'sources = [{GENERATED_HEADER}]',
-         'host executable sources require disk paths or globs'),
-        ('planning', 'sources = ["main.cc"]', f'sources = ["main.cc"]\n    plan_inputs = {{ score = {GENERATED_HEADER} }}',
-         UNSUPPORTED),
+         'host executable generated source dependency cycle'),
+        ('planning', 'sources = ["main.cc"]', f'sources = ["main.cc"]\n    plan_inputs = {{ scanner = {REFERENCE} }}',
+         PLANNING_UNSUPPORTED),
     ):
         scope, journal = workspace / name, workspace / f'{name}-runs'
         definition = prepare(scope, journal)
@@ -270,22 +269,6 @@ def check_rejections(ycxx, workspace, env):
             check_rejection(ycxx, scope, env, journal, expected)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
-
-    scope, journal = workspace / 'witness', workspace / 'witness-generator-runs'
-    witness_runs = prepare_probe(scope)
-    write_scanner(scope)
-    manifest = scope / 'build.ycxx'
-    with manifest.open('a', encoding='utf-8') as out:
-        out.write('\n' + producers(journal))
-    codec = scope / 'rules/codec.cc'
-    original = codec.read_text(encoding='utf-8')
-    assert original.count('data = "wire.cfg"') == 1, original
-    codec.write_text(original.replace('data = "wire.cfg"', f'data = {GENERATED_HEADER}'), encoding='utf-8')
-    try:
-        check_rejection(ycxx, scope, env, journal, UNSUPPORTED)
-        assert not witness_runs.exists()
-    finally:
-        run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
 
 def main():
