@@ -137,8 +137,7 @@ struct Config {
   bool nostdincxx = false;
   ast::CallTriviality calls() const {
     if (call_triviality) return *call_triviality;
-    if (compatibility == ast::Compatibility::gcc && target->operating_system == ast::OperatingSystem::linux_)
-      return ast::CallTriviality::gcc;
+    if (compatibility == ast::Compatibility::gcc) return ast::CallTriviality::gcc;
     return target->call_triviality;
   }
 

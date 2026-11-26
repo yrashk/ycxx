@@ -1299,19 +1299,32 @@ def mixed_darwin_class_calls(world, gxx):
     (scope / 'darwin-caller.cpp').write_text(CLASS_DECLARATIONS + CLASS_CALLER)
     (scope / 'darwin-peer.cpp').write_text(CLASS_DECLARATIONS + CLASS_PEER)
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    objects = {}
     for mode in MODES:
-        peer = gxx if mode == 'gcc' else clang
-        command = ['-fcompat=' + mode, '-c', 'darwin-caller.cpp', '-o', 'darwin-caller.o']
+        peer = (gxx if mode == 'gcc' else clang) if sys.platform == 'darwin' else None
+        command = [DARWIN, '-fcompat=' + mode, '-c', 'darwin-caller.cpp', '-o', 'darwin-caller.o']
         if peer:
             subprocess.run([peer, '-std=c++26', '-c', 'darwin-peer.cpp', '-o', 'darwin-peer.o'],
                            cwd=scope, check=True, capture_output=True, timeout=40)
+        outputs = []
         for env in (world.cold, world.daemon):
             result = world.cxx(command, scope, env, timeout=40)
             assert result == (0, b'', b''), (mode, result)
+            outputs.append((scope / 'darwin-caller.o').read_bytes())
             if peer:
                 subprocess.run([gxx, 'darwin-caller.o', 'darwin-peer.o', '-o', 'darwin-class-calls'],
                                cwd=scope, check=True, capture_output=True, timeout=40)
-                subprocess.run([scope / 'darwin-class-calls'], cwd=scope, check=True, timeout=20)
+                checked = subprocess.run([scope / 'darwin-class-calls'], cwd=scope, capture_output=True, timeout=20)
+                assert checked.returncode == 0, (mode, peer, env is world.daemon, checked.returncode, checked.stderr)
+        assert outputs[0] == outputs[1], mode
+        objects[mode] = outputs[0]
+    assert objects['spec'] == objects['clang'] and objects['spec'] != objects['gcc']
+    for rule, expected in (('itanium', 'spec'), ('apple', 'gcc')):
+        command = [DARWIN, '-fcompat=gcc', '-fclass-call-abi=' + rule, '-c', 'darwin-caller.cpp', '-o', 'darwin-caller.o']
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (rule, result)
+            assert (scope / 'darwin-caller.o').read_bytes() == objects[expected], rule
 
 
 def mixed_large_class_calls(world, gxx):
@@ -1902,9 +1915,7 @@ def main():
             mixed_large_class_calls(world, gxx)
             # PARITY: by design: native array new is currently available on Linux x86-64.
             wide_array_allocations(world, gxx)
-        elif sys.platform == 'darwin':
-            # PARITY: by design: check native arm64 transport with the installed compiler peers.
-            mixed_darwin_class_calls(world, gxx)
+        mixed_darwin_class_calls(world, gxx)
         mixed_class_alignment(world, gxx)
         mixed_tail_padding(world, gxx)
         mixed_constraints(world, gxx)

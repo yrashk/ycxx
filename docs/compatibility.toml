@@ -76,16 +76,16 @@ evidence = ["tests/own/headers/source-location-descriptor.run.cpp", "tests/daemo
 
 [[divergence]]
 id = "class-call-triviality"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
-reference = "[class.temporary]/3, Itanium C++ ABI §3.1.2.3, #230"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[class.temporary]/3, Itanium C++ ABI §3.1.2.3, AAPCS64 §6.8, #230"
 prior = "Clang's indirect passing for all-deleted copy and move constructors, including deletion caused by a class subobject."
 spec = "Pass indirectly when every copy and move constructor is deleted."
-gcc = "On x86-64 Linux, the supported aggregate with copies implicitly deleted by a class member or array member is a by-value MEMORY argument. Its result uses a hidden pointer."
-limits = "The x86-64 implementation covers known layouts aligned up to 16 bytes, including MEMORY arguments larger than two eightbytes. arm64 Darwin uses the published rule until a native GCC transport probe is available."
+gcc = "Classify the supported aggregate with copies implicitly deleted by a class member or array member as trivial for AAPCS64 transport on arm64 Darwin. On x86-64 Linux it is a by-value MEMORY argument and its result uses a hidden pointer."
+limits = "The x86-64 implementation covers known layouts aligned up to 16 bytes, including MEMORY arguments larger than two eightbytes. The Darwin mixed-object probe covers 8- and 12-byte integer aggregates and the 8-byte result."
 clang = "Same as spec."
 override = "On arm64 Darwin, -fclass-call-abi=apple selects the Apple Clang rule. -fclass-call-abi=itanium explicitly selects the published rule."
-evidence = ["tests/own/abi/call-triviality.run.cpp", "tests/own/abi/call-triviality-apple.run.cpp", "tests/daemon/compatibility.py"]
+evidence = ["tests/own/abi/call-triviality.run.cpp", "tests/own/abi/call-triviality-apple.run.cpp", "tests/daemon/compatibility.py", "Native GCC 16.2 arm64 Darwin rejects interoperation with the published indirect transport in https://github.com/yrashk/ycxx/actions/runs/45788890920/job/139802581218"]
 
 [[divergence]]
 id = "class-tail-padding"
