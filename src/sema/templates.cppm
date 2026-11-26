@@ -2398,9 +2398,15 @@ private:
     auto ref = ins().values.get<ast::VDepVariable>(v);
     auto args = substitute_args(ins().seqs.elements(ref.args), b);
     if (!args) return std::nullopt;
-    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+    auto keep_reference = [&] -> std::optional<ConstId> {
+      auto written = substitute_args(ins().seqs.elements(ref.written_args), b);
+      if (!written) return std::nullopt;
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      ref.written_args = ins().intern_seq(std::span<const TemplateArg>(*written));
       return ins().intern_value(ref);
+    };
+    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+      return keep_reference();
     }
     const EntityId spec = specialize_variable(ref.templ, *args);
     if (mode != BooleanSubstitution::evaluate) {
@@ -2411,8 +2417,7 @@ private:
         if (!global && demand_variable) demand_variable(spec, *type);
         return w_->values.integer(types().builtin(Builtin::bool_), false);
       }
-      ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
-      return ins().intern_value(ref);
+      return keep_reference();
     }
     return read ? read(spec) : std::nullopt;
   }

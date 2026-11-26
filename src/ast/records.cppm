@@ -8,6 +8,7 @@
 export module ycxx.ast.records;
 
 import std;
+import ycxx.hash;
 import ycxx.ast.handles;
 import ycxx.ast.schema;
 import ycxx.ast.nodes;
@@ -61,7 +62,15 @@ struct TemplateParamSema {
   // `auto` or `decltype(auto)`. Its `type` is then its own position's `TTemplateParam`, the type
   // each argument deduces, which substitution reads from the bound value.
   Placeholder placeholder = Placeholder::none;
+  ConstId type_constraint = ConstId::none;  // concept and its explicit arguments, for linkage
   constexpr bool operator==(const TemplateParamSema&) const = default;
+};
+
+// The written expression is separate from the normal form used for constraint checking.
+struct WrittenConstraint {
+  ConstId expression = ConstId::none;
+  Fp128 tokens{};
+  constexpr bool operator==(const WrittenConstraint&) const = default;
 };
 
 struct ParamSema {
@@ -123,6 +132,8 @@ struct DeclSema {
   bool explicit_default_visibility = false;
   GnuVisibility namespace_visibility = GnuVisibility::none;  // lexical namespace-definition occurrence
   u8 field_alignment = 0;  // a validated alignment stricter than the field type's natural alignment
+  WrittenConstraint head_constraint{};
+  WrittenConstraint trailing_constraint{};
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
