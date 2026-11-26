@@ -625,18 +625,19 @@ evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/e
 
 [[divergence]]
 id = "empty-union-new-list"
-status = "selectable"
-mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
-reference = "[dcl.init.aggr], [expr.new]"
+status = "partial"
+mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+reference = "[dcl.init.aggr], [expr.new], [class.default.ctor], #1483"
 prior = "Use the ordinary aggregate list initializer for the allocation."
 spec = "Initialize the first variant in the tested named union with a written destructor and a nontrivial first variant."
-gcc = "Diagnose the deleted union default constructor in the tested allocations with a nontrivial variant anywhere in the union and no default member initializer. A written default member initializer keeps the allocation valid."
+gcc = "Diagnose the deleted union default constructor in the tested direct empty allocations with a nontrivial variant and no default member initializer. An ordinary member or base with a proven usable trivial defaulted constructor does not make its enclosing variant nontrivial. A first scalar default member initializer keeps the tested allocation valid."
 clang = "Same as spec."
 spec_observed = "Empty list-initialization through new copy-list-initializes the first variant under the same rules as for an automatic object."
 gcc_observed = "Rejects new U{} because the union default constructor is deleted, even though U u{} is accepted and skips the variant constructor. A default member initializer on either variant makes both forms valid in the probes."
 clang_observed = "Both targets accept new U{} and apply the same variant initialization checks as for an automatic object. The native executable runs the first variant's default constructor."
 probe = 'struct A { A() noexcept {} ~A() noexcept {} }; union U { A first; char other; ~U() {} }; U* create() { return new U{}; }'
-evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes, plus native Clang and ycxx executable checks"]
+limits = "Nested union variants that fail earlier member declaration checks and initializers on later variants remain in #203. Omitting a union member of another allocated aggregate remains in #1481."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/empty_union/union-written-holder-dtor-member-defaulted.accept.cpp", "tests/daemon/empty_union/union-written-holder-dtor-base-defaulted.accept.cpp"]
 
 [[divergence]]
 id = "class-head-alignment"
