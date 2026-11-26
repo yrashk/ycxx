@@ -96,7 +96,7 @@ prior = "Used the modern trivial and standard-layout approximation on both targe
 spec = "Use the ABI's C++03 POD rule for supported record layouts. An all-private or all-protected data layout allows reuse of base tail padding."
 gcc = "Same as spec."
 clang = "Use the C++03 rule on x86-64 Linux and the modern rule on arm64 Darwin. The private-base probe reserves the padding on Darwin."
-limits = "The layout test accounts for user-provided special members and distinguishes first-declaration defaulting or deletion from user-provided bodies. Defaulted members whose definitions ycxx cannot yet analyze and class hierarchies beyond the supported record layout remain outside this coverage. See class-tail-padding-overlapping-member for the separate attribute case."
+limits = "Covers uniform private or protected access, mixed access, default member initializers, const and reference members, arrays of records, and a base with an empty ancestor. The layout test accounts for user-provided special members and distinguishes first-declaration defaulting or deletion from user-provided bodies. Defaulted members whose definitions ycxx cannot yet analyze and class hierarchies beyond the supported record layout remain outside this coverage. See class-tail-padding-overlapping-member for the separate attribute case."
 evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cpp"]
 
 [[divergence]]
@@ -107,9 +107,21 @@ reference = "Itanium C++ ABI §1.1, §2.4, [intro.object]"
 prior = "Treat a record with an ordinary no_unique_address field as POD for base layout."
 spec = "Reserve the full size of an otherwise POD base with a potentially overlapping field, as required by the finalization step in Itanium §2.4."
 gcc = "Reuse base tail padding when the tested otherwise POD base has a potentially overlapping field."
-clang = "Same as spec for the tested ordinary field on x86-64 Linux and AArch64 Darwin."
+clang = "Same as spec for the tested ordinary and POD class fields on x86-64 Linux and AArch64 Darwin."
 probe = 'struct B { int n; [[no_unique_address]] char c; }; struct D : B { char more; };'
 evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types"]
+
+[[divergence]]
+id = "potentially-overlapping-member-layout"
+status = "shared"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "Itanium C++ ABI §2.4, [intro.object], [dcl.attr.nouniqueaddr]"
+prior = "Allocate the complete member extent before placing the next field, including for marked empty subobjects."
+spec = "Try zero for an empty potentially overlapping member, subject to component type conflicts. Place the following field after the non-virtual extent of a nonempty overlapping member, and retain at least the complete member extent when computing the containing size."
+gcc = "Same as spec for the tested member offsets and sizes. The containing POD base's tail padding is covered separately."
+clang = "Same as GCC on both supported targets."
+probe = 'struct R { int n; char b; ~R() {} }; struct S { [[no_unique_address]] R r; char next; };'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 empty member type conflicts and nonempty extent probes on ELF and Mach-O"]
 
 [[divergence]]
 id = "dependent-variable-template-symbol"

@@ -67,6 +67,36 @@ struct Base { int value; char byte; template<class T> Base& operator=(T); };
 struct Base { private: int value; char byte; };
 #elif defined(OVERLAPPING_MEMBER)
 struct Base { int value; [[no_unique_address]] char byte; };
+#elif defined(PROTECTED_MEMBERS)
+struct Base { protected: int value; char byte; };
+#elif defined(MIXED_ACCESS)
+struct Base { int value; private: char byte; };
+#elif defined(DEFAULT_MEMBER_INITIALIZER)
+struct Base { int value = 0; char byte; };
+#elif defined(FIRST_DEFAULT_CONSTRUCTOR)
+struct Base { int value; char byte; Base() = default; };
+#elif defined(LATE_DEFAULT_CONSTRUCTOR)
+struct Base { int value; char byte; Base(); };
+Base::Base() = default;
+#elif defined(LATE_DEFAULT_ASSIGNMENT)
+struct Base { int value; char byte; Base& operator=(const Base&); };
+Base& Base::operator=(const Base&) = default;
+#elif defined(LATE_DEFAULT_DESTRUCTOR)
+struct Base { int value; char byte; ~Base(); };
+Base::~Base() = default;
+#elif defined(CONST_MEMBER)
+struct Base { const int value; char byte; };
+#elif defined(REFERENCE_MEMBER)
+struct Base { int& value; char byte; };
+#elif defined(ARRAY_MEMBER)
+struct Private { private: int value; char byte; };
+struct Base { Private array[2]; char byte; };
+#elif defined(EMPTY_BASE)
+struct Empty {};
+struct Base : Empty { int value; char byte; };
+#elif defined(NESTED_OVERLAPPING_MEMBER)
+struct Plain { int value; char byte; };
+struct Base { [[no_unique_address]] Plain member; char byte; };
 #else
 struct Base { int value; char byte; };
 #endif
@@ -1186,6 +1216,18 @@ int use() { return transform(7); }
                 'ASSIGNMENT_TEMPLATE': 12,
                 'PRIVATE_MEMBERS': 12 if darwin_clang else 8,
                 'OVERLAPPING_MEMBER': 8 if mode == 'gcc' else 12,
+                'PROTECTED_MEMBERS': 12 if darwin_clang else 8,
+                'MIXED_ACCESS': 8,
+                'DEFAULT_MEMBER_INITIALIZER': 8,
+                'FIRST_DEFAULT_CONSTRUCTOR': 12,
+                'LATE_DEFAULT_CONSTRUCTOR': 8,
+                'LATE_DEFAULT_ASSIGNMENT': 8,
+                'LATE_DEFAULT_DESTRUCTOR': 8,
+                'CONST_MEMBER': 12,
+                'REFERENCE_MEMBER': 16,
+                'ARRAY_MEMBER': 24 if darwin_clang else 20,
+                'EMPTY_BASE': 12 if darwin_clang else 8,
+                'NESTED_OVERLAPPING_MEMBER': 12 if mode == 'gcc' else 16,
             }
             for case, size in sizes.items():
                 invoke(target, *flags, '-D' + case, f'-DEXPECTED={size}', '-fsyntax-only', 'tail-padding.cpp')
@@ -2347,8 +2389,8 @@ int main() {
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
-        for feature in ('PRIVATE_MEMBERS', 'OVERLAPPING_MEMBER'):
-            peer = clang if mode == 'clang' or (mode == 'spec' and feature == 'OVERLAPPING_MEMBER') else gxx
+        for feature in ('PRIVATE_MEMBERS', 'OVERLAPPING_MEMBER', 'NESTED_OVERLAPPING_MEMBER'):
+            peer = clang if mode == 'clang' or (mode == 'spec' and feature != 'PRIVATE_MEMBERS') else gxx
             if not peer:
                 continue
             definition = '-D' + feature
@@ -2537,6 +2579,86 @@ namespace Alias = N;
             subprocess.run([scope / 'expression-constraints'], cwd=scope, check=True, timeout=20)
 
 
+def overlapping_member_layout(world, gxx):
+    scope = world.scope
+    shape = '''\
+struct Empty {};
+struct WithEmpty { int value; char byte; [[no_unique_address]] Empty a, b; };
+struct OnlyEmpty { [[no_unique_address]] Empty a, b; };
+struct Member { int value; char byte; ~Member() noexcept {} };
+struct WithMember { [[no_unique_address]] Member word; char last; };
+static_assert(sizeof(WithEmpty) == 8 && __builtin_offsetof(WithEmpty, a) == 0 && __builtin_offsetof(WithEmpty, b) == 5);
+static_assert(sizeof(OnlyEmpty) == 2 && __builtin_offsetof(OnlyEmpty, a) == 0 && __builtin_offsetof(OnlyEmpty, b) == 1);
+static_assert(sizeof(WithMember) == 8 && __builtin_offsetof(WithMember, last) == 5);
+'''
+    (scope / 'overlap-reader.cpp').write_text(shape + '''\
+extern "C" int read_overlapping(const WithMember& value) {
+  return value.word.value + value.word.byte + value.last;
+}
+''')
+    (scope / 'overlap-peer.cpp').write_text(shape + '''\
+extern "C" int read_overlapping(const WithMember&);
+int main() { return read_overlapping({{17, 19}, 23}) != 59; }
+''')
+    subprocess.run([gxx, '-std=c++26', '-c', 'overlap-peer.cpp', '-o', 'overlap-peer.o'],
+                   cwd=scope, check=True, capture_output=True, timeout=40)
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-c', 'overlap-reader.cpp', '-o', 'overlap-reader.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                    subprocess.run([gxx, 'overlap-reader.o', 'overlap-peer.o', '-o', 'overlap-calls'],
+                                   cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'overlap-calls'], cwd=scope, check=True, timeout=20)
+
+
+def late_defaulted_special_members(world, gxx):
+    scope = world.scope
+    (scope / 'late-defaulted.cpp').write_text('''\
+struct Ctor { int value = 17; char byte = 19; Ctor() noexcept; };
+struct Assign { int value; char byte; Assign& operator=(const Assign&) noexcept; };
+struct DerivedAssign : Assign { char tail; };
+struct Dtor { int value; char byte; ~Dtor() noexcept; };
+static_assert(sizeof(DerivedAssign) == 8);
+#if defined(PROVIDER)
+Ctor::Ctor() noexcept = default;
+Assign& Assign::operator=(const Assign&) noexcept = default;
+Dtor::~Dtor() noexcept = default;
+extern "C" int read_late_assignment(const DerivedAssign& value) { return value.value + value.byte + value.tail; }
+#else
+extern "C" int read_late_assignment(const DerivedAssign&);
+int main() {
+  Ctor ctor;
+  Dtor dtor{7, 11};
+  DerivedAssign dst{{0, 0}, 23};
+  const Assign src{31, 37};
+  Assign& result = static_cast<Assign&>(dst).operator=(src);
+  return ctor.value + ctor.byte + dtor.value + dtor.byte != 54 ||
+         &result != &dst || dst.tail != 23 || read_late_assignment(dst) != 91;
+}
+#endif
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-DPROVIDER', '-c', 'late-defaulted.cpp', '-o', 'late-defaulted.o']
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'late-defaulted.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                peer = clang if mode == 'clang' else gxx
+                if not peer:
+                    continue
+                subprocess.run([peer, '-std=c++26', 'late-defaulted.cpp', 'late-defaulted.o', '-o', 'late-defaulted'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'late-defaulted'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -2582,6 +2704,8 @@ def main():
         mixed_darwin_class_calls(world, gxx)
         mixed_class_alignment(world, gxx)
         mixed_tail_padding(world, gxx)
+        overlapping_member_layout(world, gxx)
+        late_defaulted_special_members(world, gxx)
         mixed_constraints(world, gxx)
         function_language_linkage(world, gxx)
         mixed_abstract_result(world, gxx)

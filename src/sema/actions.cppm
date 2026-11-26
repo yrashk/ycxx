@@ -4084,7 +4084,7 @@ public:
     while (auto paren = as<ast::Paren>(init)) init.id = paren->operand.id;
     if (!(as<ast::ValueInit>(init) || as<ast::DefaultInit>(init)) || !types().is_class(init.type())) return false;
     const ClassRec* rec = class_rec(types().class_of(init.type()));
-    return rec && rec->trivial_defaulted_default_ctor;
+    return rec && rec->trivial_defaulted_default_ctor && rec->fields.empty();
   }
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
@@ -11107,6 +11107,7 @@ public:
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
+      m->potentially_overlapping = f.no_unique_address;
       m->align = std::max(m->align, u64(f.explicit_alignment));
       places.push_back(*m);
     }

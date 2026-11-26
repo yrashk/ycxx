@@ -1475,6 +1475,7 @@ public:
                        std::vector<engine::Diagnostic>* class_diags = nullptr, sema::Sema* closure_context = nullptr);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move);
   sema::CopyAssignment require_copy_assignment(EntityId f);
+  Ex copy_assignment_body(sema::Sema& sm, EntityId cls, Ex source, bool representation_copy);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
@@ -7085,11 +7086,8 @@ private:
     bool ctor = !ps_.is(Tk::tilde);
     const bool specialized_destructor = explicit_ && !ctor;
     const bool definition = it_->kind == ItemKind::function;
+    const bool late_defaulted = p_->defaulted_body(k_);
     u32 name_at = ps_.pos();
-    if (!ctor && p_->defaulted_body(k_)) {
-      s_.diag(name_at, Diag::defaulted_destructor_out_of_class);
-      return bad();
-    }
     if (!ctor) ps_.bump();
     ps_.bump();
     EntityId owner = s_.world().entities.rec(c).scope;
@@ -7164,6 +7162,41 @@ private:
     } else if (mem->flags & sema::decl_flag::definition) {
       s_.diag(name_at, Diag::redefinition, m->name);
       return bad();
+    }
+    if (late_defaulted) {
+      if (auto previous = p_->declaration(m->entity, k_); previous && (previous->flags & sema::decl_flag::definition)) {
+        s_.diag(name_at, Diag::redefinition, m->name);
+        return bad();
+      }
+      if (!definition || template_ || explicit_ || inst_ || m->is_template || cr->union_ || cr->polymorphic ||
+          !cr->bases.empty() || !fs.params.empty() || fs.variadic || fs.cv != sema::Cv::none ||
+          fs.ref != ast::RefQual::none ||
+          !Program::encloses(p_->ns_of(k_), p_->enclosing_namespace_path(owner)) ||
+          std::ranges::any_of(cr->fields, [&](const sema::FieldRec& field) {
+            const QualType element = s_.types().innermost_array_element(field.type);
+            return !s_.types().is_scalar(element) || (ctor && !field.dmi && sema::Types::is_const(element));
+          })) {
+        s_.diag(name_at, ctor ? Diag::defaulted_default_constructor : Diag::defaulted_destructor_out_of_class);
+        return bad();
+      }
+      // [dcl.fct.def.default]: a later defaulted definition is user-provided and uses
+      // the earlier declaration's exception specification.
+      if (ctor) {
+        if (nonthrowing != s_.types().rec(m->type).fn_noexcept) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);
+          return bad();
+        }
+      } else {
+        ps_.exception_specifier(fs, ok);
+        if (!ok) return bad();
+        const bool definition_noexcept = !fs.has_noexcept || ps_.noexcept_value(fs.noexcept_condition, ok);
+        if (!ok) return bad();
+        if (cr->destructor_noexcept != definition_noexcept) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);
+          return bad();
+        }
+      }
+      if (!finish_constructor_declarator()) return bad();
     }
     if (m->is_virtual) {
       if (const auto prior = p_->declaration(m->entity, k_); prior && (prior->flags & sema::decl_flag::definition)) {
@@ -8019,6 +8052,25 @@ private:
     if ((mem->flags & sema::decl_flag::definition) || (latest && (latest->flags & sema::decl_flag::definition))) {
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
+    }
+    if (p_->defaulted_body(k_) && s_.ins().names.spelling(d.name) == "operator=") {
+      auto& types = s_.types();
+      const auto signature = types.rec(matched_type);
+      const auto source = p_->assignment_parameter(*m, *t);
+      const EntityId owner = p_->world().entities.rec(cls).scope;
+      if (template_ || explicit_ || inst_ || cr->union_ || cr->polymorphic || !cr->bases.empty() || !source ||
+          !types.is_reference(*source) || sema::Types::is_volatile(types.canonical(types.referee(*source))) ||
+          signature.fn_cv != sema::Cv::none || signature.fn_ref == ast::RefQual::rvalue || signature.variadic ||
+          types.canonical(signature.inner) != types.lvalue_ref(*t) ||
+          !Program::encloses(p_->ns_of(k_), p_->enclosing_namespace_path(owner)) ||
+          std::ranges::any_of(cr->fields, [&](const sema::FieldRec& field) {
+            const QualType type = types.canonical(field.type);
+            return !types.is_scalar(type) || sema::Types::is_const(type) || sema::Types::is_volatile(type) ||
+                   field.no_unique_address;
+          })) {
+        s_.diag(d.name_at, Diag::defaulted_copy_assignment_declaration);
+        return false;
+      }
     }
     if (m->is_virtual) {
       if (m->is_consteval != spec.is_consteval) {  // [dcl.constexpr]
@@ -11425,6 +11477,10 @@ public:
           Ex ret = s_.node(ast::Return{sema::Sema::at(*result, 0)}, 0, 0);
           root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{sema::Sema::at(ret, 0)})}, 0, 0);
         }
+      } else if (defaulted && (ctor || (f->flags & sema::decl_flag::destructor))) {
+        root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{})}, 0, 0);
+      } else if (defaulted && s_.ins().names.spelling(p_->world().entities.rec(f->entity).name) == "operator=") {
+        root = p_->copy_assignment_body(s_, s_.current_class, s_.local_ref(param_locals.front(), 0, 0), false);
       } else if (!ps_.is(lex::Tk::l_brace)) {
         // A failed class keeps its written comparison declaration without completing its body.
         const bool failed_comparison = defaulted && p_->failed_class_assertions_.contains(s_.current_class) &&
@@ -11844,7 +11900,10 @@ void Program::classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<e
     // Inspect the complete member list, including declarations after the constructor.
     const bool flat = !rec.union_ && !rec.polymorphic && rec.bases.empty() &&
                       rec.destructor_usable && rec.destructor == EntityId::none;
-    rec.trivial_defaulted_default_ctor = flat && rec.fields.empty();
+    rec.trivial_defaulted_default_ctor = flat && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& field) {
+      const QualType element = w_->types.innermost_array_element(field.type);
+      return w_->types.is_scalar(element) && !field.dmi && !sema::Types::is_const(element);
+    });
     if (flat && !rec.unapplied_layout && rec.fields.size() == 1) {
       const auto& field = rec.fields.front();
       rec.null_pointer_defaulted_default_ctor = w_->types.is_pointer(field.type) && !field.no_unique_address &&
@@ -12574,9 +12633,26 @@ sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
   const auto param = w_->ins.seqs.at(s.decl.params, 0);
   sm.push_scope();
   sm.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+  const Ex root = copy_assignment_body(sm, cls, sm.name_expr(param.name, 0, 0), copy.state == CopyAssignment::trivial);
+  copy.checking = false;
+  if (!root.ok() || !diags.empty()) {
+    const bool unsupported = diags.empty() || std::ranges::any_of(diags, [](const engine::Diagnostic& d) {
+      return d.id == sema::diag_id(Diag::unsupported_copy_assignment) || d.id == sema::diag_id(Diag::not_supported);
+    });
+    copy.state = unsupported ? CopyAssignment::unsupported : CopyAssignment::deleted;
+    return copy.state;
+  }
+  copy.body = b.commit(ast::BodySema{root.id, b.seq(sm.locals()), b.seq(std::span<const ast::ExpansionRec>{}),
+                                    b.seq(std::span<const u32>{}), QualType{}, 0,
+                                    b.seq(std::span<const ast::ClosureDef>{})});
+  sm.pop_scope();
+  return copy.state;
+}
+
+Ex Program::copy_assignment_body(sema::Sema& sm, EntityId cls, Ex source, bool representation_copy) {
   const Ex self = sm.this_expr(0, 0);
   const Ex destination = sm.unary(ast::UnaryOp::deref, self, 0, 0, 0);
-  const Ex source = sm.name_expr(param.name, 0, 0);
+  if (!destination.ok() || !source.ok()) return {};
   std::vector<ast::Child> statements;
   const auto append = [&](Ex expr) {
     if (!expr.ok()) return false;
@@ -12586,36 +12662,19 @@ sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
     return true;
   };
 
-  bool ok = true;
-  if (copy.state == CopyAssignment::trivial) {
+  if (representation_copy) {
     const auto info = destination.info;
-    ok = append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy,
-                                   {destination.id, 0}, {source.id, 0}, info.type}, 0, 0, info));
+    if (!append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy,
+                                    {destination.id, 0}, {source.id, 0}, info.type}, 0, 0, info))) return {};
   } else {
     for (const auto& field : classes_.rec(cls).fields) {
       Ex from = sm.member(source, false, field.name, 0, 0, 0);
       Ex to = sm.member(self, true, field.name, 0, 0, 0);
-      if (!append(sm.assign(sema::Sema::AsgOp::assign, to, from, 0))) {
-        ok = false;
-        break;
-      }
+      if (!append(sm.assign(sema::Sema::AsgOp::assign, to, from, 0))) return {};
     }
   }
-  copy.checking = false;
-  if (!ok || !diags.empty()) {
-    const bool unsupported = diags.empty() || std::ranges::any_of(diags, [](const engine::Diagnostic& d) {
-      return d.id == sema::diag_id(Diag::unsupported_copy_assignment) || d.id == sema::diag_id(Diag::not_supported);
-    });
-    copy.state = unsupported ? CopyAssignment::unsupported : CopyAssignment::deleted;
-    return copy.state;
-  }
   statements.push_back({sm.node(ast::Return{{destination.id, 0}}, 0, 0).id, 0});
-  const Ex root = sm.node(ast::Compound{b.list(statements)}, 0, 0);
-  copy.body = b.commit(ast::BodySema{root.id, b.seq(sm.locals()), b.seq(std::span<const ast::ExpansionRec>{}),
-                                    b.seq(std::span<const u32>{}), QualType{}, 0,
-                                    b.seq(std::span<const ast::ClosureDef>{})});
-  sm.pop_scope();
-  return copy.state;
+  return sm.node(ast::Compound{sm.builder().list(statements)}, 0, 0);
 }
 
 // The copy of the object `src` designates as an initializer of type `t` ([class.copy.ctor]/14):

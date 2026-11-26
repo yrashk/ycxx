@@ -1083,6 +1083,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   }
   for (std::size_t i = 0; i < it->fields.size(); ++i) {
     ast::Placed f = placed(in.canonical(it->fields[i]));
+    f.potentially_overlapping = std::ranges::binary_search(it->overlapping_fields, std::uint32_t(i));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
     if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
