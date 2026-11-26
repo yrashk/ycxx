@@ -58,6 +58,15 @@ constexpr std::string_view styles = R"HTML(
   .dependencies .origin, .dependency-comparison .origin { display: block; }
   .dependency-sites { margin: .15rem 0 0; padding-inline-start: 1rem; }
   .dependency-notice { padding: .75rem 1.1rem; background: #f8f7f2; }
+  .plan-target { padding: .75rem 1.1rem; overflow-wrap: anywhere; scroll-margin-block: .65rem; }
+  .plan-target + .plan-target { border-top: 1px solid var(--border); }
+  .plan-target:target { background: #e5f1f3; box-shadow: inset .18rem 0 var(--link); }
+  .plan-target h3 { margin: 0 0 .3rem; font-size: 1rem; }
+  .plan-target code { white-space: pre-wrap; }
+  .plan-target > ul { margin: 0; padding: 0; list-style: none; }
+  .plan-target li { padding: .3rem 0; }
+  .plan-target li .origin { margin-inline-start: .65rem; }
+  .plan-target .empty { padding: 0; }
   .owner, .fact-name, .location { display: block; }
   .owner, .origin, .fact-name { color: var(--muted); font-size: .86rem; }
   .fact-value, .fact-name, .origin { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -412,6 +421,64 @@ void append_value_bindings(std::string& out, std::span<const PlanValueDependency
   out += "</tbody></table></section>\n";
 }
 
+void append_target_dependencies(std::string& out, std::string_view selected, const DependencyGraphInspection& graph,
+                                std::size_t lines) {
+  struct TargetInputs {
+    std::size_t id = 0;
+    std::vector<const PlanDependencyEdge*> artifacts;
+    std::vector<const PlanValueDependencyEdge*> values;
+  };
+  std::map<std::string_view, TargetInputs> targets;
+  const auto selected_target = targets.try_emplace(selected).first;
+  for (const auto& edge : graph.edges) {
+    targets[edge.consumer].artifacts.push_back(&edge);
+    targets.try_emplace(edge.producer);
+  }
+  if (graph.value_edges) {
+    for (const auto& edge : *graph.value_edges) {
+      targets[edge.consumer].values.push_back(&edge);
+      targets.try_emplace(edge.producer);
+    }
+  }
+  std::size_t id = 0;
+  for (auto& target : targets | std::views::values) target.id = id++;
+
+  out += R"(<section class="panel" aria-labelledby="target-dependencies"><h2 id="target-dependencies">Target dependencies</h2>)";
+  if (!graph.complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved target dependencies so far.</p>)";
+  const auto append_input = [&](const auto& edge, std::string_view label, std::optional<std::string_view> detail) {
+    std::format_to(std::back_inserter(out), R"(<li><a href="#plan-target-{}"><code>)", targets.at(edge.producer).id);
+    escaped(out, edge.producer);
+    out += R"(</code></a><code class="origin">)";
+    escaped(out, edge.usage);
+    out += "</code>";
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, label, detail);
+    append_dependency_location(out, edge.location, lines);
+    out += "</li>\n";
+  };
+  const auto append_target = [&](std::string_view name, const TargetInputs& target) {
+    std::format_to(std::back_inserter(out), R"(<article class="plan-target" id="plan-target-{}"><h3><code>)", target.id);
+    escaped(out, name);
+    out += "</code></h3>";
+    if (target.artifacts.empty() && target.values.empty()) {
+      out += R"(<p class="empty">)";
+      out += graph.complete ? "No resolved inputs." : "No resolved inputs yet.";
+      out += "</p>";
+    } else {
+      out += "<ul>";
+      for (const auto* edge : target.artifacts) append_input(*edge, "Output", edge->output);
+      for (const auto* edge : target.values) append_input(*edge, "Export", edge->export_name);
+      out += "</ul>";
+    }
+    out += "</article>\n";
+  };
+  append_target(selected_target->first, selected_target->second);
+  for (const auto& [name, target] : targets)
+    if (name != selected) append_target(name, target);
+  out += "</section>\n";
+}
+
 std::string_view module_label(std::string_view value) {
   using Label = std::pair<std::string_view, std::string_view>;
   constexpr Label labels[] = {
@@ -764,6 +831,7 @@ std::string render_inspection_html(const PlanInspection& inspection,
   if (value_binding_changes) append_value_binding_changes(out, *value_binding_changes, lines);
   if (inspection.dependency_graph) {
     const auto& graph = *inspection.dependency_graph;
+    append_target_dependencies(out, inspection.target, graph, lines);
     append_dependencies(out, graph, lines);
     if (graph.value_edges) append_value_bindings(out, *graph.value_edges, graph.complete, lines);
   }
