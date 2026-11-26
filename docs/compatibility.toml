@@ -103,16 +103,16 @@ evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cp
 
 [[divergence]]
 id = "over-width-bit-field-allocation"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[class.bit], Itanium C++ ABI §1.1 and §2.4"
 prior = "Limit named int and unsigned int bit-fields to the declared type's width."
 spec = "Allocate the written width with the alignment of the largest integral POD allocation unit that fits. The low bits of the declared type represent the value. Preserve the final aligned size in an otherwise POD base."
-gcc = "For a 128-bit wide field of type unsigned long long, GCC 16.2 on Linux uses 16-byte alignment and a 32-byte base. The derived tail begins at offset 32."
+gcc = "For a 128-bit wide field of type unsigned long long, GCC 16.2 uses 16-byte alignment and a 32-byte base on x86-64 Linux and arm64 Darwin. The derived tail begins at offset 32."
 clang = "Uses an 8-byte allocation unit on x86-64 Linux, giving a 24-byte base. Uses a 16-byte unit on arm64 Darwin, giving a 32-byte base."
-limits = "The probes also cover 40-bit wide named fields, signed reads and writes, derived tail transport, and private base tail padding. The GCC-style Darwin layout is checked in ycxx object generation and still needs comparison with a native GCC object. The warning controls are tracked separately."
+limits = "The probes also cover 40-bit wide named fields, signed reads and writes, derived tail transport, and private base tail padding. Native mixed objects verify the layout on both targets. The warning controls are tracked separately."
 probe = 'struct Base { unsigned long long field : 128; char byte; }; struct Derived : Base { char last; };'
-evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types", "GCC 16.2 x86-64 Linux and upstream Clang 23.1.6 x86-64 Linux and arm64 Darwin layout probes"]
+evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types", "GCC 16.2 x86-64 Linux and upstream Clang 23.1.6 x86-64 Linux and arm64 Darwin layout probes", "Native arm64 Darwin mixed-object tests with GCC 16.2.0 and upstream Clang 23.1.5 in https://github.com/yrashk/ycxx/actions/runs/45886630209/job/140138830657"]
 
 [[divergence]]
 id = "over-width-bit-field-diagnostic"
@@ -1320,15 +1320,15 @@ evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "empty-class-argument-transport"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Apple arm64 calling convention, AAPCS64 §6.8.2, AMD64 psABI §3.2.3, Itanium C++ ABI §3.1.2.3, #116, #641"
 prior = "Omit a trivial empty class argument on both targets, as observed with Clang. The GCC Darwin mixed-object fixture is expected to fail."
 spec = "Omit the call-trivial empty argument per the Apple arm64 convention and the AMD64 NO_CLASS classification."
-gcc = "Omit the tested one-byte empty argument on x86-64 Linux. On arm64 Darwin, the recorded GCC behavior is to pass the byte, consuming a parameter register."
+gcc = "Omit the tested one-byte empty argument on x86-64 Linux. Pass the byte on arm64 Darwin, consuming a parameter register."
 clang = "Same as spec."
-limits = "Covers fixed direct calls using naturally aligned one-byte classes with trivial call operations, with adjacent scalar arguments. Cold and resident objects agree for both targets. Native Linux interoperation is verified. The Darwin GCC rule still needs an updated native mixed-object result."
-evidence = ["tests/own/abi/empty-classes.run.cpp", "tests/daemon/compatibility.py", "https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms", "https://github.com/yrashk/ycxx/commit/41b46a11c2aa34dc5fb6daebf1812b93a01e8955"]
+limits = "Covers fixed direct calls using naturally aligned one-byte classes with trivial call operations, with adjacent scalar arguments. Cold and resident objects agree. Mixed-object tests verify both call directions on x86-64 Linux and arm64 Darwin."
+evidence = ["tests/own/abi/empty-classes.run.cpp", "tests/daemon/compatibility.py", "https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms", "https://github.com/yrashk/ycxx/commit/41b46a11c2aa34dc5fb6daebf1812b93a01e8955", "Native arm64 Darwin mixed-object tests with GCC 16.2.0 and upstream Clang 23.1.5 in https://github.com/yrashk/ycxx/actions/runs/45886630209/job/140138830657"]
 
 [[divergence]]
 id = "c-linkage-cross-namespace-duplicate-definition"
