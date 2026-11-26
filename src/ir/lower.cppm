@@ -1278,6 +1278,9 @@ class Lowering {
         emit_unreachable();
         return {};
       }
+      case Op::builtin:
+        if (BuiltinFn(imms[0]) == BuiltinFn::nansl) return fail("evaluating __builtin_nansl is not supported yet");
+        [[fallthrough]];
       default: return fail(std::format("`{}` is not in the α subset", info(nd.op).name));
     }
   }
