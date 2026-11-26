@@ -946,8 +946,8 @@ class Planner {
     GeneratorPlan plan;
     plan.name = decl.name;
     const auto& tool = require_field(decl, "tool");
-    const bool accepts_staged_tool = !sdk_header && !observer;
-    const auto* staged_tool = accepts_staged_tool ? std::get_if<InputArg>(&tool.data) : nullptr;
+    const bool artifact_inputs_allowed = !sdk_header;
+    const auto* staged_tool = artifact_inputs_allowed ? std::get_if<InputArg>(&tool.data) : nullptr;
     if (const auto* spelling = std::get_if<std::string>(&tool.data)) {
       if (spelling->contains('\0') || !fs::path(*spelling).is_absolute())
         fail(tool.location, "expected an absolute tool path");
@@ -956,8 +956,7 @@ class Planner {
       else observe(*spelling);
     } else if (!staged_tool && (!sdk_header || !std::holds_alternative<CxxTool>(tool.data))) {
       if (sdk_header) fail(tool.location, "expected an absolute tool path or cxx() selector");
-      fail(tool.location, accepts_staged_tool ? "expected an absolute tool path or input(name) selector"
-                                              : "expected an absolute tool path");
+      fail(tool.location, "expected an absolute tool path or input(name) selector");
     }
 
     if (const auto* entries = field(decl, "environment")) {
@@ -977,7 +976,6 @@ class Planner {
       plan.inputs.push_back({"ycxx_rule_api.h", std::move(sdk_path),
                              {{sdk_header->begin(), sdk_header->end()}, false}});
     }
-    const bool artifact_inputs_allowed = !sdk_header;
     const auto first_file_input = plan.inputs.size();
     const auto* inputs = field(decl, "inputs");
     const auto* bindings = inputs ? &as<Record>(*inputs, "a record of named inputs") : nullptr;
