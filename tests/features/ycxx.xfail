@@ -9,7 +9,6 @@ draft/basic/basic.contract.eval-3.accept.cpp 'contract_assert' not supported yet
 draft/basic/basic.def.odr-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/basic/basic.def.odr-3.reject.cpp errors elsewhere: '[' not supported yet
 draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'auto' is not supported yet
-draft/basic/basic.def.odr-5.accept.cpp 'auto' not supported yet
 draft/basic/basic.def.odr-8.accept.cpp '[' not supported yet
 draft/basic/basic.fundamental-2.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.life-2.accept.cpp preprocessing directives are not supported yet
@@ -34,7 +33,6 @@ draft/basic/class.member.lookup-3.reject.cpp errors elsewhere: 'struct' not supp
 draft/basic/class.member.lookup-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.member.lookup-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.temporary-5.accept.cpp preprocessing directives are not supported yet
-draft/basic/intro.execution-3.accept.cpp 'union' not supported yet
 draft/basic/intro.memory-1.accept.cpp 'struct' not supported yet
 draft/basic/intro.object-2.accept.cpp preprocessing directives are not supported yet
 draft/basic/intro.object-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -84,13 +82,11 @@ draft/class/class.local-1.reject.cpp errors elsewhere: 'static' not supported ye
 draft/class/class.mem.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.mem.general-4.accept.cpp 'struct' not supported yet
 draft/class/class.mfct-2.accept.cpp 'typedef' not supported yet
-draft/class/class.name-3.accept.cpp 'struct' not supported yet
 draft/class/class.paths-1.accept.cpp 'class' not supported yet
 draft/class/class.pre-1.accept.cpp 'namespace' not supported yet
 draft/class/class.prop-1.accept.cpp 'struct' not supported yet
 draft/class/class.protected-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.union.anon-1.accept.cpp 'union' not supported yet
-draft/class/class.union.anon-2.reject.cpp errors elsewhere: 'union' not supported yet
 draft/class/class.union.anon-3.reject.cpp errors elsewhere: 'union' not supported yet
 draft/class/class.union.general-1.accept.cpp preprocessing directives are not supported yet
 draft/class/class.virtual-1.accept.cpp 'struct' not supported yet
@@ -250,7 +246,6 @@ draft/expr/expr.prim.req.general-2.reject.cpp errors elsewhere: 'template' not s
 draft/expr/expr.prim.req.type-1.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.splice-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.prim.this-1.accept.cpp 'struct' not supported yet
-draft/expr/expr.prim.this-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/expr/expr.ref-1.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.ref-2.accept.cpp 'struct' not supported yet
 draft/expr/expr.reflect-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -411,8 +406,12 @@ own/three-way-comparison/implicit-equality.run.cpp invalid operands: the '==' a 
 own/three-way-comparison/library.accept.cpp <type_traits> before <compare> (#1082, #1091, #1172, #308, #340)
 own/function-pointers/iota-template-argument.run.cpp function pointers and references as constant template arguments (#406)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
-own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
-own/classes/s1-locals-scopes.run.cpp local classes (#117)
+own/local-classes/consteval-dtor.run.cpp the interpreter does not evaluate 'alloc' yet (#1140)
+own/local-classes/consteval-table.run.cpp the interpreter does not evaluate 'alloc' yet: class arrays and array members (#1140)
+own/local-classes/enclosing-types.run.cpp 'enum' is not supported yet: block-scope enumerations (#1442)
+own/local-classes/implicit-copy.run.cpp defaulted copy assignment of 'Box' is unsupported for this operation (#360)
+own/local-classes/nested-class.run.cpp expected a type specifier: a member class defined in the block (#1443)
+own/local-classes/virtual-functions.run.cpp 'virtual' is not supported yet: local dynamic classes (#1155)
 own/floating/const-compare.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-arith-types.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-double-float.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645

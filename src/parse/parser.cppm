@@ -64,6 +64,7 @@ struct DeclSpec {
   Tk class_key = Tk::eof;
   NameId class_name{};
   u32 class_at = 0;
+  bool defined_class = false;  // a class-specifier: a local class ([class.local])
   bool ok = true;
 };
 
@@ -674,6 +675,14 @@ public:
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
   // declares the class ([basic.scope.pdecl]); set by the owner where that applies.
   std::function<std::optional<QualType>(NameId, Tk, u32)> declare_class;
+  // A local class's class-specifier at region token `index` ([class.local]), which the splitter cut
+  // as an item of its own: whether there is one; then its type, none after an error, and the
+  // index past its `}`. Set by the owner of a block.
+  struct LocalClass {
+    std::optional<QualType> type;
+    u32 end = 0;
+  };
+  std::function<std::optional<LocalClass>(u32)> define_class;
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
@@ -877,6 +886,23 @@ public:
       case Tk::kw_class:
       case Tk::kw_union: {
         u32 at = pos();
+        if (define_class && !qualified_ahead(1)) {
+          if (auto local = define_class(index())) {
+            seek(local->end);
+            if (!local->type) {
+              d.ok = false;
+              goto done;
+            }
+            if (any_type()) {
+              s_->diag(at, Diag::conflicting_specifiers, k);
+              d.ok = false;
+              goto done;
+            }
+            cls = *local->type;
+            d.defined_class = true;
+            continue;
+          }
+        }
         if (qualified_ahead(1)) {
           bump();
           const std::size_t diags = s_->diag_count();
@@ -7414,6 +7440,16 @@ public:
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement(bool no_prefix_attributes) {
     u32 begin = pos();
+    // `class-key identifier ;` declares a class in the block, unless the block has declared it
+    // ([dcl.type.elab]/2, [basic.scope.pdecl]/7): a local class.
+    if (body && is_class_key(kind()) && kind(1) == Tk::identifier && kind(2) == Tk::semi && declare_class) {
+      const NameId n = name_of(tok(1));
+      if (!s_->innermost_block_type(n)) declare_class(n, kind(), begin + 1);
+      bump();
+      bump();
+      bump();
+      return s_->node(ast::ExprStmt{}, begin, pos());
+    }
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);
@@ -7428,6 +7464,8 @@ public:
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
+    // A local class's definition may declare nothing else ([dcl.pre]/5).
+    if (spec.defined_class && spec.ok && accept(Tk::semi)) return s_->node(ast::ExprStmt{}, begin, pos());
     if (spec.is_typedef) {
       // Block-scope typedef-names ([dcl.typedef]).
       do {

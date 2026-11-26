@@ -1014,6 +1014,15 @@ of non-template member classes. An implicit instantiation checks the member defi
 requires the member class to be complete.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
 
+**Local classes.** A class can be defined in a function body, a lambda, or a member function of
+a class template: named or unnamed, with declarators after it, constructors, a destructor that runs
+when the block exits, member functions and default member initializers. Its members use the
+block's types and constants, and the function's access. Each specialization of a templated
+function has its own local class. Block-scope enumerations and local classes with virtual
+functions are not supported yet.
+[#117](https://github.com/yrashk/ycxx/issues/117) · [#1442](https://github.com/yrashk/ycxx/issues/1442) ·
+[#1155](https://github.com/yrashk/ycxx/issues/1155)
+
 **Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
 class templates with external linkage and single public nonvirtual inheritance can declare virtual
 functions, virtual destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
