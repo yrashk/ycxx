@@ -61,3 +61,15 @@ target_link_libraries(ycxxc_lib PUBLIC ycxxc_options ycxxc_daemon ycxxc_obj)
 add_executable(ycxxc main.cpp)
 set_target_properties(ycxxc PROPERTIES OUTPUT_NAME ycxx RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 target_link_libraries(ycxxc PRIVATE ycxxc_lib ycxxc_new)
+
+if(YCXXC_STDLIB STREQUAL "system")
+  # Rule workers start this executable with a sanitized environment, even when GCC is installed
+  # outside the system loader's search directories.
+  execute_process(COMMAND "${CMAKE_CXX_COMPILER}" "-print-file-name=libstdc++${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    OUTPUT_VARIABLE stock_runtime OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+  if(IS_ABSOLUTE "${stock_runtime}" AND EXISTS "${stock_runtime}")
+    file(REAL_PATH "${stock_runtime}" stock_runtime)
+    cmake_path(GET stock_runtime PARENT_PATH stock_runtime_directory)
+    set_property(TARGET ycxxc APPEND PROPERTY BUILD_RPATH "${stock_runtime_directory}")
+  endif()
+endif()
