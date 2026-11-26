@@ -531,6 +531,7 @@ public:
 
   // `decltype(e)` [dcl.type.decltype], with `decltype` and `(` at the cursor.
   std::optional<QualType> decltype_expression_type() {
+    const u32 at = pos();
     bump();
     bump();
     int saved = std::exchange(angle_, 0);
@@ -541,8 +542,18 @@ public:
     angle_ = saved;
     bool closed = expect(Tk::r_paren);
     if (!e.ok() || !closed) return std::nullopt;
+    const bool parenthesized = s_->as<ast::Paren>(e).has_value();
+    if (!written_function_parameters_.empty()) {
+      const auto reference = written_atom(e);
+      if (s_->ins().values.is<ast::VDepFnParam>(reference)) {
+        const std::array operands{reference, ConstId::none};
+        const auto spelling = s_->ins().intern_value(ast::VWrittenOperator{
+            u8(Tk::kw_decltype), s_->ins().intern_seq(std::span<const ConstId>(operands).first(parenthesized ? 2 : 1))});
+        written_decltypes_.insert_or_assign(at, spelling);
+      }
+    }
     if (s_->dependent(e)) ++deferred_argument_checks_;
-    return s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
+    return s_->decltype_of(e, parenthesized);
   }
 
   // In an argument, a nested `<` can be an operator. Type-template names reached through
@@ -3263,7 +3274,8 @@ public:
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
                                                                      bool* took_closer = nullptr, bool expand_empty = false,
-                                                                     VariableArgumentReplay* replay = nullptr) {
+                                                                     VariableArgumentReplay* replay = nullptr,
+                                                                     bool retain_decltype = false) {
     // Any nested template-id must supply canonical arguments to its enclosing argument.
     const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     if (took_closer) *took_closer = false;
@@ -3331,7 +3343,9 @@ public:
           if (!t) ok = false;
           else {
             const auto type = writing_gcc_template_signature_ ? retain_gcc_signature_transforms(*t) : *t;
-            args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type), sema::ConstId::none});
+            const auto spelling = retain_decltype ? written_decltypes_.find(arg_at) : written_decltypes_.end();
+            args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type),
+                            spelling == written_decltypes_.end() ? ConstId::none : spelling->second});
           }
         } else {
           Ex e = template_argument_expression(replay != nullptr);
@@ -3536,6 +3550,7 @@ public:
   sema::ConstId trailing_function_constraint(std::span<const Param> params, sema::ConstId& written) {
     auto saved = std::exchange(written_function_parameters_, {});
     auto saved_packs = std::exchange(written_function_packs_, {});
+    auto saved_decltypes = std::exchange(written_decltypes_, {});
     s_->push_scope();
     for (std::size_t i = 0; i < params.size(); ++i) {
       const auto& p = params[i];
@@ -3550,6 +3565,7 @@ public:
     s_->pop_scope();
     written_function_parameters_ = std::move(saved);
     written_function_packs_ = std::move(saved_packs);
+    written_decltypes_ = std::move(saved_decltypes);
     return result;
   }
 
@@ -3760,28 +3776,38 @@ public:
       if (!c) return std::nullopt;
       bump();
     }
-    auto args = template_argument_list();
+    auto args = template_argument_list(nullptr, nullptr, false, nullptr, /*retain_decltype=*/written != nullptr);
     if (!args) {  // read again as an expression, which diagnoses it
       i_ = back;
       s_->truncate_diags(n);
       return std::nullopt;
     }
-    auto normal = s_->concept_constraint(*c, *args, at);
+    auto canonical = *args;
+    for (auto& argument : canonical)
+      if (argument.kind == ast::TemplateArgKind::type) argument.value = ConstId::none;
+    auto normal = s_->concept_constraint(*c, canonical, at);
     if (normal && written) {
       if (s_->compatibility() == ast::Compatibility::gcc)
-        if (auto full = s_->template_arguments(*c, *args, at)) *args = std::move(*full);
+        if (auto full = s_->template_arguments(*c, canonical, at)) {
+          for (std::size_t i = 0; i < std::min(full->size(), args->size()); ++i)
+            if ((*full)[i].kind == ast::TemplateArgKind::type && (*args)[i].kind == ast::TemplateArgKind::type)
+              (*full)[i].value = (*args)[i].value;
+          *args = std::move(*full);
+        }
       *written = written_concept(*c, *args, qualified, global);
     }
     return normal.value_or(sema::ConstId::none);
   }
 
   bool writing_constraint_atom_ = false;
+  bool defer_member_constraint_layout = false;
   bool normalizing_constraint_atom_ = false;
   bool writing_pack_index_ = false;
   std::map<NodeId, ConstId> written_operators_;
   std::map<u32, ast::VRequiresParameter> written_requires_parameters_;
   std::map<u32, ast::VDepFnParam> written_function_parameters_;
   std::map<NameId, ast::VDepFnParam> written_function_packs_;
+  std::map<u32, ConstId> written_decltypes_;
   u32 written_requires_depth_ = 0;
 
   struct FoldConstraintPattern {
@@ -4790,6 +4816,7 @@ public:
         // Tentatively a type-id: `sizeof(int(1))` and `sizeof(T{})` are expressions.
         u32 back = i_;
         bump();
+        const u32 type_at = pos();
         if (starts_type_id()) {
           std::size_t n = s_->diag_count();
           auto t = type_id();
@@ -4802,8 +4829,11 @@ public:
               if (layout_argument_at_ == begin) return s_->dependent_layout_query(*t, align, begin, pos());
             }
             Ex r = s_->size_of(*t, align, begin, pos());
-            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok())
-              written_operators_.insert_or_assign(r.id, s_->layout_query_value(*t, align));
+            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok()) {
+              if (const auto spelling = written_decltypes_.find(type_at); spelling != written_decltypes_.end())
+                record_written_operator(r, align ? Tk::kw_alignof : Tk::kw_sizeof, {spelling->second});
+              else written_operators_.insert_or_assign(r.id, s_->layout_query_value(*t, align));
+            }
             return {r.id, begin, pos(), r.info};
           }
           s_->truncate_diags(n);
@@ -4824,9 +4854,15 @@ public:
       }
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
       if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
-      Ex r = s_->size_of(e.type(), false, begin, pos());
+      const auto operand = writing_constraint_atom_ ? written_atom(e) : ConstId::none;
+      bool defer = false;
+      if (defer_member_constraint_layout && s_->ins().values.is<ast::VWrittenOperator>(operand)) {
+        const auto op = s_->ins().values.get<ast::VWrittenOperator>(operand);
+        defer = Tk(op.token) == Tk::star && s_->ins().seqs.size(op.operands) == 1 &&
+                s_->ins().values.is<ast::VWrittenThis>(s_->ins().seqs.at(op.operands, 0));
+      }
+      Ex r = defer ? s_->dependent_layout_query(e.type(), false, begin, pos()) : s_->size_of(e.type(), false, begin, pos());
       if (writing_constraint_atom_) {
-        const auto operand = written_atom(e);
         // Clang folds the size of a nondependent `this` pointer in its symbol.
         const bool folded_this = s_->compatibility() == ast::Compatibility::clang &&
             s_->ins().values.is<ast::VWrittenThis>(operand) && s_->as<ast::Literal>(r).has_value();
@@ -5045,13 +5081,20 @@ public:
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
         const Ex object = e;
-        e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
-                       structural_member_argument() && !keyword && !targs);
+        const auto written_object = writing_constraint_atom_ ? written_atom(object) : ConstId::none;
+        const bool dependent_this = s_->declaration_part && targs &&
+            s_->ins().values.is<ast::VWrittenThis>(written_object) &&
+            std::ranges::any_of(*targs, [&](const ast::TemplateArg& arg) { return s_->dependent(arg); });
+        // A dependent member call in a trailing clause is checked at substitution.
+        // Class completion may still be processing the member's declaration here.
+        if (dependent_this) e = s_->dependent_node({object}, object.begin, pos());
+        else e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
+                            structural_member_argument() && !keyword && !targs);
         if (writing_constraint_atom_ && !member_class && e.ok()) {
-          if (const auto operand = written_atom(object); operand != ConstId::none) {
+          if (written_object != ConstId::none) {
             const auto args = targs ? std::span<const ast::TemplateArg>(*targs) : std::span<const ast::TemplateArg>{};
             written_operators_.insert_or_assign(e.id, s_->ins().intern_value(ast::VWrittenMember{
-                operand, n, s_->ins().intern_seq(args), arrow, targs.has_value()}));
+                written_object, n, s_->ins().intern_seq(args), arrow, targs.has_value()}));
           }
         }
         if (targs) s_->explicit_template_args(e, std::move(*targs));

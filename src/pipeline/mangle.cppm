@@ -815,7 +815,8 @@ class Mangler {
         }
         return out + "E";
       }
-      if (a.kind == ast::TemplateArgKind::type) return type(a.type);
+      if (a.kind == ast::TemplateArgKind::type)
+        return a.value != ast::ConstId::none ? expression(a.value) : type(a.type);
       // A template: its <name>, the name a candidate (§5.1.5.7); while dependent, its parameter.
       if (a.kind == ast::TemplateArgKind::template_) return a.templ != ast::EntityId::none ? template_entity_name(a.templ) : type(a.type);
       // A non-type pack expansion: `sp` and its pattern, an <expression> (§5.1.6).
@@ -996,7 +997,14 @@ class Mangler {
       case lex::Tk::l_paren: code = "cl"; break;
       case lex::Tk::l_square: code = "ix"; break;
       case lex::Tk::question: code = "qu"; break;
-      case lex::Tk::kw_sizeof: code = "sz"; break;
+      case lex::Tk::kw_sizeof: {
+        const bool decltype_type = operands.size() == 1 && in_.values.is<ast::VWrittenOperator>(operands.front()) &&
+            lex::Tk(in_.values.get<ast::VWrittenOperator>(operands.front()).token) == lex::Tk::kw_decltype;
+        code = decltype_type ? "st" : "sz";
+        break;
+      }
+      case lex::Tk::kw_alignof: code = "at"; break;
+      case lex::Tk::kw_decltype: code = operands.size() == 1 ? "Dt" : "DT"; break;
       case lex::Tk::ellipsis: code = "sZ"; break;
       case lex::Tk::kw_noexcept: code = "nx"; break;
       case lex::Tk::kw_throw: code = operands.empty() ? "tr" : "tw"; break;
@@ -1012,7 +1020,7 @@ class Mangler {
         if (!child) return child;
         encoded += *child;
       }
-      if (token == lex::Tk::l_paren) encoded += 'E';
+      if (token == lex::Tk::l_paren || token == lex::Tk::kw_decltype) encoded += 'E';
       return encoded;
     }
     if (in_.values.is<ast::VWrittenMember>(v)) {

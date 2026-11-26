@@ -3778,7 +3778,7 @@ extern "C" F obtain() { return f(); }
                 if mode == 'spec':
                     assert not any(b'_cvP' in name for name in names), (mode, target, case, names)
                 else:
-                    assert symbol.encode() in names, (mode, target, case, symbol, names)
+                    assert symbol.encode() in names, (mode, target, case, symbol, [n for n in names if b'_Z' in n])
                 rejection = [*flags, f'-DCASE={case}', '-DREJECT', '-fsyntax-only', 'constrained-conversion.cpp']
                 cold, warm = (world.cxx(rejection, scope, env, timeout=40) for env in (world.cold, world.daemon))
                 assert cold == warm and warm[0] == 1, (mode, target, case, cold, warm)
@@ -3921,6 +3921,11 @@ struct S {
 };
 #elif CASE == 5
 struct S { template<class T> int f(T n) const requires (sizeof(this) == 1) { return n; } };
+#elif CASE == 6
+struct S {
+  template<class T> requires (sizeof(T) > 8) int h() const { return 1; }
+  template<class T> int f(T n) const requires requires { this->template h<T>(); } { return n; }
+};
 #endif
 int use() { S x; return x.f(7); }
 ''')
@@ -3931,7 +3936,7 @@ int use() { S x; return x.f(7); }
                    4: '_ZNK1S1fIiEEiT_QrqXclptfpT1hIS1_EEE'}
         for target in (LINUX, DARWIN):
             prefix = '_' if target == DARWIN else ''
-            for case in range(1, 6):
+            for case in range(1, 7):
                 flags = [target, '-fcompat=' + mode, f'-DCASE={case}']
                 if case not in symbols:
                     rejection = [*flags, '-fsyntax-only', 'this-constraint.cpp']

@@ -8300,7 +8300,10 @@ private:
         const auto before = s_.diag_count();
         const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, r.fn_cv)));
         const auto saved = std::exchange(s_.this_type, object);
+        const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout,
+                                                p_->items().items[it_->parent].template_depth != 0);
         trailing_requires_clause(d.params);
+        ps_.defer_member_constraint_layout = saved_layout;
         s_.this_type = saved;
         if (s_.has_error_since(before)) return false;
       }
