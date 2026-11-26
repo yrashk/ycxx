@@ -11213,8 +11213,10 @@ public:
       ast::DeclSema d = ins.seqs.at(is.decls, 0);
       if (ins.seqs.size(d.template_params) > 0) s_.template_scopes.push_back(ins.seqs.elements(d.template_params));
     }
-    if (ins.seqs.size(atom_.lambda_head) != 0)
-      s_.template_scopes.push_back(ins.seqs.elements(atom_.lambda_head));
+    const bool in_lambda = ins.seqs.size(atom_.lambda_scope) != 0;
+    const auto lambda = in_lambda ? ins.seqs.at(atom_.lambda_scope, 0) : ast::AtomLambdaScope{};
+    if (ins.seqs.size(lambda.head) != 0)
+      s_.template_scopes.push_back(ins.seqs.elements(lambda.head));
     sema::Templates t = s_.templates();
     s_.template_args.levels.resize(atom_.depth + 1);
     for (ConstId e : ins.seqs.elements(atom_.mapping))
@@ -11227,10 +11229,9 @@ public:
           if (auto arg = s_.template_args.at(parameter.depth, parameter.index); arg && arg->kind != ast::TemplateArgKind::pack)
             parameter.pack = false;
     // The function's parameters, of their substituted types, for an atom that names them.
-    if (atom_.fn_params && (ins.seqs.size(atom_.lambda_parameters) != 0 || ins.seqs.size(is.decls) != 0)) {
+    if (atom_.fn_params && (in_lambda || ins.seqs.size(is.decls) != 0)) {
       s_.push_scope();
-      const auto params = ins.seqs.size(atom_.lambda_parameters) != 0
-          ? atom_.lambda_parameters : ins.seqs.at(is.decls, 0).params;
+      const auto params = in_lambda ? lambda.parameters : ins.seqs.at(is.decls, 0).params;
       for (const ast::ParamSema& prm : ins.seqs.elements(params)) {
         if (s_.types().kind(prm.type) == sema::TypeKind::pack_expansion) {
           const std::array pattern{t.type_arg(prm.type)};

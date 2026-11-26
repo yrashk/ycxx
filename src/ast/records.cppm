@@ -84,6 +84,12 @@ struct ParamSema {
   constexpr bool operator==(const ParamSema&) const = default;
 };
 
+struct AtomLambdaScope {
+  SeqId<TemplateParamSema> head{};
+  SeqId<ParamSema> parameters{};
+  constexpr bool operator==(const AtomLambdaScope&) const = default;
+};
+
 // [dcl.attr.annotation]: the type deduced by reflect_constant's by-value parameter, the
 // evaluated constant, and the item-relative position of the annotation's '='. Enum constants
 // use their underlying representation in the value interner, paired here with the enum type.
@@ -283,7 +289,7 @@ struct WrittenRequirement {
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
                                 ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection, WrittenRequirement,
-                                TemplateTypeSpelling, FoldPackBinding>;
+                                TemplateTypeSpelling, FoldPackBinding, AtomLambdaScope>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

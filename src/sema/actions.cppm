@@ -1638,23 +1638,20 @@ public:
   // The type-constraints of the template-head being read, in normal form ([temp.constr.decl]/3).
   std::vector<ConstId> head_constraints;
   // Atoms in a lambda constraint replay in its own declarator scope.
-  ast::SeqId<ast::TemplateParamSema> atom_lambda_head{};
-  ast::SeqId<ast::ParamSema> atom_lambda_parameters{};
+  ast::SeqId<ast::AtomLambdaScope> atom_lambda_scope{};
   struct LambdaConstraintScope {
     Sema& sema;
-    ast::SeqId<ast::TemplateParamSema> saved_head;
-    ast::SeqId<ast::ParamSema> saved_parameters;
+    ast::SeqId<ast::AtomLambdaScope> saved_scope;
 
     LambdaConstraintScope(Sema& s, std::span<const ast::ParamSema> parameters)
-        : sema(s), saved_head(s.atom_lambda_head), saved_parameters(s.atom_lambda_parameters) {
-      sema.atom_lambda_head = sema.template_scopes.empty() ? ast::SeqId<ast::TemplateParamSema>{}
-          : sema.ins().intern_seq(std::span<const ast::TemplateParamSema>(sema.template_scopes.back()));
-      sema.atom_lambda_parameters = sema.ins().intern_seq(parameters);
+        : sema(s), saved_scope(s.atom_lambda_scope) {
+      ast::AtomLambdaScope scope;
+      if (!sema.template_scopes.empty())
+        scope.head = sema.ins().intern_seq(std::span<const ast::TemplateParamSema>(sema.template_scopes.back()));
+      scope.parameters = sema.ins().intern_seq(parameters);
+      sema.atom_lambda_scope = sema.ins().intern_seq(std::span<const ast::AtomLambdaScope>(&scope, 1));
     }
-    ~LambdaConstraintScope() {
-      sema.atom_lambda_head = saved_head;
-      sema.atom_lambda_parameters = saved_parameters;
-    }
+    ~LambdaConstraintScope() { sema.atom_lambda_scope = saved_scope; }
   };
 
   // An atomic constraint ([temp.constr.atomic]): the expression at [begin, end) of this part, whose
@@ -1692,9 +1689,9 @@ public:
     std::vector<u32> calls;
     for (u32 c : dependent_calls)
       if (c >= begin && c < end) calls.push_back(c - begin);
-    return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, depth, ins().intern_seq(std::span<const ConstId>(mapping)),
-                                         ins().intern_seq(std::span<const u32>(calls)), fn_params, current_class,
-                                         atom_lambda_head, atom_lambda_parameters});
+    return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, ins().intern_seq(std::span<const ConstId>(mapping)),
+                                         ins().intern_seq(std::span<const u32>(calls)), current_class, atom_lambda_scope, depth,
+                                         fn_params});
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
