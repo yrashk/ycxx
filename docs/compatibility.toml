@@ -713,8 +713,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6
 
 [[divergence]]
 id = "concept-template-parameter-fold-expansion"
-status = "pending"
-mode_status = { spec = "pending", gcc = "unverified", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.param], [temp.constr.concept], [temp.constr.normal], [temp.constr.order]"
 prior = "No concept template parameter pack normalization."
 spec = "Normalize each bound concept pack argument individually. This selects the more constrained overload in the draft example. A fold cannot combine concept template parameter packs and other pack kinds."
@@ -725,8 +725,8 @@ evidence = ["tests/daemon/compatibility.py", "The explicit overload and mixed-pa
 
 [[divergence]]
 id = "constrained-builtin-predicate-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.over.link], Itanium C++ ABI §5.1.6.2, docs/EXTENSIONS.md"
 prior = "Retain an opaque constraint fingerprint even when the source uses a recognized type predicate."
 spec = "Keep the predicate's source argument types with the vendor expression encoding."

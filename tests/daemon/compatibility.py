@@ -3209,7 +3209,8 @@ int keep() { return direct(); }
                     mode, target, case, name, [n for n in names if b'_Z' in n])
                 rejecting = [target, '-fcompat=' + mode, f'-DCASE={case + 6}', '-fsyntax-only', 'constrained-lambda.cpp']
                 cold, warm = (world.cxx(rejecting, scope, env, timeout=40) for env in (world.cold, world.daemon))
-                assert cold == warm and warm[0] == 1 and b'viable' in warm[2], (mode, target, case, cold, warm)
+                assert cold == warm and warm[0] == 1 and b"no matching function for call to 'operator()'" in warm[2], (
+                    mode, target, case, cold, warm)
                 if peer and ((target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')):
                     (scope / 'lambda-caller.cpp').write_text(f'''\
 struct EmptyClosure {{}};
@@ -3323,7 +3324,7 @@ def written_allocation_constraint_symbols(world, gxx):
     scope = world.scope
     (scope / 'allocation-constraint.cpp').write_text('''\
 using Size = decltype(sizeof(0));
-void* operator new(Size, void*);
+void* operator new(Size, void*) noexcept;
 struct Box {
   int number;
   static constexpr int num = 1;
@@ -3373,7 +3374,11 @@ struct Box {
 #endif
 template<class T> requires CONSTRAINT
 int f(T) { return 1; }
+#if CASE == 9 || CASE == 14 || CASE == 15
+int use() { return f(7); }
+#else
 int use() { return f(Box{}); }
+#endif
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
@@ -3405,14 +3410,17 @@ int use() { return f(Box{}); }
                     assert result == (0, b'', b''), (mode, target, case, result)
                     outputs.append((scope / 'allocation-constraint.o').read_bytes())
                 prefix = '_' if target == DARWIN else ''
-                parameter = 'S2_' if case == 8 else 'S1_'
-                name = f'{prefix}_Z1fI3BoxQ{clause}Ei{parameter}'
+                scalar = case in (9, 14, 15)
+                argument = 'i' if scalar else '3Box'
+                parameter = 'S0_' if scalar else 'S2_' if case == 8 else 'S1_'
+                name = f'{prefix}_Z1fI{argument}Q{clause}Ei{parameter}'
                 names = outputs[1].split(b'\0')
                 assert outputs[0] == outputs[1] and name.encode() in names, (
                     mode, target, case, name, [n for n in names if b'_Z1f' in n])
                 peer = gxx if mode == 'gcc' else clang
                 host = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
                 if peer and host and case in (6, 11, 15):
+                    argument_type = 'int' if scalar else 'Box'
                     (scope / 'allocation-caller.cpp').write_text(f'''\
 struct Box {{
   int number;
@@ -3420,8 +3428,8 @@ struct Box {{
   constexpr Box(int n = 0) : number(n) {{}}
   constexpr operator int() const {{ return number; }}
 }};
-extern "C" int call(Box) asm("{name}");
-int main() {{ return call(Box{{7}}) != 1; }}
+extern "C" int call({argument_type}) asm("{name}");
+int main() {{ return call({argument_type}{{7}}) != 1; }}
 ''')
                     subprocess.run([peer, '-std=c++26', 'allocation-caller.cpp', 'allocation-constraint.o',
                                     '-o', 'allocation-call'], cwd=scope, check=True, capture_output=True, timeout=40)
