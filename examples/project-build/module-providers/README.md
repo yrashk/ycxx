@@ -35,9 +35,11 @@ candidate link to its declaration at `shared_linux.cc:2:1`. In
 `arm64-apple-darwin-plan.html`, both links land at `shared_darwin.cc:2:1`.
 The import sites are `left.cc:3:1` and `right.cc:3:1` in both reports.
 
-Open `linux-to-darwin.html` to see what changed. **Plan changes** compares the
-saved Linux snapshot with the current Darwin plan. **Module graph** below it
-shows the current Darwin graph.
+Open `linux-to-darwin.html` and find **Module changes**. Under **Import changes**,
+both `demo.shared` entries show `shared_linux.cc:2:1` under **Before** and
+`shared_darwin.cc:2:1` under **After**. Follow either **After** provider link
+to its declaration in the current Darwin graph. The report also includes
+**Plan changes** and **Module graph**.
 
 ## Compare provider edges in JSON
 
@@ -114,8 +116,8 @@ ycxx show app --target=x86_64-pc-linux-gnu --against x86_64-pc-linux-gnu-plan.js
     --format=json > linux-body-edit.json
 ```
 
-The body edit leaves all four `module_changes` arrays empty. Press `q` in the
-trace view to stop watch.
+The HTML report shows **No semantic module changes.** The body edit leaves all
+four `module_changes` arrays empty. Press `q` in the trace view to stop watch.
 
 ## See ambiguous providers
 
@@ -134,6 +136,7 @@ ycxx show app --target=x86_64-pc-linux-gnu --against x86_64-pc-linux-gnu-plan.js
     --format=html > ambiguous-plan.html
 ```
 
-Open `ambiguous-plan.html` and find **Module graph**. Each `demo.shared` import
-now shows an ambiguous status with links to `shared_linux.cc:2:1` and
-`shared_darwin.cc:2:1`. The `demo.shared` conflict links to both declarations.
+Open `ambiguous-plan.html` and find **Module changes**. Each `demo.shared`
+import changes from resolved to ambiguous. Its **After** candidates link to
+`shared_linux.cc:2:1` and `shared_darwin.cc:2:1`. Under **Provider conflict
+changes**, the added `demo.shared` conflict links to both declarations.

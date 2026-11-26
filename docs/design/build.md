@@ -422,6 +422,24 @@ set `unavailable` to `ambiguous_legacy_configuration`. The plan's `changes`
 array contains the semantic fact comparison in either case. Snapshots saved
 without a graph still produce the original fact comparison.
 
+### Module graph comparisons in HTML (#1390)
+
+`ycxx show app --against before.json --format=html > changes.html` shows
+**Module changes** above **Plan changes** and the current **Module graph**
+when both plans have graphs. It uses the same semantic comparison as JSON.
+Before entries show sites from the saved snapshot. After entries link to the
+current imports, provider declarations, and translation units. The comparison
+also shows scan completeness, changes to individual unit scans, conflicts,
+and cycles. A partial scan can change which providers are observable.
+
+An older graph with unambiguous unit paths can compare by source path. The
+report identifies that fallback and explains when repeated source paths make a
+comparison unavailable. An available comparison with equal semantic results
+shows **No semantic module changes.** A schema-1 snapshot without a graph
+still shows the fact comparison and the current graph when available.
+Inspection is read-only. Named-module compilation and BMI support are tracked
+in [#319](https://github.com/yrashk/ycxx/issues/319).
+
 ## Native rule packages (#1257)
 
 A package owns its definition and exports a host rule plugin target. A workspace
