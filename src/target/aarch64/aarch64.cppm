@@ -105,6 +105,11 @@ export struct CompiledFunction {
 export std::expected<obj::object, CodegenError> assemble(std::string name, std::span<const CompiledFunction> functions,
                                                          std::span<const DataDef> data, std::span<const Symbol> symbols);
 
+// An entity among an object's definitions that is there twice. Its references could name only one of
+// them, so both object formats refuse it. Different entities may share a spelling: an asm label's
+// (#694) or a local symbol's.
+export std::optional<CodegenError> repeated_definition(std::vector<ir::EntityId> defined);
+
 // The whole unit, functions and variables in entity-id order.
 export std::expected<obj::object, CodegenError> codegen(const Unit& unit, const CallingConvention& cc = apple_arm64);
 
@@ -288,8 +293,19 @@ std::expected<std::vector<std::uint8_t>, std::string> cleanup_lsda(const Machine
 
 }  // namespace
 
+std::optional<CodegenError> repeated_definition(std::vector<ir::EntityId> defined) {
+  std::ranges::sort(defined, {}, [](ir::EntityId e) { return ir::raw(e); });
+  const auto twice = std::ranges::adjacent_find(defined);
+  if (twice == defined.end()) return std::nullopt;
+  return CodegenError{*twice, std::format("@{} is defined twice in one object", ir::raw(*twice))};
+}
+
 std::expected<obj::object, CodegenError> assemble(std::string name, std::span<const CompiledFunction> functions,
                                                   std::span<const DataDef> data, std::span<const Symbol> symbols) {
+  std::vector<ir::EntityId> definitions;
+  for (const CompiledFunction& f : functions) definitions.push_back(f.entity);
+  for (const DataDef& d : data) definitions.push_back(d.entity);
+  if (auto error = repeated_definition(std::move(definitions))) return std::unexpected(std::move(*error));
   std::map<std::uint32_t, const Symbol*> names;
   for (const Symbol& s : symbols) names[ir::raw(s.entity)] = &s;
   auto name_of = [&](ir::EntityId e) -> std::expected<const Symbol*, CodegenError> {

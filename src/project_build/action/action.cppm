@@ -35,10 +35,17 @@ struct ActionOutput {
 };
 
 struct ActionArg {
-  enum class Kind : std::uint8_t { literal, input, output, target_triple };
+  enum class Kind : std::uint8_t { literal, input, output, target_triple, host_triple };
   Kind kind = Kind::literal;
   std::string value;  // an argument word or the name of a declared input or output
 };
+
+constexpr std::string_view triple_arg_selector(ActionArg::Kind kind) {
+  using enum ActionArg::Kind;
+  if (kind == target_triple) return "target_triple()";
+  if (kind == host_triple) return "host_triple()";
+  return {};
+}
 
 struct Action {
   std::string tool;  // absolute host executable or normalized path to a staged input under inputs/
@@ -131,7 +138,7 @@ std::expected<Command, std::string> prepare(const Action& action, std::span<cons
 
   Command cmd{{action.tool}, {}};
   for (const auto& arg : action.args) {
-    if (arg.kind == ActionArg::Kind::literal || arg.kind == ActionArg::Kind::target_triple) {
+    if (arg.kind == ActionArg::Kind::literal || !triple_arg_selector(arg.kind).empty()) {
       if (arg.value.contains('\0')) return std::unexpected("action argument contains NUL");
       cmd.args.push_back(arg.value);
       continue;

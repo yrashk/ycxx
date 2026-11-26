@@ -73,6 +73,7 @@ using Apply = std::function<void(const std::function<void(engine::Db&)>&)>;
 struct Planned {
   Fp128 workspace;
   ProjectPlan resolved;
+  std::vector<pipeline::RequestId> host_requests;
 };
 struct [[=engine::input{engine::Durability::low}]] WorkspacePlan {
   using Key = Fp128;  // The requested executable's output path.
@@ -133,6 +134,48 @@ struct RuleWitnessResult {
   using Value = RuleWitnessReceipt::Value;
   static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
     co_return cx.fetch<RuleWitnessReceipt>(key);
+  }
+};
+
+struct HostWitnessTool {
+  Artifact executable;
+  std::vector<HostFileObservation> files;
+  std::string error;
+};
+
+struct HostWitnessImage {
+  using Key = pipeline::RequestId;
+  using Value = HostWitnessTool;
+
+  static engine::query_task<Value> run(engine::Ctx& cx, Key request) {
+    const auto& built = co_await cx.fetch<pipeline::Build>(request);
+    const auto& build = cx.fetch<pipeline::BuildIn>(request);
+    std::map<std::string, std::optional<Fp128>> observed;
+    for (auto unit : build.units) {
+      const pp::FileId file{unit.n};
+      const auto& source = cx.fetch<pp::SourceOf>(file);
+      auto path = (fs::path(source.cwd) / source.path).lexically_normal().generic_string<char>();
+      const bool exists = pp::source_content(cx, source, source.path).has_value();
+      observed.insert_or_assign(std::move(path),
+          exists ? std::optional{fingerprint128(cx.fetch<pp::FileText>(file))} : std::nullopt);
+      if (!exists) continue;
+
+      (void)co_await cx.fetch<pp::Pp>(file);
+      // A changed include probe can leave preprocessing and the linked image equal.
+      // Observe the raw reads as well so the file evidence still advances.
+      for (const auto input : cx.observed_input_keys<pp::FileContent, pp::Pp>(file)) {
+        const auto& contents = cx.fetch<pp::FileContent>(input);
+        observed.try_emplace(pp::path_of(input), contents ? std::optional{fingerprint128(*contents)} : std::nullopt);
+      }
+    }
+    Value result;
+    for (const auto& [path, contents] : observed) result.files.push_back({path, contents});
+    if (built.linked && !built.linked->image.empty()) result.executable = {built.linked->image, true};
+    else {
+      result.error = pipeline::Build::errors(built);
+      if (result.error.empty()) result.error = "build produced no executable";
+    }
+    co_return result;
   }
 };
 
@@ -254,12 +297,13 @@ Fp128 action_key(const GeneratorPlan& generator, const std::vector<ActionInput>&
   const auto key = [&](const Action& recipe) {
     return fingerprint(std::tie(recipe, inputs, generator.tool_fingerprint));
   };
-  if (!std::ranges::contains(action.args, ActionArg::Kind::target_triple, &ActionArg::kind)) return key(action);
+  const auto resolved_triple = [](const ActionArg& arg) { return !triple_arg_selector(arg.kind).empty(); };
+  if (std::ranges::none_of(action.args, resolved_triple)) return key(action);
 
   // The argv word determines the receipt. Keep its provenance on the plan for traces.
   auto recipe = action;
   for (auto& arg : recipe.args)
-    if (arg.kind == ActionArg::Kind::target_triple) arg.kind = ActionArg::Kind::literal;
+    if (resolved_triple(arg)) arg.kind = ActionArg::Kind::literal;
   return key(recipe);
 }
 
@@ -287,18 +331,27 @@ struct ActionResolution {
 };
 
 template<class Lookup>
-ActionResolution resolve_actions(const ProjectPlan& plan, Lookup lookup) {
+bool append_generator_inputs(const GeneratorPlan& generator, Lookup lookup, std::span<const Artifact> host_images,
+                             std::vector<ActionInput>& inputs) {
+  if (generator.host_inputs.empty() && generator.artifact_inputs.empty()) return true;
+  for (const auto& edge : generator.host_inputs)
+    inputs.push_back({edge.name, edge.path, host_images[edge.executable]});
+  return append_artifact_inputs(generator, lookup, inputs);
+}
+
+template<class Lookup>
+ActionResolution resolve_actions(const ProjectPlan& plan, Lookup lookup, std::span<const Artifact> host_images) {
   const auto count = plan.generators.size();
   ActionResolution result{std::vector<std::optional<Fp128>>(count), {}};
   std::vector<const ActionOutputs*> outputs(count, nullptr);
   for (std::size_t i = 0; i < count; ++i) {
     const auto& generator = plan.generators[i];
     Fp128 key;
-    if (generator.artifact_inputs.empty()) {
+    if (generator.artifact_inputs.empty() && generator.host_inputs.empty()) {
       key = action_key(generator);
     } else {
       auto inputs = generator.inputs;
-      if (!append_artifact_inputs(generator, [&](std::size_t dep) { return outputs[dep]; }, inputs))
+      if (!append_generator_inputs(generator, [&](std::size_t dep) { return outputs[dep]; }, host_images, inputs))
         continue;
       key = action_key(generator, inputs);
     }
@@ -339,6 +392,7 @@ Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<F
 
 struct Demand {
   ActionResolution actions;
+  std::vector<Artifact> host_images;
   Fp128 native_plan;
   bool prepare = false;
   std::vector<std::uint8_t> image;
@@ -536,11 +590,22 @@ struct WorkspaceBuild {
     const auto& snapshot = cx.fetch<WorkspacePlan>(key);
     const auto& plan = snapshot.resolved;
     Demand demand{};
+    const auto host_builds = co_await cx.par_map<pipeline::Build>(snapshot.host_requests);
+    for (const auto& [index, built] : std::views::enumerate(host_builds)) {
+      const auto& host = built.get();
+      if (!host.linked || host.linked->image.empty()) {
+        const auto errors = pipeline::Build::errors(host);
+        demand.errors.push_back(std::format("host executable '{}': {}", plan.host_executables[index].name,
+            errors.empty() ? "build produced no executable" : errors));
+        co_return demand;
+      }
+      demand.host_images.push_back({host.linked->image, true});
+    }
     const auto receipt = [&](Fp128 action) -> const ActionOutputs* {
       const auto& stored = cx.fetch<ActionReceipt>(action);
       return stored ? &*stored : nullptr;
     };
-    demand.actions = resolve_actions(plan, receipt);
+    demand.actions = resolve_actions(plan, receipt, demand.host_images);
     if (!demand.actions.pending.empty()) co_return demand;
     demand.native_plan = native_plan_key(plan, demand.actions.keys, [&](std::size_t i) {
       return receipt(*demand.actions.keys[i]);
@@ -590,9 +655,9 @@ std::string normalized_include_directory(const fs::path& path) {
 }
 
 pipeline::TuId register_project_unit(pipeline::Session& session, const std::string& cwd,
-                                     const SourcePlan& source, const ast::Target* target, bool explicit_target) {
+                                     const SourcePlan& source, const ast::Target* target, pp::View view) {
   pp::Config config;
-  config.view = explicit_target ? pp::View::explicit_target_build : pp::View::build;
+  config.view = view;
   config.target = target;
   config.freestanding = target == &ast::x86_64_linux;
   for (const auto& include : source.includes) config.angle_dirs.push_back(normalized_include_directory(include));
@@ -600,12 +665,22 @@ pipeline::TuId register_project_unit(pipeline::Session& session, const std::stri
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
 
+pipeline::RequestId register_host_executable(pipeline::Session& session, const std::string& cwd,
+                                             const HostExecutablePlan& executable, const ast::Target* host_target) {
+  pipeline::BuildKey build;
+  for (const auto& source : executable.sources)
+    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk));
+  build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name});
+  return session.request(std::move(build));
+}
+
 pipeline::RequestId register_native(pipeline::Session& session, const std::string& cwd, const std::string& target,
                                     const ast::Target* native_target, const ProjectPlan& plan,
                                     LookupActionOutputs output_at, std::string_view native_triple) {
   pipeline::BuildKey build;
+  const auto view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
   for (const auto& source : plan.sources)
-    build.units.push_back(register_project_unit(session, cwd, source, native_target, !native_triple.empty()));
+    build.units.push_back(register_project_unit(session, cwd, source, native_target, view));
   std::optional<pipeline::ArchiveLinkInputs> archives;
   if (!plan.link_inputs.empty()) {
     using enum pipeline::LinkOperand::Kind;
@@ -673,7 +748,8 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
   std::vector<std::vector<std::string>> fact_names;
   for (const auto& source : plan.sources) {
     const auto shown_source = module_unit_display({module_path(source.path, cwd), ++source_instances[source.path]}, true);
-    const auto unit = register_project_unit(session, workspace, source, target, !native_triple.empty());
+    const auto view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
+    const auto unit = register_project_unit(session, workspace, source, target, view);
     const auto file = pp::FileId{unit.n};
     auto scan = *session.run<pipeline::ModuleDirectives>(file);
     std::string_view scan_status = "complete";
@@ -866,6 +942,15 @@ using RunRulePackage = std::function<std::expected<RulePackageBuild, std::string
     const RulePackageRef&, const RulePackagePlan&, Fp128, std::function_ref<bool()>)>;
 using RunRuleWitness = std::function<std::expected<WitnessEvidence, std::string>(
     std::string_view, const GeneratorPlan&, Fp128, std::function_ref<bool()>)>;
+struct BuiltWitnessTools {
+  std::vector<Artifact> images;
+  std::vector<HostFileObservation> files;
+  std::string error;
+};
+
+using BuildWitnessTools = std::function<std::optional<BuiltWitnessTools>(
+    const ProjectPlan&, std::span<const std::size_t>)>;
+using FindActionReceipt = std::function_ref<const ActionOutputs*(Fp128)>;
 using AdmitRuleValue = std::function<void(std::string_view, std::string_view, RuleValueRecord)>;
 using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePackagePlan&, const RulePackageAction&)>;
 using ResolveRuleArguments = std::function<std::expected<ProjectedRuleArguments, std::string>(
@@ -874,8 +959,20 @@ using ResolveRuleArguments = std::function<std::expected<ProjectedRuleArguments,
 bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared);
 
 Fp128 witness_stamp(const RuleWitnessPlan& plan) {
-  if (plan.producers.generators.empty() && !plan.schema) return action_key(plan.witness);
+  if (plan.producers.generators.empty() && plan.producers.host_executables.empty() && !plan.schema)
+    return action_key(plan.witness);
   return fingerprint(std::tie(plan.witness, plan.producers, plan.schema));
+}
+
+std::optional<Fp128> host_file_contents(std::string_view path) {
+  const auto contents = pp::read_disk(pp::path_id(path)).value;
+  return contents ? std::optional{fingerprint128(*contents)} : std::nullopt;
+}
+
+bool current_host_files(std::span<const HostFileObservation> files) {
+  return std::ranges::all_of(files, [](const auto& file) {
+    return host_file_contents(file.path) == file.contents;
+  });
 }
 
 std::optional<RuleValueData> classify_value(std::string_view output, std::string_view field,
@@ -902,32 +999,73 @@ struct StagedProducers {
   const ActionOutputs* output_at(std::size_t i) const { return &outputs.at(i); }
 };
 
-std::expected<StagedProducers, std::string> stage_producers(
-    const ProjectPlan& plan, std::span<const ArtifactInputPlan> requested, const RunRuleAction& run,
-    std::function_ref<bool()> current) {
-  const auto count = plan.generators.size();
-  // The planning graph also contains producers already used to lower other rules.
-  // Stage only the requested outputs and their ordinary action inputs.
-  std::vector<bool> needed(count);
+struct ProducerClosure {
+  std::vector<std::size_t> generators;
+  std::vector<std::size_t> hosts;
+};
+
+ProducerClosure producer_closure(const ProjectPlan& plan, std::span<const ArtifactInputPlan> requested,
+                                  std::span<const HostArtifactInputPlan> direct = {}) {
+  // Other rule expansions can have added nodes to the plan. Follow only the requested outputs.
+  std::vector<bool> needed(plan.generators.size());
   for (const auto& input : requested) needed[input.producer] = true;
-  for (auto i = count; i != 0; --i) {
+  std::set<std::size_t> hosts;
+  for (const auto& input : direct) hosts.insert(input.executable);
+  ProducerClosure closure;
+  for (auto i = needed.size(); i != 0; --i) {
     if (!needed[i - 1]) continue;
-    for (const auto& input : plan.generators[i - 1].artifact_inputs) needed[input.producer] = true;
+    closure.generators.push_back(i - 1);
+    const auto& generator = plan.generators[i - 1];
+    for (const auto& input : generator.artifact_inputs) needed[input.producer] = true;
+    for (const auto& input : generator.host_inputs) hosts.insert(input.executable);
   }
+  std::ranges::reverse(closure.generators);
+  closure.hosts.append_range(hosts);
+  return closure;
+}
+
+std::expected<StagedProducers, std::string> stage_producers(
+    const ProjectPlan& plan, std::span<const std::size_t> needed, std::span<const Artifact> host_images,
+    const RunRuleAction& run, std::function_ref<bool(std::size_t, Fp128)> current) {
+  const auto count = plan.generators.size();
   StagedProducers staged{std::vector<ActionOutputs>(count), std::vector<Fp128>(count)};
   const auto output_at = [&](std::size_t i) { return staged.output_at(i); };
-  for (std::size_t i = 0; i < count; ++i) {
-    if (!needed[i]) continue;
+  for (const auto i : needed) {
     const auto& producer = plan.generators[i];
     auto inputs = producer.inputs;
-    if (!producer.artifact_inputs.empty()) (void)append_artifact_inputs(producer, output_at, inputs);
+    (void)append_generator_inputs(producer, output_at, host_images, inputs);
     const auto key = action_key(producer, inputs);
-    auto result = run("ExternalAction", producer.name, producer.action, inputs, key, current);
+    auto result = run("ExternalAction", producer.name, producer.action, inputs, key, [&] { return current(i, key); });
     if (!result) return std::unexpected(std::move(result.error()));
     staged.outputs[i] = std::move(*result);
     staged.keys[i] = key;
   }
   return staged;
+}
+
+std::optional<Fp128> current_producer_key(const ProjectPlan& plan, const ProducerClosure& closure,
+                                          std::size_t index, std::span<const Artifact> host_images,
+                                          FindActionReceipt receipt) {
+  std::vector<const ActionOutputs*> outputs(plan.generators.size());
+  const auto output_at = [&](std::size_t i) { return outputs[i]; };
+  for (const auto i : closure.generators) {
+    const auto& generator = plan.generators[i];
+    auto inputs = generator.inputs;
+    if (!append_generator_inputs(generator, output_at, host_images, inputs)) {
+      if (i == index) return std::nullopt;
+      continue;
+    }
+    const auto key = action_key(generator, inputs);
+    if (i == index) return key;
+    outputs[i] = receipt(key);
+  }
+  return std::nullopt;
+}
+
+bool same_host_images(std::span<const Artifact> left, std::span<const Artifact> right) {
+  return std::ranges::equal(left, right, [](const Artifact& a, const Artifact& b) {
+    return a.executable == b.executable && a.bytes == b.bytes;
+  });
 }
 
 std::expected<std::string, std::string> invoke_rule_worker(
@@ -953,6 +1091,7 @@ std::expected<std::string, std::string> invoke_rule_worker(
 std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
     const RunRuleAction& run, const RunRulePackage& run_package, const RunRuleWitness& run_witness,
+    const BuildWitnessTools& build_witness_tools, FindActionReceipt receipt,
     const AdmitRuleValue& admit_value, const UseRuleCompiler& use_compiler,
     const ResolveRuleArguments& resolve_arguments, PreparedProject& prepared, bool watch, bool& superseded) {
   const auto native_triple = prepared.native_triple;
@@ -1043,7 +1182,9 @@ std::expected<void, std::string> prepare_project(
       return current_inputs && fingerprint(*current_inputs) == *planning_stamp;
     };
     if (planning_plan) {
-      auto staged = stage_producers(planning_plan->producers, planning_plan->inputs, run, current_invocation);
+      const auto closure = producer_closure(planning_plan->producers, planning_plan->inputs);
+      auto staged = stage_producers(planning_plan->producers, closure.generators, {}, run,
+                                    [&](std::size_t, Fp128) { return current_invocation(); });
       if (!staged) return std::unexpected(std::move(staged.error()));
       for (const auto& input : planning_plan->inputs) {
         const auto& producer = planning_plan->producers.generators[input.producer];
@@ -1067,6 +1208,7 @@ std::expected<void, std::string> prepare_project(
     if (consumes_values && !current_invocation()) return changed_rule_inputs();
     RuleExpansion expansion{demand, std::move(*lowered), std::move(arguments->facts)};
     std::optional<Fp128> witness_key;
+    std::optional<std::vector<HostFileObservation>> host_files;
     if (demand.value_export) {
       const auto& field = *demand.value_export;
       const auto label = std::format("{}.{}", demand.target, field);
@@ -1093,7 +1235,9 @@ std::expected<void, std::string> prepare_project(
       }
       auto& plan = std::get<RuleWitnessPlan>(*witness_plan);
       witness_key = witness_stamp(plan);
-      const auto current_witness = [&] {
+      const auto closure = producer_closure(plan.producers, plan.witness.artifact_inputs, plan.witness.host_inputs);
+      auto hosts = std::make_shared<const BuiltWitnessTools>();
+      const auto current_witness_recipe = [&] {
         if (!current_invocation()) return false;
         const auto current = plan_rule_witness(cwd, expansion, prepared.rules.expansions, native_triple);
         const auto* recipe = current ? std::get_if<RuleWitnessPlan>(&*current) : nullptr;
@@ -1103,39 +1247,100 @@ std::expected<void, std::string> prepare_project(
         superseded = true;
         return std::unexpected(std::format("witness '{}' changed during classification", label));
       };
-      if (!current_witness()) return changed_witness();
-      auto compiled = stage_producers(plan.producers, plan.witness.artifact_inputs, run, current_witness);
+      const auto refresh_hosts = [&] {
+        if (!current_witness_recipe()) return false;
+        if (closure.hosts.empty() || (!hosts->files.empty() && current_host_files(hosts->files))) return true;
+        auto updated = build_witness_tools(plan.producers, closure.hosts);
+        if (!updated) return false;
+        hosts = std::make_shared<const BuiltWitnessTools>(std::move(*updated));
+        if (watch) {
+          prepared.rules.pending_host_files.insert_or_assign(demand.target, hosts->files);
+          prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
+        }
+        return current_witness_recipe() && (hosts->error.empty() || current_host_files(hosts->files));
+      };
+      const auto stage_witness = [&]() -> std::expected<StagedProducers, std::string> {
+        for (;;) {
+          if (!refresh_hosts()) return changed_witness();
+          if (!hosts->error.empty()) return std::unexpected(hosts->error);
+          const auto staged_hosts = hosts;
+          // An executing generator keeps its inputs. Its admission guard may refresh
+          // host images and inspect receipts, but never starts another generator.
+          auto staged = stage_producers(plan.producers, closure.generators, staged_hosts->images, run,
+              [&](std::size_t index, Fp128 key) {
+                if (!plan.producers.generators[index].host_dependent) return current_witness_recipe();
+                if (!refresh_hosts() || !hosts->error.empty()) return false;
+                return hosts == staged_hosts || same_host_images(hosts->images, staged_hosts->images) ||
+                       current_producer_key(plan.producers, closure, index, hosts->images, receipt) == key;
+              });
+          if (!staged) return std::unexpected(std::move(staged.error()));
+          if (!refresh_hosts()) return changed_witness();
+          if (hosts == staged_hosts || same_host_images(hosts->images, staged_hosts->images)) return staged;
+        }
+      };
+      const auto staged_inputs = [&](const StagedProducers& staged) {
+        auto inputs = plan.witness.inputs;
+        (void)append_generator_inputs(plan.witness, [&](std::size_t i) { return staged.output_at(i); },
+                                      hosts->images, inputs);
+        return inputs;
+      };
+      auto compiled = stage_witness();
       if (!compiled) return std::unexpected(std::move(compiled.error()));
-      const auto output_at = [&](std::size_t i) { return compiled->output_at(i); };
-      if (!plan.witness.artifact_inputs.empty()) (void)append_artifact_inputs(plan.witness, output_at, plan.witness.inputs);
-      if (!current_witness()) return changed_witness();
-      const auto witness_action = action_key(plan.witness);
-      auto evidence = run_witness(label, plan.witness, witness_action, current_witness);
-      if (!evidence) return std::unexpected(std::move(evidence.error()));
+      auto invocation = plan.witness;
+      invocation.inputs = staged_inputs(*compiled);
+      const auto witness_action = action_key(invocation);
+      std::optional<std::string> staging_error;
+      const auto current_witness = [&] {
+        if (!current_witness_recipe()) return false;
+        if (closure.hosts.empty() || current_host_files(hosts->files)) return true;
+        // Restage only here, outside the producer guard. Equal selected output can
+        // preserve the witness even when its upstream receipts have changed.
+        auto staged = stage_witness();
+        if (!staged) {
+          if (!superseded) staging_error = std::move(staged.error());
+          return false;
+        }
+        if (action_key(plan.witness, staged_inputs(*staged)) != witness_action) return false;
+        compiled = std::move(staged);
+        return true;
+      };
+      const auto witness_failure = [&](std::string diagnostic) {
+        if (!staging_error) return std::unexpected(std::move(diagnostic));
+        // The runner rejected admission. Report the validated producer failure
+        // without retrying the same failed action as if inputs had changed again.
+        superseded = false;
+        return std::unexpected(std::move(*staging_error));
+      };
+      if (!current_witness()) return witness_failure(changed_witness().error());
+      auto evidence = run_witness(label, invocation, witness_action, current_witness);
+      if (!evidence) return witness_failure(std::move(evidence.error()));
       observation->request.witness = RuleWitnessReport{
           field, evidence->exit_status, std::move(evidence->out), std::move(evidence->err), plan.schema};
       const auto classification_key = observation_key(*observation, toolchain.executable_build);
-      const auto receipt = fingerprint(std::tie(library_key, witness_action, classification_key));
+      const auto value_receipt = fingerprint(std::tie(library_key, witness_action, classification_key));
       auto classified = invoke_rule_worker(run, toolchain, "RuleClassifier", label, library,
                                            std::move(*observation), current_witness);
-      if (!classified) return std::unexpected(std::move(classified.error()));
-      if (!current_witness()) return changed_witness();
+      if (!classified) return witness_failure(std::move(classified.error()));
+      if (!current_witness()) return witness_failure(changed_witness().error());
       auto value = classify_value(*classified, field, plan.schema);
       if (!value) return std::unexpected(std::format("invalid classification for '{}'", label));
       auto origin = std::format("{} via {} · {} · witness exit {} · receipt {:016x}{:016x}", label,
-          plan.witness.action.tool, demand.package.target, evidence->exit_status, receipt.lo, receipt.hi);
+          plan.witness.action.tool, demand.package.target, evidence->exit_status, value_receipt.lo, value_receipt.hi);
       for (const auto& input : plan.witness.artifact_inputs) {
         const auto key = compiled->keys[input.producer];
         origin += std::format(" · artifact {} receipt {:016x}{:016x}", input.name, key.lo, key.hi);
       }
       expansion.capability_facts.push_back(
           {"value-export", demand.target, field, describe_rule_value(*value), origin});
-      admit_value(demand.target, field, RuleValueRecord{std::move(*value), receipt, std::move(origin)});
+      admit_value(demand.target, field, RuleValueRecord{std::move(*value), value_receipt, std::move(origin)});
       std::erase_if(prepared.rules.pending_witnesses, [&](const auto& entry) { return entry.demand == demand; });
+      prepared.rules.pending_host_files.erase(demand.target);
+      if (!closure.hosts.empty()) host_files = hosts->files;
     }
     prepared.rules.pending_projections.erase(demand.target);
     prepared.rules.observations.push_back(
-        {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key, planning_stamp});
+        {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key, planning_stamp,
+         std::move(host_files)});
     prepared.rules.expansions.push_back(std::move(expansion));
     if (!deferred.empty()) {
       next = std::move(deferred.back());
@@ -1169,7 +1374,9 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
   if (!record.witness) return true;
   const auto witness = plan_rule_witness(cwd, expansion, upstream, native_triple);
   const auto* recipe = witness ? std::get_if<RuleWitnessPlan>(&*witness) : nullptr;
-  return recipe && witness_stamp(*recipe) == *record.witness;
+  if (!recipe || witness_stamp(*recipe) != *record.witness ||
+      record.host_files.has_value() != recipe->witness.host_dependent) return false;
+  return !record.host_files || current_host_files(*record.host_files);
 }
 
 bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared) {
@@ -1276,6 +1483,16 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     observations.push_back(stamp);
     return stamp;
   };
+  const auto observe_host_files = [&](std::span<const HostFileObservation> files) {
+    bool current = true;
+    for (const auto& file : files) {
+      const auto contents = host_file_contents(file.path);
+      observations.push_back(fingerprint(std::tie(file.path, contents)));
+      paths.push_back(file.path);
+      current = current && contents == file.contents;
+    }
+    return current;
+  };
   for (std::size_t i = 0; i < snapshot.observations.size(); ++i) {
     const auto& record = snapshot.observations[i];
     const auto& expansion = snapshot.expansions[i];
@@ -1285,13 +1502,16 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
       if (!observe_probe(probe)) profiles_current = false;
     const bool planning_current = !record.planning || observe_planning(record.demand) == record.planning;
     const bool witness_current = !record.witness || observe_witness(expansion) == record.witness;
-    if (profiles_current && planning_current && witness_current && state == std::pair{record.package, record.invocation})
+    const bool host_current = !record.host_files || observe_host_files(*record.host_files);
+    if (profiles_current && planning_current && witness_current && host_current &&
+        state == std::pair{record.package, record.invocation})
       current.push_back(expansion);
   }
   for (const auto& probe : snapshot.probes) (void)observe_probe(probe);
   for (const auto& [name, profiles] : snapshot.pending_projections)
     for (const auto& probe : profiles) (void)observe_probe(probe);
   for (const auto& witness : snapshot.pending_witnesses) (void)observe_witness(witness);
+  for (const auto& entry : snapshot.pending_host_files) (void)observe_host_files(entry.second);
   auto watch = observed ? *observed : watch_project(cwd, target, current, native_triple);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
         return record.demand == *watch.pending;
@@ -1475,9 +1695,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (tracer->values()) {
         if (witness_exit) event.value = std::format("exit status {}", result.exit_status);
         for (const auto& [index, arg] : std::views::enumerate(action.args)) {
-          if (arg.kind != ActionArg::Kind::target_triple) continue;
+          const auto selector = triple_arg_selector(arg.kind);
+          if (selector.empty()) continue;
           if (!event.value.empty()) event.value += '\n';
-          event.value += std::format("args[{}]: target_triple() = {}", index, arg.value);
+          event.value += std::format("args[{}]: {} = {}", index, selector, arg.value);
         }
       }
       if (event.outcome == engine::Outcome::failed)
@@ -1529,6 +1750,40 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     WitnessEvidence evidence{result.exit_status, std::move(result.out), std::move(result.err)};
     apply(AdmitRuleInput<RuleWitnessReceipt>{id, evidence});
     return evidence;
+  };
+  const std::function<void()> check_revision = [] {};
+  const BuildWitnessTools build_witness_tools = [&](const ProjectPlan& plan, std::span<const std::size_t> needed)
+      -> std::optional<BuiltWitnessTools> {
+    std::vector<pipeline::RequestId> requests;
+    for (const auto i : needed)
+      requests.push_back(register_host_executable(session_, workspace_path, plan.host_executables[i], host_target));
+    while (!cancelled()) {
+      refresh();
+      const auto before = session_.db().revision();
+      BuiltWitnessTools batch;
+      batch.images.resize(plan.host_executables.size());
+      std::map<std::uint32_t, HostWitnessTool> built;
+      std::map<std::string, std::optional<Fp128>> observed;
+      bool consistent = true;
+      for (const auto& [i, request] : std::views::zip(needed, requests)) {
+        auto [tool, first] = built.try_emplace(request.n);
+        if (first) {
+          auto image = session_.run<HostWitnessImage>(request, poll, nullptr, tracer);
+          if (!image) return std::nullopt;
+          tool->second = std::move(*image);
+          for (const auto& file : tool->second.files) {
+            const auto [prior, inserted] = observed.try_emplace(file.path, file.contents);
+            if (!inserted && prior->second != file.contents) consistent = false;
+          }
+        }
+        batch.images[i] = tool->second.executable;
+        if (batch.error.empty() && !tool->second.error.empty())
+          batch.error = std::format("host executable '{}': {}", plan.host_executables[i].name, tool->second.error);
+      }
+      for (const auto& [path, contents] : observed) batch.files.push_back({path, contents});
+      if (consistent && publish(before, check_revision) && current_host_files(batch.files)) return batch;
+    }
+    return std::nullopt;
   };
   const AdmitRuleValue admit_value = [&](std::string_view producer, std::string_view field, RuleValueRecord record) {
     const auto id = rule_value_key(value_scope, producer, field);
@@ -1770,7 +2025,8 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (measured) planned.rules.probes.push_back(std::move(measured->snapshot));
       else if (!cancelled() && !superseded) report.diagnostics.push_back(std::move(measured.error()));
     };
-    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, admit_value,
+    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, build_witness_tools,
+                                    receipt, admit_value,
                                     use_compiler, resolve_arguments, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
     if (superseded || !current_rules(cwd, toolchain, planned)) continue;
@@ -1785,8 +2041,12 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (!prepared) return fail(prepared.error());
     const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
-    if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id)
-      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{native_workspace, plan}); });
+    if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id) {
+      std::vector<pipeline::RequestId> host_requests;
+      for (const auto& executable : plan.host_executables)
+        host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target));
+      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests)}); });
+    }
 
     for (;;) {
       const auto before = session_.db().revision();
@@ -1800,6 +2060,29 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       };
       if (!demand->actions.pending.empty()) {
         std::set<Fp128> attempted;
+        const auto host_plan = fingerprint(plan.host_executables);
+        const auto current_action = [&](const GeneratorPlan& generator, Fp128 id) {
+          auto revision = before;
+          std::span<const Artifact> images = demand->host_images;
+          std::optional<Demand> rechecked;
+          while (!cancelled()) {
+            const auto observed = observe_project(cwd, target, toolchain, planned);
+            if (!observed || fingerprint(observed->host_executables) != host_plan) return false;
+            const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
+            if (current == observed->generators.end()) return false;
+            if (!current->host_dependent || publish(revision, [] {})) {
+              const auto at = static_cast<std::size_t>(current - observed->generators.begin());
+              return resolve_actions(*observed, receipt, images).keys[at] == id;
+            }
+            // The plan only describes host source paths. Re-demand the images so an
+            // unrelated edit, or one that leaves the staged bytes equal, keeps the receipt.
+            revision = session_.db().revision();
+            rechecked = session_.run<WorkspaceBuild>(key, poll, nullptr, tracer);
+            if (!rechecked || rechecked->host_images.size() != plan.host_executables.size()) return false;
+            images = rechecked->host_images;
+          }
+          return false;
+        };
         for (const auto index : demand->actions.pending) {
           if (cancelled()) return fail("build cancelled");
           const auto& generator = plan.generators[index];
@@ -1808,18 +2091,14 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           if (!attempted.insert(id).second) continue;
           std::vector<ActionInput> staged;
           std::span<const ActionInput> inputs = generator.inputs;
-          if (!generator.artifact_inputs.empty()) {
+          if (!generator.artifact_inputs.empty() || !generator.host_inputs.empty()) {
             staged = generator.inputs;
-            if (!append_artifact_inputs(generator, output_at, staged)) break;
+            if (!append_generator_inputs(generator, output_at, demand->host_images, staged)) break;
             inputs = staged;
           }
+          if (generator.host_dependent && !publish(before, [] {})) break;
           auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
-          const auto observed = observe_project(cwd, target, toolchain, planned);
-          if (!observed) break;
-          const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
-          if (current == observed->generators.end()) break;
-          const auto at = static_cast<std::size_t>(current - observed->generators.begin());
-          if (resolve_actions(*observed, receipt).keys[at] != id) break;
+          if (!current_action(generator, id)) break;
           if (result.exit_status != 0) {
             report.status = result.exit_status;
             report.diagnostics.push_back(std::format("generator '{}': {}", generator.name,
