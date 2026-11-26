@@ -254,7 +254,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     text of `#error` and `#warning` in the main file and included headers (#172);
   - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
     Header-unit imports are diagnosed as unsupported.
-  - `#embed` and `__has_embed` with `limit`, `offset`, `prefix`, `suffix` and `if_empty` (#125).
+  - `#embed` and `__has_embed` with `limit`, `prefix`, `suffix` and `if_empty` (#125).
+    The offset spelling follows the mode, using `offset` in spec, `gnu::offset` in GCC, and
+    `clang::offset` in Clang. GCC mode also accepts double underscores around either identifier.
     Resources use the include search paths and are tracked by resolution and content. A nonempty
     embed is one byte-carrying phase-4 token with an expansion that names the resource. It yields
     integer and comma tokens in the parser's input. Unsupported scoped parameters are diagnosed
@@ -2632,11 +2634,13 @@ session's.*
   #310, so it answers false for every class ycxx accepts). The second is true for the same nonunion
   class or a base of a standard-layout Derived ([basic.compound]). The third compares the same type,
   enumerations' underlying types, and standard-layout classes' members (in order for structs, with
-  alignment and bit-field widths; in any order for unions) ([class.mem.general]). A
+  effective alignment and bit-field widths; in any order for unions) ([class.mem.general]).
+  Clang mode compares the strongest written member `alignas` for structs. A
   `[[no_unique_address]]` member is diagnosed as not supported yet: whether it ends the sequence
-  depends on `__has_cpp_attribute`, which answers 0 for everything so far (#1141). Distinct class
-  operands need a complete Derived (both operands, for layout compatibility); the same incomplete
-  class is allowed where Clang and GCC reject it for the virtual base trait. Dependent operands
+  depends on `__has_cpp_attribute`, which answers 0 for everything so far (#1141). The virtual-base
+  trait requires a complete Derived when both operands are nonunion classes. Pointer
+  interconvertibility permits the same incomplete class. Layout compatibility requires both
+  class operands to be complete. Dependent operands
   are decided at instantiation in class-template bases, variable-template initializers, function
   template bodies and constraints (`tests/own/builtins/virtual-base-of-*`,
   `pointer-interconvertible-base-of-*`, `layout-compatible-*`, `relation-traits-*`). Unknown base graph,
