@@ -747,6 +747,12 @@ class Planner {
   }
 
  private:
+  struct RestoreHostHeaderOwner {
+    const TargetDecl*& current;
+    const TargetDecl* previous;
+    ~RestoreHostHeaderOwner() { current = previous; }
+  };
+
   std::string display_path(const fs::path& path) const {
     const auto relative = path.lexically_relative(cwd_);
     return relative.empty() || *relative.begin() == ".." ? path_text(path) : path_text(relative);
@@ -908,6 +914,8 @@ class Planner {
         if (!binding.value && binding.package != builtin_cpp)
           observe(cwd_ / fs::path(binding.package).parent_path() / "build.ycxx");
     }
+    // Rule prerequisites resolve separately from the emitted action's input graph.
+    const RestoreHostHeaderOwner prerequisites{host_header_owner_, std::exchange(host_header_owner_, nullptr)};
     const auto find_bindings = [&](std::string_view name) {
       const auto* value = field(decl, name);
       return value ? std::get_if<Record>(&value->data) : nullptr;
@@ -1246,11 +1254,7 @@ class Planner {
   }
 
   std::string host_header(const ArtifactRef& ref, const TargetDecl& consumer, HostExecutablePlan& host, SourceLocation at) {
-    struct RestoreOwner {
-      const TargetDecl*& current;
-      const TargetDecl* previous;
-      ~RestoreOwner() { current = previous; }
-    } restore{host_header_owner_, std::exchange(host_header_owner_, &consumer)};
+    const RestoreHostHeaderOwner restore{host_header_owner_, std::exchange(host_header_owner_, &consumer)};
     const auto requested = artifact(ref, at);
     artifact_dependency(consumer, requested, "generated_headers", at);
     host.generated_headers.push_back(requested);
