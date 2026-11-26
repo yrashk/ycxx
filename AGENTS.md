@@ -31,6 +31,16 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
 (LESSONS: #198, #233).
 - Every PR targets `main`. Stack at most one step on an unmerged PR. When its base merges,
   retarget yours to `main` (`gh pr edit N --base main`) before anything else.
+- Agent display names identify sessions in coordination comments. For commits agents create,
+  including merge and rebase commits, use the name and email the intended GitHub account holder
+  has authorized. Use the exact address associated with that account. Never construct a
+  `@users.noreply.github.com` address from an agent display name. GitHub uses commit email
+  addresses to assign attribution.
+- Before committing, check `git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT`. Before
+  pushing or merging, inspect the raw author and committer of every new agent-created commit,
+  including commits brought in by a merge. For a checked-out branch, run
+  `git log origin/main..HEAD --format='%h %an <%ae> | %cn <%ce>'`. Correct any mismatch on the
+  unmerged branch before proceeding. Preserve the identities of existing human contributions.
 - Before pushing to a PR's branch, check that the PR is still open (`gh pr view N --json state`).
   Once it has merged, anything new, even a follow-up to the same issue, goes on a fresh branch
   from `main` with a new PR.
