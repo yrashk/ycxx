@@ -244,9 +244,9 @@ link. The action receipt reuses an equal staged image.
 The coordinator verifies the engine revision before launching an action
 that depends on a host build and again before admitting its receipt. Watch
 observes the source and include reads through the same file table as native
-compilation. Host executables are available to ordinary generator recipes.
-Witness and planning inputs that reach them require content-sensitive
-freshness validation, tracked in #1259.
+compilation. Host executables are available to ordinary generator recipes
+and direct witness tools. Planning inputs and transitive witness producer
+chains with host dependencies remain in #1259.
 [Native host tool example](../../examples/project-build/native-host-tool/README.md)
 
 Project generators and rule witnesses accept `target_triple()` (#1347)
@@ -884,6 +884,20 @@ An edit that preserves the classified score can reuse header generation
 and native compilation. Build the example with `ycxx build app` and inspect
 the artifact and value links with `ycxx show app --format=html`.
 [Runnable example](../../examples/project-build/staged-witness/README.md)
+
+A witness can bind `tool = input("name")` directly to the `executable`
+artifact of a `cpp.host_executable` (#1566). The resident host query captures
+its linked image and the paths and content fingerprints of its source
+and include reads in one revision. The observations include missing
+include candidates so a newly preferred header can invalidate them.
+Read-only inspection checks the saved paths and fingerprints. Watch
+retains the lookups from a failed compile so creating a missing header
+can wake the build.
+
+The witness receipt uses the staged executable bytes and mode. Edits
+that preserve the image refresh the saved file observations and reuse
+the receipt. The coordinator checks the image again if its inputs change
+while the witness runs. [Native host witness example](../../examples/project-build/native-host-witness/README.md)
 
 The same staged analyzer can call a helper at an absolute host path. Declare
 the path in `tool_inputs` to track helper changes as witness inputs. Equal
