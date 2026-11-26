@@ -4,6 +4,7 @@
 # Libraries, lowest first.
 add_subdirectory(memory)
 add_subdirectory(hash)
+add_subdirectory(cm)
 add_subdirectory(stack)
 add_subdirectory(ast)
 add_subdirectory(engine)

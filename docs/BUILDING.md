@@ -90,6 +90,59 @@ YCXX_BUILD_TYPE=Release YCXX_BUILD_DIR=build-release tools/test --fast
 - CI builds Release on Linux in the PR tier (compile only), and builds and tests it on both hosts
   in the nightly tier (`nightly.yml`'s `release` job, or dispatched alone with `release-only`).
 
+## Optimizer experiments
+
+Build the pinned HiGHS, CaDiCaL, and Chuffed sources in a separate build tree. This
+project uses CMake, Ninja, Make for CaDiCaL, and a C/C++ toolchain. The first build
+needs network access to GitHub's source archives. The archive hashes are checked at
+download. Installation stays inside the build tree.
+
+```sh
+cmake -S cmake/solver-deps -B build-solver-deps -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-16 -DCMAKE_CXX_COMPILER=g++-16
+cmake --build build-solver-deps --parallel 1
+```
+
+The independent targets are `highs`, `cadical`, and `chuffed`. Each installs under
+`build-solver-deps/install/<solver>`. Set `-DYCXX_SOLVER_JOBS=N` to control the
+parallelism inside each dependency build. For an installed libycxx toolchain, use a
+fresh build directory and pass `-DCMAKE_TOOLCHAIN_FILE=<prefix>/lib/cmake/libycxx/toolchain.cmake`
+in place of the explicit compiler arguments. The normal compiler build has no solver
+download or link step. These experimental builds precede the pinned submodule
+integration for in-process backends described in [DECISIONS §7](../DECISIONS.md#7-third-party-libraries).
+
+CaDiCaL's source recipe includes the POSIX clock header explicitly for the Linux
+libycxx build.
+
+To check the compiler-owned model and run its generated FlatZinc through Chuffed:
+
+```sh
+cmake -S . -B build-optimizer -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DYCXXC_FLATZINC_SOLVER="$PWD/build-solver-deps/install/chuffed/bin/fzn-chuffed"
+cmake --build build-optimizer --target unit_cm ycxx-cm-export-bench
+ctest --test-dir build-optimizer -R '^unit\.cm' --output-on-failure
+build-optimizer/tests/unit/cm/ycxx-cm-export-bench
+build-optimizer/tests/unit/cm/ycxx-cm-export-bench --ndjson
+```
+
+The export benchmark builds its models before timing. Its three inputs isolate
+serialization as the number of covering decisions grows.
+[Benchmark module and runner](../packages/ycxx-bench/GUIDE.md).
+
+Reproduce the extraction comparison from the e-graph spike with the same seed-derived
+cases and limits. The repeated configurations reverse the order of the two blocks.
+
+```sh
+cmake --build build-solver-deps --target egraph-spike
+build-solver-deps/egraph-spike demo
+VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+NO_PRUNE=1 VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+NO_PRUNE=1 VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+```
+The optimizer design specifies how these experiments relate to corpus measurements.
+[Measurement process](design/optimization.md#91-evidence-for-an-optimizer-change).
+
 ## Sanitizer builds
 
 `-DYCXXC_SANITIZE=<list>` (`address`, `undefined`, `thread`, comma-separated) instruments ycxx's

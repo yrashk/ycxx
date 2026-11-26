@@ -592,6 +592,63 @@ superoptimizer's verified `(region, cheaper form)` pairs in `opt/rules/CANDIDATE
 generalizes into rules and proves (Ruler-style inference can automate the first step). Reading a
 competitor's code for a specific gap follows DECISIONS §2.3 and is logged on the issue.
 
+### 9.1 Evidence for an optimizer change
+
+Use the same stored IR, target, cost model and initial heuristic for both sides of an
+experiment. Change one pass, rule family, model encoding, or solver setting at a time.
+Record the compiler and solver revisions, flags, host, seed, input identity, and
+deterministic budgets with the raw results.
+
+1. **Check correctness and applicability.** Verify the candidate using §6, compare
+   outputs with the reference program, and count how often the candidate is usable
+   across the corpus. Keep timeouts, exhausted budgets, and rejected candidates in
+   the results.
+2. **Measure optimizer work.** Use `ycxx::bench` for warmed local comparisons and
+   record model construction, solving, and validation separately. Include the model
+   size, solver work units, objective values, and achieved optimality. Report the
+   total optimizer cost including fallbacks. Wall time describes the experiment.
+   Deterministic work units govern solver budgets.
+3. **Measure the generated code.** Use the oracle corpus (#9) to compare runtime and
+   code size, along with cold and incremental compile time. Use held-out workloads
+   when selecting cutoffs or cost-model weights. Treat a better modeled objective
+   as a candidate for runtime measurement. Use paired samples, retain their
+   variation, and require a practical effect before reporting a speedup.
+
+The first local evidence uses the same small e-graphs with and without dominated-node
+pruning. That isolates pruning's effect on exact extraction work and objective
+values. A separate benchmark measures FlatZinc serialization with model construction
+outside the timed loop. [Build and reproduction commands](../BUILDING.md#optimizer-experiments).
+
+On Linux x86-64 with GCC 16.2 and the pinned HiGHS 1.16.0, use seeds 1000–1009
+with the 30-entry inputs and the 300-e-node cap from the spike. Run pruned, unpruned,
+unpruned, then pruned. All 10 exact objectives matched across configurations, and exact
+extraction lowered the aggregate modeled DAG cost from 705 to 614 versus greedy.
+Pruning reduced the sum of branch-and-bound nodes from 18,170 to 261 per block.
+The median of the ten within-case solve-time ratios was 15.72×. This measures
+HiGHS solve work on the spike corpus. Generated-code runtime requires the corpus
+comparison described above.
+
+### 9.2 End-to-end solver experiments
+
+Take one candidate transformation at a time through the existing `Optimized`
+query. Hold the input, target, optimization options and baseline fixed, and
+validate the selected result before codegen. Record model construction, solve
+and validation work separately, then compare runtime, code size, and cold and
+incremental compilation on the same workload. The extraction spike measures
+the cost model and solver work; this experiment measures the generated program.
+
+Expose the decision as child query nodes. Show the modeling path, number of
+variables and constraints, backend, deterministic budget, selected result
+and validation or fallback. Use the engine's worker identity and timing events
+for interactive and JSON tracing. Solver choices and reproducibility keys
+contain the semantic inputs, solver build and deterministic limits.
+
+Schedule independent solve queries across the engine's existing workers. Each
+solve owns its model, solver state and stop hook, and runs one solver thread.
+Cancellation is propagated before and after the solver call. Tests compare final
+program bytes at one and multiple workers, and check overlap of the solve nodes
+themselves on independent work.
+
 ## 10. What the first back end must build
 
 Everything below exists so that the optimizer can be added without the front end, the IR or the
