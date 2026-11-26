@@ -431,7 +431,7 @@ std::vector<Diagnostic> parse_messages(std::string_view err, std::string_view cw
     }
     std::filesystem::path p(where);
     if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
-    d.path = p.lexically_normal().generic_native_encoded_string();
+    d.path = p.lexically_normal().generic_string<char>();
     out.push_back(std::move(d));
   }
   return out;
@@ -454,7 +454,7 @@ std::optional<std::string> path_of(std::string_view uri) {
       out += rest[i];
     }
   }
-  return std::filesystem::path(out).lexically_normal().generic_native_encoded_string();
+  return std::filesystem::path(out).lexically_normal().generic_string<char>();
 }
 
 std::string uri_of(std::string_view path) {

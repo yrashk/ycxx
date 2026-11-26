@@ -13,6 +13,7 @@ module;
 export module ycxx.build.action;
 
 import std;
+import ycxx.execution;
 import :spawn;
 
 export namespace ycxx::build {
@@ -66,7 +67,7 @@ struct ActionResult {
 // working directory. All named outputs become available together on success. The tool can use
 // its ambient filesystem, so the caller needs an input contract before reusing its result.
 ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
-                     const std::filesystem::path& scratch_root, std::inplace_stop_token stop = {},
+                     const std::filesystem::path& scratch_root, ycxx::exec::inplace_stop_token stop = {},
                      std::optional<std::size_t> log_limit = std::nullopt);
 
 }  // namespace ycxx::build
@@ -104,7 +105,7 @@ std::expected<Command, std::string> prepare(const Action& action, std::span<cons
   std::set<std::string> paths;
   for (const auto& input : inputs) {
     if (!valid_path(input.path)) return std::unexpected("invalid action input path: " + input.path);
-    auto path = (fs::path("inputs") / fs::path(input.path).lexically_normal()).native_encoded_string();
+    auto path = (fs::path("inputs") / fs::path(input.path).lexically_normal()).native();
     if (input.name.empty() || !input_paths.emplace(input.name, path).second)
       return std::unexpected("empty or duplicate action input name: " + input.name);
     if (!paths.insert(std::move(path)).second)
@@ -230,7 +231,7 @@ std::expected<pid_t, std::string> spawn(const fs::path& cwd, Command& command) {
   return pid;
 }
 
-std::expected<int, std::string> wait_for(pid_t pid, std::inplace_stop_token stop) {
+std::expected<int, std::string> wait_for(pid_t pid, ycxx::exec::inplace_stop_token stop) {
   for (;;) {
     if (stop.stop_requested()) {
       ::kill(-pid, SIGKILL);
@@ -293,7 +294,7 @@ std::expected<std::string, std::string> read_log(int dir, const std::string& fil
 }  // namespace
 
 ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
-                     const fs::path& scratch_root, std::inplace_stop_token stop,
+                     const fs::path& scratch_root, ycxx::exec::inplace_stop_token stop,
                      std::optional<std::size_t> log_limit) {
   auto cmd = prepare(action, inputs);
   if (!cmd) return failed(std::move(cmd.error()));
@@ -302,7 +303,7 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
   std::error_code ec;
   auto root = fs::absolute(scratch_root, ec);
   if (ec) return failed("cannot locate action scratch directory: " + ec.message());
-  auto path = (root / "action-XXXXXX").native_encoded_string();
+  auto path = (root / "action-XXXXXX").native();
   if (!::mkdtemp(path.data())) return failed(os_error("cannot create action scratch directory", errno));
   const Scratch scratch{fs::path(path)};
   if (auto error = stage(scratch.path, inputs)) return failed(std::move(*error));

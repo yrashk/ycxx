@@ -1360,9 +1360,9 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.hosted_catch = true;
     input.catch_int_binding = d.hosted_catch->int_binding;
   }
-  const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = facts.target().triple == ast::x86_64_linux.triple;
   if (input.exceptions_enabled) {
-    if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
+    if (target_is_linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
     else if (facts.target().triple == ast::aarch64_darwin.triple)
       input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
   }
@@ -1375,8 +1375,8 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.cleanup_call = d.cleanup_call;
     input.constructor_cleanup = d.constructor_cleanup;
   }
-  input.native_array_delete = linux;
-  input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
+  input.native_array_delete = target_is_linux;
+  input.native_array_new = target_is_linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) {
@@ -1552,8 +1552,8 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
   const ast::Target& target = unit_target(cx, k.tu);
-  const bool linux = object_target(target) == obj::target::x86_64_linux;
-  if (!f.body && !linux) co_return Lowered{std::nullopt, {}, f.error};
+  const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
+  if (!f.body && !target_is_linux) co_return Lowered{std::nullopt, {}, f.error};
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
@@ -1569,7 +1569,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         config.unreachable_body = ir::NodeId(std::uint32_t(checked - f.body->nodes.begin()));
     }
   }
-  if (linux) {
+  if (target_is_linux) {
     const ast::Interners& in = *universe().in;
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
     const FunctionDef& def = src.def;
@@ -1702,10 +1702,10 @@ struct TuSymbolAddresses {
   using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     auto [u, index] = co_await cx.par_fetch(engine::q<TuUnit>{tu}, engine::q<UnitIndexQ>{tu});
-    const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
+    const bool target_is_linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
     Value out;
     auto add = [&](EntityId id) {
-      if (linux) {
+      if (target_is_linux) {
         auto e = indexed(index.entities, id);
         if (!e || !u.entities[*e].has_local_binding()) return;
       }
@@ -1713,7 +1713,7 @@ struct TuSymbolAddresses {
     };
     for (const FunctionDef& f : u.functions) add(f.entity);
     for (const Variable& v : u.variables) add(v.entity);
-    if (linux) {
+    if (target_is_linux) {
       for (const Entity& e : u.entities)
         if (!e.has_local_binding() && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
           out.got.push_back(e.id);
@@ -2574,7 +2574,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   const ast::Target& target = config ? *config->target : *universe().target;
   const bool emit_table_type_info = !config || config->rtti_enabled;
   const auto compatibility = config ? config->compatibility : ast::Compatibility::spec;
-  const bool linux = object_target(target) == obj::target::x86_64_linux;
+  const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
   if (tu.front_failed) {
@@ -2591,7 +2591,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
-  if (linux && tu.namespace_destruction) {
+  if (target_is_linux && tu.namespace_destruction) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
@@ -2704,7 +2704,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     // A weak Mach-O definition stays out of zero-fill: Apple's linkers coalesce weak definitions
     // in content sections, as Clang emits them, but older ones not in __bss (#124).
-    else if (zero && (linux || !d.weak)) {
+    else if (zero && (target_is_linux || !d.weak)) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
       d.bytes.clear();
@@ -2767,7 +2767,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     }
   }
   for (const RuntimeUse& r : runtime)
-    symbols.push_back({r.entity, std::format("{}{}", linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
+    symbols.push_back({r.entity, std::format("{}{}", target_is_linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
   use(layout.objects());
 
   // Emit the constant objects referenced by functions and variables. A descriptor's
@@ -2804,7 +2804,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     // The cstring section is reserved for strings with one-byte code units.
     auto kind = layout.size == 1 ? aarch64::DataKind::cstring : aarch64::DataKind::rodata;
     data.push_back({entity, kind, std::move(bytes), 0, layout.align, {}});
-    symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
+    symbols.push_back({entity, std::format("{}.str.{}", target_is_linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
   // The declarations that own closure types, by entity (docs/design/closures.md).
@@ -2917,7 +2917,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                             table ? "virtual table's" : "RTTI object's", encoding.error())});
         continue;
       }
-      symbols.push_back({e.id, std::format("{}{}{}", linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
+      symbols.push_back({e.id, std::format("{}{}{}", target_is_linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
                          obj::binding::global});
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
@@ -2955,7 +2955,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility);
       if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
       else {
-        symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
+        symbols.push_back({e.id, target_is_linux ? std::move(*name) : "_" + *name, obj::binding::global});
         template_parameter_objects.insert(e.id);
       }
       continue;
@@ -2969,7 +2969,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility);
+                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility);
     };
     auto name = encode(entry);
     if (!name) {
@@ -3009,7 +3009,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                                   "ordinary ELF symbol named '{}'", directive.name)});
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
-  const std::string_view object_prefix = linux ? "" : "_";
+  const std::string_view object_prefix = target_is_linux ? "" : "_";
   for (const Entity* e : locals) {
     auto f = mangled.find(ir::raw(e->local_function));
     if (f == mangled.end()) {
@@ -3052,7 +3052,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
            !found->second->has_local_binding() && found->second->asm_label.empty();
   };
   auto o = [&] {
-    if (linux) {
+    if (target_is_linux) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
         const auto& def = *definitions[i];

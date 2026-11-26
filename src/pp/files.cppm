@@ -84,7 +84,7 @@ public:
   // The lexically normal form of a path; `<...>` names are kept as they are.
   static std::string normalize(std::string_view path) {
     if (path.starts_with('<')) return std::string(path);
-    std::string s = std::filesystem::path(path).lexically_normal().generic_native_encoded_string();
+    std::string s = std::filesystem::path(path).lexically_normal().generic_string<char>();
     return s.empty() ? std::string(".") : s;
   }
 

@@ -172,9 +172,11 @@ reasoning; do not leave decisions only in issue threads.
 
 ## 3. Implementation language and bootstrap
 
-1. **C++26 with libycxx.** ycxx is written in C++26 and uses libycxx (submodule
-   `deps/libycxx`) as its standard library, with `import std;`. libycxx's preprocessor policy
-   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's own sources too.
+1. **C++26 with a selectable standard library.** The default build uses the pinned libycxx
+   submodule and `import std;`. A system build imports the bootstrap GCC installation's
+   libstdc++ module and builds libycxx's portable execution provider against that same library.
+   The bootstrap compiler and the source language stay the same. libycxx's preprocessor policy
+   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's sources in both configurations.
 2. **Modern C++, as far as the bootstrap compiler allows.** ycxx exercises C++20–26 as heavily
    as the bootstrap compiler supports. The test is: *how would this be written in fully
    implemented C++26?* Write it that way, unless the bootstrap compiler cannot.
