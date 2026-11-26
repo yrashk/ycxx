@@ -605,6 +605,19 @@ clang = "Same as GCC."
 evidence = ["tests/own/consteval/function-reference-constexpr.accept.cpp", "tests/own/consteval/function-reference-binding.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "immediate-function-template-argument-escalation"
+status = "pending"
+mode_status = { spec = "partial", gcc = "partial", clang = "pending" }
+reference = "[expr.const.imm]/2, example 2; [temp.arg.nontype]"
+prior = "Allow a direct constant call through a bare auto template parameter in every mode. Targetless address selection for the function specialization fails before immediate escalation can be checked."
+spec = "Accept a constant invocation. Treat the specialization as immediate when invoking the substituted immediate function with a runtime parameter, and reject an escaping address of the specialization."
+gcc = "Same as spec for the tested forwarding function."
+clang = "Reject the immediate function as a template argument, including at a direct constant call."
+probe = 'consteval int id(int x) { return x; } template<auto F> constexpr auto apply_to(int i) { return F(i); }'
+limits = "GCC and Clang both accept a direct call and a targetless address for the same specialization when id is constexpr. The existing draft rejection case does not distinguish targetless address deduction from immediate escalation."
+evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin syntax probes for static_assert(apply_to<id>(7) == 7) and auto p = &apply_to<id>, repeated with constexpr id"]
+
+[[divergence]]
 id = "constexpr-void-cast-one-past"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
