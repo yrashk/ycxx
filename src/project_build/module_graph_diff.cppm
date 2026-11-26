@@ -59,7 +59,7 @@ struct UnitCounts {
   bool legacy = false;
 };
 
-std::expected<std::set<std::string>, std::string> legacy_sources(
+std::optional<std::set<std::string>> legacy_sources(
     const ModuleGraphInspection& before, const ModuleGraphInspection& after) {
   std::map<std::string, UnitCounts> sources;
   const std::array graphs{&before, &after};
@@ -73,7 +73,7 @@ std::expected<std::set<std::string>, std::string> legacy_sources(
   std::set<std::string> result;
   for (const auto& [source, usage] : sources) {
     if (!usage.legacy) continue;
-    if (std::ranges::max(usage.counts) > 1) return std::unexpected("ambiguous_legacy_configuration");
+    if (std::ranges::max(usage.counts) > 1) return std::nullopt;
     result.insert(source);
   }
   return result;
@@ -100,14 +100,18 @@ std::expected<Candidates, std::string> candidate_keys(std::string_view name,
 }
 
 std::expected<GraphIndex, std::string> index_graph(const ModuleGraphInspection& graph,
-    const std::set<std::string>& fallbacks, UnitIdentities& identities) {
+    const std::optional<std::set<std::string>>& fallbacks, UnitIdentities& identities) {
   GraphIndex index;
   UnitIds ids;
   Declarations declarations;
   for (const auto& unit : graph.units) {
-    const auto source = unit_source(unit, graph);
-    const auto configuration = fallbacks.contains(source) ? ModuleUnitConfiguration{source, {}} : *unit.configuration;
-    const auto identity = identities.try_emplace(configuration, identities.size()).first->second;
+    // If matching is ambiguous, keep snapshot-local unit IDs to validate references.
+    auto identity = unit.id;
+    if (fallbacks) {
+      const auto source = unit_source(unit, graph);
+      const auto configuration = fallbacks->contains(source) ? ModuleUnitConfiguration{source, {}} : *unit.configuration;
+      identity = identities.try_emplace(configuration, identities.size()).first->second;
+    }
     if (!ids.emplace(unit.id, identity).second)
       return std::unexpected(std::format("duplicate module unit id {}", unit.id));
 
@@ -122,7 +126,7 @@ std::expected<GraphIndex, std::string> index_graph(const ModuleGraphInspection& 
     }
     std::ranges::sort(names);
     if (!index.units.emplace(identity, std::pair{&unit, std::pair{std::string_view(unit.scan), std::move(names)}}).second)
-      return std::unexpected(std::format("duplicate module unit configuration for '{}'", source));
+      return std::unexpected(std::format("duplicate module unit configuration for '{}'", unit_source(unit, graph)));
   }
 
   std::set<Site> sites;
@@ -182,17 +186,17 @@ std::expected<ModuleGraphChanges, std::string> compare_module_graph(
     const ModuleGraphInspection& before, const ModuleGraphInspection& after) {
   ModuleGraphChanges result{};
   auto fallbacks = legacy_sources(before, after);
+  UnitIdentities identities;
+  auto old_graph = index_graph(before, fallbacks, identities);
+  if (!old_graph) return std::unexpected(std::format("saved module graph: {}", old_graph.error()));
+  auto new_graph = index_graph(after, fallbacks, identities);
+  if (!new_graph) return std::unexpected(std::format("current module graph: {}", new_graph.error()));
+
   if (!fallbacks) {
-    result.unavailable = std::move(fallbacks.error());
+    result.unavailable = "ambiguous_legacy_configuration";
     return result;
   }
   if (!fallbacks->empty()) result.matching = "legacy_source_only";
-
-  UnitIdentities identities;
-  auto old_graph = index_graph(before, *fallbacks, identities);
-  if (!old_graph) return std::unexpected(std::format("saved module graph: {}", old_graph.error()));
-  auto new_graph = index_graph(after, *fallbacks, identities);
-  if (!new_graph) return std::unexpected(std::format("current module graph: {}", new_graph.error()));
 
   if (before.complete != after.complete) result.completeness = ModuleChange<bool>{"changed", before.complete, after.complete};
   result.units = changes(old_graph->units, new_graph->units);

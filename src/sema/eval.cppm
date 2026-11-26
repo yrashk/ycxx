@@ -261,6 +261,7 @@ private:
     if (bytes) bytes->result.site = bytes->capture.site;
     Host host{q_, this};
     interp::Config config{
+        .compatibility = q_->compatibility(),
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
         .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
         .virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic, bool immediate) {

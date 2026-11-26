@@ -769,7 +769,12 @@ mappings (/1.4); any other operand is a `VAtom`.
 - **Subsumption** ([temp.constr.order]) puts the left side in disjunctive and the right in
   conjunctive normal form and compares atoms by identity, with a budget of 65536 clauses beyond
   which neither subsumes.
-- **Mangling** carries no constraints, as Darwin's Clang emits today; Itanium's is #236.
+- **Mangling** preserves written constraints separately from their satisfaction normal forms.
+  Current GCC and upstream Clang use `Q` for template-head and trailing requires-clauses and
+  `Tk` for constrained type parameters. The supported forms follow the selected compatibility
+  mode and the current [Itanium ABI proposal](https://github.com/itanium-cxx-abi/cxx-abi/issues/24).
+  Other retained clauses use a distinct ycxx encoding. The remaining forms are tracked in
+  [#236](https://github.com/yrashk/ycxx/issues/236) and [the compatibility table](../compatibility.toml).
 
 `if constexpr` ([stmt.if]/2) evaluates its condition while parsing. A dependent condition keeps
 both branches; otherwise only the kept one is in the tree. In an instantiation the discarded

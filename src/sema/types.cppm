@@ -733,6 +733,7 @@ struct FieldRec {
   bool mutable_ = false;
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
   u8 explicit_alignment = 0;
+  u8 written_alignment = 0;
 };
 
 // What a complete class makes of a special member explicitly defaulted on its first declaration,
@@ -850,8 +851,7 @@ struct ClassRec {
   bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
   // Its direct base classes, in declaration order ([class.derived.general]).
   std::vector<BaseRec> bases;
-  // POD for the purposes of layout, as Clang has it (`ast::record_layout`): trivial and
-  // standard-layout ([class.prop]).
+  // POD for the purposes of layout under the unit's ABI rule (`ast::record_layout`).
   bool pod = true;
   bool union_ = false;  // a union ([class.union]): its members share its storage
   bool polymorphic = false;
@@ -894,6 +894,7 @@ struct ClassRec {
   }
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
+  bool copy_deleted_by_class_subobject = false;
   CopyState defaulted_copy = CopyState::ordinary;
   bool defaulted_copy_const = true;  // the implicit parameter when it depends on a defaulted copy
   // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
@@ -1264,6 +1265,8 @@ public:
     if (c->layout_requires_virtual_support || c->destructor != EntityId::none || c->copy_nontrivial()) return false;
     if (rule == ast::CallTriviality::apple) return true;
     if (c->move_usable && c->move_nontrivial) return false;
+    // GCC passes classes with implicitly deleted subobject copies directly in this case.
+    if (rule == ast::CallTriviality::gcc && c->copy_deleted_by_class_subobject && !c->move_nontrivial) return true;
     return !c->copy_deleted || c->move_usable;
   }
 

@@ -158,7 +158,7 @@ public:
   Program(sema::World& w, const pp::Region& r, const items::Items& its, const pp::Config& config = {},
           std::shared_ptr<const Index> index = nullptr)
       : instantiation_limit(config.template_depth), exceptions_enabled_(config.exceptions_enabled),
-        rtti_enabled_(config.rtti_enabled), w_(&w), r_(&r),
+        rtti_enabled_(config.rtti_enabled), compatibility_(config.compatibility), w_(&w), r_(&r),
         view_(its), items_(&view_), ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
     may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
@@ -368,6 +368,7 @@ public:
   const pp::Region& region() const { return *r_; }
   bool exceptions_enabled() const { return exceptions_enabled_; }
   bool rtti_enabled() const { return rtti_enabled_; }
+  ast::Compatibility compatibility() const { return compatibility_; }
   const ItemsView& items() const { return *items_; }
   // Records the items this Program reads into `reads` (#947).
   void record_reads(std::vector<std::uint8_t>* reads) {
@@ -473,7 +474,12 @@ public:
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
-    return it == asm_labels_.end() ? std::string() : it->second;
+    return it == asm_labels_.end() ? std::string() : it->second.spelling;
+  }
+  std::optional<ast::Loc> asm_label_site(EntityId e) const {
+    auto it = asm_labels_.find(std::to_underlying(e));
+    if (it == asm_labels_.end()) return std::nullopt;
+    return ast::Loc{id(it->second.item), it->second.offset};
   }
   // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
   // item that does not enclose `item`.
@@ -1937,6 +1943,7 @@ private:
 
   const bool exceptions_enabled_;
   const bool rtti_enabled_;
+  const ast::Compatibility compatibility_;
   sema::World* w_;
   const pp::Region* r_;
   ItemsView view_;
@@ -2006,7 +2013,11 @@ private:
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
-  std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
+  struct AsmLabel {
+    u32 item = 0, offset = 0;
+    std::string spelling;
+  };
+  std::map<u32, AsmLabel> asm_labels_;  // the last written label per entity
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, lex::Tk> class_definition_keys_;  // by defining item: the parsed class-key
   std::map<u32, u32> class_templates_;        // by class template entity: its defining item
@@ -2348,6 +2359,7 @@ public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
   bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
+  ast::Compatibility compatibility() const override { return p_->compatibility(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::optional<bool> defaulted_nonthrowing(EntityId f) override { return p_->defaulted_nonthrowing(f); }
@@ -3307,6 +3319,7 @@ public:
   }
   bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
+  ast::Compatibility compatibility() const override { return p_->compatibility(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
@@ -4616,8 +4629,9 @@ private:
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    head_requires_ = ps_.constraint_expression(true);
-    constraints_fp_ = ast::mix(constraints_fp_, clause_fp(begin, ps_.pos()));
+    head_requires_ = ps_.constraint_expression(true, &head_constraint_.expression);
+    head_constraint_.tokens = clause_fp(begin, ps_.pos());
+    constraints_fp_ = ast::mix(constraints_fp_, head_constraint_.tokens);
   }
   // A declarator's trailing requires-clause ([dcl.decl]/4).
   void trailing_requires_clause() {
@@ -4625,8 +4639,9 @@ private:
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    trailing_requires_ = ps_.constraint_expression(true);
-    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), clause_fp(begin, ps_.pos()));
+    trailing_requires_ = ps_.constraint_expression(true, &trailing_constraint_.expression);
+    trailing_constraint_.tokens = clause_fp(begin, ps_.pos());
+    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
   }
   // The fingerprint of a clause's tokens with each template parameter as its position: equal for
   // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
@@ -6225,6 +6240,7 @@ private:
       if (!s_.require_complete(d.type, d.name_at)) return bad();
       if (!s_.require_concrete_object(d.type, d.name_at)) return bad();
       u8 field_alignment = 0;
+      u8 written_field_alignment = 0;
       if (alignment && alignment->value && !alignment->dependent && !types.is_dependent(d.type)) {
         const auto natural = s_.layout_of(d.type, /*align=*/true);
         if (!natural) {
@@ -6235,7 +6251,8 @@ private:
           s_.diag(alignment->at, Diag::field_alignment_weak);
           return bad();
         }
-        if (alignment->value > *natural) field_alignment = alignment->value;
+        written_field_alignment = alignment->value;
+        if (written_field_alignment > *natural) field_alignment = written_field_alignment;
       }
       if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
@@ -6247,6 +6264,7 @@ private:
       sem.type = d.type;
       sem.bit_width = bit_width;
       sem.field_alignment = field_alignment;
+      sem.written_field_alignment = written_field_alignment;
       sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
@@ -6808,6 +6826,7 @@ private:
       sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, sem.linkage, {}, ns_entity()};
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
+      sem.head_constraint = head_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
@@ -7701,6 +7720,7 @@ private:
       sema::EntityRec e{sema::EntityKind::function_template, name, type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
+      sem.head_constraint = head_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
@@ -8134,6 +8154,7 @@ private:
         sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
         e.head = head_fp(s_.template_scopes.back());
         sem.constraints = associated_constraints();
+        sem.head_constraint = head_constraint_;
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       } else {
@@ -8769,6 +8790,8 @@ private:
           s_.pop_scope();
         }
         sem.constraints = associated_constraints();
+        sem.head_constraint = head_constraint_;
+        sem.trailing_constraint = trailing_constraint_;
         // [temp.param]: a variable template's pack is last; a function template's is followed only
         // by parameters with a default or deduced from its parameter-type-list.
         const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
@@ -9147,13 +9170,15 @@ private:
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
     if (!d.asm_label.empty()) {
-      // Every labelled declaration of an entity gives it one label (docs/EXTENSIONS.md).
+      // GCC uses the last label. The other modes diagnose a conflicting redeclaration.
       std::string earlier = p_->asm_label(sem.entity);
-      if (!earlier.empty() && earlier != d.asm_label) {
+      if (p_->compatibility() != ast::Compatibility::gcc && !earlier.empty() && earlier != d.asm_label) {
         s_.diag(d.name_at, Diag::asm_label_conflict, d.name);
         return false;
       }
-      p_->asm_labels_[std::to_underlying(sem.entity)] = d.asm_label;
+      auto& label = p_->asm_labels_[std::to_underlying(sem.entity)];
+      if (label.spelling.empty() || std::pair{k_, d.name_at} > std::pair{label.item, label.offset})
+        label = {k_, d.name_at, d.asm_label};
     }
     return true;
   }
@@ -9331,6 +9356,7 @@ private:
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
   ConstId head_requires_ = ConstId::none;      // the template-head's requires-clause, in normal form
   ConstId trailing_requires_ = ConstId::none;  // the declarator's
+  ast::WrittenConstraint head_constraint_{}, trailing_constraint_{};
   sema::Fp128 constraints_fp_{};               // their tokens' fingerprint, for identity
   ConstId partial_constraints_ = ConstId::none;  // a partial specialization's, from `partial_arguments`
   sema::Fp128 partial_constraints_fp_{};
@@ -9450,7 +9476,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address,
-                        d.field_alignment});
+                        d.field_alignment, d.written_field_alignment});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
@@ -12285,6 +12311,10 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
   if (!user_copy && deletes_implicit_copy) rec.copy_deleted = true;
+  // GCC's call rule asks whether a class subobject deletes it, however its copy is classified.
+  if (implicit_copy)
+    for (QualType t : subobjects)
+      if (!types.is_reference(t)) rec.copy_deleted_by_class_subobject |= classes_.copy_of(t).second;
   if (implicit_copy && rec.defaulted_copy == sema::CopyState::ordinary) {
     bool nontrivial = false;
     for (QualType t : subobjects) {
@@ -12324,7 +12354,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
       return !types.is_reference(t) && classes_.move_nontrivial(t);
     });
   }
-  // POD for layout, as Clang has it (`ast::record_layout`): a trivial class ([class.prop]/2: its
+  // The Darwin Clang layout rule uses a trivial class ([class.prop]/2: its
   // default constructor, copy and move operations and destructor trivial), and standard-layout
   // (/3: one access for all its data members, no reference members, and its data members all
   // in one class of the hierarchy), whose members and bases are too.
@@ -12352,10 +12382,12 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
     const sema::ClassRec* r = classes_.find(b.cls);
     return r && (!r->fields.empty() || !r->pod);
   });
-  // Apple's ABI takes C++11's definition ([class.prop]). Its trivial class has a trivial default
-  // constructor, even a deleted one. Elsewhere it is C++03's, whose class has only public members
-  // and no base classes.
-  const bool pod_definition = w_->target.apple_calls
+  // Clang on arm64 Darwin takes C++11's definition ([class.prop]). Its trivial class has a trivial
+  // default constructor, even a deleted one. The other modes and targets take the Itanium ABI's,
+  // C++03's, whose class has only public members and no base classes (docs/compatibility.toml).
+  const bool modern_pod = compatibility_ == ast::Compatibility::clang &&
+                          w_->target.operating_system == ast::OperatingSystem::darwin;
+  const bool pod_definition = modern_pod
       ? (!rec.user_ctors || std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
            return m.is_ctor && !m.is_template && types.rec(m.type).params.empty() &&
                   (m.is_deleted || m.defaulted == sema::CopyState::trivial);
@@ -12364,7 +12396,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
       : std::ranges::none_of(rec.members, provided_constructor) && rec.bases.empty() &&
         std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return rec.access_of(f.entity) == ast::Access::public_; });
   // No operation of a volatile class member is trivial for Apple's definition, even one that is deleted.
-  const bool pod_fields = !w_->target.apple_calls || std::ranges::none_of(rec.fields, volatile_field);
+  const bool pod_fields = !modern_pod || std::ranges::none_of(rec.fields, volatile_field);
   rec.pod = pod_fields && !rec.layout_requires_virtual_support && (rec.destructor == EntityId::none || (user_dtor && user_dtor->is_deleted)) &&
             pod_definition &&
             !provided_assignment(false) && std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&

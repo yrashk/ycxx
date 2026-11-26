@@ -1361,6 +1361,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
             (owner && !std::ranges::all_of(owner->args, default_visible_argument));
     }
     emitted.asm_label = program.asm_label(e);
+    emitted.asm_label_at = program.asm_label_site(e);
     tu.has_raw_linkage_names |= !emitted.asm_label.empty();
     if (emitted.special == Special::destructor || emitted.special == Special::deleting_destructor ||
         emitted.special == Special::base_object_destructor) {
@@ -1399,6 +1400,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           }
           tu.entities.back().template_params = std::move(ps);
           tu.entities.back().template_same_heads = std::move(same);
+          tu.entities.back().template_head_constraint = td->head_constraint;
+          tu.entities.back().template_trailing_constraint = td->trailing_constraint;
         }
     }
   };
@@ -2168,7 +2171,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
 // The unit's definitions from its groups' parts, in order (#947): each entity, function and
 // variable as the first part has it, and the decisions `unit_of` leaves to the whole unit.
 TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, std::string name, std::string_view source,
-                            const std::set<EntityId>& uncertain_layouts) {
+                            const std::set<EntityId>& uncertain_layouts, const parse::Program::Index& index) {
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
@@ -2178,15 +2181,22 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   std::set<EntityId> classes_with_unapplied_rtti_abi;
   std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
+  auto label_order = [&](ast::Loc at) {
+    return std::pair{index.index.at(std::to_underlying(at.item)), at.offset};
+  };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));
       } else if (!e.asm_label.empty()) {
-        // A part that saw the labelled declaration has the label.
+        // A group may read another declaration out of order. Compare written positions.
         auto& kept = *std::ranges::find(tu.entities, e.id, &Entity::id);
-        if (kept.asm_label.empty()) kept.asm_label = e.asm_label;
+        if (kept.asm_label.empty() ||
+            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at))) {
+          kept.asm_label = std::move(e.asm_label);
+          kept.asm_label_at = e.asm_label_at;
+        }
       }
     }
     for (FunctionDef& f : p.tu.functions)

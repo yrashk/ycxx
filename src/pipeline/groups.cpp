@@ -394,7 +394,11 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
-      shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
+      const auto call_rule = unit_source.config.calls();
+      const bool gcc_differs = classes.trivial_for_calls(c, ast::CallTriviality::gcc) &&
+                               !classes.trivial_for_calls(c, ast::CallTriviality::itanium);
+      shape.trivial_calls = classes.trivial_for_calls(c, call_rule);
+      shape.gcc_stack_calls = linux && call_rule == ast::CallTriviality::gcc && gcc_differs;
       shape.layout_uncertain = uncertain.contains(c);
       shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
       {
@@ -411,7 +415,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         const bool defaulted_nontrivial = std::ranges::any_of(record.members, [&](const sema::MemberDeclRec& m) {
           return m.is_ctor && m.defaulted == sema::CopyState::nontrivial && m.entity != record.defaulted_default_ctor;
         });
-        shape.calls_abi_uncertain = !shape.trivial_calls && !defaulted_nontrivial && (!known || !nontrivial) &&
+        shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && !defaulted_nontrivial && (!known || !nontrivial) &&
                                     !(linux && nontrivial_destructor(c));
       }
       // Only a class outside the general dynamic layout lacks a native complete-object type.
@@ -563,7 +567,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   if (!out.has_errors()) {
     std::vector<UnitPart> parts;
     for (GroupResult& r : results) parts.push_back(std::move(*r.part));
-    out.unit = finish_unit(parts, world, src.name, region.files.at(0), uncertain_layouts);
+    out.unit = finish_unit(parts, world, src.name, region.files.at(0), uncertain_layouts, *index);
   }
   co_return out;
 }

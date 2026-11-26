@@ -86,6 +86,12 @@ Later: coarse source-area maps, then ycxx's own query engine (§9.2.3).
 
 ## Writing tests
 
+For a behavior in [the compatibility table](compatibility.toml), exercise each affected
+`-fcompat` mode and keep the draft's own expectation in the spec fixture. Use GCC and upstream
+Clang as black-box oracles and record the observed versions, target, and evidence for each
+mode's behavior. `ctest --test-dir build -R daemon.compatibility` exercises the profiles through
+the compiler and editor.
+
 **Unit tests** of ycxx's own components live in `tests/unit/<area>/`, one executable per file,
 registered with `ycxxc_unit_test(<name> <source> <libraries>...)` in the area's `CMakeLists.txt`
 and run by ctest, so `tools/build` (the driver's build stage, and CI) runs them. They import
