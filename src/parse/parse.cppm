@@ -10657,11 +10657,10 @@ void Program::diagnose_abstract_static_self_members(const sema::ClassRec& rec, E
                                                     std::vector<engine::Diagnostic>& diags) {
   if (compatibility() != ast::Compatibility::clang) return;
   auto& types = w_->types;
+  const bool pattern = types.is_dependent(types.class_type(cls));
   // A directly declared pure member is enough evidence for this check in a template pattern.
   // Inherited abstractness is decided only after replay completes the specialization.
-  if (!rec.is_abstract() &&
-      !(types.is_dependent(types.class_type(cls)) && std::ranges::any_of(rec.members, &sema::MemberDeclRec::is_pure)))
-    return;
+  if (!rec.is_abstract() && !(pattern && std::ranges::any_of(rec.members, &sema::MemberDeclRec::is_pure))) return;
 
   // A nondefining static declaration can name its own class while the class is incomplete.
   for (const sema::MemberDeclRec& member : rec.members) {
@@ -10673,6 +10672,12 @@ void Program::diagnose_abstract_static_self_members(const sema::ClassRec& rec, E
     const u32 item = index(declaration->item);
     // Clang accepts a template-id written directly in the static declaration, even for its own type.
     if (static_template_id_items_.contains(item)) continue;
+    if (pattern) {
+      // The pattern check applies to declarations. An inline static definition of a dependent
+      // type is checked on instantiation ([class.static.data], [temp.inst]).
+      const auto written = decl_sema(*declaration);
+      if (!written || (written->flags & sema::decl_flag::definition)) continue;
+    }
     const auto& source = items_->items[item];
     const auto name = std::ranges::find(source.names, w_->ins.names.spelling(member.name), &items::DeclName::name);
     const u32 at = name == source.names.end() ? 0 : name->offset;
