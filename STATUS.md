@@ -4565,6 +4565,39 @@ for calls and for selection against a static function-pointer target.
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
 
+## Member using-declarations of base member functions (#1150, 2026-11-26)
+
+- `using B::f;`, `using B::operator();` and `using B::operator T;` in a class's
+  member-specification ([namespace.udecl]) name member functions of a base class, direct or
+  indirect, of an ordinary class, a class template or a partial specialization
+  (`member_using_declarator` in parse.cppm). A dependent base (`using Fn::operator();`) is named
+  again by each specialization's analysis of the member item. What lookup in the base finds is
+  kept in `Program::member_usings_` by (member item, class entity).
+- `Program::introduce_members` puts them in `ClassRec::introduced` once the class's own members are
+  known. It leaves out those that one of the class's own member functions hides or overrides: the
+  same name, parameter-type-list, cv-qualifier and ref-qualifier (/11). A conversion function also
+  compares its conversion type. A member function template also compares its template-head's
+  parameter kinds and depths (a class template's member template never hides an ordinary base's:
+  #1437). A constrained declaration hides nothing. The using-declaration's access goes in
+  `ClassRec::access` (/16). A data member or member type of the same name conflicts with it.
+- In a template definition, a name taken from a dependent base (`using Fn::name;`) is
+  type-dependent ([temp.dep.expr]/3; `Program::dependent_member_usings_`), so unqualified calls of
+  it are resolved in each specialization. In an incomplete class (a static member's initializer, a
+  `static_assert`), lookup also finds what earlier using-declarations introduced (`members_before`),
+  and a static initializer's call ranks every earlier declaration of the name.
+- Lookup (`direct_member`, `member_functions`) finds them as members of the class, so they join
+  its overload set ([over.match.funcs.general]/4). A call selecting one converts the object to
+  the declaring base subobject, whatever the base's access, and a virtual one dispatches through
+  that base's table.
+- A call of a class object finds `operator()` in a base too ([over.call.object]), through the base
+  subobject unless every candidate is static.
+- Checks: the nominated class is a base (/3), the member exists and each function is accessible
+  (/14), and a declarator is not repeated in its class.
+- Not yet: member types, data members and enumerators (#1425); inheriting constructors and pack
+  expansions `using Fs::operator()...;` (#308). Conversions do not consider a class with bases
+  (#339). Operator expressions do not find a base's member operators (#1426), and overloaded
+  `operator[]` is not supported (#219). Access to an inherited injected-class-name is not checked (#1427).
+
 ## Pointer-to-member types and declarators (#238)
 
 - Declarators build `TMemberPtr` ([dcl.mptr]), interning the owning class and member type as

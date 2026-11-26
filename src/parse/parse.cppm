@@ -1629,6 +1629,12 @@ public:
   // The base member functions the using-declarations `usings` of class `cls` introduce
   // ([namespace.udecl]), into `rec.introduced`, once `rec.members` has its own declarations.
   void introduce_members(EntityId cls, sema::ClassRec& rec, std::span<const std::pair<u32, ast::Access>> usings);
+  // Whether member function types `own` and `base` have the same parameter-type-list,
+  // cv-qualifier and ref-qualifier ([basic.scope.scope]/4, [namespace.udecl]/11).
+  bool corresponding_signatures(QualType own, QualType base) const;
+  // Whether member templates `own` and `base` have equivalent template-heads ([temp.over.link]/6),
+  // as far as their parameters' kinds, packs, depths and non-type parameters' types tell.
+  bool equivalent_heads(EntityId own, EntityId base);
   bool class_assertion(u32 member) const {
     return r_->tokens[items_->items[member].begin].kind == lex::Tk::kw_static_assert;
   }
@@ -1972,6 +1978,9 @@ private:
   // ([namespace.udecl]), as lookup in its nominated base found them; for a specialization, as
   // its instantiation of the item found them. `introduce_members` filters them.
   std::map<std::pair<u32, u32>, std::vector<sema::MemberDeclRec>> member_usings_;
+  // By class template (or partial specialization) entity: the names its using-declarations take
+  // from a dependent base, which its definition looks up in each specialization.
+  std::map<u32, std::set<NameId>> dependent_member_usings_;
   struct AsmLabel {
     u32 item = 0, offset = 0;
     std::string spelling;
@@ -2573,6 +2582,17 @@ public:
     if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end()) return b->second;
     return {};
   }
+  bool dependent_member_using(EntityId c, ast::NameId name) override {
+    const auto definition = p_->class_items_.find(std::to_underlying(c));
+    if (definition == p_->class_items_.end()) return false;
+    // Its using-declarations are analysed before the name is asked about.
+    for (u32 m : p_->items().items[definition->second].members)
+      if (m != item_ && p_->items().items[m].kind != ItemKind::access_spec &&
+          p_->region().tokens[p_->items().items[m].begin].kind == lex::Tk::kw_using)
+        p_->item_sema(m);
+    const auto found = p_->dependent_member_usings_.find(std::to_underlying(c));
+    return found != p_->dependent_member_usings_.end() && found->second.contains(name);
+  }
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override {
     p_->static_locals_[std::to_underlying(v)] = {t, value};
   }
@@ -2603,8 +2623,14 @@ public:
   std::optional<ast::DeclSema> members_before(u32 cls_item, u32 limit, EntityId owner, ast::NameId name, bool type_only,
                                               std::vector<ast::DeclSema>* functions) {
     std::optional<ast::DeclSema> r;
+    std::vector<ast::DeclSema> introduced;  // by earlier using-declarations ([namespace.udecl])
     for (u32 m : p_->items().items[cls_item].members) {
       if (m == limit) break;
+      if (!type_only && p_->items().items[m].kind != ItemKind::access_spec &&
+          p_->region().tokens[p_->items().items[m].begin].kind == lex::Tk::kw_using)
+        if (const auto u = p_->member_usings_.find({m, std::to_underlying(owner)}); u != p_->member_usings_.end())
+          for (const sema::MemberDeclRec& f : u->second)
+            if (f.name == name) introduced.push_back(introduced_declaration(f));
       // In a class template's instantiation, the specialization's own records of its members.
       const ast::ItemSema& ms = p_->class_patterns_.contains(std::to_underlying(owner)) &&
                                       p_->items().items[m].kind != ItemKind::access_spec
@@ -2623,7 +2649,52 @@ public:
         if (!type || !r || sema::Sema::is_type(r->kind)) r = d;
       }
     }
+    // An earlier member function with the same parameter-type-list and qualifiers hides one
+    // (/11); member function templates are compared by their types alone.
+    const auto own_corresponding = [&](const ast::DeclSema& f) {
+      return functions && std::ranges::any_of(*functions, [&](const ast::DeclSema& d) {
+        return ((d.flags & sema::decl_flag::template_) != 0) == ((f.flags & sema::decl_flag::template_) != 0) &&
+               (!(d.flags & sema::decl_flag::template_) || p_->equivalent_heads(d.entity, f.entity)) &&
+               d.constraint == NodeId::none && d.constraints == ast::ConstId::none &&
+               f.constraint == NodeId::none && f.constraints == ast::ConstId::none &&
+               p_->corresponding_signatures(d.type, f.type);
+      });
+    };
+    for (const ast::DeclSema& f : introduced) {
+      if (own_corresponding(f)) continue;
+      if (!r || sema::Sema::is_type(r->kind)) r = f;
+      if (functions) functions->push_back(f);
+    }
     return r;
+  }
+  // A declaration standing for a base member function a using-declaration introduced: its
+  // template's, or one built from its record.
+  ast::DeclSema introduced_declaration(const sema::MemberDeclRec& f) {
+    if (f.is_template)
+      if (auto t = template_decl(f.entity)) return *t;
+    auto& ins = p_->world().ins;
+    std::vector<ast::ParamSema> params;
+    const sema::TypeRec type = p_->world().types.rec(f.type);
+    for (std::size_t i = 0; i < type.params.size(); ++i)
+      params.push_back({EntityId::none, type.params[i], ast::NameId{}, i < f.defaults.size() ? f.defaults[i] : NodeId::none, 0});
+    ast::DeclSema d{};
+    d.entity = f.entity;
+    d.type = f.type;
+    d.kind = ast::DeclKind::function;
+    d.linkage = ast::Linkage::external;
+    d.storage = ast::Storage::none;
+    d.access = ast::Access::none;
+    d.flags = sema::decl_flag::member | (f.is_static ? sema::decl_flag::static_ : 0) |
+              (f.is_deleted ? sema::decl_flag::deleted : 0) | (f.is_template ? sema::decl_flag::template_ : 0);
+    d.attributes = ins.intern_seq(std::span<const NodeId>{});
+    d.constraint = NodeId::none;
+    d.constraints = ast::ConstId::none;
+    d.contracts = NodeId::none;
+    d.params = ins.intern_seq(std::span<const ast::ParamSema>(params));
+    d.template_params = ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+    d.is_virtual = f.is_virtual;
+    d.is_pure = f.is_pure;
+    return d;
   }
   // The same for the members analysed so far of a class template specialization being instantiated.
   std::optional<ast::DeclSema> members_so_far(EntityId spec, ast::NameId name, bool type_only,
@@ -4027,7 +4098,10 @@ private:
       s_.diag(at, Diag::using_namespace_member, *name);
       return false;
     }
-    if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) return true;
+    if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) {
+      p_->dependent_member_usings_[std::to_underlying(ce)].insert(*name);
+      return true;
+    }
     if (!sc->type || !types.is_class(*sc->type)) {
       s_.diag(at, Diag::using_not_base, sc->type ? *sc->type : s_.builtin(sema::Builtin::void_), types.class_type(ce));
       return false;
@@ -9554,6 +9628,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         statics.back().is_final = d.is_final;
         statics.back().is_pure = d.is_pure;
         statics.back().is_consteval = (d.flags & sema::decl_flag::consteval_) != 0;
+        statics.back().constrained = d.constraint != NodeId::none || d.constraints != ast::ConstId::none;
         if (auto overridden = overridden_virtuals_.find(d.entity); overridden != overridden_virtuals_.end())
           statics.back().overridden_virtual = overridden->second;
         if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
@@ -9564,23 +9639,58 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   return out;
 }
 
+bool Program::equivalent_heads(EntityId own, EntityId base) {
+  const auto a = declaration(own, end());
+  const auto b = declaration(base, end());
+  if (!a || !b) return false;
+  const auto x = w_->ins.seqs.elements(a->template_params);
+  const auto y = w_->ins.seqs.elements(b->template_params);
+  // Parameters at different depths name different types, so their signatures never compare
+  // equal here: a member template of a class template and one of an ordinary base (#1437).
+  return std::ranges::equal(x, y, [&](const ast::TemplateParamSema& p, const ast::TemplateParamSema& q) {
+    return p.kind == q.kind && p.pack == q.pack && p.depth == q.depth &&
+           (p.kind != ast::TemplateArgKind::value || w_->types.canonical(p.type) == w_->types.canonical(q.type)) &&
+           w_->ins.seqs.size(p.params) == 0 && w_->ins.seqs.size(q.params) == 0;
+  });
+}
+
+bool Program::corresponding_signatures(QualType own, QualType base) const {
+  const sema::TypeRec a = w_->types.rec(own);
+  const sema::TypeRec b = w_->types.rec(base);
+  return a.fn_cv == b.fn_cv && a.fn_ref == b.fn_ref && a.variadic == b.variadic &&
+         std::ranges::equal(a.params, b.params, {}, [&](QualType t) { return w_->types.canonical(t); },
+                            [&](QualType t) { return w_->types.canonical(t); });
+}
+
 void Program::introduce_members(EntityId cls, sema::ClassRec& rec, std::span<const std::pair<u32, ast::Access>> usings) {
   // [namespace.udecl]/11: the same name, parameter-type-list, cv-qualification and ref-qualifier
   // (and for a template, a template's head: the same kind of member, approximated by its type).
+  // Conversion functions share one name: theirs is the conversion type.
   const auto corresponds = [&](const sema::MemberDeclRec& own, const sema::MemberDeclRec& base) {
     if (own.name != base.name || !own.is_function || own.is_ctor || own.is_dtor || own.is_template != base.is_template ||
-        !own.head.empty() || !base.head.empty())
+        !own.head.empty() || !base.head.empty() || own.constrained || base.constrained)
       return false;
-    const sema::TypeRec a = w_->types.rec(own.type);
-    const sema::TypeRec b = w_->types.rec(base.type);
-    return a.fn_cv == b.fn_cv && a.fn_ref == b.fn_ref && a.variadic == b.variadic &&
-           std::ranges::equal(a.params, b.params, {}, [&](QualType t) { return w_->types.canonical(t); },
-                              [&](QualType t) { return w_->types.canonical(t); });
+    if (w_->ins.names.spelling(own.name) == lex::conversion_function_name &&
+        w_->types.canonical(w_->types.rec(own.type).inner) != w_->types.canonical(w_->types.rec(base.type).inner))
+      return false;
+    if (own.is_template && !equivalent_heads(own.entity, base.entity)) return false;
+    return corresponding_signatures(own.type, base.type);
   };
   for (const auto& [m, access] : usings) {
     const auto found = member_usings_.find({m, std::to_underlying(cls)});
     if (found == member_usings_.end()) continue;
     for (const sema::MemberDeclRec& f : found->second) {
+      // [basic.scope.scope]/4: a data member or member type of the class conflicts with it.
+      if (std::ranges::contains(rec.fields, f.name, &sema::FieldRec::name) ||
+          std::ranges::contains(rec.types, f.name, &sema::NestedType::name)) {
+        u32 offset = 0;
+        for (const items::DeclName& n : items_->items[m].names)
+          if (n.name == w_->ins.names.spelling(f.name)) offset = n.offset;
+        engine::Diagnostic d{engine::Loc{std::to_underlying(id(m)), offset}, sema::diag_id(sema::Diag::conflicting_declaration),
+                             {{std::to_underlying(f.name), w_->ins.names.fp(f.name)}}};
+        if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+        break;
+      }
       if (std::ranges::contains(rec.introduced, f.entity, &sema::MemberDeclRec::entity) ||
           std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& own) { return corresponds(own, f); }))
         continue;

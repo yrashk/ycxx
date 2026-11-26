@@ -240,6 +240,9 @@ public:
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
+  // Whether a using-declaration of class `c` names `name` in a dependent base: in its template
+  // definition, a member of an unknown specialization ([namespace.udecl], [temp.dep.type]/7).
+  virtual bool dependent_member_using(EntityId, NameId) { return false; }
   // Whether class `c` is an explicit specialization, which has no template-head of its own
   // ([temp.expl.spec]).
   virtual bool explicit_specialization(EntityId) { return false; }
@@ -3627,7 +3630,8 @@ public:
       q_->earlier_member(name, /*type_only=*/false, &functions);
       return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     }
-    return r && std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+    return r && std::ranges::any_of(std::array{std::span(r->members), std::span(r->introduced)} | std::views::join,
+                                    [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
   }
   // Whether `S::name` names a function template ([temp.names]/3): a member template of class S,
   // or a function template of namespace S.
@@ -7055,6 +7059,11 @@ public:
                           /*defer_no_viable=*/false, /*scalar_list_arguments=*/objectless_prefix);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
+    // A base member a using-declaration introduced: overload resolution took the implicit object
+    // parameter as the naming class's ([over.match.funcs.general]/4); the call's object is the
+    // base subobject that declares it, `object_cls`.
+    const bool introduced = introduced_member(bound.cls, d);
+    const EntityId object_cls = introduced ? w_->entities.rec(d->entity).scope : bound.cls;
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
     if (objectless_prefix && !d->is_static) {
@@ -7088,10 +7097,10 @@ public:
           }
         }
       } else if (d->is_virtual) {
-        const auto* record = virtual_consumer(bound.cls);
+        const auto* record = virtual_consumer(object_cls);
         // The pure interface has a known call shape independently of its object layout.
         if (!record && d->is_pure && bound.explicit_receiver && !bound.qualified && bound.naming == bound.cls &&
-            q_->peer_pure_dispatch(bound.cls)) record = class_rec(bound.cls);
+            q_->peer_pure_dispatch(object_cls)) record = class_rec(object_cls);
         if (!record || !object || assignment_notation ||
             (!m.arrow && (object->cat() != ValueCategory::lvalue ||
                           (record->peer_virtual_layout == PeerVirtualLayout::primary_base && !peer_object_lvalue(*object))))) {
@@ -7107,13 +7116,13 @@ public:
             return fail;
           }
         }
-      } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) {
+      } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(object_cls), paren_at)) {
         return fail;
       }
     }
     const auto copy_assignment = d->copy_assignment;
     if (copy_assignment != CopyAssignment::none) {
-      QualType ct = types().class_type(bound.cls);
+      QualType ct = types().class_type(object_cls);
       if (!usable_copy_assignment(copy_assignment, ct, paren_at)) return fail;
       if (copy_assignment == CopyAssignment::memberwise && !d->explicit_defaulted_assignment &&
           (!lvalue_assignment || args[0].cat() != ValueCategory::lvalue || !same_unqualified(args[0].type(), ct))) {
@@ -7168,6 +7177,12 @@ public:
       return fail;
     }
     Ex o = *object;
+    // The using-declaration's access governs ([namespace.udecl]/16), not the base's.
+    if (introduced) {
+      if (!m.arrow && !o.glvalue()) o = materialize(o, o.type(), false);
+      o = to_base(o, object_cls, paren_at, false, /*check_access=*/false);
+      if (!o.ok()) return fail;
+    }
     if (assignment_notation && copy_assignment == CopyAssignment::trivial) {
       // The chosen reference argument already designates the source object. Assignment does not
       // initialize a new class value, even when the copy constructor is deleted.
@@ -7179,14 +7194,6 @@ public:
       if (!o.glvalue()) o = materialize(o, o.type(), false);
       ExprInfo pi{types().pointer(o.type()), ValueCategory::prvalue, 0};
       o = node(ast::Unary{pi, ast::UnaryOp::address_of, at(o, o.begin)}, o.begin, o.end, pi);
-    }
-    // A base member a using-declaration introduced: overload resolution took the implicit object
-    // parameter as the naming class's ([over.match.funcs.general]/4); the call's object is the
-    // base subobject that declares it. The using-declaration's access governs ([namespace.udecl]/16),
-    // not the base's.
-    if (introduced_member(bound.cls, d)) {
-      o = to_base(o, w_->entities.rec(d->entity).scope, paren_at, false, /*check_access=*/false);
-      if (!o.ok()) return fail;
     }
     if (assignment_notation) {
       contract_assert(children->size() == 1);
@@ -8376,6 +8383,8 @@ public:
       return enumerator_in_list(*declaration, begin, end);
     // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
+      // A name a using-declaration takes from a dependent base is type-dependent ([temp.dep.expr]/3).
+      if (q_->dependent_member_using(current_class, name)) return dependent_node({}, begin, end);
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class))
         if (auto r = incomplete_class_member(name, begin, end, begin, /*unqualified=*/true, callee)) return *r;
@@ -12978,8 +12987,11 @@ public:
         return {NodeId::none, begin, end};
       }
       Ex object = callee;
-      if (found->owner != c) {
-        object = to_base(callee, found->owner, paren_at);
+      // A static operator() needs no base subobject ([over.call.object], [expr.ref]); a prvalue
+      // object is materialized before the derived-to-base conversion ([class.temporary]/2).
+      if (found->owner != c && !std::ranges::all_of(member_functions(found->owner, op), &MemberDeclRec::is_static)) {
+        if (!object.glvalue()) object = materialize(object, object.type(), false);
+        object = to_base(object, found->owner, paren_at);
         if (!object.ok()) return {NodeId::none, begin, end};
       }
       Ex bound = bound_member(found->owner, op, object, false, begin, callee.end, paren_at, c);
@@ -13444,8 +13456,7 @@ private:
     }
     const bool assertion = in_class_assertion();
     std::vector<ast::DeclSema> functions;
-    if (auto m = q_->earlier_member(name, /*type_only=*/false,
-                                    (nested_enum_members_begin || assertion || unevaluated || in_function_body) ? &functions : nullptr)) {
+    if (auto m = q_->earlier_member(name, /*type_only=*/false, &functions)) {
       if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
       // Rank mixed overloads before checking whether the selected member needs an object.
       if (m->kind == ast::DeclKind::function) {

@@ -769,6 +769,9 @@ struct MemberDeclRec {
   bool is_final = false;
   bool is_pure = false;
   bool is_consteval = false;  // an immediate function ([dcl.constexpr])
+  // A trailing requires-clause or a template's constraints: it corresponds to no unconstrained
+  // declaration ([basic.scope.scope]/4, [namespace.udecl]/11).
+  bool constrained = false;
 };
 
 struct NestedType {

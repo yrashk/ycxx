@@ -989,12 +989,13 @@ private:
   // appended to `spelled` as declarators spell it; the first token after it: a `(`, `to`, or
   // with `comma_ends` a `,` past its first token (a using-declarator's end).
   u32 operator_spelling(u32 n, u32 to, std::string& spelled, bool comma_ends) {
+    const u32 first = n;
     if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
         (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
       spelled += kind(n) == Tk::l_paren ? "()" : "[]";
       n += 2;
     }
-    for (const u32 first = n; n < to && kind(n) != Tk::l_paren && !(comma_ends && n > first && kind(n) == Tk::comma); ++n) {
+    for (; n < to && kind(n) != Tk::l_paren && !(comma_ends && n > first && kind(n) == Tk::comma); ++n) {
       Tk o = kind(n);
       bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
       if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';

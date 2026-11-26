@@ -1692,6 +1692,23 @@ int main() { D d(3); return d.v - 3; }
 issues = [308]
 
 [[feature]]
+id = 'class-member-using'
+name = 'Member using-declarations naming base members'
+group = 'class'
+clauses = ['namespace.udecl', 'class.member.lookup', 'over.match.funcs.general']
+std = 'C++98'
+detect = '''\busing\s+(?:typename\s+)?\w+(?:<[^;]*>)?::(?:operator\b[^;]*|~?\w+)\s*(?:\.\.\.\s*)?;'''
+status = 'partial'
+probe = '''
+struct F { int operator()(int x) const { return x; } int g(long) { return 2; } };
+struct S : F { using F::operator(); using F::g; int g(int) { return 1; } };
+template<class Fn> struct D : Fn { using Fn::operator(); int operator()() const { return 4; } };
+int main() { S s; return s(3) + s.g(1) + s.g(1L) + D<F>{}(5) + D<F>{}() - 15; }
+'''
+issues = [1425, 308, 339]
+note = 'Member functions, operators and conversion functions of ordinary, nondependent and dependent bases. Member types, data members and enumerators (#1425), inheriting constructors and pack expansions (#308) remain; conversions do not yet consider a class with bases (#339).'
+
+[[feature]]
 id = 'class-nsdmi'
 name = 'Default member initializers'
 group = 'class'
