@@ -15,6 +15,7 @@ add_test(NAME unit.driver_queries
 
 add_subdirectory(hash)
 add_subdirectory(bench)
+add_subdirectory(cm)
 add_subdirectory(ast)
 add_subdirectory(engine)
 add_subdirectory(lex)

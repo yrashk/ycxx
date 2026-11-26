@@ -30,6 +30,15 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
   (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
   extraction, and solver builds against libycxx.
+- `ycxx.cm` in `src/cm/` models bounded integers, Boolean 0/1 views, linear rows and
+  minimization. It emits stable FlatZinc with explicit failure for values beyond the
+  offline solver's integer range. Optional CTest runs exported models through Chuffed.
+  The standalone solver build pins HiGHS, CaDiCaL, and Chuffed by revision and archive
+  hash. See [optimizer experiments](docs/BUILDING.md#optimizer-experiments) and [#66](https://github.com/yrashk/ycxx/issues/66).
+- `ycxx.bench` in `packages/ycxx-bench/` provides calibrated, warmed sampling and balanced
+  comparisons, with typed callable properties and metadata. It reports clock and
+  host context, retained samples, and practical comparison verdicts. The optimizer
+  uses it for FlatZinc export timing. [Benchmark runner](packages/ycxx-bench/GUIDE.md).
 - AST design accepted: [`docs/design/ast.md`](docs/design/ast.md) (#2), summarized in DECISIONS
   §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
   the red view and type canonicalization.
