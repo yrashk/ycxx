@@ -575,13 +575,15 @@ evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own
 id = "dependent-template-disambiguator"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
-reference = "[temp.names], #340"
-prior = "Require template for the supported dependent member alias template spelling."
-spec = "Require the syntactically applicable disambiguator."
-gcc = "Allow the omitted keyword in the terminal member template-id of an explicit typename-type, as in typename T::M<int>."
-clang = "Same as spec."
-limits = "Both reject omission when T::M is used as a template-template argument."
-probe = 'struct A { template<class U> using M = U; }; template<class T> using X = typename T::M<int>; static_assert(__is_same(X<A>, int));'
+reference = "[temp.names], [temp.res.general], #340, #1466"
+prior = "Only GCC mode allowed the omitted keyword in the tested terminal typename-specifier."
+spec = "Allow template to be omitted in the terminal member template-id of a typename-specifier."
+gcc = "Same as spec for this terminal spelling."
+clang = "Require template for the tested dependent member template-id."
+gcc_observed = "Accepts the terminal typename-specifier without template."
+clang_observed = "Requires template in the tested terminal typename-specifier."
+limits = "The terminal rule excludes nested-name-specifiers. All modes reject the tested dependent template-template argument without template."
+probe = 'template<class T> using X = typename T::M<int>;'
 evidence = ["STATUS.md", "tests/own/templates/member-alias-template-mangling.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]

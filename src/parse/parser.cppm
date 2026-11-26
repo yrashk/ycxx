@@ -1931,7 +1931,11 @@ public:
       return template_argument_list(nullptr, &took_closer);
     }();
     u32 after = i_ - saved;
-    bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
+    const bool followed_by_scope = !half_ && kind() == Tk::coloncolon;
+    // The draft's omitted disambiguator applies only to the terminal name.
+    const bool implicit_qualifier = implicit_template && dependent_member && !keyword && followed_by_scope &&
+                                    s_->compatibility() == ast::Compatibility::spec;
+    const bool closed = took_closer && (scope ? followed_by_scope : !implicit_qualifier);
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     const bool constrained_alias = tmpl && tmpl->kind == ast::DeclKind::type_alias && tmpl->constraints != sema::ConstId::none;
     std::optional<QualType> t;
@@ -2011,7 +2015,8 @@ public:
       u32 j = next;
       qualified_half_ = false;
       const u32 first = index() + start;
-      const bool implicit_template = s_->compatibility() == ast::Compatibility::gcc && first != 0 &&
+      // The terminal name of a typename-specifier is type-only ([temp.names], [temp.res.general]).
+      const bool implicit_template = s_->compatibility() != ast::Compatibility::clang && first != 0 &&
                                      r_->tokens[first - 1].kind == Tk::kw_typename;
       if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr,
                                      /*conversion=*/false, /*committed_type=*/false, classify_only, implicit_template)) {
