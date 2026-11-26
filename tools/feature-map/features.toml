@@ -1699,8 +1699,8 @@ clauses = ['class.mem']
 std = 'C++11'
 ftm = '__cpp_nsdmi'
 status = 'partial'
-issues = [118]
-note = 'initializers that are not constants'
+issues = [118, 1140]
+note = 'initializers that are not constants (#118); constant evaluation of objects whose array members use one (#1140)'
 probe = '''
 int seven() { return 7; }
 struct S { int a = 1; int b{2}; int c = seven(); };

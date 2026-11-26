@@ -1445,6 +1445,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   lexical point. An unbound class template pattern leaves dependent expressions for a selecting
   initialization ([class.mem.general], [temp.res], [temp.inst]).
   [#732](https://github.com/yrashk/ycxx/issues/732)
+- An array member whose innermost element is a scalar (not a pointer to member) keeps no value at
+  declaration. Where an initialization selects its default member initializer,
+  `AtItem::replay_default_member` replays the tokens for the class or specialization and folds
+  them with `Evaluator::evaluate_initializer` into an aggregate literal. This applies to dependent
+  bounds and element types (`T w[N] = {}`), partial lists and nested arrays
+  ([class.mem.general], [dcl.init.aggr], [temp.inst]/3). A nonconstant array default remains
+  #118, and constant evaluation of the object remains #1140
+  (`tests/own/templates/array-default-member/`).
+  [#1418](https://github.com/yrashk/ycxx/issues/1418)
 - In non-template code, ordinary scalar aggregates replay written defaults in braced expressions,
   `T()` value initialization, result objects, and aggregate arguments. The expanded runtime path
   checks built-in scalar operations and ordinary calls for nonthrowing behavior. IR binds receiver
