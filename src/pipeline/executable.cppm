@@ -234,8 +234,8 @@ obj::object linux_startup(std::int64_t init_array_size, bool dynamic) {
 
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_executable(
     std::span<const obj::object> objects, const link::elf::dynamic_options* dynamic) {
-  const auto link_elf = [&](std::span<const obj::object> input, std::string_view entry) {
-    return link::elf::link(input, entry, dynamic).transform_error([](std::string message) {
+  const auto link_elf = [&](std::string_view entry, std::optional<obj::object> startup = std::nullopt) {
+    return link::elf::link(objects, entry, dynamic, std::move(startup)).transform_error([](std::string message) {
       return std::vector<link::error>{{std::move(message)}};
     });
   };
@@ -268,19 +268,17 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
       return std::unexpected(std::vector<link::error>{{"a custom '_start' is unsupported for dynamic ELF linking"}});
     if (init_array_size != 0)
       return std::unexpected(std::vector<link::error>{{"a custom '_start' with a nonempty ELF .init_array is unsupported"}});
-    return link_elf(objects, "_start");
+    return link_elf("_start");
   }
 
   // Let the ELF linker diagnose missing or invalid definitions, along with any other input errors.
-  if (!main || *main->section >= main_object->sections.size()) return link_elf(objects, "main");
+  if (!main || *main->section >= main_object->sections.size()) return link_elf("main");
   const auto& section = main_object->sections[*main->section];
   if (section.segment != "__TEXT" || section.name != "__text" || main->offset >= section.size())
-    return link_elf(objects, "main");
+    return link_elf("main");
 
   // The object model only describes the code symbol. The source caller checks main's type.
-  std::vector<obj::object> with_startup(objects.begin(), objects.end());
-  with_startup.push_back(linux_startup(static_cast<std::int64_t>(init_array_size), dynamic != nullptr));
-  return link_elf(with_startup, "_start");
+  return link_elf("_start", linux_startup(static_cast<std::int64_t>(init_array_size), dynamic != nullptr));
 }
 
 }  // namespace

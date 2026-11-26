@@ -30,11 +30,26 @@ struct ModuleDeclarationInspection {
   ModuleSourceLocation location;
 };
 
+struct ModuleUnitConfiguration {
+  std::string source;
+  std::vector<std::string> include_dirs;
+  auto operator<=>(const ModuleUnitConfiguration&) const = default;
+};
+
+// Only the build system's virtual storage varies with the graph's native target.
+inline std::string logical_module_path(std::string_view path, std::string_view native_target) {
+  const auto prefix = std::format(".ycxx/targets/{}/virtual", native_target);
+  if (path.starts_with(prefix) && (path.size() == prefix.size() || path[prefix.size()] == '/'))
+    return std::format(".ycxx/virtual{}", path.substr(prefix.size()));
+  return std::string(path);
+}
+
 struct ModuleUnitInspection {
   std::size_t id;
   std::string source;
   std::string scan;
   std::vector<ModuleDeclarationInspection> declarations;
+  std::optional<ModuleUnitConfiguration> configuration = std::nullopt;
 };
 
 struct ModuleCandidateInspection {

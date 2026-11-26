@@ -675,10 +675,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
     else the Command Line Tools' SDK, looked up once per process outside the engine.
   - `:runtime` (configured by CMake): what a Darwin link includes by default after its operands
-    (#842): this build's `libycxx.a` and `libycxx-abi.a`, `libemutls_w.a` from the GCC that built
-    them (GCC on Darwin lowers `thread_local` to `___emutls_get_address`), and the names
-    libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
-    `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
+    (#842): this build's `libycxx.a` and `libycxx-abi.a`, GCC's `libemutls_w.a` for emulated TLS,
+    the two GCC shift helpers `___ashlti3` and `___lshrti3` for optimized `to_chars` (#1130),
+    and the names libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read
+    from its `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
     A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's
@@ -978,6 +978,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- Static x86-64 ELF links validate the canonical GNU property note for `FEATURE_1_AND` with
+  IBT and SHSTK bits. The linker intersects the masks of ordinary objects and selected archive
+  members, treating an unmarked object as zero. A zero intersection produces an executable
+  without a GNU property note or segment. A nonzero intersection is diagnosed.
+  [#1367](https://github.com/yrashk/ycxx/issues/1367) · [#1376](https://github.com/yrashk/ycxx/issues/1376)
 - An arm64 macOS link can include explicit Darwin `.a` operands (BSD `#1/<n>` names and a
   `__.SYMDEF`, `__.SYMDEF SORTED` or `_64` ranlib index first), with the system linker's
   selection rules: every ordinary object comes first, an archive serves names referenced
@@ -2685,6 +2690,14 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
+## Trailing-zero count builtin (#1381)
+
+`__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
+operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
+after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
+Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
+Other unsigned operand types and the optional fallback argument remain in #248.
+
 ## C library string and memory builtins (#248, #1093, #1170)
 
 `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
@@ -3303,6 +3316,23 @@ physical locations and links to candidate declarations. The section identifies
 incomplete scans, provider conflicts, and cyclic components. With `--against`,
 it shows the current plan's graph below **Plan changes**.
 
+JSON plan comparisons include `module_changes` when both snapshots contain a
+module graph (#1383). Units match by logical source and ordered include paths,
+so provider changes can be compared across target variants. The comparison
+reports changes to units, imports, conflicts, cycles, and scan completeness.
+Body-only edits and moved source sites preserve the semantic results. Older
+graphs can use source-only matching when their unit paths are unambiguous.
+
+HTML comparisons show these semantic differences in **Module changes** when
+both plans contain graphs (#1390). The report shows before and after provider
+locations, resolution and scan states, conflicts, and cycles. After entries
+link to the corresponding imports, declarations, and units in the current
+graph. The section identifies source-only matches and explains when an older
+graph lacks enough configuration information to compare. An available
+comparison with equal semantic results reports no module changes. Earlier
+schema-1 snapshots without a graph still show **Plan changes** and the current
+**Module graph** when available.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe
@@ -3458,9 +3488,10 @@ request it serves.
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
 - The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
   given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
-  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
-  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
-  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. An
+  interrupted terminal wait also checks the size, so a deferred handler cannot stall the redraw
+  (#1375). Fatal signals restore the terminal, then re-raise. The tree has columns (time, worker,
+  alloc and retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
   summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
   width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
   divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
@@ -4735,6 +4766,15 @@ Each is removed once ycxx compiles itself.
   - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
     daemon's `socket_address`.
   - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
+
+
+## Dependent immediate calls in template defaults (#1327)
+
+An integral non-type template parameter default can call an eligible `consteval`
+function with earlier non-type parameters. The unqualified or namespace-qualified
+call selects its overload in the declaration context. Substituting an omitted
+argument evaluates the selected call and checks the converted constant expression
+for the destination parameter type. Explicit template arguments skip the default.
 
 ## Milestones
 

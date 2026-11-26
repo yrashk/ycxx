@@ -4,6 +4,7 @@ description: >
   name (deps/libycxx/.github/actions/setup-linux-tsan). The bare Linux runner lets the job lower
   vm.mmap_rnd_bits to 28 for ThreadSanitizer's shadow memory layout. The job uses GCC 16.2 with
   its sanitizer runtimes, built by libycxx's provision --with-sanitizers (about 17 minutes) and cached.
+  Clang 23 is a peer for the native ABI tests.
 runs:
   using: composite
   steps:
@@ -44,6 +45,7 @@ runs:
       run: |
         command -v cmake
         cmake --version
+    - uses: ./.github/actions/setup-linux-oracle
     - id: gcc-cache
       uses: actions/cache/restore@v4
       with:
@@ -51,10 +53,10 @@ runs:
         key: ycxx-gcc-16.2.0-sanitizers-${{ runner.os }}-${{ runner.arch }}-glibc-${{ steps.glibc.outputs.version }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
     - shell: bash
       run: |
-        deps/libycxx/tools/toolchain/provision --gcc-only --with-sanitizers --jobs 4
-        # The Linux ABI tests use YCXX_GXX to find the GCC peer instead of the system g++.
+        deps/libycxx/tools/toolchain/provision --with-sanitizers --jobs 4
+        # The Linux ABI tests select the configured peer compilers by these paths.
         toolchains=${YCXX_TOOLCHAINS:-${XDG_DATA_HOME:-$HOME/.local/share}/ycxx/toolchains}
-        grep '^YCXX_GXX=' "$toolchains/toolchains.env" >> "$GITHUB_ENV"
+        grep -E '^YCXX_(GXX|CLANGXX)=' "$toolchains/toolchains.env" >> "$GITHUB_ENV"
     - if: steps.gcc-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:

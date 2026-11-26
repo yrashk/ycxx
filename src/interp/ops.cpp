@@ -66,6 +66,14 @@ struct Ops {
   static Flow lshr(M& m, Frame& f, N n) { return m.shift(f, n); }
   static Flow ashr(M& m, Frame& f, N n) { return m.shift(f, n); }
 
+  static Flow ctz(M& m, Frame& f, N n) {
+    const Value arg = m.operand(f, n, 0);
+    if (arg.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    const ast::Bits128 bits{arg.bits, arg.hi};
+    if (ast::wide::is_zero(bits)) return m.fail(Reason::ctz_zero);
+    return m.set(f, n, Value::integer(ast::wide::countr_zero(bits)));
+  }
+
   static Flow icmp(M& m, Frame& f, N n) {
     Value a = m.operand(f, n, 0), b = m.operand(f, n, 1);
     if (a.kind != VKind::integer || b.kind != VKind::integer) return m.fail(Reason::ill_formed);

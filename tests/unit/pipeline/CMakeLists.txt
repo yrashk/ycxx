@@ -249,6 +249,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_archive
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_archive.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR})
+  # PARITY: by design: runs native Linux x86-64 executables and checks GNU ELF properties (#1367).
+  add_test(NAME unit.linux_elf_gnu_property
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_gnu_property.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR} ${CMAKE_READELF})
   add_test(NAME unit.linux_archive_output
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_archive_output.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_NM} ${CMAKE_LINKER} ${CMAKE_C_COMPILER})

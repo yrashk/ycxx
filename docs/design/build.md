@@ -349,7 +349,8 @@ indicates whether every unit scan is complete. The graph contains `units`,
 - A unit has `id`, `source`, `scan`, and `declarations`. A translation unit
   registered more than once appears once. Different configurations of the same
   source have distinct IDs. `scan` is `complete`, `generated_inputs_unavailable`,
-  or `preprocessing_incomplete`.
+  or `preprocessing_incomplete`. The optional `configuration` records the
+  logical `source` path and ordered `include_dirs`.
 - A declaration has `directive_index`, `kind` (`interface_unit` or
   `implementation_unit`), `name`, and `location`. An import adds `unit_id`,
   `status`, and `candidates` and has kind `import` or `exported_import`.
@@ -392,6 +393,52 @@ facts with the current plan. **Module graph** follows that comparison and shows
 the current plan's graph. A resolved plan with a supported native configuration
 and zero C++ translation units shows an empty graph. The section is omitted
 while rule expansion is unresolved or when no native configuration is available.
+
+### Module graph comparisons (#1383)
+
+`ycxx show app --against before.json --format=json` includes `module_changes`
+when both snapshots contain a module graph. Its `units`, `imports`, `conflicts`,
+and `cycles` arrays contain records with `change` (`added`, `removed`, or
+`changed`) and the applicable `before` and `after` records from the original
+graphs. Resolve candidate references and cycle members in their respective
+snapshots. If graph completeness changes, `completeness` carries `change`
+(`changed`) and the `before` and `after` booleans. In an incomplete graph,
+removed entries can reflect a loss of scan coverage.
+
+Units match by `configuration.source` and the ordered
+`configuration.include_dirs`. The target triple may differ between snapshots.
+Paths inside the workspace are relative to it. Per-target virtual source and
+include paths use the common `.ycxx/virtual` root for matching.
+Unit changes cover scan state and named declarations. Repeated imports of the
+same kind and name in a unit pair by occurrence order. Import changes cover
+resolution status and the set of candidate declarations. Conflicts match by
+module name and cycles by their set of configured units. A body-only edit or a
+moved directive produces empty change arrays when the observed graph facts agree.
+
+For an older graph with units that lack `configuration`, unambiguous source
+paths allow source-only matching. The result sets `matching` to
+`legacy_source_only`. Ambiguous source matches produce empty change arrays and
+set `unavailable` to `ambiguous_legacy_configuration`. The plan's `changes`
+array contains the semantic fact comparison in either case. Snapshots saved
+without a graph still produce the original fact comparison.
+
+### Module graph comparisons in HTML (#1390)
+
+`ycxx show app --against before.json --format=html > changes.html` shows
+**Module changes** above **Plan changes** and the current **Module graph**
+when both plans have graphs. It uses the same semantic comparison as JSON.
+Before entries show sites from the saved snapshot. After entries link to the
+current imports, provider declarations, and translation units. The comparison
+also shows scan completeness, changes to individual unit scans, conflicts,
+and cycles. A partial scan can change which providers are observable.
+
+An older graph with unambiguous unit paths can compare by source path. The
+report identifies that fallback and explains when repeated source paths make a
+comparison unavailable. An available comparison with equal semantic results
+shows **No semantic module changes.** A schema-1 snapshot without a graph
+still shows the fact comparison and the current graph when available.
+Inspection is read-only. Named-module compilation and BMI support are tracked
+in [#319](https://github.com/yrashk/ycxx/issues/319).
 
 ## Native rule packages (#1257)
 

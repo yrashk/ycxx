@@ -48,8 +48,10 @@ project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
 report to follow links from imports to their provider declarations.
 Use `ycxx show app --format=json` to read these dependencies and their physical
-source locations as a structured `module_graph`. Named-module compilation and
-BMI support are tracked in
+source locations as a structured `module_graph`. Run
+`ycxx show app --against before.json --format=html > changes.html` to compare
+module dependencies with a saved JSON plan and follow links into the current
+graph. Named-module compilation and BMI support are tracked in
 [#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
@@ -235,6 +237,10 @@ after the inputs that reference its members, and include at least one source or 
 Resident links reread explicit archives on each request.
 [#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
 [#951](https://github.com/yrashk/ycxx/issues/951)
+
+Static x86-64 ELF links accept supported objects and selected archive members with GNU IBT and
+SHSTK properties when the inputs have no such feature in common.
+[#1367](https://github.com/yrashk/ycxx/issues/1367)
 
 For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
 `__PIC__` and `__pic__` as `2`, and `-fpic` defines them as `1`. arm64 Darwin code is always
@@ -800,6 +806,8 @@ written default member initializer are value-initialized.
   `intmax_t` result during constant evaluation. [#1077](https://github.com/yrashk/ycxx/issues/1077)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
+  Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
+  expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the

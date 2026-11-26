@@ -182,6 +182,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V}).with({commutative})]],
   or_ [[=pure({V, V}, {V}).with({commutative})]],
   xor_ [[=pure({V, V}, {V}).with({commutative})]],
+  ctz [[=pure({V}, {V})]],  // trailing zero bits of an integer; undefined for zero
   icmp [[=pure({V, V}, {V}).imms({pred})]],
   select [[=pure({V, V, V}, {V})]],
 

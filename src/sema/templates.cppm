@@ -635,7 +635,7 @@ public:
     return out;
   }
   // One type or value argument, substituted.
-  std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b) {
+  std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b, bool default_argument = false) {
     // A template: itself, or the argument of the template template parameter it is.
     if (a.kind == TemplateArgKind::template_) {
       if (a.templ == EntityId::none && types().kind(a.type) == TypeKind::dep_name) {
@@ -687,6 +687,9 @@ public:
       return converted_value(value_arg(ins().values.get<ast::VInt>(*value).type, *value), t);
     }
     if (ins().values.is<ast::VDepCall>(a.value)) {
+      const auto result_type = ins().values.get<ast::VDepCall>(a.value).result_type;
+      if (default_argument && immediate_default_constant && types().is_integral(t) && types().is_integral(result_type))
+        return substitute_call_value(a.value, b, t);
       auto value = substitute_call_value(a.value, b);
       if (!value) return std::nullopt;
       if (ins().values.is_dependent(value->value) && !needs_class_value_check(value->type, t, value->value))
@@ -1983,7 +1986,7 @@ public:
         d.type = types().canonical(*s);
       } else if (ins().values.is<ast::VDepOp>(d.value) || ins().values.is<ast::VDepVariable>(d.value) ||
                  ins().values.is<ast::VDepCall>(d.value)) {
-        auto s = substitute_arg(d, bindings(depth, out));
+        auto s = substitute_arg(d, bindings(depth, out), /*default_argument=*/true);
         if (!s) return std::nullopt;
         d = *s;
       } else if (ins().values.is<ast::VDepParam>(d.value)) {
@@ -2318,14 +2321,15 @@ private:
     return concept_constant ? concept_constant(ref.concept_, *args) : std::nullopt;
   }
 
-  std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b) {
+  std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b, std::optional<QualType> default_target = {}) {
     auto call = ins().values.get<ast::VDepCall>(v);
     auto args = substitute_args(ins().seqs.elements(call.args), b);
     if (!args) return std::nullopt;
     if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
       call.args = ins().intern_seq(std::span<const TemplateArg>(*args));
-      return value_arg(call.result_type, ins().intern_value(call));
+      return value_arg(default_target.value_or(call.result_type), ins().intern_value(call));
     }
+    if (default_target) return immediate_default_constant(call.callee, *args, *default_target);
     return call_constant ? call_constant(call.callee, *args) : std::nullopt;
   }
 
@@ -2537,6 +2541,8 @@ public:
   std::function<std::optional<TemplateArg>(QualType, NameId)> member_constant;
   std::function<std::optional<ConstId>(EntityId, std::span<const TemplateArg>)> concept_constant;
   std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>)> call_constant;
+  // A directly used default gets converted to its parameter's type with diagnostics at the use.
+  std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>, QualType)> immediate_default_constant;
   std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>,
                                         const Bindings&, AliasSubstitution)> alias_type;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;

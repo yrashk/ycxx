@@ -201,6 +201,7 @@ struct object {
   std::vector<section> sections;
   std::vector<symbol> symbols;
   std::vector<comdat_group> comdat_groups;
+  std::optional<std::uint32_t> elf_x86_feature_1_and = std::nullopt;  // GNU property, if present
 
   std::uint32_t add_section(section s) {
     sections.push_back(std::move(s));

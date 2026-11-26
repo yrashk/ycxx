@@ -2748,7 +2748,9 @@ public:
     p.kind = ast::TemplateArgKind::value;
     p.type = t;
     if (!p.pack && accept(Tk::equal)) {
+      const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
+      in_integral_template_default_ = saved_default;
       auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
       if (!v) v = template_value(e, t);
       if (!v) {
@@ -3061,9 +3063,12 @@ public:
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
+          // An argument nested in a default has its own destination type ([temp.arg.nontype]).
+          const bool saved_default = std::exchange(in_integral_template_default_, false);
           const auto saved_value_argument = std::exchange(in_template_value_argument_, s_->unevaluated);
           Ex e = conditional_expression();
           in_template_value_argument_ = saved_value_argument;
+          in_integral_template_default_ = saved_default;
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
@@ -4152,7 +4157,8 @@ public:
           } while (accept(Tk::comma));
         }
         if (!expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
-        if (in_template_value_argument_ && !s_->unevaluated && std::ranges::all_of(args, [&](Ex argument) {
+        if ((in_template_value_argument_ || in_integral_template_default_) && !s_->unevaluated &&
+            std::ranges::all_of(args, [&](Ex argument) {
               if (!argument.ok()) return false;
               if (s_->dependent(argument)) return true;
               while (auto paren = s_->as<ast::Paren>(argument)) {
@@ -4165,7 +4171,7 @@ public:
               return argument.width() == 1 &&
                      (token == Tk::int_lit || token == Tk::char_lit || token == Tk::kw_true || token == Tk::kw_false);
             }))
-          if (auto call = s_->dependent_immediate_call(e, args, pos())) {
+          if (auto call = s_->dependent_immediate_call(e, args, pos(), in_integral_template_default_)) {
             e = *call;
             ++deferred_immediate_calls_;
             break;
@@ -4546,7 +4552,9 @@ public:
         }
         return s_->template_id(n, std::move(*args), begin, pos());
       }
-      return s_->name_expr(n, begin, pos(), is(Tk::l_paren));
+      const bool callee = is(Tk::l_paren);
+      const bool immediate_default_call = callee && in_integral_template_default_ && !s_->unevaluated;
+      return s_->name_expr(n, begin, pos(), callee, immediate_default_call);
     }
     case Tk::coloncolon:
       if (!allocation_operator_ahead(1)) return qualified_id(begin);
@@ -4838,6 +4846,10 @@ public:
     bool operator_name = !suffix.empty() || literal_operator_ahead();
     auto name = expression_id(suffix);
     if (!name) return {NodeId::none, begin, pos()};
+    if (ambiguous_namespace && in_integral_template_default_ && is(Tk::l_paren)) {
+      s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+      return {NodeId::none, begin, pos()};
+    }
     NameId n = *name;
     auto scope_expr = [&](bool immediate_call = false) {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
@@ -4960,7 +4972,8 @@ public:
         return r;
       }
     }
-    return scope_expr();
+    const bool immediate_default_call = s->ns && in_integral_template_default_ && !s_->unevaluated && is(Tk::l_paren);
+    return scope_expr(immediate_default_call);
   }
 
   // ------------------------------------------------------------ [stmt]
@@ -6884,6 +6897,7 @@ private:
   // nested unevaluated operands still do not require immediate invocation.
   std::optional<u32> in_template_value_argument_;  // unevaluated depth where the argument begins
   bool in_template_type_argument_ = false;
+  bool in_integral_template_default_ = false;
   bool in_type_requirement_ = false;
   bool variable_template_initializer_ = false;
   bool in_template_id_lookahead_ = false;
