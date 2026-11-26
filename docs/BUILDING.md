@@ -151,6 +151,7 @@ inputs per case before timing. The two RSS runners link each version separately.
 Use the installed [YCXX Bench package](../packages/ycxx-bench/README.md) and its
 matching libycxx. Choose an idle logical CPU available to the process.
 Pass `--deep` to the paired runner for a longer follow-up with the same inputs.
+Pass `--console` for the terminal comparison.
 
 ```sh
 cmake -S spikes/optimization/division -B build-division -G Ninja \
@@ -178,6 +179,19 @@ python3 spikes/optimization/division/check-workers.py build/bin/ycxx build-divis
 
 The replay saves objects and traces from one worker and three fresh four-worker
 compiles. It checks byte equality and looks for overlapping solves on distinct workers.
+
+Measure cold compiles and incremental compiles after changing the shard-index
+function. Each incremental object is checked against an independent cold compile.
+
+```sh
+taskset -c "$cpu" python3 spikes/optimization/division/compile-timings.py build/bin/ycxx \
+  > build-division/compile-timings.ndjson
+```
+
+The [original observations](../spikes/optimization/division/ycxx-division-evidence.tar.gz)
+include all timing and RSS samples, compile pairs, worker traces, FlatZinc checks,
+and prototype non-wins. The archive records the capture's source and binary
+digests, workload, host and run policy.
 
 ## Sanitizer builds
 

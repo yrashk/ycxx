@@ -36,7 +36,7 @@ Word batch(Fn fn, Iterations iterations) {
 
 template<class Left, class Right>
 void compare(std::string_view left_name, std::string_view right_name, Left left, Right right,
-             const Configuration& config) {
+             const Configuration& config, std::optional<Style> console) {
   for (const Word x : {0ULL, 1ULL, (1ULL << 63) - 1, (1ULL << 63), ~0ULL})
     if (left(x, advance(x)) != right(x, advance(x))) throw std::runtime_error("edge mismatch");
   Word x = 0;
@@ -48,20 +48,29 @@ void compare(std::string_view left_name, std::string_view right_name, Left left,
   const auto data = compare_batched(
       [&](Iterations n) { return batch(left, n); },
       [&](Iterations n) { return batch(right, n); }, config);
-  write_ndjson(std::cout, left_name, right_name, data);
+  if (console) write_console(std::cout, left_name, right_name, data, *console);
+  else write_ndjson(std::cout, left_name, right_name, data);
 }
 
 int main(int argc, char** argv) {
-  if (argc > 2 || (argc == 2 && std::string_view(argv[1]) != "--deep")) {
-    std::println(std::cerr, "usage: division_compare [--deep]");
-    return 2;
+  auto band = Band::standard;
+  std::optional<Style> console;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg = argv[i];
+    if (arg == "--deep") band = Band::deep;
+    else if (arg == "--console")
+      console = stdout_is_terminal() && std::getenv("NO_COLOR") == nullptr ? Style::ansi : Style::plain;
+    else {
+      std::println(std::cerr, "usage: division_compare [--deep] [--console]");
+      return 2;
+    }
   }
-  auto config = configuration_for(argc == 2 ? Band::deep : Band::standard);
+  auto config = configuration_for(band);
   config.process_telemetry = true;
   compare("two DIV · unsigned 64-bit shard index", "one DIV · unsigned 64-bit shard index",
-          Shard{plain_shard_index}, Shard{fused_shard_index}, config);
+          Shard{plain_shard_index}, Shard{fused_shard_index}, config, console);
   compare("two DIV · unsigned 32-bit lane index", "one DIV · unsigned 32-bit lane index",
-          Lane{plain_lane_index}, Lane{fused_lane_index}, config);
+          Lane{plain_lane_index}, Lane{fused_lane_index}, config, console);
   compare("heuristic · power-of-two page offset", "solver · power-of-two page offset",
-          plain_page_offset, fused_page_offset, config);
+          plain_page_offset, fused_page_offset, config, console);
 }
