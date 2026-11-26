@@ -649,6 +649,65 @@ Cancellation is propagated before and after the solver call. Tests compare final
 program bytes at one and multiple workers, and check overlap of the solve nodes
 themselves on independent work.
 
+### 9.3 Unsigned division on x86-64
+
+`-fycxx-optimize=heuristic` replaces eligible unsigned division and remainder by a
+power of two with a shift or mask. `-fycxx-optimize=solver` also tries to fuse
+compatible 32- and 64-bit unsigned quotients and remainders in the same block.
+One hardware divide supplies both results. The emitter keeps operand evaluation
+in place and saves the second result in its existing stack slot. The solver
+leaves power-of-two divisors to the heuristic.
+
+Group sites by equivalent operands and visit each group in instruction order.
+A site selected as the later half of a pair consumes a distinct earlier site of
+the opposite kind. In every prefix the number of selected sites can be at most
+the smaller of the quotient and remainder counts. This also suffices for
+reconstructing pairs. For each selected site, the objective counts the bytes
+its omitted instructions would have taken. The x86 encoder supplies those costs.
+`ycxx.cm` solves this nested prefix model exactly with a heap and retains
+earlier sites on weight ties. It can express the same model as linear rows
+for FlatZinc export.
+
+Each function has a deterministic budget of 4,096 solver site visits. The
+emitter checks pair compatibility and disjointness.
+The validation query compares the actual function size with the predicted
+savings over the heuristic emission. Budget exhaustion or failed validation
+uses the heuristic. A stopped solve publishes no candidate.
+
+Use `--trace-engine=interactive` or `--trace-engine=json` to inspect
+`DivisionFusionModel`, `DivisionFusionSolve` and `DivisionFusionValidate`.
+The events include worker and elapsed time. The solve result reports the budget,
+visits and selected byte savings. The emitted result reports validation or fallback.
+
+**Emitted-code evidence.** The [division spike](../BUILDING.md#benchmark-emitted-division-code)
+compiles one pinned workload in both modes. On an x86-64 Xeon Platinum 8573C, three
+fresh 50-round comparisons and three fresh 120-round comparisons measured 17–24%
+less wall time and 18–24% less CPU time per operation for the 64-bit shard index.
+Every 95% interval cleared the 1% practical threshold. The least favorable lower
+bounds were 12% for wall time and 13% for CPU. Its emitted body shrank from 429 to
+407 bytes. The 32-bit lane index shrank from 437 to 414 bytes, with a practical
+timing win in four of six runs. Both modes emitted identical power-of-two page
+offset code. In isolated shard processes, both modes had median resident and
+peak RSS of 1,468 KiB across five fresh processes each.
+
+In ten alternating compile pairs on the same fixture, cold medians were 32.2 ms
+for the heuristic and 34.6 ms for the solver. Incremental medians after changing
+one function were both 10.6 ms. Both paired intervals included zero. One cold
+single-worker trace recorded 94 µs constructing models, 38 µs solving and 296 µs
+validating. Validation emits both versions to check the size difference.
+
+The corpus suggests this order for the next models.
+
+1. Try sharing a single dynamic divide across more than two compatible results.
+   Keep it only if elapsed and CPU time improve beyond the current pair fusion.
+2. Try a size-sensitive choice between fusion and shift/mask for power-of-two
+   divisors. The emitter prototype saved 15 function bytes on the page-offset
+   case with inconclusive timing. Require a whole-function size reduction within
+   the declared runtime tolerance.
+3. Treat reciprocal constant division as an emitter experiment. The source-level
+   multiply/shift recipe grew the body from 252 to 305 bytes and lost 17 of 18
+   comparisons. Reconsider it only if a register-level recipe reverses that result.
+
 ## 10. What the first back end must build
 
 Everything below exists so that the optimizer can be added without the front end, the IR or the

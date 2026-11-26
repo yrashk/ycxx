@@ -18,6 +18,7 @@ export import :arena;
 export import :storage;
 import ycxx.memory;
 import std;
+import ycxx.execution;
 
 export namespace ycxx::engine {
 
@@ -340,8 +341,9 @@ std::uint64_t heap_footprint(const T& v) {
 // `Db::note`. `cutoff` is an execution whose value did not change; `input` an input read for the
 // first time (counted nowhere; later reads are `reused`); `recomputed` a cheap cell computed
 // privately while another frame owned it; `waited` a fetch that found it owned and waited;
-// `failed` a frame that left without publishing (an internal error, or a stop; counted nowhere).
-enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed };
+// `failed` and `stopped` leave without publishing because of an error or cancellation (counted
+// nowhere).
+enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed, stopped };
 
 // Where in the source a cell is (#638): a file, and the part of it from `line`:`column` to
 // `end_line`:`end_column`, where its last token starts (1-based; columns in bytes). `line` 0: the
@@ -678,7 +680,7 @@ struct Root {
   Db* db;
   CellId cell;
   Priority priority;
-  std::inplace_stop_source stop;
+  ycxx::exec::inplace_stop_source stop;
   std::atomic<std::uint32_t> holds{1};
   Counters* counters = nullptr;  // what its frames do (daemon design §8.1)
   Tracer* tracer = nullptr;      // what its frames do, one cell at a time (#245)
@@ -742,7 +744,7 @@ struct Wait final : Task {
   std::atomic<bool> stopped{false};
   std::vector<Waiter> links;
   std::vector<std::exception_ptr> errors;
-  std::optional<std::inplace_stop_callback<OnStop>> on_stop;
+  std::optional<ycxx::exec::inplace_stop_callback<OnStop>> on_stop;
 };
 
 // `ensure_green` over a group of cells for a frame (§A1.5, §A3.1): cells verified at this
@@ -1517,13 +1519,30 @@ public:
     for (auto&& k : keys) cells.push_back(db_->cell_for<Q>(k));
     return {*db_, *frame_, std::move(cells)};
   }
+  // Direct input keys in the fetched parent's dependency order. Inspection records no reads.
+  // Fetch the returned inputs to track their changes when the parent's value stays equal.
+  template <InputKind Input, MemoQuery Parent>
+    requires (!InputKind<Parent>)
+  std::vector<typename Input::Key> observed_input_keys(const typename Parent::Key& k) const {
+    const auto parent = db_->find_cell<Parent>(k);
+    if (!parent || frame_->position_of(*parent) == ~0u || !db_->is_current(*parent))
+      throw std::logic_error("observed_input_keys requires a fetched current parent");
+
+    std::vector<typename Input::Key> keys;
+    const auto kind = kind_slot<Input>();
+    for (const std::uint32_t marked : db_->cells_[*parent].deps) {
+      const CellId dependency = marked & ~group_start;
+      if (db_->cells_[dependency].kind == kind) keys.push_back(db_->key_of<Input>(dependency));
+    }
+    return keys;
+  }
   // A key for `DiagsOf`; records nothing.
   template <MemoQuery Q>
   CellRef cell_of(const typename Q::Key& k) {
     return db_->ref(db_->cell_for<Q>(k));
   }
   // The request's stop token (§A4.1), for leaves that poll.
-  std::inplace_stop_token stop_token() const noexcept { return frame_->root->stop.get_token(); }
+  ycxx::exec::inplace_stop_token stop_token() const noexcept { return frame_->root->stop.get_token(); }
   // A budget checkpoint of a long-running leaf (§A3.5): completes stopped if the request was
   // cancelled, so the query never resumes and stores nothing.
   stop_awaitable stop_point() noexcept { return stop_awaitable(*frame_); }
@@ -1610,34 +1629,34 @@ export namespace ycxx::engine {
 template <MemoQuery Q>
 class cell_sender {
 public:
-  using sender_concept = std::execution::sender_tag;
+  using sender_concept = ycxx::exec::sender_tag;
   template <class Self, class... Env>
   static consteval auto get_completion_signatures() {
-    return std::execution::completion_signatures<std::execution::set_value_t(const typename Q::Value&),
-                                                 std::execution::set_error_t(std::exception_ptr), std::execution::set_stopped_t()>();
+    return ycxx::exec::completion_signatures<ycxx::exec::set_value_t(const typename Q::Value&),
+                                                 ycxx::exec::set_error_t(std::exception_ptr), ycxx::exec::set_stopped_t()>();
   }
 
   template <class R>
   class op : Request {
   public:
-    using operation_state_concept = std::execution::operation_state_tag;
+    using operation_state_concept = ycxx::exec::operation_state_tag;
     op(Db& db, CellId c, Priority p, Counters* counters, Tracer* tracer, R r) : Request(db, c, p), rcvr_(std::move(r)) {
       this->counters = counters;
       this->tracer = tracer;
     }
 
     void start() & noexcept {
-      auto token = std::get_stop_token(std::execution::get_env(rcvr_));
+      auto token = ycxx::exec::get_stop_token(ycxx::exec::get_env(rcvr_));
       if (token.stop_requested()) {
-        std::execution::set_stopped(std::move(rcvr_));
+        ycxx::exec::set_stopped(std::move(rcvr_));
         return;
       }
-      if constexpr (!std::unstoppable_token<token_t>) forward_.emplace(token, Forward{this});
+      if constexpr (!ycxx::exec::unstoppable_token<token_t>) forward_.emplace(token, Forward{this});
       begin();
     }
 
   private:
-    using token_t = std::stop_token_of_t<std::execution::env_of_t<R>>;
+    using token_t = ycxx::exec::stop_token_of_t<ycxx::exec::env_of_t<R>>;
     struct Forward {
       Root* root;
       void operator()() const noexcept { root->stop.request_stop(); }
@@ -1645,13 +1664,13 @@ public:
 
     void complete() noexcept override {
       forward_.reset();
-      if (stopped) std::execution::set_stopped(std::move(rcvr_));
-      else if (error) std::execution::set_error(std::move(rcvr_), error);
-      else std::execution::set_value(std::move(rcvr_), db->value_of<Q>(cell));
+      if (stopped) ycxx::exec::set_stopped(std::move(rcvr_));
+      else if (error) ycxx::exec::set_error(std::move(rcvr_), error);
+      else ycxx::exec::set_value(std::move(rcvr_), db->value_of<Q>(cell));
     }
 
     R rcvr_;
-    std::optional<std::stop_callback_for_t<token_t, Forward>> forward_;
+    std::optional<ycxx::exec::stop_callback_for_t<token_t, Forward>> forward_;
   };
 
   template <class R>
@@ -1693,7 +1712,7 @@ public:
 
   private:
     friend class Epochs;
-    std::inplace_stop_source client_;
+    ycxx::exec::inplace_stop_source client_;
     Counters counters_;
     std::uint64_t executed_at_restart_ = 0;
     std::atomic<std::size_t> restarts_{0};
@@ -1709,7 +1728,7 @@ public:
     std::size_t starved = 0;
   };
 
-  explicit Epochs(Db& db) : db_(&db), scope_(std::make_unique<std::execution::counting_scope>()) {}
+  explicit Epochs(Db& db) : db_(&db), scope_(std::make_unique<ycxx::exec::counting_scope>()) {}
   Epochs(const Epochs&) = delete;
   Epochs& operator=(const Epochs&) = delete;
   ~Epochs() {
@@ -1725,7 +1744,7 @@ public:
   // `tracer`, when given, gets the request's events, through every restart (#245).
   template <MemoQuery Q, class F, class G>
   std::shared_ptr<Ticket> spawn(const typename Q::Key& k, Priority p, F on_value, G on_error, Tracer* tracer = nullptr) {
-    namespace ex = std::execution;
+    namespace ex = ycxx::exec;
     auto ticket = std::make_shared<Ticket>();
     auto callbacks = std::make_shared<std::pair<F, G>>(std::move(on_value), std::move(on_error));
     ticket->launch_ = [this, t = ticket.get(), k, p, callbacks, tracer] {
@@ -1749,7 +1768,7 @@ public:
                       interrupted(self);
                       ended(self);
                     }),
-                scope_->get_token(), ex::prop(std::get_stop_token, t->client_.get_token()));
+                scope_->get_token(), ex::prop(ycxx::exec::get_stop_token, t->client_.get_token()));
     };
     std::lock_guard lock(m_);
     ticket->launch_();
@@ -1760,7 +1779,7 @@ public:
   void join() {
     std::lock_guard lock(m_);
     finish(false);
-    scope_ = std::make_unique<std::execution::counting_scope>();
+    scope_ = std::make_unique<ycxx::exec::counting_scope>();
   }
 
   // Stops and joins the current epoch, runs `write(db)` at quiescence (it sets inputs), opens
@@ -1771,7 +1790,7 @@ public:
   Applied apply(F&& write) {
     std::lock_guard lock(m_);
     finish(true);
-    scope_ = std::make_unique<std::execution::counting_scope>();
+    scope_ = std::make_unique<ycxx::exec::counting_scope>();
     std::exception_ptr failure;
     try {
       std::forward<F>(write)(*db_);
@@ -1800,7 +1819,7 @@ private:
   void finish(bool stop) {
     if (stop) scope_->request_stop();
     scope_->close();
-    std::this_thread::sync_wait(scope_->join());
+    ycxx::exec::sync_wait(scope_->join());
     contract_assert(db_->live_frames() == 0);
   }
   // A request completed stopped: by its client, for good, or by the epoch, to run again.
@@ -1812,7 +1831,7 @@ private:
 
   Db* db_;
   std::mutex m_;
-  std::unique_ptr<std::execution::counting_scope> scope_;
+  std::unique_ptr<ycxx::exec::counting_scope> scope_;
   std::mutex stopped_m_;
   std::vector<std::shared_ptr<Ticket>> stopped_;
 };
@@ -1971,7 +1990,7 @@ std::coroutine_handle<> Settle::step() noexcept {
         w->resolve(i, nullptr);
       }
     }
-    const std::inplace_stop_token token = frame_->root->stop.get_token();
+    const ycxx::exec::inplace_stop_token token = frame_->root->stop.get_token();
     w->on_stop.emplace(token, Wait::OnStop{w});
     start_children();
     std::uint8_t expected = Wait::suspending;
@@ -2344,7 +2363,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       co_await settle_group(f, group);
       memory::exchange_target(&f.mem);
       if (f.error || f.stopped) {
-        db.note(Outcome::failed, &f, c, &f.span);
+        db.note(f.error ? Outcome::failed : Outcome::stopped, &f, c, &f.span);
         db.abort(c, restore, f.error);
         db.finish(f);
         co_return;
@@ -2405,7 +2424,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       }
     }
   }
-  db.note(Outcome::failed, &f, c, &f.span);
+  db.note(f.error ? Outcome::failed : Outcome::stopped, &f, c, &f.span);
   db.abort(c, restore, f.error);
   db.finish(f);
 }
@@ -2586,7 +2605,8 @@ void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer*
     case Outcome::recomputed: counts[n++] = Counter::recomputed; break;
     case Outcome::waited: counts[n++] = Counter::contended; break;
     case Outcome::input:
-    case Outcome::failed: break;
+    case Outcome::failed:
+    case Outcome::stopped: break;
   }
   if (n > 0) {
     const std::size_t stripe = pool_ ? pool_->worker_index().value_or(pool_->size()) : 0;
@@ -2637,13 +2657,15 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
   ev.alloc_bytes = run.allocated;
   ev.allocs = run.count;
   ev.peak_bytes = run.peak;
-  if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) ev.retained_bytes = e.retained;
+  // Only a cell with a settled value can expose it. An abandoned run may be replacing old data.
+  const bool settled = o != Outcome::failed && o != Outcome::stopped &&
+                       o != Outcome::waited && o != Outcome::recomputed && e.has_value;
+  if (settled) ev.retained_bytes = e.retained;
   try {
     ev.key = describe(c);
     ev.cell = e.key_fp.lo ^ e.key_fp.hi;
     ev.span = table.span(*this, e.slot);
-    // Only a cell that is done (not one another frame is computing) is read.
-    if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) {
+    if (settled) {
       if (t->values()) ev.value = table.show(e.slot);
       ev.errors = table.errors(e.slot, e.diags);  // the kind's say: its diagnostics may be warnings
     }

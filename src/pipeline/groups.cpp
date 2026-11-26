@@ -27,6 +27,7 @@ struct GroupMessage {
   std::string text;
   engine::Loc at;
   bool depth_limit = false;  // [temp.inst]/16's limit, which a unit reports once
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 struct GroupResult {
   std::vector<GroupMessage> messages;
@@ -286,7 +287,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   SemaResult out;
   // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
   out.lex_errors = co_await cx.fetch<LexErrors>(file);
-  const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
   // What one Program says of the items [first, end): where each entity is first declared and the
   // bodies, for an editor's position requests (#170), whether or not the unit has errors; only what
   // the analysis reached, which analysing more would change (its diagnostics). Then its messages,
@@ -337,9 +338,10 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       if (!kind) continue;
       std::vector<std::uint64_t> args;
       for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-      r.messages.push_back({sema::message_of(*kind).severity == lex::Severity::error,
+      const auto spec = sema::message_of(*kind);
+      r.messages.push_back({spec.severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                            d.at, *kind == sema::Diag::instantiation_depth});
+                            d.at, *kind == sema::Diag::instantiation_depth, spec.warning});
     }
     // The unit's own records of its classes and enumerations (#115).
     const sema::Classes& classes = program.classes();
@@ -393,12 +395,13 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       if (record.destructor_noexcept.value_or(false)) shape.nonthrowing_destructor = record.destructor;
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
+      shape.clang_weak_alignment = record.clang_weak_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
       const auto call_rule = unit_source.config.calls();
       const bool gcc_differs = classes.trivial_for_calls(c, ast::CallTriviality::gcc) &&
                                !classes.trivial_for_calls(c, ast::CallTriviality::itanium);
       shape.trivial_calls = classes.trivial_for_calls(c, call_rule);
-      shape.gcc_stack_calls = linux && call_rule == ast::CallTriviality::gcc && gcc_differs;
+      shape.gcc_stack_calls = target_is_linux && call_rule == ast::CallTriviality::gcc && gcc_differs;
       shape.layout_uncertain = uncertain.contains(c);
       shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
       {
@@ -410,9 +413,16 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
                                 t.move_constructor == eligible_nontrivial ||
                                 (t.copy_constructor == ineligible && t.move_constructor == ineligible);
-        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
-        shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && (!known || !nontrivial) &&
-                                    !(linux && nontrivial_destructor(c));
+        // A class with virtual functions has no trivial copy or move constructor ([class.copy.ctor]/11).
+        // Clang allows callers to reserve result storage for an abstract class with a known layout.
+        const bool abstract_result = unit_source.config.compatibility == ast::Compatibility::clang && record.is_abstract();
+        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown,
+        // and so does a nontrivial copy or move constructor defaulted in the class (#157).
+        const bool defaulted_nontrivial = std::ranges::any_of(record.members, [&](const sema::MemberDeclRec& m) {
+          return m.is_ctor && m.defaulted == sema::CopyState::nontrivial && m.entity != record.defaulted_default_ctor;
+        });
+        shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && !defaulted_nontrivial && (!known || !nontrivial) &&
+                                    !abstract_result && !(target_is_linux && nontrivial_destructor(c));
       }
       // Only a class outside the general dynamic layout lacks a native complete-object type.
       shape.layout_requires_virtual_support = record.virtual_layout_unsupported;
@@ -449,7 +459,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       here.insert(std::move(key));
       const items::Item& it = items.items[index->index.at(m.at.item)];
       const auto token = std::min<std::size_t>(it.begin + m.at.offset, region.tokens.size() - 1);
-      out.messages.push_back({m.error, m.text, static_cast<std::uint32_t>(token)});
+      out.messages.push_back({m.error, m.text, static_cast<std::uint32_t>(token), m.warning});
     }
     said.merge(here);
     for (const auto& [e, at] : r.declared)

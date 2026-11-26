@@ -5,6 +5,7 @@
 # Nothing when libycxx has no static archives or the host is not arm64 Darwin.
 set(YCXXC_DARWIN_RUNTIME_ARCHIVES "")
 set(YCXXC_DARWIN_RUNTIME_UNDEFINED "")
+set(_runtime_undefined)
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING
    AND TARGET ycxx AND TARGET ycxx_abi)
   get_target_property(_libycxx_dir ycxx BINARY_DIR)
@@ -51,13 +52,14 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   file(STRINGS ${_libycxx_dir}/ycxx-link-options _options REGEX "^-Wl,-u,")
   foreach(_option IN LISTS _options)
     string(REGEX REPLACE "^-Wl,-u," "" _name "${_option}")
+    list(APPEND _runtime_undefined "${_name}")
     string(APPEND YCXXC_DARWIN_RUNTIME_UNDEFINED "\"${_name}\", ")
   endforeach()
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_libycxx_dir}/ycxx-link-options)
 endif()
 configure_file(runtime.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/runtime.cppm @ONLY)
 
-add_library(ycxxc_pipeline STATIC)
+add_library(ycxxc_pipeline ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
   FILES
@@ -74,8 +76,11 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   session.cppm
   pipeline.cppm)
 target_sources(ycxxc_pipeline PRIVATE groups.cpp)
-target_link_libraries(ycxxc_pipeline PUBLIC ycxxc_parse ycxxc_irgen ycxxc_aarch64 ycxxc_x86_64 ycxxc_link)
+target_link_libraries(ycxxc_pipeline PUBLIC ycxxc_parse ycxxc_irgen ycxxc_aarch64 ycxxc_x86_64 ycxxc_link ycxxc_cm)
 # The programs ycxx links on arm64 macOS need the runtime archives built (see above).
 if(YCXXC_DARWIN_RUNTIME_ARCHIVES)
   add_dependencies(ycxxc_pipeline ycxx ycxx_abi)
+  set_target_properties(ycxxc_pipeline PROPERTIES
+    YCXXC_DARWIN_RUNTIME_ARCHIVES "${_runtime}"
+    YCXXC_DARWIN_RUNTIME_UNDEFINED "${_runtime_undefined}")
 endif()

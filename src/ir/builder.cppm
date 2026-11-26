@@ -44,7 +44,7 @@ export class Builder {
     }
     return b;
   }
-  BlockId add_block(std::initializer_list<Ty> params) { return add_block(std::span(params)); }
+  inline BlockId add_block(std::initializer_list<Ty> params) { return add_block(std::span(params)); }
 
   ValueId param(BlockId b, std::uint32_t i) const { return blocks_[raw(b)].params[i]; }
 
@@ -68,7 +68,7 @@ export class Builder {
     blocks_[raw(b)].nodes.push_back(n);
     return n;
   }
-  NodeId emit(BlockId b, Op op, std::initializer_list<Ty> results,
+  inline NodeId emit(BlockId b, Op op, std::initializer_list<Ty> results,
               std::initializer_list<ValueId> operands, std::initializer_list<std::uint64_t> imms = {},
               Flags flags = 0) {
     return emit(b, op, flags, std::span(results), std::span(operands), std::span(imms));

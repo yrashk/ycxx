@@ -50,7 +50,7 @@ void restores_executable_when_asset_exchange_fails(const fs::path& workspace) {
   // Remove the candidate after staging so the kernel exchange fails after the executable swap.
   std::vector<fs::path> candidates;
   for (const auto& entry : fs::directory_iterator(assets.parent_path())) {
-    if (entry.path().filename().native_encoded_string().starts_with(".publish-"))
+    if (entry.path().filename().native().starts_with(".publish-"))
       candidates.push_back(entry.path());
   }
   check(candidates.size() == 1, "find one staged asset generation");
@@ -62,7 +62,7 @@ void restores_executable_when_asset_exchange_fails(const fs::path& workspace) {
   const auto failed = std::move(*pending).commit();
   const auto missing = std::make_error_code(std::errc::no_such_file_or_directory);
   const auto expected =
-      std::format("cannot publish runtime assets at '{}': {}", assets.display_string(), missing.message());
+      std::format("cannot publish runtime assets at '{}': {}", assets.native(), missing.message());
   check(!failed && failed.error() == expected, failed ? "asset exchange must fail" : failed.error());
   check(read_file(output) == "old", "restore the previous executable bytes");
   struct stat after{};
@@ -121,7 +121,7 @@ void rejects_a_nested_asset_directory_change(const fs::path& workspace) {
 }  // namespace
 
 int main() {
-  auto directory = (fs::temp_directory_path() / "ycxx-publication-test-XXXXXX").native_encoded_string();
+  auto directory = (fs::temp_directory_path() / "ycxx-publication-test-XXXXXX").native();
   if (!::mkdtemp(directory.data())) {
     check(false, "could not create test workspace");
     return result("build publication");

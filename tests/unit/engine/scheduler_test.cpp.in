@@ -4,12 +4,13 @@
 // cancellation injected; waiter hand-over when an owner is stopped; cycles and errors reported
 // the same from every entry point.
 import std;
+import ycxx.execution;
 import ycxx.engine;
 import ycxx.unit;
 
 using namespace ycxx::engine;
 using ycxx::unit::check;
-namespace ex = std::execution;
+namespace ex = ycxx::exec;
 
 namespace {
 
@@ -17,12 +18,12 @@ Pool* backend_pool = nullptr;
 
 }  // namespace
 
-namespace std::execution::parallel_scheduler_replacement {
-shared_ptr<parallel_scheduler_backend> query_parallel_scheduler_backend() {
+namespace @YCXXC_SCHEDULER_REPLACEMENT_NAMESPACE@ {
+std::shared_ptr<parallel_scheduler_backend> query_parallel_scheduler_backend() {
   static const auto b = ycxx::engine::pool_backend(*backend_pool);
   return b;
 }
-}  // namespace std::execution::parallel_scheduler_replacement
+}  // namespace @YCXXC_SCHEDULER_REPLACEMENT_NAMESPACE@
 
 namespace {
 
@@ -43,7 +44,7 @@ void pool_scheduling() {
                 }),
                 scope.get_token());
     }
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
   }
   check(ran == 1000 && on_workers == 1000, "schedule() completes on a worker, once per sender");
   static_assert(ex::scheduler<pool_scheduler>);
@@ -85,12 +86,12 @@ void pool_scheduling() {
   backend_pool = &p;
   std::atomic<long> sum{0};
   std::atomic<int> outside{0};
-  auto r = std::this_thread::sync_wait(ex::schedule(ex::get_parallel_scheduler()) | ex::bulk(ex::par, 1000, [&](int i) {
+  auto r = ycxx::exec::sync_wait(ex::schedule(ex::get_parallel_scheduler()) | ex::bulk(ex::par, 1000, [&](int i) {
                                          sum.fetch_add(i);
                                          if (!p.worker_index()) outside.fetch_add(1);
                                        }));
   check(r.has_value() && sum == 999 * 1000 / 2 && outside == 0, "parallel_scheduler's bulk runs on the pool");
-  auto one_shot = std::this_thread::sync_wait(ex::schedule(ex::get_parallel_scheduler()) | ex::then([&] { return p.worker_index().has_value(); }));
+  auto one_shot = ycxx::exec::sync_wait(ex::schedule(ex::get_parallel_scheduler()) | ex::then([&] { return p.worker_index().has_value(); }));
   check(one_shot && std::get<0>(*one_shot), "parallel_scheduler's schedule completes on a worker");
 }
 
@@ -355,13 +356,13 @@ void senders_and_stop() {
   Db db(pool);
   db.set<In>(0, 4);
   slow_release = true;
-  auto r = std::this_thread::sync_wait(db.request<AboveSlow>(0));
+  auto r = ycxx::exec::sync_wait(db.request<AboveSlow>(0));
   check(r && std::get<0>(*r) == 41, "sync_wait on a request");
 
   // A request whose stop was requested before it starts completes stopped.
-  std::inplace_stop_source stopped;
+  ycxx::exec::inplace_stop_source stopped;
   stopped.request_stop();
-  auto s = std::this_thread::sync_wait(ex::write_env(db.request<AboveSlow>(1), ex::prop(std::get_stop_token, stopped.get_token())));
+  auto s = ycxx::exec::sync_wait(ex::write_env(db.request<AboveSlow>(1), ex::prop(ycxx::exec::get_stop_token, stopped.get_token())));
   check(!s.has_value(), "a request stopped before it starts completes stopped");
 
   // The owner of a cell is stopped while another request waits on it: the cell is handed over and
@@ -383,10 +384,10 @@ void senders_and_stop() {
   std::this_thread::sleep_for(std::chrono::milliseconds(50));  // b links on the cell a owns
   a.request_stop();
   a.close();
-  std::this_thread::sync_wait(a.join());
+  ycxx::exec::sync_wait(a.join());
   slow_release = true;
   b.close();
-  std::this_thread::sync_wait(b.join());
+  ycxx::exec::sync_wait(b.join());
   check(a_values == 0 && a_errors == 0, "the stopped request completes stopped");
   check(b_value == 50, "the waiter computed the cell after its owner left");
   check(slow_runs == 2 && db.runs<Slow>(2) == 1, "the stopped execution stored nothing; the second did");
@@ -521,7 +522,7 @@ void private_recomputation() {
                   ex::upon_error([](std::exception_ptr) noexcept {}),
               scope.get_token());
   }
-  std::this_thread::sync_wait(scope.join());
+  ycxx::exec::sync_wait(scope.join());
   check(got[0] == "42" && got[1] == "42", "both frames got the cheap value");
   check(gate_arrivals == 2 && db.stats().recomputed == 1 && db.runs<Gate>(0) == 1,
         "the second fetch computed it privately; only the owner stored it");
@@ -584,7 +585,7 @@ std::vector<std::string> errors_from_every_entry(Db& db, std::uint32_t entries) 
                   }),
               scope.get_token());
   }
-  std::this_thread::sync_wait(scope.join());
+  ycxx::exec::sync_wait(scope.join());
   return messages;
 }
 
@@ -679,10 +680,10 @@ void first_error_by_position() {
   std::this_thread::sleep_for(std::chrono::milliseconds(50));  // B failed; PairAB waits on A's owner
   a.request_stop();
   a.close();
-  std::this_thread::sync_wait(a.join());
+  ycxx::exec::sync_wait(a.join());
   a_release = true;
   b.close();
-  std::this_thread::sync_wait(b.join());
+  ycxx::exec::sync_wait(b.join());
   check(message == "A", std::format("the first member's error, not the one that came first (got {})", message));
 }
 
@@ -727,7 +728,7 @@ void one_execution_for_many_waiters() {
                     ex::then([&got, r](const std::int64_t& v) { got[r] = v; }) | ex::upon_error([](std::exception_ptr) noexcept {}),
                 scope.get_token());
     }
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
     Db cold;
     for (std::uint32_t i = 0; i < width; ++i) cold.set<In>(i, i % 5);
     for (std::uint32_t i = 0; i < width; ++i) cold.set<Sys>(i, 1);
