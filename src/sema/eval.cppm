@@ -620,9 +620,12 @@ private:
       if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value)) {
         // Block-scope statics also have stored initializers. Const qualification alone does
         // not make a class variable potentially constant ([expr.const]).
-        if (Types::is_const(e->s_->types().canonical(value->type)) &&
-            e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
-          value->record = e->constant_record_layout(value->type);
+        Types& types = e->s_->types();
+        const QualType type = types.canonical(value->type);
+        const QualType leaf = types.innermost_array_element(type);
+        if (Types::is_const(leaf) && e->s_->world().entities.rec(v).linkage != ast::Linkage::none &&
+            (leaf == type || e->s_->is_aggregate(leaf)))
+          value->record = e->constant_record_layout(leaf);
       }
       return {std::move(value)};
     }

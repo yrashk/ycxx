@@ -1368,6 +1368,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- A constant expression can read a scalar field through a reference to an indexed element of
+  a namespace-scope constexpr array of supported flat aggregates. L1 keeps the array element
+  and field in the address path and checks the index against the array bound ([expr.sub],
+  [expr.ref], [expr.const]). [#1403](https://github.com/yrashk/ycxx/issues/1403)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
   initializer's object, including through a conditional glvalue. Reading a later field on
