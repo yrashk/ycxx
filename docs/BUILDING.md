@@ -1,8 +1,9 @@
 # Building ycxx
 
-ycxx is built by GCC 16.2 (`-freflection -fcontracts`) against libycxx, the submodule at
-`deps/libycxx`, with `import std;` (DECISIONS §3.1, §3.3). You need CMake 3.30 or later, Ninja
-and Python 3.10 or later. Linux x86_64 and macOS arm64 are supported.
+ycxx is built by GCC 16.2 (`-freflection -fcontracts`) with `import std;`
+(DECISIONS §3.1, §3.3). The default standard library is libycxx. An optional CMake configuration
+builds against GCC's libstdc++. You need CMake 3.30 or later, Ninja and Python 3.10 or later.
+The project targets Linux x86_64 and macOS arm64.
 
 ```sh
 tools/build                      # configures build/ on first use, builds, runs the smoke test
@@ -62,6 +63,50 @@ provisioned on its own: `deps/libycxx/tools/toolchain/provision --clang-only`.
 CMake target names are `ycxxc*` and our options are `YCXXC_*`, because libycxx owns `ycxx*` and
 `YCXX_*`.
 
+## Linking ycxx into a C++ application
+
+See the [embedder guide](EMBEDDING.md) for a complete CMake consumer and examples of the component APIs.
+
+Use CMake with GCC 16.2, Ninja, and the same C++ standard library as your ycxx build.
+The source targets include `ycxx::engine`, `ycxx::preprocessor`, `ycxx::frontend`,
+`ycxx::ir`, `ycxx::object`, `ycxx::linker`, `ycxx::compiler`, and `ycxx::project_build`.
+The [embedding examples](../examples/embedding) use the query engine and compiler pipeline
+as independent components.
+
+- `YCXXC_BUILD_SHARED_LIBS=ON` builds shared components. The default builds static archives.
+- `YCXXC_STDLIB=libycxx` selects the libycxx bootstrap runtime. This is the default.
+- `YCXXC_STDLIB=system` selects the configured GCC installation's libstdc++ and its `std` module.
+  It also builds libycxx's portable execution component against that same libstdc++.
+- `YCXXC_LIBYCXX_SOURCE_DIR` selects the libycxx checkout. For work on both repositories, point
+  it at a checkout with the portable provider and shared-mode contract handler.
+
+```sh
+cmake -S . -B build-system -G Ninja -DYCXXC_STDLIB=system
+cmake --build build-system --target ycxxc
+```
+
+Add the ycxx checkout with `add_subdirectory` for a source build. To install the component
+libraries and their CMake targets, build with `YCXXC_INSTALL=ON`, then run `cmake --install`.
+Use a separate build directory and installation prefix for each linkage and standard-library choice.
+In a separate CMake build, use `find_package(ycxx CONFIG REQUIRED)` and link the component
+you need. Set `CMAKE_PREFIX_PATH` to the installation prefix and build the examples with
+`YCXX_EMBED_INSTALLED=ON`, then run `ctest --test-dir <consumer-build> --output-on-failure`.
+The stock configuration also tests catching an exception from a separately built shared library.
+For an installed compiler session, pass the include paths to `ycxx::pp::Config`.
+The package exposes `ycxx_RESOURCE_DIR` for the compiler resource headers and
+`ycxx_TARGET_INCLUDE_DIR` for the target libycxx headers.
+`ycxx_STDLIB` identifies the standard library used to build the package.
+
+For an SDK built on arm64 macOS with the target runtime, `ycxx_DARWIN_RUNTIME_ARCHIVES` gives
+the installed archive paths in link order. Use them for `ycxx::pipeline::ArchiveLinkInputs`
+along with `ycxx_DARWIN_RUNTIME_UNDEFINED`, which lists the initial undefined symbols.
+Both lists come from the runtime configuration used to build the SDK. The
+`ycxx::pipeline::darwin_runtime()` helper gives the build-tree defaults used by the CLI.
+
+The C++ interfaces use modules and the selected runtime's C++ types. Compile their consumers
+with the matching compiler and runtime. A compiler session owns the values returned by its
+queries, including object and diagnostic data. Copy values that need to survive a session update.
+
 ## Preprocessor policy
 
 libycxx's policy (`deps/libycxx/DECISIONS.md` §1) applies to ycxx in a stricter form, because
@@ -90,6 +135,109 @@ YCXX_BUILD_TYPE=Release YCXX_BUILD_DIR=build-release tools/test --fast
 - CI builds Release on Linux in the PR tier (compile only), and builds and tests it on both hosts
   in the nightly tier (`nightly.yml`'s `release` job, or dispatched alone with `release-only`).
 
+## Optimizer experiments
+
+Build the pinned HiGHS, CaDiCaL, and Chuffed sources in a separate build tree. This
+project uses CMake, Ninja, Make for CaDiCaL, and a C/C++ toolchain. The first build
+needs network access to GitHub's source archives. The archive hashes are checked at
+download. Installation stays inside the build tree.
+
+```sh
+cmake -S cmake/solver-deps -B build-solver-deps -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-16 -DCMAKE_CXX_COMPILER=g++-16
+cmake --build build-solver-deps --parallel 1
+```
+
+The independent targets are `highs`, `cadical`, and `chuffed`. Each installs under
+`build-solver-deps/install/<solver>`. Set `-DYCXX_SOLVER_JOBS=N` to control the
+parallelism inside each dependency build. For an installed libycxx toolchain, use a
+fresh build directory and pass `-DCMAKE_TOOLCHAIN_FILE=<prefix>/lib/cmake/libycxx/toolchain.cmake`
+in place of the explicit compiler arguments. The normal compiler build has no solver
+download or link step. These experimental builds precede the pinned submodule
+integration for in-process backends described in [DECISIONS §7](../DECISIONS.md#7-third-party-libraries).
+
+CaDiCaL's source recipe includes the POSIX clock header explicitly for the Linux
+libycxx build.
+
+To check the compiler-owned model and run its generated FlatZinc through Chuffed:
+
+```sh
+cmake -S . -B build-optimizer -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DYCXXC_FLATZINC_SOLVER="$PWD/build-solver-deps/install/chuffed/bin/fzn-chuffed"
+cmake --build build-optimizer --target unit_cm ycxx-cm-export-bench
+ctest --test-dir build-optimizer -R '^unit\.cm' --output-on-failure
+build-optimizer/tests/unit/cm/ycxx-cm-export-bench
+build-optimizer/tests/unit/cm/ycxx-cm-export-bench --ndjson
+```
+
+The export benchmark builds its models before timing. Its three inputs isolate
+serialization as the number of covering decisions grows.
+[Benchmark module and runner](../packages/ycxx-bench/GUIDE.md).
+
+Reproduce the extraction comparison from the e-graph spike with the same seed-derived
+cases and limits. The repeated configurations reverse the order of the two blocks.
+
+```sh
+cmake --build build-solver-deps --target egraph-spike
+build-solver-deps/egraph-spike demo
+VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+NO_PRUNE=1 VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+NO_PRUNE=1 VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
+```
+The optimizer design specifies how these experiments relate to corpus measurements.
+[Measurement process](design/optimization.md#91-evidence-for-an-optimizer-change).
+
+### Benchmark emitted division code
+
+The Linux x86-64 division spike builds the same workload with the heuristic and
+solver modes. The paired runner checks boundary values and 100,000 generated
+inputs per case before timing. The two RSS runners link each version separately.
+Use the installed [YCXX Bench package](../packages/ycxx-bench/README.md) and its
+matching libycxx. Choose an idle logical CPU available to the process.
+Pass `--deep` to the paired runner for a longer follow-up with the same inputs.
+Pass `--console` for the terminal comparison.
+
+```sh
+cmake -S spikes/optimization/division -B build-division -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-16 \
+  -DYCXX_COMPILER="$PWD/build/bin/ycxx" \
+  -DCMAKE_PREFIX_PATH='<bench-prefix>;<libycxx-prefix>'
+cmake --build build-division
+cpu=4
+for run in 1 2 3; do
+  taskset -c "$cpu" build-division/division_compare > "build-division/compare-$run.ndjson"
+done
+taskset -c "$cpu" build-division/division_heuristic_rss > build-division/heuristic-rss.ndjson
+taskset -c "$cpu" build-division/division_solver_rss > build-division/solver-rss.ndjson
+nm -S --defined-only build-division/{heuristic,solver}.raw.o
+```
+
+Capture modeling, solving and validation on the same pinned workload.
+
+```sh
+YCXX_NO_DAEMON=1 YCXX_THREADS=4 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu \
+  -fycxx-optimize=solver --trace-engine=json -c spikes/optimization/division/workload.cpp \
+  -o build-division/traced.o 2>build-division/trace.ndjson
+python3 spikes/optimization/division/check-workers.py build/bin/ycxx build-division/worker-replay
+```
+
+The replay saves objects and traces from one worker and three fresh four-worker
+compiles. It checks byte equality and looks for overlapping solves on distinct workers.
+
+Measure cold compiles and incremental compiles after changing the shard-index
+function. Each incremental object is checked against an independent cold compile.
+
+```sh
+taskset -c "$cpu" python3 spikes/optimization/division/compile-timings.py build/bin/ycxx \
+  > build-division/compile-timings.ndjson
+```
+
+The [original observations](../spikes/optimization/division/ycxx-division-evidence.tar.gz)
+include all timing and RSS samples, compile pairs, worker traces, FlatZinc checks,
+and prototype non-wins. The archive records the capture's source and binary
+digests, workload, host and run policy.
+
 ## Sanitizer builds
 
 `-DYCXXC_SANITIZE=<list>` (`address`, `undefined`, `thread`, comma-separated) instruments ycxx's
@@ -99,7 +247,12 @@ daemon tests, then repeats the concurrent ones. Any report fails the test; a fal
 an entry with its reason in `tests/tsan.supp`. It needs Linux (GCC has no ThreadSanitizer on macOS
 arm64), a GCC built with its sanitizer runtimes
 (`deps/libycxx/tools/toolchain/provision --with-sanitizers`) and `vm.mmap_rnd_bits` at most 28.
-The nightly `linux-x86_64-tsan` job runs it (#105).
+The nightly `linux-x86_64-tsan` job runs on bare Ubuntu 26.04 (#105). Its glibc includes the
+upstream loader fixes needed by the freestanding dynamic executable tests. The job logs its
+glibc version and uses it in the GCC sanitizer cache key.
+[#1377](https://github.com/yrashk/ycxx/issues/1377) ·
+[Link-map fix](https://github.com/bminor/glibc/commit/8f8dd904c4a2207699bb666f30acceb5209c8d3f) ·
+[Libc-free relocation fix](https://github.com/bminor/glibc/commit/706209867f1ba89c458033408d419e92d8055f58)
 
 ## Bootstrap smoke test
 

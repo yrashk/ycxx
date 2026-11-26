@@ -18,7 +18,7 @@ export namespace ycxx::lex {
 enum class Severity : u8 { error, warning };
 
 // Diagnostic categories the driver can select. A diagnostic without a category is always shown.
-enum class Warning : u8 { uncontrolled, multichar, attributes, sized_deallocation };
+enum class Warning : u8 { uncontrolled, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large };
 
 struct message {
   Severity severity;

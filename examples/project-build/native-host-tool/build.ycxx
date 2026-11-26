@@ -1,0 +1,15 @@
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

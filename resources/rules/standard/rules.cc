@@ -56,6 +56,8 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
   size_t used = 0;
   if (equal(host->rule, "executable")) {
     if (!append(&used, "native.executable ", sizeof("native.executable ") - 1)) return 3;
+  } else if (equal(host->rule, "host_executable")) {
+    if (!append(&used, "native.host_executable ", sizeof("native.host_executable ") - 1)) return 3;
   } else if (equal(host->rule, "library")) {
     if (!append(&used, "native.library ", sizeof("native.library ") - 1)) return 3;
   } else if (equal(host->rule, "generate")) {

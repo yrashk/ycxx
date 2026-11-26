@@ -336,6 +336,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Toolchain
 
+- **GCC's stock contract runtime needs the link driver flag.** Compile and link with
+  `-fcontracts` in the system standard-library configuration. The driver adds
+  `libstdc++exp`, which contains the default contract handler and its reporter.
+  The libycxx configuration gets its handler from libycxx's own runtime.
+
 - **A sandbox command's `/dev/shm` is private to that command.** A compiler built there by one
   command was inaccessible to the next.
   - Do: build and test in the same command when using `/dev/shm`. Copy the binary and test logs
@@ -393,6 +398,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     verbatim and reduce them. #283's trigger was an inline constructor in an *intermediate*
     module, and #46's was a template specialization instantiated in the imported interface.
   - Learned on #726.
+- **An in-tree package and its consumers need the same `std` module provider.**
+  The standalone benchmark target brought its own module flags and dependency
+  into the compiler build. CMake generated a second `std` BMI for its
+  consumers, and GCC on macOS reported a CRC mismatch when a test also imported
+  `ycxx.unit`.
+  - Do: pass the compiler's shared options target to the in-tree package.
+    Keep the standalone dependency path for external consumers. Compare the
+    `std` entries in the generated `.modmap` files when diagnosing a mismatch.
+  - Learned on #1414.
+
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.
@@ -701,6 +716,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     field of that type, not only with uses after the closing brace.
   - Learned on #306.
 
+- **A query that every lookup asks must not start analyses.** On #1150 a `Questions` hook that
+  unqualified name lookup calls (`dependent_member_using`) ran `item_sema` on the class's using items
+  to be sure they were recorded. On `<iostream>` it re-entered an item whose analysis was running
+  (a contract violation in `item_sema`). The own tests all passed, and the crash was in a worker,
+  so lldb showed no stack.
+  - Do: have such a hook read only what is recorded, and rely on the order the definition
+    analyses items in (member items before bodies). Run the `<iostream>` hello program after every
+    change to lookup, not only the gate.
+  - Learned on #1150.
+
 ## Evidence and tests
 
 - **Map a header chain past its first wall with an overlay, and check both gates.** Every
@@ -977,14 +1002,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Run `git status` after `git merge -q … | tail`: the pipe hides a conflict's exit code, and a gate
     ran for half an hour on a half-merged tree.
   - Learned on #1243.
-- **The item splitter must learn every token-level construct that looks like `name(`.** It decides
-  what a namespace-scope item declares from tokens alone, and a miss is silent: `typedef
-  __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never existed and
-  only its uses failed, far away.
+- **The item splitter guesses from tokens, and a wrong guess is silent.** It decides what a
+  namespace-scope item or member declares from tokens alone.
+  - `typedef __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never
+    existed and only its uses failed, far away (#211).
+  - It read `requires` after any `&&` as a requires-expression. While templated members with `&&`
+    were rejected, that guess was never reached. Once #311 accepted them,
+    `int a() && requires (C) { … }` took its `(…)` and `{…}` as the expression's parts and ran the
+    next member's body: a miscompile that every own test missed and an independent review caught.
   - Do: when adding a specifier that takes parentheses (`decltype`, `__attribute__`, the type-trait
-    built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
-    namespace-scope typedef, variable and function template whose type begins with it.
-  - Learned on #211.
+    built-ins), or when a gate stops rejecting a token form, grep `items.cppm` for the token. Test
+    the form in a namespace-scope typedef, variable and function template, and as a member followed
+    by each thing that can come next (a requires-clause, `noexcept`, `->`, `= 0`, `= delete`, a
+    body, another member).
+  - Rule: AGENTS.md ("While working"). Learned on #211 and #311.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
@@ -1057,3 +1088,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`
   (`find_program(... clang++)`), not `${CMAKE_CXX_COMPILER}`.
   - Learned on #650.
+- **A tentative parse decides on syntax diagnostics, not on errors or on where it stopped.** The
+  first #1190 version took a template argument as a type-id only if its parse gave no error. That
+  accepted the ill-formed type-id `IC<P(P(p))[1]>` as an expression and hid type errors behind
+  expression diagnostics. The second version took "the parse reached `>`" instead. But the
+  declarator parser reports `unexpected identifier` and then keeps going to the argument's end,
+  so `bool(&g)` stayed a type-id.
+  - Do: use `Sema::has_syntax_error_since` (expected or unexpected tokens) together with the end
+    position. When both readings fail, report the diagnostics of the reading the grammar prefers.
+  - Learned on #1190.

@@ -535,7 +535,7 @@ private:
 struct Interners {
   // The empty template argument list is list 0, the `elems` of every argument that is no pack; the
   // empty template-head is list 0, the `params` of every template parameter that is no template
-  // template parameter. Declarations without annotations also use list 0.
+  // template parameter. Absent annotations, qualifiers and written type spellings use list 0.
   Interners() {
     [[maybe_unused]] SeqId<TemplateArg> empty = intern_seq(std::span<const TemplateArg>{});
     contract_assert(empty.index == 0);
@@ -543,6 +543,10 @@ struct Interners {
     contract_assert(no_head.index == 0);
     [[maybe_unused]] const auto no_annotations = intern_seq(std::span<const AnnotationSema>{});
     contract_assert(no_annotations.index == 0);
+    [[maybe_unused]] const auto no_qualifier = intern_seq(std::span<const NameId>{});
+    contract_assert(no_qualifier.index == 0);
+    [[maybe_unused]] const auto no_spellings = intern_seq(std::span<const TemplateTypeSpelling>{});
+    contract_assert(no_spellings.index == 0);
   }
   Names names;
   FpTable tokens;    // placeholder until #18

@@ -362,7 +362,7 @@ export class Builder {
     return n;
   }
   // One-result convenience.
-  ValueId value(Op op, Type t, std::initializer_list<ValueId> operands, std::initializer_list<std::uint64_t> imms = {},
+  inline ValueId value(Op op, Type t, std::initializer_list<ValueId> operands, std::initializer_list<std::uint64_t> imms = {},
                 Flags flags = 0, std::span<const ir::Origin> origin = {}) {
     Type ts[] = {t};
     NodeId n = emit(op, ts, std::span(operands), std::span(imms), flags, {}, origin);

@@ -17,7 +17,7 @@ One object per cell a request settled, in the collector's batches: whole subtree
 | `parent` | integer | the event of the frame that asked for the cell; 0 for a request's own cell |
 | `depth` | integer | in the request's tree |
 | `kind`, `key` | string | the cell: its query kind and its key as text (`Tu`, `a.cpp`) |
-| `outcome` | string | `executed`, `cutoff`, `verified`, `reused`, `durable`, `input`, `recomputed`, `waited` or `failed` |
+| `outcome` | string | `executed`, `cutoff`, `verified`, `reused`, `durable`, `input`, `recomputed`, `waited`, `failed` or `stopped` |
 | `start_ns`, `duration_ns` | integer | since the trace began; 0 for an instant |
 | `worker`, `end_worker` | integer | the pool worker it started and ended on; -1 the requesting thread |
 | `request` | string | with `ctl trace`: which request |
@@ -35,6 +35,8 @@ One object per cell a request settled, in the collector's batches: whole subtree
 Memory that one cell's run allocated and others use (an interned tree, a header's region) counts
 for that cell only. Memory no frame allocated (the engine's tables, the session's state) counts
 for no cell.
+
+A `stopped` query was cancelled before it could publish. It carries no value or retained bytes.
 
 ## Source spans
 

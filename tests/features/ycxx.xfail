@@ -142,7 +142,6 @@ draft/dcl/dcl.fct.default-2.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.default-4.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.fct.default-5.reject.cpp errors elsewhere: 'extern' not supported yet
 draft/dcl/dcl.fct.default-8.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.fct.spec-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-10.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-11.reject.cpp reference-member initializer recursion is tracked in #118
@@ -190,8 +189,6 @@ draft/dcl/enum.udecl-2.accept.cpp 'enum' not supported yet
 draft/dcl/enum.udecl-3.reject.cpp errors elsewhere: 'enum' not supported yet
 draft/dcl/namespace.def.general-2.accept.cpp 'namespace' not supported yet
 draft/dcl/namespace.udecl-1.accept.cpp 'enum' not supported yet
-draft/dcl/namespace.udecl-10.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/namespace.udecl-11.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/namespace.udecl-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -211,9 +208,7 @@ draft/expr/expr.const.core-1.accept.cpp 'static' is not supported yet
 draft/expr/expr.const.core-3.accept.cpp 'auto' not supported yet
 draft/expr/expr.const.core-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.core-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.const.defns-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.imm-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.const.imm-2.reject.cpp errors elsewhere: 'template' is not supported yet
 draft/expr/expr.const.imm-3.reject.cpp errors elsewhere: overloading 'id' is not supported yet
 draft/expr/expr.const.init-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.const.init-2.accept.cpp 'thread_local' not supported yet
@@ -251,8 +246,6 @@ draft/expr/expr.prim.lambda.general-1.accept.cpp preprocessing directives are no
 draft/expr/expr.prim.lambda.general-2.accept.cpp 'auto' not supported yet
 draft/expr/expr.prim.lambda.general-3.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.general-4.accept.cpp 'auto' not supported yet
-draft/expr/expr.prim.req.compound-2.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.prim.req.general-1.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.req.general-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/expr/expr.prim.req.type-1.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.splice-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -290,7 +283,6 @@ draft/over/over.match.best.general-2.accept.cpp 'template' not supported yet
 draft/over/over.match.best.general-3.accept.cpp 'template' not supported yet
 draft/over/over.match.best.general-4.accept.cpp 'struct' not supported yet
 draft/over/over.match.best.general-5.accept.cpp 'struct' not supported yet
-draft/over/over.match.best.general-6.accept.cpp preprocessing directives are not supported yet
 draft/over/over.match.best.general-7.accept.cpp 'template' not supported yet
 draft/over/over.match.class.deduct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/over/over.match.class.deduct-2.reject.cpp errors elsewhere: 'template' not supported yet
@@ -320,11 +312,8 @@ draft/temp/temp.arg.nontype-1.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.arg.nontype-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.nontype-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.nontype-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.arg.template-2.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.template-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.type-1.accept.cpp 'template' not supported yet
-draft/temp/temp.class.general-1.accept.cpp 'template' not supported yet
-draft/temp/temp.concept-1.accept.cpp preprocessing directives are not supported yet
 draft/temp/temp.constr.atomic-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.concept-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet
@@ -427,12 +416,8 @@ own/classes/s1-locals-scopes.run.cpp local classes (#117)
 own/floating/const-compare.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-arith-types.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-double-float.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
-own/floating/conv-fpprom-overload.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-narrowing-ok.accept.cpp@linux-x86_64 x87 long double initialization is unsupported #645
-own/floating/conv-narrowing.reject.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-static-cast.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
-own/floating/conv-unary.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/lit-digit-separators.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
-own/floating/lit-suffix-types.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/templates/c2-constexpr-members.run.cpp constexpr constructors (#157) and class objects in constant evaluation (#25)
 own/templates/c2-distinct-types.reject.cpp a namespace-scope reference bound to a variable is not a constant initializer yet, for any class (#367)

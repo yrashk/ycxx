@@ -16,7 +16,7 @@
 //                            which of its references this TU defines; its value is the unit's
 //                            fingerprint, the unit itself is in a content-addressed store
 //   optimized(unit, target, level)  level 0: selection, slot allocation and emission
-//   codegen(TU, F)           best_available(unit, B, S) over the opt_cache_snapshot input S
+//   codegen(TU, F, mode)     best_available(unit, B, S) over the opt_cache_snapshot input S
 //   tu(TU)                   the object, in definition order (§A5.3), and the first-demand table
 //   layout                   `layout_type(T)`, `layout_step(T, s)`, `layout_constant(c)` (cheap)
 //
@@ -35,6 +35,7 @@ export module ycxx.pipeline:back;
 
 import std;
 import ycxx.ast;
+import ycxx.cm;
 import ycxx.engine;
 import ycxx.ir;
 import ycxx.ir.l2;
@@ -120,6 +121,9 @@ struct Entity {
   bool nonthrowing = false;  // including implicit exception specifications on destructors
   bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
   bool unsupported_class_parameter_signature = false;
+  bool inline_function = false;
+  bool namespace_static = false;
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -202,6 +206,7 @@ struct ClassShape {
   bool calls_abi_uncertain = false;
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
+  std::uint8_t clang_weak_alignment = 0;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
   bool dynamic_root = false;  // a dynamic class whose own vptr is at offset zero (#309)
@@ -274,6 +279,7 @@ struct TranslationUnit {
   bool has_raw_linkage_names = false;  // written asm labels or attributes with raw names
   // The declared heads of class templates whose own arguments may appear in symbols.
   std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
+  std::map<EntityId, std::pair<ast::Loc, ast::SeqId<ast::TemplateArg>>> class_template_spellings{};
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -463,9 +469,13 @@ struct ConstLayout {
   std::optional<ConstId> object;  // a string literal or compiler-created constant object
 };
 struct [[=engine::cheap]] LayoutConstant {
-  using Key = ConstId;
+  struct Key {
+    ConstId value;
+    bool linux_target;
+    bool operator==(const Key&) const = default;
+  };
   using Value = ConstLayout;
-  static Value run(engine::SyncCtx& cx, ConstId c);
+  static Value run(engine::SyncCtx& cx, Key key);
 };
 
 // A constant object a function or variable uses, and its entity.
@@ -516,7 +526,7 @@ class QueryLayout {
   bool is_class(EntityId e) const { return shape_of(e) != nullptr; }
   bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
-    ConstLayout v = cx_->fetch<LayoutConstant>(c);
+    ConstLayout v = cx_->fetch<LayoutConstant>({c, target_->triple == ast::x86_64_linux.triple});
     if (!v.base) return {v.bits, v.high};
     if (v.object && !std::ranges::contains(objects_, *v.object, &ConstantObjectUse::object))
       objects_.push_back({*v.object, *v.base});
@@ -705,24 +715,35 @@ struct UnitQ {
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
 };
 
+enum class OptimizationMode : std::uint8_t { none, heuristic, solver };
+
 struct OptKey {
   Fp128 unit;
   obj::target target = obj::target::aarch64_macos;
   std::uint8_t level = 0;
+  OptimizationMode mode = OptimizationMode::none;
   bool operator==(const OptKey&) const = default;
 };
+enum class RewriteOutcome : std::uint8_t { none, applied, no_candidates, rejected, unsupported_target };
+enum class FusionOutcome : std::uint8_t { none, no_candidates, invalid_model, budget_exhausted, rejected };
 struct Machine {
   std::optional<aarch64::MachineCode> code;
   std::string error;
   std::optional<x86_64::MachineCode> linux_code{};
+  RewriteOutcome rewrites = RewriteOutcome::none;
+  std::uint32_t candidates = 0;
+  std::uint32_t fused_pairs = 0;
+  std::uint32_t saved_bytes = 0;
+  FusionOutcome fusion = FusionOutcome::none;
   bool ok() const { return code.has_value() || linux_code.has_value(); }
 };
-// `optimized(unit, target, options, optimizer_version, level)` (§A8.1). Options and the optimizer
-// version have nothing to choose yet: the version is the binary's, and a daemon serves one binary.
+// `optimized(unit, target, options, optimizer_version, level)` (§A8.1). The version is the
+// binary's, and a daemon serves one binary.
 struct Optimized {
   using Key = OptKey;
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, OptKey k);
+  static std::string describe(const Key& k);
   static std::string show(const Value& v);  // the instruction words, for traces (#245)
   static std::string errors(const Value& v) { return v.ok() ? std::string() : v.error; }
 };
@@ -730,10 +751,20 @@ struct Optimized {
 // `codegen(F)`: `best_available(unit, B, S)` (§A8.3; optimization design §7: S is consulted only
 // for B ≥ 1, so -O0 is level 0 exactly).
 struct Codegen {
-  using Key = FnKey;
-  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
+  struct Key {
+    FnKey function;
+    OptimizationMode mode = OptimizationMode::none;
+    bool operator==(const Key&) const = default;
+
+    friend void hash_into(Hasher& h, const Key& k) noexcept {
+      hash_append(h, k.function);
+      if (k.mode != OptimizationMode::none) h.uint(std::to_underlying(k.mode));
+    }
+    friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.function); }
+  };
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k.function); }
   using Value = Machine;
-  static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static engine::query_task<Value> run(engine::Ctx& cx, Key k);
   static std::string show(const Value& v) { return Optimized::show(v); }
   static std::string errors(const Value& v) { return Optimized::errors(v); }
 };
@@ -758,11 +789,14 @@ struct Tu {
   struct Key {
     TuId tu;
     bool check_policies = false;
+    OptimizationMode optimization = OptimizationMode::none;
     bool operator==(const Key&) const = default;
 
     friend void hash_into(Hasher& h, const Key& k) noexcept {
       hash_append(h, k.tu);
-      if (k.check_policies) h.uint(std::uint8_t(1));
+      if (k.check_policies || k.optimization != OptimizationMode::none)
+        h.uint(std::uint8_t(k.check_policies));
+      if (k.optimization != OptimizationMode::none) h.uint(std::to_underlying(k.optimization));
     }
     friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.tu); }
   };
@@ -879,7 +913,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
-            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment};
+            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment,
+            .unusable_class_alignment = e.unusable_class_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -889,8 +924,12 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TClass>(c)) {
     const auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
     // A peer object's field offsets are available through step(), with no native complete-object type.
-    if (const ClassShape* shape = shape_of(EntityId(key)); shape && shape->layout_requires_virtual_support)
-      return {};
+    if (const ClassShape* shape = shape_of(EntityId(key))) {
+      if (shape->clang_weak_alignment)
+        return {.kind = record, .size = shape->clang_weak_alignment, .align = shape->clang_weak_alignment,
+                .unusable_class_alignment = true};
+      if (shape->layout_requires_virtual_support) return {};
+    }
     if (auto done = records_.find(key); done != records_.end()) return done->second;
   }
   if (auto r = class_layout(c)) {
@@ -920,6 +959,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     for (const ir::SubObject& b : r->bases) {
       const auto base = type(b.type);
       l.layout_uncertain |= base.layout_uncertain;
+      l.unusable_class_alignment |= base.unusable_class_alignment;
       l.contains_explicit_alignment |= base.contains_explicit_alignment;
       if (!base.empty) parts.push_back(b);
     }
@@ -936,6 +976,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
       l.layout_uncertain |= m.layout_uncertain;
+      l.unusable_class_alignment |= m.unusable_class_alignment;
       l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
@@ -947,6 +988,10 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     if (hfa && count <= 4 && count * bytes == r->size) {
       l.hfa = std::uint8_t(count);
       l.hfa_bytes = bytes;
+    }
+    if (l.unusable_class_alignment) {
+      l.size = 0;
+      l.align = 1;
     }
     records_[std::to_underlying(in.types.get<ast::TClass>(c).entity)] = l;
     return l;
@@ -1024,6 +1069,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   const ClassShape* it = shape_of(EntityId(key));
+  if (it && it->clang_weak_alignment) return std::nullopt;
   if (!it || (it->layout_requires_virtual_support &&
                                it->peer_virtual_layout == sema::PeerVirtualLayout::none &&
                                it->peer_automatic_primary_base == EntityId::none))
@@ -1037,6 +1083,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   }
   for (std::size_t i = 0; i < it->fields.size(); ++i) {
     ast::Placed f = placed(in.canonical(it->fields[i]));
+    f.potentially_overlapping = std::ranges::binary_search(it->overlapping_fields, std::uint32_t(i));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
     if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
@@ -1083,12 +1130,15 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
   return {};
 }
 
-ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
+ConstLayout LayoutConstant::run(engine::SyncCtx&, Key key) {
   ast::Interners& in = *universe().in;
+  const ConstId c = key.value;
   if (auto a = universe().consts->address(c)) {
     if (in.values.is<ast::VEntity>(a->object)) {
       const EntityId entity = in.values.get<ast::VEntity>(a->object).entity;
-      if (const auto* world = universe().linux_world) {
+      // Descriptor records are created in the target's semantic world. The same interned
+      // address can be used on both targets before both worlds contain the corresponding record.
+      if (const auto* world = universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin)) {
         if (const auto* record = world->entities.find(entity); record && record->constant_object != ConstId::none)
           return {a->offset, 0, entity, record->constant_object};
       }
@@ -1311,13 +1361,14 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.constructor_table = d.constructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
-  for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
+  bool needs_nonthrowing = facts.classify(facts.return_type(d.decl.type)) == irgen::TypeClass::record;
+  for (std::uint32_t index = 0, count = seqs.size(locals); !needs_nonthrowing && index < count; ++index) {
     QualType type = seqs.at(locals, index).type;
     while (facts.classify(type) == irgen::TypeClass::array) type = facts.element(type);
-    if (facts.classify(type) != irgen::TypeClass::record) continue;
-    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
-    break;
+    needs_nonthrowing = facts.classify(type) == irgen::TypeClass::record;
   }
+  if (needs_nonthrowing)
+    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
   input.guards = d.guards;
   input.guard_acquire = d.guard_acquire;
   input.guard_release = d.guard_release;
@@ -1327,9 +1378,9 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.hosted_catch = true;
     input.catch_int_binding = d.hosted_catch->int_binding;
   }
-  const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = facts.target().triple == ast::x86_64_linux.triple;
   if (input.exceptions_enabled) {
-    if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
+    if (target_is_linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
     else if (facts.target().triple == ast::aarch64_darwin.triple)
       input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
   }
@@ -1342,8 +1393,8 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.cleanup_call = d.cleanup_call;
     input.constructor_cleanup = d.constructor_cleanup;
   }
-  input.native_array_delete = linux;
-  input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
+  input.native_array_delete = target_is_linux;
+  input.native_array_new = target_is_linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) {
@@ -1371,13 +1422,57 @@ std::string Lower::show(const Lowered& v) {
   return v.body ? unnamed(l2::print(EntityId::none, v.body->f)) : std::string();
 }
 
+std::string Optimized::describe(const Key& k) {
+  std::string out = "{";
+  engine::describe_into(out, k.unit);
+  out += ", ";
+  engine::describe_into(out, k.target);
+  out += ", ";
+  engine::describe_into(out, k.level);
+  if (k.mode != OptimizationMode::none) {
+    out += ", ";
+    engine::describe_into(out, k.mode);
+  }
+  return out + '}';
+}
+
 std::string Optimized::show(const Machine& m) {
+  std::string decision;
+  switch (m.rewrites) {
+    case RewriteOutcome::none: break;
+    case RewriteOutcome::applied:
+      decision = std::format("{0}=heuristic candidates={1} applied={1} validation=passed\n",
+                             m.fused_pairs ? "prepass" : "path", m.candidates);
+      break;
+    case RewriteOutcome::no_candidates:
+      if (!m.fused_pairs && m.fusion == FusionOutcome::none) decision = "path=baseline fallback=no_candidates\n";
+      break;
+    case RewriteOutcome::rejected:
+      decision = std::format("path=baseline candidates={} applied=0 fallback=validation_or_emission_failed\n",
+                             m.candidates);
+      break;
+    case RewriteOutcome::unsupported_target: decision = "path=baseline fallback=unsupported_target\n"; break;
+  }
+  if (m.fused_pairs != 0)
+    decision = std::format("path=solver fused_pairs={} saved_bytes={} validation=passed\n", m.fused_pairs, m.saved_bytes) + decision;
+  std::string_view fusion_fallback;
+  switch (m.fusion) {
+    case FusionOutcome::none: break;
+    case FusionOutcome::no_candidates: fusion_fallback = "no_candidates"; break;
+    case FusionOutcome::invalid_model: fusion_fallback = "invalid_model"; break;
+    case FusionOutcome::budget_exhausted: fusion_fallback = "budget_exhausted"; break;
+    case FusionOutcome::rejected: fusion_fallback = "emitted_size_or_codegen_validation_failed"; break;
+  }
+  if (!fusion_fallback.empty()) {
+    if (decision.empty()) decision = "path=baseline ";
+    decision += std::format("fusion_fallback={}\n", fusion_fallback);
+  }
   if (m.linux_code)
-    return std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
+    return decision + std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
   if (m.code)
-    return std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
+    return decision + std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
            aarch64::disassemble(*m.code, [](EntityId e) { return entity_name(e); });
-  return m.error.empty() ? std::string() : "error: " + m.error;
+  return m.error.empty() ? decision : decision + "error: " + m.error;
 }
 
 engine::query_task<FunctionIrValue> FunctionIr::run(engine::Ctx& cx, FnKey k) {
@@ -1422,13 +1517,14 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
     if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) return {};
     auto l = layout.type(value);
+    if (l.unusable_class_alignment) return "a class whose requested alignment has no usable object layout";
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
                     : "defaulted copy ABI classification is unavailable for a parameter";
     if (f.variadic && l.kind == ir::TypeKind::integer && l.size == 16)  // #1172
       return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
-        (allow_aggregates && (l.sysv_integer_eightbytes || (l.sysv_stack_record && (result || l.size <= 16))))) return {};
+        (allow_aggregates && (l.sysv_integer_eightbytes || l.sysv_stack_record))) return {};
     if (fixed_direct && l.sysv_empty_record) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
@@ -1475,8 +1571,8 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
   const ast::Target& target = unit_target(cx, k.tu);
-  const bool linux = object_target(target) == obj::target::x86_64_linux;
-  if (!f.body && !linux) co_return Lowered{std::nullopt, {}, f.error};
+  const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
+  if (!f.body && !target_is_linux) co_return Lowered{std::nullopt, {}, f.error};
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
@@ -1492,7 +1588,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         config.unreachable_body = ir::NodeId(std::uint32_t(checked - f.body->nodes.begin()));
     }
   }
-  if (linux) {
+  if (target_is_linux) {
     const ast::Interners& in = *universe().in;
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
     const FunctionDef& def = src.def;
@@ -1625,10 +1721,10 @@ struct TuSymbolAddresses {
   using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     auto [u, index] = co_await cx.par_fetch(engine::q<TuUnit>{tu}, engine::q<UnitIndexQ>{tu});
-    const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
+    const bool target_is_linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
     Value out;
     auto add = [&](EntityId id) {
-      if (linux) {
+      if (target_is_linux) {
         auto e = indexed(index.entities, id);
         if (!e || !u.entities[*e].has_local_binding()) return;
       }
@@ -1636,7 +1732,7 @@ struct TuSymbolAddresses {
     };
     for (const FunctionDef& f : u.functions) add(f.entity);
     for (const Variable& v : u.variables) add(v.entity);
-    if (linux) {
+    if (target_is_linux) {
       for (const Entity& e : u.entities)
         if (!e.has_local_binding() && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
           out.got.push_back(e.id);
@@ -1701,21 +1797,265 @@ engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   co_return UnitRef{universe().units->add(std::move(u)), std::nullopt};
 }
 
+struct DivisionRewrite {
+  std::uint32_t node;
+  std::uint32_t immediate;
+  l2::Op op;
+  std::uint64_t operand;
+  bool operator==(const DivisionRewrite&) const = default;
+};
+
+namespace {
+
+bool unsigned_division(const l2::Node& node) {
+  return node.flags == 0 && (node.op == l2::Op::udiv || node.op == l2::Op::urem);
+}
+
+std::vector<DivisionRewrite> power_of_two_divisions(const l2::Function& body) {
+  std::vector<DivisionRewrite> rewrites;
+  if (std::ranges::none_of(body.nodes, unsigned_division)) return rewrites;
+
+  // Successor arguments live in operands too. Changing the constant is safe only when this
+  // division or remainder is its sole use.
+  std::vector<std::uint8_t> uses(body.values.size());
+  for (const auto operand : body.operands) {
+    auto& count = uses[ir::raw(operand)];
+    if (count < 2) ++count;
+  }
+  for (std::uint32_t i = 0; i < body.nodes.size(); ++i) {
+    const auto& node = body.nodes[i];
+    if (!unsigned_division(node)) continue;
+    const auto divisor = body.operands_of(ir::NodeId(i))[1];
+    const auto& value = body.value(divisor);
+    if (value.param || uses[ir::raw(divisor)] != 1 ||
+        (value.type != l2::Type::i32 && value.type != l2::Type::i64))
+      continue;
+    const auto& constant = body.nodes[value.def];
+    if (constant.op != l2::Op::const_) continue;
+    auto bits = body.imms[constant.imm0];
+    if (value.type == l2::Type::i32) bits = std::uint32_t(bits);
+    if (!std::has_single_bit(bits)) continue;
+
+    // In both widths, division by 2^k drops the low k bits. The remainder retains exactly
+    // those bits. The nonzero divisor and in-range shift preserve defined behavior.
+    if (node.op == l2::Op::udiv)
+      rewrites.push_back({i, constant.imm0, l2::Op::lshr, std::uint64_t(std::countr_zero(bits))});
+    else
+      rewrites.push_back({i, constant.imm0, l2::Op::and_, bits - 1});
+  }
+  return rewrites;
+}
+
+std::optional<l2::Function> rewrite_divisions(const l2::Function& body,
+                                              std::span<const DivisionRewrite> rewrites) {
+  if (rewrites.empty()) return {};
+  auto transformed = body;
+  for (const auto& rewrite : rewrites) {
+    transformed.nodes[rewrite.node].op = rewrite.op;
+    transformed.imms[rewrite.immediate] = rewrite.operand;
+  }
+  return transformed;
+}
+
+}  // namespace
+
+struct DivisionModel {
+  using Key = Fp128;
+  using Value = std::vector<DivisionRewrite>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    auto rewrites = power_of_two_divisions(universe().units->at(unit).body.f);
+    co_await cx.stop_point();
+    co_return rewrites;
+  }
+  static std::string show(const Value& v) {
+    return std::format("model=unsigned_power_of_two_division candidates={}", v.size());
+  }
+};
+
+using DivisionGroups = std::vector<std::vector<x86_64::DivisionSite>>;
+
+void division_prefix_choices(std::span<const x86_64::DivisionSite> group,
+                             std::vector<cm::PrefixChoice>& choices) {
+  choices.clear();
+  std::array<std::uint32_t, 2> counts{};
+  for (const auto& site : group) {
+    ++counts[site.quotient];
+    choices.push_back({std::min(counts[0], counts[1]), site.saved_bytes});
+  }
+}
+
+struct FusionModel {
+  DivisionGroups groups;
+  std::string error;
+};
+struct DivisionFusionModel {
+  using Key = Fp128;
+  using Value = FusionModel;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    co_await cx.stop_point();
+    auto groups = x86_64::group_divisions(universe().units->at(unit).body.f, cx.stop_token());
+    co_await cx.stop_point();
+    if (!groups) co_return Value{{}, groups.error()};
+    co_return Value{std::move(*groups), {}};
+  }
+  static std::string show(const Value& v) {
+    if (!v.error.empty()) return "model=unsigned_divrem_fusion fallback=" + v.error;
+    auto out = std::format("model=unsigned_divrem_fusion equivalence_groups={}", v.groups.size());
+    if (v.groups.size() == 1 && v.groups.front().size() <= 8) {
+      std::vector<cm::PrefixChoice> choices;
+      division_prefix_choices(v.groups.front(), choices);
+      out += "\nprefix_capacity:byte_benefit";
+      for (const auto choice : choices) out += std::format(" {}:{}", choice.capacity, choice.benefit);
+    }
+    return out;
+  }
+};
+
+struct FusionResult {
+  std::vector<x86_64::DivisionPair> pairs;
+  std::uint32_t saved_bytes = 0;
+  std::size_t visits = 0;
+  std::optional<cm::PrefixFailure> failure;
+};
+struct DivisionFusionSolve {
+  static constexpr std::size_t visit_budget = 4'096;
+  using Key = Fp128;
+  using Value = FusionResult;
+  static std::string describe(const Key& unit) {
+    std::string key;
+    engine::describe_into(key, unit);
+    return key + std::format(", model=unsigned_divrem_fusion backend=exact_prefix budget={}", visit_budget);
+  }
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    // Optimized builds the model first. Fetch the completed value to record the dependency,
+    // then do the solve synchronously on this worker.
+    const auto& model = co_await cx.fetch<DivisionFusionModel>(unit);
+    co_await cx.stop_point();
+    Value result;
+    std::vector<cm::PrefixChoice> choices;
+    for (const auto& group : model.groups) {
+      co_await cx.stop_point();
+      if (group.size() > visit_budget - result.visits)
+        co_return Value{{}, 0, result.visits, cm::PrefixFailure::budget_exhausted};
+
+      division_prefix_choices(group, choices);
+      const auto selected = cm::solve_prefix_choices(choices, visit_budget - result.visits, cx.stop_token());
+      co_await cx.stop_point();
+      if (!selected) co_return Value{{}, 0, result.visits, selected.error()};
+      result.visits += group.size();
+
+      // An accepted later site must have a free earlier site of the opposite operation.
+      // Prefix feasibility ensures this in both directions, so reconstruct in source order.
+      std::array<std::vector<ir::NodeId>, 2> free;
+      auto next = selected->begin();
+      for (std::size_t i = 0; i < group.size(); ++i) {
+        const auto& site = group[i];
+        if (next == selected->end() || *next != i) {
+          free[site.quotient].push_back(site.node);
+          continue;
+        }
+        auto& opposite = free[!site.quotient];
+        if (opposite.empty()) co_return Value{{}, 0, result.visits, cm::PrefixFailure::unsupported};
+        result.pairs.push_back({opposite.back(), site.node});
+        opposite.pop_back();
+        result.saved_bytes += site.saved_bytes;
+        ++next;
+      }
+    }
+    co_await cx.stop_point();
+    co_return result;
+  }
+  static std::string show(const Value& v) {
+    if (v.failure)
+      return std::format("model=unsigned_divrem_fusion backend=exact_prefix budget={} visits={} fallback={}",
+                         visit_budget, v.visits,
+                         *v.failure == cm::PrefixFailure::budget_exhausted ? "budget_exhausted" : "invalid_model");
+    return std::format("model=unsigned_divrem_fusion backend=exact_prefix budget={} visits={} outcome=optimal pairs={} predicted_saved_bytes={}",
+                       visit_budget, v.visits, v.pairs.size(), v.saved_bytes);
+  }
+};
+
+struct DivisionFusionValidate {
+  using Key = Fp128;
+  using Value = Machine;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& u = universe().units->at(key);
+    const auto& fusion = co_await cx.fetch<DivisionFusionSolve>(key);
+    const auto& rewrites = co_await cx.fetch<DivisionModel>(key);
+    co_await cx.stop_point();
+
+    auto rewritten = rewrite_divisions(u.body.f, rewrites);
+    const auto& body = rewritten ? *rewritten : u.body.f;
+    auto heuristic = x86_64::compile_function(body, u.local, u.got_symbols);
+    co_await cx.stop_point();
+    const auto candidates = std::uint32_t(rewrites.size());
+    if (!heuristic) {
+      if (rewritten) heuristic = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
+      co_await cx.stop_point();
+      if (!heuristic)
+        co_return Machine{std::nullopt, heuristic.error(), {}, RewriteOutcome::rejected,
+                          candidates, 0, 0, FusionOutcome::rejected};
+      co_return Machine{std::nullopt, {}, std::move(*heuristic), RewriteOutcome::rejected,
+                        candidates, 0, 0, FusionOutcome::rejected};
+    }
+    const auto outcome = rewritten ? RewriteOutcome::applied : RewriteOutcome::no_candidates;
+    auto paired = x86_64::compile_function(body, u.local, u.got_symbols, fusion.pairs);
+    co_await cx.stop_point();
+    if (paired && paired->bytes.size() + fusion.saved_bytes == heuristic->bytes.size())
+      co_return Machine{std::nullopt, {}, std::move(*paired), outcome, candidates,
+                        std::uint32_t(fusion.pairs.size()), fusion.saved_bytes};
+    co_return Machine{std::nullopt, {}, std::move(*heuristic), outcome, candidates, 0, 0, FusionOutcome::rejected};
+  }
+  static std::string show(const Value& v) { return Optimized::show(v); }
+  static std::string errors(const Value& v) { return Optimized::errors(v); }
+};
+
 engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   (void)cx.fetch<CostModelIn>(k.target);  // part of `target` (§O8); level 0 reads no cost
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
+    RewriteOutcome outcome = RewriteOutcome::none;
+    std::uint32_t candidates = 0;
+    const FusionResult* fusion = nullptr;
+    FusionOutcome fusion_outcome = FusionOutcome::none;
+    if (k.mode == OptimizationMode::solver) {
+      const auto& model = co_await cx.fetch<DivisionFusionModel>(k.unit);
+      if (!model.error.empty()) fusion_outcome = FusionOutcome::invalid_model;
+      else if (model.groups.empty()) fusion_outcome = FusionOutcome::no_candidates;
+      else {
+        fusion = &co_await cx.fetch<DivisionFusionSolve>(k.unit);
+        if (fusion->failure)
+          fusion_outcome = *fusion->failure == cm::PrefixFailure::budget_exhausted
+            ? FusionOutcome::budget_exhausted : FusionOutcome::invalid_model;
+      }
+    }
+    if (k.mode != OptimizationMode::none) {
+      const auto& rewrites = co_await cx.fetch<DivisionModel>(k.unit);
+      candidates = std::uint32_t(rewrites.size());
+      outcome = RewriteOutcome::no_candidates;
+      if (fusion && !fusion->pairs.empty()) co_return co_await cx.fetch<DivisionFusionValidate>(k.unit);
+      if (auto rewritten = rewrite_divisions(u.body.f, rewrites)) {
+        auto optimized = x86_64::compile_function(*rewritten, u.local, u.got_symbols);
+        co_await cx.stop_point();
+        if (optimized)
+          co_return Machine{std::nullopt, {}, std::move(*optimized), RewriteOutcome::applied,
+                            candidates, 0, 0, fusion_outcome};
+        outcome = RewriteOutcome::rejected;
+      }
+    }
     auto m = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
-    if (!m) co_return Machine{std::nullopt, m.error()};
-    co_return Machine{std::nullopt, {}, std::move(*m)};
+    if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome, candidates, 0, 0, fusion_outcome};
+    co_return Machine{std::nullopt, {}, std::move(*m), outcome, candidates, 0, 0, fusion_outcome};
   }
+  const auto outcome = k.mode == OptimizationMode::none ? RewriteOutcome::none : RewriteOutcome::unsupported_target;
   auto m = aarch64::compile_function(u.body.f, u.local);
-  if (!m) co_return Machine{std::nullopt, m.error()};
-  co_return Machine{std::move(*m), {}};
+  if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome};
+  co_return Machine{std::move(*m), {}, {}, outcome};
 }
 
-engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
+engine::query_task<Machine> Codegen::run(engine::Ctx& cx, Key key) {
+  const FnKey k = key.function;
   const obj::target target = object_target(unit_target(cx, k.tu));
   const UnitRef& unit = co_await cx.fetch<UnitQ>(k);
   if (!unit.unit) co_return Machine{std::nullopt, unit.error ? unit.error->message : "no unit"};
@@ -1725,7 +2065,7 @@ engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
     for (const SnapshotEntry& e : cx.fetch<OptCacheSnapshot>(target))
       if (e.unit == *unit.unit) level = std::max(level, e.level);
   }
-  co_return co_await cx.fetch<Optimized>({*unit.unit, target, level});
+  co_return co_await cx.fetch<Optimized>({*unit.unit, target, level, key.mode});
 }
 
 // ------------------------------------------------------------------------------------- tu(TU)
@@ -1786,6 +2126,7 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
 std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const QueryLayout& layout, QualType type,
                                                 ConstId init) {
   ir::TypeLayout l = layout.type(type);
+  if (l.unusable_class_alignment) return std::unexpected("an object whose class alignment has no usable layout");
   if (l.contains_member_pointer) return std::unexpected("static storage containing pointers to members");
   Bytes out;
   out.bytes.assign(l.size, 0);
@@ -2253,7 +2594,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   const ast::Target& target = config ? *config->target : *universe().target;
   const bool emit_table_type_info = !config || config->rtti_enabled;
   const auto compatibility = config ? config->compatibility : ast::Compatibility::spec;
-  const bool linux = object_target(target) == obj::target::x86_64_linux;
+  const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
   if (tu.front_failed) {
@@ -2270,7 +2611,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
-  if (linux && tu.namespace_destruction) {
+  if (target_is_linux && tu.namespace_destruction) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
@@ -2319,20 +2660,83 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       }
     }
   }
+  // A private lambda's Clang number is allocated in native reference order. The
+  // bodies of unreferenced closure members must not participate in that walk.
+  std::map<std::uint32_t, const Entity*> by_id;
+  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
+  const sema::World* closure_world = universe().world_for(target);
+  auto private_closure_owner = [&](EntityId closure) -> std::optional<EntityId> {
+    if (closure == EntityId::none || !closure_world) return std::nullopt;
+    const auto* record = closure_world->entities.find(closure);
+    if (!record || record->kind != sema::EntityKind::class_ || record->unnamed_type_ordinal ||
+        !closure_world->ins.names.spelling(record->name).empty()) return std::nullopt;
+    auto found = by_id.find(ir::raw(record->scope));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& owner = *found->second;
+    if (!owner.is_function || owner.inline_function || owner.template_type) return std::nullopt;
+    if (owner.scope != EntityId::none) {
+      const auto* scope = closure_world->entities.find(owner.scope);
+      if (scope && scope->kind == sema::EntityKind::class_ &&
+          (scope->templ != EntityId::none || closure_world->ins.names.spelling(scope->name).empty())) return std::nullopt;
+    }
+    return owner.id;
+  };
+  std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
+  auto note_closure = [&](EntityId closure) {
+    if (private_closure_numbers.contains(closure)) return;
+    if (auto owner = private_closure_owner(closure))
+      private_closure_numbers.emplace(closure, next_private_closure_number[*owner]++);
+  };
+  auto note_type = [&](this auto&& visit, ast::QualType type) -> void {
+    const auto t = closure_world->types.rec(type);
+    switch (t.kind) {
+    case sema::TypeKind::class_: note_closure(t.entity); break;
+    case sema::TypeKind::pointer:
+    case sema::TypeKind::reference:
+    case sema::TypeKind::array: visit(t.inner); break;
+    case sema::TypeKind::member_pointer:
+      visit(t.member_owner);
+      visit(t.inner);
+      break;
+    case sema::TypeKind::function:
+      visit(t.inner);
+      for (ast::QualType p : t.params) visit(p);
+      break;
+    default: break;
+    }
+  };
+  auto note_argument = [&](this auto&& visit, const ast::TemplateArg& arg) -> void {
+    if (arg.kind == ast::TemplateArgKind::pack)
+      for (const auto& element : in.seqs.elements(arg.elems)) visit(element);
+    else if (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value)
+      note_type(arg.type);
+  };
+  const bool defer_closures = compatibility != ast::Compatibility::spec && !tu.has_raw_linkage_names &&
+                              tu.asm_hidden_symbols.empty();
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) {
-    if (f.emit_if_referenced) deferred.insert(ir::raw(f.entity));
+    auto found = by_id.find(ir::raw(f.entity));
+    if (f.emit_if_referenced || (defer_closures && found != by_id.end() && private_closure_owner(found->second->scope)))
+      deferred.insert(ir::raw(f.entity));
     else if (!deferred.contains(ir::raw(f.entity))) fns.push_back({id, f.entity});
   }
 
   // Follow native references in the lowered bodies, where only the runtime edge of an
   // if consteval remains. Each demanded definition can introduce more demands.
   std::set<std::uint32_t> used;
+  std::set<std::uint32_t> numbered_references;
   std::set<EntityId> unreachable_immediate;
   std::vector<FnKey> pending;
-  auto use_entity = [&](std::uint32_t entity) {
-    if (used.insert(entity).second && deferred.contains(entity))
-      pending.push_back({id, EntityId(entity)});
+  auto use_entity = [&](std::uint32_t entity, bool referenced = true) {
+    if (used.insert(entity).second && deferred.contains(entity)) pending.push_back({id, EntityId(entity)});
+    if (referenced && compatibility == ast::Compatibility::clang && closure_world && numbered_references.insert(entity).second) {
+      auto found = by_id.find(entity);
+      if (found != by_id.end()) {
+        note_closure(found->second->scope);
+        for (const auto& arg : found->second->template_args) note_argument(arg);
+        note_type(found->second->type);
+      }
+    }
   };
   auto collect_lowered = [&](std::span<const FnKey> keys, const auto& bodies) {
     for (std::size_t i = 0; i < keys.size(); ++i) {
@@ -2340,7 +2744,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (l.error) errors.push_back(*l.error);
       if (!l.body) continue;
       if (l.unreachable_immediate) unreachable_immediate.insert(keys[i].fn);
-      use_entity(ir::raw(keys[i].fn));
+      use_entity(ir::raw(keys[i].fn), false);
       for (const auto& ref : references(l.body->f)) use_entity(ir::raw(ref.entity));
     }
   };
@@ -2383,7 +2787,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     // A weak Mach-O definition stays out of zero-fill: Apple's linkers coalesce weak definitions
     // in content sections, as Clang emits them, but older ones not in __bss (#124).
-    else if (zero && (linux || !d.weak)) {
+    else if (zero && (target_is_linux || !d.weak)) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
       d.bytes.clear();
@@ -2446,7 +2850,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     }
   }
   for (const RuntimeUse& r : runtime)
-    symbols.push_back({r.entity, std::format("{}{}", linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
+    symbols.push_back({r.entity, std::format("{}{}", target_is_linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
   use(layout.objects());
 
   // Emit the constant objects referenced by functions and variables. A descriptor's
@@ -2483,15 +2887,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     // The cstring section is reserved for strings with one-byte code units.
     auto kind = layout.size == 1 ? aarch64::DataKind::cstring : aarch64::DataKind::rodata;
     data.push_back({entity, kind, std::move(bytes), 0, layout.align, {}});
-    symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
+    symbols.push_back({entity, std::format("{}.str.{}", target_is_linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
   // The declarations that own closure types, by entity (docs/design/closures.md).
-  std::map<std::uint32_t, const Entity*> by_id;
-  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   auto spec_of = [](const Entity& e) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
-                        e.template_head_constraint, e.template_trailing_constraint};
+                        e.template_head_constraint, e.template_trailing_constraint, e.generic_invoker_head};
   };
   const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
     auto found = by_id.find(ir::raw(id));
@@ -2512,13 +2914,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
-    auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) return std::nullopt;
-    const Entity& object = *found->second;
     const sema::World* w = universe().world_for(target);
-    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+    if (!w) return std::nullopt;
     const auto& r = w->entities.rec(id);
-    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
+    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none || r.linkage == ast::Linkage::none)
+      return std::nullopt;
     auto is_namespace = [&](EntityId scope) {
       return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
     };
@@ -2528,7 +2928,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
         return std::nullopt;
     }
-    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    if (auto found = by_id.find(ir::raw(id)); found != by_id.end()) {
+      const Entity& object = *found->second;
+      if (object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+      return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    }
+    // A constant may occur only in a written type and have no emitted object.
+    return ObjectName{std::string(w->ins.names.spelling(r.name)), r.type, r.scope,
+                      namespace_object && r.linkage == ast::Linkage::internal};
   };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
@@ -2540,6 +2947,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     if (n.is_class && r.templ != EntityId::none) {
       auto params = tu.class_template_parameters.find(r.templ);
       if (params != tu.class_template_parameters.end()) n.template_params = params->second;
+      auto spelling = tu.class_template_spellings.find(c);
+      if (spelling != tu.class_template_spellings.end()) n.args = in.seqs.elements(spelling->second.second);
     }
     if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
       auto f = by_id.find(ir::raw(r.scope));
@@ -2547,13 +2956,24 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       n.closure_type = r.type;
       n.closure_number = r.ordinal;
       n.closure_head = r.closure_head;
+      if (compatibility == ast::Compatibility::clang) {
+        note_closure(c);
+        if (auto private_number = private_closure_numbers.find(c); private_number != private_closure_numbers.end())
+          n.private_closure_number = private_number->second;
+      }
       if (f != by_id.end()) {
         const Entity& fe = *f->second;
         if (fe.is_function) {
           std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+          const bool namespace_function = fe.scope == EntityId::none || w->entities.rec(fe.scope).kind == sema::EntityKind::namespace_;
+          const bool internal_name = namespace_function &&
+              ((compatibility == ast::Compatibility::gcc && !fe.template_type && fe.linkage == ast::Linkage::internal) ||
+               (compatibility == ast::Compatibility::clang && fe.namespace_static));
+          const bool c_name = compatibility != ast::Compatibility::spec &&
+                              (fe.lang == ast::LangLinkage::c || fe.id == tu.main);
           n.local = std::make_shared<const LocalFunction>(LocalFunction{
               fname, fe.type, fe.scope, fe.special != Special::none,
-              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt, internal_name, c_name});
         } else {
           n.closure_variable = fe.id;
         }
@@ -2591,7 +3011,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                             table ? "virtual table's" : "RTTI object's", encoding.error())});
         continue;
       }
-      symbols.push_back({e.id, std::format("{}{}{}", linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
+      symbols.push_back({e.id, std::format("{}{}{}", target_is_linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
                          obj::binding::global});
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
@@ -2629,7 +3049,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility);
       if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
       else {
-        symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
+        symbols.push_back({e.id, target_is_linux ? std::move(*name) : "_" + *name, obj::binding::global});
         template_parameter_objects.insert(e.id);
       }
       continue;
@@ -2643,7 +3063,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility);
+                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility);
     };
     auto name = encode(entry);
     if (!name) {
@@ -2683,7 +3103,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                                   "ordinary ELF symbol named '{}'", directive.name)});
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
-  const std::string_view object_prefix = linux ? "" : "_";
+  const std::string_view object_prefix = target_is_linux ? "" : "_";
   for (const Entity* e : locals) {
     auto f = mangled.find(ir::raw(e->local_function));
     if (f == mangled.end()) {
@@ -2705,7 +3125,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
 
   // Code: codegen(F) for every function, in definition order.
-  auto ms = co_await cx.par_map<Codegen>(fns);
+  auto ms = co_await cx.par_map<Codegen>(fns | std::views::transform([&](FnKey fn) {
+    return Codegen::Key{fn, k.optimization};
+  }));
   for (std::size_t i = 0; i < fns.size(); ++i) {
     if (ms[i].get().ok()) continue;
     const auto& def = *definitions[i];
@@ -2724,7 +3146,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
            !found->second->has_local_binding() && found->second->asm_label.empty();
   };
   auto o = [&] {
-    if (linux) {
+    if (target_is_linux) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
         const auto& def = *definitions[i];
