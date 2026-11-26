@@ -286,6 +286,18 @@ probe = 'inline int (*provider())(int) { return [](auto n) { return n; }; }'
 evidence = ["GCC 16.2 with -fabi-compat-version=0 and upstream Clang 23.1.6 -O0 and -O2 ELF and Mach-O symbol probes"]
 
 [[divergence]]
+id = "constrained-lambda-conversion-trailing-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.lambda.closure], [temp.deduct.conv], Itanium C++ ABI §5.1.5.1 and the constraint mangling proposal"
+prior = "Take the invoker address directly and reject the tested constrained generic conversions."
+spec = "Check the call operator's constraints during conversion deduction. Use the selected call operator directly for a static lambda and its invoker otherwise."
+gcc = "Check the call operator's constraints. Keep written head constraints in the closure name, and omit the trailing constraint from the synthesized conversion and invoker symbols."
+clang = "Check the call operator's constraints and keep the written head naming. Append the trailing Q constraint to the conversion member's symbol on both static and nonstatic closures. The invoker has no trailing Q constraint."
+probe = 'template<class T> concept Size = sizeof(T) >= 2; inline int (*f())(int) { return [](auto n) requires Size<decltype(n)> { return n; }; }'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 ELF with -fabi-compat-version=0 and Clang 23.1.6 ELF and Mach-O primary symbols at -O0, with negative conversion-deduction controls"]
+
+[[divergence]]
 id = "constrained-lambda-call-operator-symbol"
 status = "pending"
 mode_status = { spec = "pending", gcc = "pending", clang = "pending" }

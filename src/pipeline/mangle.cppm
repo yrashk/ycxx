@@ -616,6 +616,12 @@ class Mangler {
       }
       auto p = prefix(scope);
       if (!p) return p;
+      auto trailing_constraint = [&] {
+        const auto saved_depth = std::exchange(own_depth, sc.closure_constraint_depth);
+        auto result = constraint_suffix(spec.trailing, false);
+        own_depth = saved_depth;
+        return result;
+      };
       const bool gcc_deduced = gcc_generated && in_.types.is<ast::TAuto>(in_.types.canon(f.ret));
       if (conversion) {
         auto target = [&]() -> std::expected<std::string, std::string> {
@@ -630,7 +636,11 @@ class Mangler {
         candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
         auto args = specialization_args(spec);
         if (!args) return args;
-        return local + "NK" + *p + "cv" + *target + *args + "Ev";
+        std::string result = local + "NK" + *p + "cv" + *target + *args + "Ev";
+        if (compatibility_ != ast::Compatibility::clang) return result;
+        auto trailing = trailing_constraint();
+        if (!trailing) return trailing;
+        return result + *trailing;
       }
       std::string unqualified = std::format("{}{}", name.size(), name);
       if (name.starts_with("operator") && name.size() > 8) {
@@ -643,9 +653,7 @@ class Mangler {
       if (!args) return args;
       auto sig = signature_for_closure(f, sc, spec, scope, gcc_deduced);
       if (!sig) return sig;
-      const auto saved_depth = std::exchange(own_depth, sc.closure_constraint_depth);
-      auto trailing = constraint_suffix(spec.trailing, false);
-      own_depth = saved_depth;
+      auto trailing = trailing_constraint();
       if (!trailing) return trailing;
       *sig += *trailing;
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");

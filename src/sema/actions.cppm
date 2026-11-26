@@ -5695,6 +5695,7 @@ public:
       if (h.name != invented_name()) cr.closure_head.push_back(h);
     const u16 depth = spec.head.empty() ? 0 : spec.head.front().depth;
     cr.lambda_head_constraint = spec.head_constraint;
+    cr.lambda_trailing_constraint = spec.trailing_constraint;
     cr.lambda_constraint_depth = depth;
     LambdaFrame f;
     f.closure = w_->entities.entity(std::move(cr));
@@ -6265,6 +6266,7 @@ public:
       const auto source_type = closure.static_closure ? invoker_type(closure.type) : source.type;
       EntityRec pattern{EntityKind::function_template, name, source_type, LangLinkage::cxx, target.linkage, {}, target.scope};
       pattern.generic_invoker_head = closure.static_closure ? invoker_head(head) : source.generic_invoker_head;
+      pattern.lambda_trailing_constraint = closure.lambda_trailing_constraint;
       ast::DeclSema declaration{};
       declaration.entity = w_->entities.entity(std::move(pattern));
       conversion = specialization(declaration, target.args, type);

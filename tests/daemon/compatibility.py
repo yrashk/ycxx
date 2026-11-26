@@ -3720,6 +3720,73 @@ int invalid(int n) {
                 subprocess.run([scope / 'static-call'], cwd=scope, check=True, timeout=20)
 
 
+def constrained_lambda_conversions(world, gxx):
+    scope = world.scope
+    (scope / 'constrained-conversion.cpp').write_text('''\
+template<class T> concept Size = sizeof(T) >= 2;
+#ifdef REJECT
+using F = char (*)(char);
+#else
+using F = int (*)(int);
+#endif
+#if CASE == 1
+inline F f() { return []<Size T>(T n) { return n; }; }
+#elif CASE == 2
+inline F f() { return [](auto n) requires Size<decltype(n)> { return n; }; }
+#elif CASE == 3
+inline F f() { return []<class T> requires Size<T> (T n) { return n; }; }
+#elif CASE == 4
+inline F f() { return []<Size T>(T n) static { return n; }; }
+#elif CASE == 5
+inline F f() { return [](auto n) static requires Size<decltype(n)> { return n; }; }
+#else
+inline F f() { return [](Size auto n) { return n; }; }
+#endif
+extern "C" F obtain() { return f(); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    heads = ('UlTk4SizeT_E', 'UlT_E', 'UlTyQ4SizeIT_ES_E', 'UlTk4SizeT_E', 'UlT_E', 'UlT_E')
+    for mode in MODES:
+        peer = gxx if mode == 'gcc' else clang
+        for target in (LINUX, DARWIN):
+            flags = [target, '-fcompat=' + mode]
+            prefix = '_' if target == DARWIN else ''
+            for case, head in enumerate(heads, 1):
+                trailing = case in (2, 5)
+                static = case in (4, 5)
+                ret = 'Da'
+                if mode == 'gcc':
+                    ret = 'DTclonclscOS_fp_EE' if static else 'DTcldtdeLKPKS0_0EonclIS_EscOS_fp_EE'
+                suffix = 'Q4SizeIDtfp_EE' if mode == 'clang' and trailing else ''
+                symbol = f'{prefix}_ZZ1fvENK{head}_cvPF{ret}S_EIiEEv{suffix}'
+                command = [*flags, f'-DCASE={case}', '-O0', '-c', 'constrained-conversion.cpp', '-o', 'constrained-conversion.o']
+                outputs = []
+                for env in (world.cold, world.daemon):
+                    result = world.cxx(command, scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, case, result)
+                    outputs.append((scope / 'constrained-conversion.o').read_bytes())
+                names = outputs[1].split(b'\0')
+                assert outputs[0] == outputs[1], (mode, target, case)
+                if mode == 'spec':
+                    assert not any(b'_cvP' in name for name in names), (mode, target, case, names)
+                else:
+                    assert symbol.encode() in names, (mode, target, case, symbol, names)
+                rejection = [*flags, f'-DCASE={case}', '-DREJECT', '-fsyntax-only', 'constrained-conversion.cpp']
+                cold, warm = (world.cxx(rejection, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == 1, (mode, target, case, cold, warm)
+                native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+                if peer and native and mode != 'spec' and trailing:
+                    (scope / 'constrained-conversion-caller.cpp').write_text(f'''\
+using F = int (*)(int);
+extern "C" F convert(const void*) asm("{symbol}");
+extern "C" F obtain();
+int main() {{ unsigned char closure = 0; return convert(&closure)(19) != 19 || obtain()(23) != 23; }}
+''')
+                    subprocess.run([peer, '-std=c++26', 'constrained-conversion-caller.cpp', 'constrained-conversion.o',
+                                    '-o', 'constrained-conversion'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'constrained-conversion'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3757,6 +3824,7 @@ def main():
         generic_invoker_symbols(world, gxx)
         dependent_variable_spellings(world, gxx)
         static_lambda_conversion(world, gxx)
+        constrained_lambda_conversions(world, gxx)
         lambda_conversion_symbols(world, gxx)
         floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.

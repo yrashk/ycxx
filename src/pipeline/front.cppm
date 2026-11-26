@@ -1386,12 +1386,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       const auto& pattern = world.entities.rec(r.templ);
       emitted.template_type = pattern.type;
       emitted.generic_invoker_head = pattern.generic_invoker_head;
+      emitted.template_trailing_constraint = pattern.lambda_trailing_constraint;
       const bool invoker = ins.seqs.size(pattern.generic_invoker_head) != 0;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
-      if (!invoker && sema::Sema::closure_member(world, r.templ)) {
+      if (!invoker && sema::Sema::closure_member(world, r.templ))
         emitted.template_type = world.entities.rec(pattern.scope).type;
-        emitted.template_trailing_constraint = pattern.lambda_trailing_constraint;
-      }
       emitted.template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
       if (!invoker && pattern.kind == sema::EntityKind::function_template)
