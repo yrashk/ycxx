@@ -2145,8 +2145,9 @@ clauses = ['temp.param']
 std = 'C++17'
 ftm = '__cpp_nontype_template_parameter_auto'
 detect = '''\btemplate\s*<[^;{<>]*\bauto\b'''
-status = 'missing'
-issues = [286]
+status = 'partial'
+issues = [286, 1401]
+note = '`auto`, `decltype(auto)` and `auto...` parameters deduce the type of each argument, which is part of the identity and the name of the specialization (#1244). Constrained `C auto` (#286), `auto*` and `auto&`, and `decltype(auto)` of a parenthesized lvalue (#1401) remain open.'
 probe = '''
 template<auto N> int get() { return N; }
 int main() { return get<3>() + get<'a'>() - 100; }
