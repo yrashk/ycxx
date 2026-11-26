@@ -132,6 +132,7 @@ struct DeclSema {
   bool explicit_default_visibility = false;
   GnuVisibility namespace_visibility = GnuVisibility::none;  // lexical namespace-definition occurrence
   u8 field_alignment = 0;  // a validated alignment stricter than the field type's natural alignment
+  u8 written_field_alignment = 0;  // the strongest validated alignas, including the natural alignment
   WrittenConstraint head_constraint{};
   WrittenConstraint trailing_constraint{};
   constexpr bool operator==(const DeclSema&) const = default;

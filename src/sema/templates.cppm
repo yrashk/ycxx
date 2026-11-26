@@ -566,6 +566,7 @@ public:
     case ast::DepOp::has_virtual_destructor:
     case ast::DepOp::is_standard_layout:
     case ast::DepOp::alignof_type:
+    case ast::DepOp::sizeof_type:
     case ast::DepOp::array_rank:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
@@ -761,7 +762,8 @@ public:
         if (!operand) return std::nullopt;
         return array_rank_value(operand->type);
       }
-      case ast::DepOp::alignof_type: {
+      case ast::DepOp::alignof_type:
+      case ast::DepOp::sizeof_type: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand || !types().is_dependent(operand->type)) return std::nullopt;
         const std::array operands{*operand};

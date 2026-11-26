@@ -211,7 +211,6 @@ draft/expr/expr.const.core-1.accept.cpp 'static' is not supported yet
 draft/expr/expr.const.core-3.accept.cpp 'auto' not supported yet
 draft/expr/expr.const.core-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.core-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.const.defns-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.imm-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.imm-3.reject.cpp errors elsewhere: overloading 'id' is not supported yet
 draft/expr/expr.const.init-1.accept.cpp 'struct' not supported yet
@@ -250,8 +249,6 @@ draft/expr/expr.prim.lambda.general-1.accept.cpp preprocessing directives are no
 draft/expr/expr.prim.lambda.general-2.accept.cpp 'auto' not supported yet
 draft/expr/expr.prim.lambda.general-3.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.general-4.accept.cpp 'auto' not supported yet
-draft/expr/expr.prim.req.compound-2.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.prim.req.general-1.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.req.general-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/expr/expr.prim.req.type-1.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.splice-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -289,7 +286,6 @@ draft/over/over.match.best.general-2.accept.cpp 'template' not supported yet
 draft/over/over.match.best.general-3.accept.cpp 'template' not supported yet
 draft/over/over.match.best.general-4.accept.cpp 'struct' not supported yet
 draft/over/over.match.best.general-5.accept.cpp 'struct' not supported yet
-draft/over/over.match.best.general-6.accept.cpp preprocessing directives are not supported yet
 draft/over/over.match.best.general-7.accept.cpp 'template' not supported yet
 draft/over/over.match.class.deduct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/over/over.match.class.deduct-2.reject.cpp errors elsewhere: 'template' not supported yet
@@ -322,7 +318,6 @@ draft/temp/temp.arg.nontype-4.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.arg.template-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.type-1.accept.cpp 'template' not supported yet
 draft/temp/temp.class.general-1.accept.cpp 'template' not supported yet
-draft/temp/temp.concept-1.accept.cpp preprocessing directives are not supported yet
 draft/temp/temp.constr.atomic-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.concept-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet

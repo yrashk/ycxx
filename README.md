@@ -41,6 +41,9 @@ when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
+Use `ycxx show --targets` to list the workspace's declared target names and rule
+kinds before a build. Add `--format=html` for a catalog with links to their
+declarations in the manifest.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
@@ -701,6 +704,9 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
   through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
+- Dependent `alignof(type-id)` and `sizeof(type-id)` arguments to namespace variable templates
+  replay when an initializer or a nested record's direct field array bound needs them. This
+  includes pack expansions. [#1371](https://github.com/yrashk/ycxx/issues/1371)
 - `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
   and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
