@@ -39,6 +39,7 @@ struct PlanComparison {
   std::string target;
   std::vector<PlanChange> changes;
   std::optional<ModuleGraphChanges> module_changes = std::nullopt;
+  std::optional<std::vector<DependencyOccurrenceChange>> dependency_changes = std::nullopt;
 };
 
 namespace {
@@ -77,6 +78,40 @@ std::expected<PlanComparison, std::string> compare(const PlanInspection& before,
   for (const auto& [key, fact] : *new_facts)
     if (!old_facts->contains(key)) diff.changes.push_back({"added", std::nullopt, *fact});
   return diff;
+}
+
+std::vector<DependencyOccurrenceChange> compare_dependency_occurrences(
+    const DependencyGraphInspection& before, const DependencyGraphInspection& after) {
+  using Key = std::tuple<std::string_view, std::string_view, std::string_view,
+                         std::optional<std::string_view>, std::optional<std::string_view>>;
+  struct Occurrences {
+    std::vector<const PlanDependencyEdge*> before;
+    std::vector<const PlanDependencyEdge*> after;
+  };
+  const auto key = [](const PlanDependencyEdge& edge) -> Key {
+    const auto view = [](const std::string& text) { return std::string_view(text); };
+    return {edge.consumer, edge.usage, edge.producer, edge.output.transform(view), edge.binding.transform(view)};
+  };
+  std::map<Key, Occurrences> grouped;
+  for (const auto& edge : before.edges) grouped[key(edge)].before.push_back(&edge);
+  for (const auto& edge : after.edges) grouped[key(edge)].after.push_back(&edge);
+
+  const auto ordered_sites = [](const std::vector<const PlanDependencyEdge*>& occurrences) {
+    std::vector<PlanDependencyEdge> result;
+    result.reserve(occurrences.size());
+    for (const auto* edge : occurrences) result.push_back(*edge);
+    std::ranges::sort(result, {}, [](const auto& edge) {
+      const auto& [path, line, column] = edge.location;
+      return std::tie(path, line, column);
+    });
+    return result;
+  };
+  std::vector<DependencyOccurrenceChange> changes;
+  for (const auto& [old_edges, new_edges] : grouped | std::views::values) {
+    if (old_edges.size() != new_edges.size())
+      changes.push_back({ordered_sites(old_edges), ordered_sites(new_edges)});
+  }
+  return changes;
 }
 
 std::expected<std::string, std::string> read_text(const std::filesystem::path& path, std::string_view kind) {
@@ -233,17 +268,22 @@ std::expected<std::string, std::string> show_project(
     if (!before) return std::unexpected(before.error());
     auto diff = compare(*before, *inspected);
     if (!diff) return std::unexpected(diff.error());
-    if ((format == InspectionFormat::json || format == InspectionFormat::html) &&
-        before->module_graph && inspected->module_graph) {
-      auto modules = compare_module_graph(*before->module_graph, *inspected->module_graph);
-      if (!modules) return std::unexpected(std::move(modules.error()));
-      diff->module_changes = std::move(*modules);
+    if (format == InspectionFormat::json || format == InspectionFormat::html) {
+      if (before->module_graph && inspected->module_graph) {
+        auto modules = compare_module_graph(*before->module_graph, *inspected->module_graph);
+        if (!modules) return std::unexpected(std::move(modules.error()));
+        diff->module_changes = std::move(*modules);
+      }
+      const auto& old_dependencies = before->dependency_graph;
+      const auto& new_dependencies = inspected->dependency_graph;
+      if (old_dependencies && new_dependencies && old_dependencies->complete && new_dependencies->complete)
+        diff->dependency_changes = compare_dependency_occurrences(*old_dependencies, *new_dependencies);
     }
     if (format == InspectionFormat::json) return lsp::dump(lsp::to_json(*diff)) + "\n";
     if (format == InspectionFormat::html) {
       std::optional<ModuleGraphComparison> modules;
       if (diff->module_changes) modules.emplace(ModuleGraphComparison{*before->module_graph, *diff->module_changes});
-      return render_inspection_html(*inspected, &diff->changes, modules);
+      return render_inspection_html(*inspected, &diff->changes, modules, diff->dependency_changes);
     }
     return diff_text(*diff);
   }

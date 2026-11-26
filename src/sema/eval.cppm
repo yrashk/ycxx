@@ -303,6 +303,14 @@ private:
   }
 
 public:
+  // L1 can materialize this array shape as a field of a constant record.
+  static bool constant_record_char_array(Types& types, QualType type) {
+    if (!types.is_array(type)) return false;
+    const TypeRec array = types.rec(type);
+    const QualType element = types.canonical(array.inner);
+    return array.bound_value != ConstId::none && !Types::is_volatile(element) && types.is(element, Builtin::char_);
+  }
+
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
   Evaluated evaluate_initializer(Ex e, bool zero_default = true) {
     return evaluate_initializer(e, zero_default, {});
@@ -311,6 +319,9 @@ public:
 private:
   Evaluated evaluate_initializer(Ex e, bool zero_default, irgen::FunctionInput::InitializedFields initialized_fields) {
     if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
+    if (const auto literal = s_->as<ast::Literal>(e);
+        literal && s_->types().is_array(e.type()) && s_->ins().values.is<ast::VAggregate>(literal->value))
+      return {literal->value, 0, true};
     if (s_->as<ast::InitList>(e)) {
       const auto clauses = s_->list_elements(e);
       EntityId owner = EntityId::none;
@@ -577,11 +588,7 @@ private:
     Types& types = s_->types();
     type = types.canonical(type);
     if (Types::is_volatile(type)) return false;
-    if (types.is_array(type)) {
-      const TypeRec array = types.rec(type);
-      const QualType element = types.canonical(array.inner);
-      return array.bound_value != ConstId::none && !Types::is_volatile(element) && types.is(element, Builtin::char_);
-    }
+    if (types.is_array(type)) return constant_record_char_array(types, type);
     if (types.is_pointer(type)) return true;
     if (types.is_enum(type)) {
       const EnumRec* enumeration = s_->enum_rec(types.enum_of(type));
@@ -613,9 +620,12 @@ private:
       if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value)) {
         // Block-scope statics also have stored initializers. Const qualification alone does
         // not make a class variable potentially constant ([expr.const]).
-        if (Types::is_const(e->s_->types().canonical(value->type)) &&
-            e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
-          value->record = e->constant_record_layout(value->type);
+        Types& types = e->s_->types();
+        const QualType type = types.canonical(value->type);
+        const QualType leaf = types.innermost_array_element(type);
+        if (Types::is_const(leaf) && e->s_->world().entities.rec(v).linkage != ast::Linkage::none &&
+            (leaf == type || e->s_->is_aggregate(leaf)))
+          value->record = e->constant_record_layout(leaf);
       }
       return {std::move(value)};
     }

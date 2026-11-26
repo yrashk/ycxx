@@ -18,6 +18,7 @@ using lex::Severity;
 struct message {
   Severity severity;
   char text[120];
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 
 enum class Diag : std::uint32_t {
@@ -412,6 +413,8 @@ enum class Diag : std::uint32_t {
   class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  class_alignment_zero [[=message{Severity::warning, "a zero class alignment is not a positive power of two", lex::Warning::attributes}]],
+  class_alignment_ignored [[=message{Severity::warning, "class alignment is ignored after the class is defined", lex::Warning::attributes}]],
   post_definition_layout_attribute [[=message{Severity::error, "layout- or ABI-affecting attributes after a class or enum definition are not supported yet"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   field_alignment_not_constant [[=message{Severity::error, "a member alignment requires an integral constant expression or a type"}]],

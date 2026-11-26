@@ -360,6 +360,28 @@ semantic facts. The `link-input` facts describe the executable's effective
 archive order. The read-only report can identify an artifact before its
 bytes exist.
 
+### Dependency comparisons (#1464)
+
+`ycxx show app --against before.json --format=json` includes
+`dependency_changes` when both plans have complete dependency graphs. The
+comparison groups occurrences by consumer, usage, producer, output, and
+binding. Each group with different counts has `before` and `after` arrays
+of the original edge records, including every source site on each side.
+An added dependency has an empty `before` array, and a removed dependency
+has an empty `after` array.
+
+Source locations explain where dependencies were used. Moving a reference
+with the same identity and count produces an empty `dependency_changes`
+array. **Plan changes** reports changes in the effective archive order
+through the `link-input` facts. Older schema-1 snapshots without a
+dependency graph can still compare plan facts.
+
+Run `ycxx show app --against before.json --format=html > changes.html` to
+read **Dependency changes** alongside the current **Dependencies**. The
+table shows before and after counts and source sites. After links open
+the relevant lines in the current manifest. Before sites describe the
+saved plan. A comparison with equal counts shows **No dependency changes.**
+
 ### Declared target catalog (#1392)
 
 Run `ycxx show --targets` from the workspace directory to see the target names

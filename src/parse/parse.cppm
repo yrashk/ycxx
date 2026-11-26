@@ -1897,10 +1897,11 @@ public:
 
 private:
   struct ClassAlignment {
-    u8 value = 0;  // the strictest written alignment, including a zero-only sequence
+    u8 value = 0;  // the selected written alignment, zero for a zero-only sequence
     u32 at = 0;    // in the item, for diagnostics
     u64 natural = 0;  // once the definition's natural alignment has been computed
     std::vector<std::pair<u32, u32>> specifiers;  // the applied ranges in the region
+    std::vector<u32> zeros;  // zero operands that GCC diagnoses, relative to the item
     bool dependent = false;  // a member's alignment is checked again when its class is instantiated
     u64 effective(u64 natural_alignment) const { return value ? value : natural_alignment; }
   };
@@ -2880,7 +2881,11 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   if (!dmi) return std::nullopt;
   const auto& entity = p_->world().entities.rec(field);
   const auto arguments = p_->class_args_.find(std::to_underlying(entity.scope));
-  if (fallback && (arguments == p_->class_args_.end() || !caller.types().is_scalar(entity.type))) return std::nullopt;
+  auto& types = caller.types();
+  const bool array_fallback = fallback && dmi->braced && !types.is_dependent(entity.type) &&
+                              sema::Evaluator::constant_record_char_array(types, entity.type);
+  if (fallback && !array_fallback && (arguments == p_->class_args_.end() || !types.is_scalar(entity.type)))
+    return std::nullopt;
   if (dmi->invalid) return NodeId::none;
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
@@ -2937,6 +2942,14 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
     return NodeId::none;
   }
   if (fallback) {
+    // A stored value also initializes runtime objects. Only fold array elements whose values are
+    // independent of evaluation mode, including the value-initialized tail ([dcl.init.aggr]).
+    if (array_fallback) {
+      if (!replay.as<ast::InitList>(init)) return std::nullopt;
+      if (!std::ranges::all_of(replay.list_elements(init), [&](Ex element) {
+            return replay.as<ast::Literal>(element).has_value() || replay.as<ast::ValueInit>(element).has_value();
+          })) return std::nullopt;
+    }
     const auto value = sema::Evaluator(replay, source).evaluate_initializer(init).value;
     if (instantiation_failed()) return NodeId::none;
     if (!value) return std::nullopt;
@@ -4804,6 +4817,7 @@ private:
   std::optional<Program::ClassAlignment> read_alignment(std::vector<ast::AnnotationSema>& annotations, bool field = false) {
     sema::Sema::ImmediateReferenceScope references(s_, /*allowed=*/true);
     sema::Sema::ClassAlignmentOperand operand_context(s_);
+    const bool last_nonzero = !field && s_.compatibility() == ast::Compatibility::gcc;
     Program::ClassAlignment alignment;
     alignment.at = ps_.pos();
     while (ps_.is(Tk::kw_alignas)) {
@@ -4857,7 +4871,8 @@ private:
         s_.diag(at, field ? Diag::field_alignment_unsupported : Diag::class_alignment_unsupported);
         return std::nullopt;
       }
-      if (bits.lo > alignment.value) {
+      if (last_nonzero && bits.lo == 0) alignment.zeros.push_back(at);
+      if (last_nonzero ? bits.lo != 0 : bits.lo > alignment.value) {
         alignment.value = u8(bits.lo);
         alignment.at = at;
       }
@@ -4897,30 +4912,60 @@ private:
       s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
       return bad();
     }
-    const auto cls = std::to_underlying(sem.entity);
-    if (const auto definition = p_->class_items_.find(cls); definition != p_->class_items_.end() && definition->second < k_) {
-      const auto written = p_->class_alignments_.find(definition->second);
-      if (written == p_->class_alignments_.end()) {
-        s_.diag(alignment->at, Diag::class_alignment_missing);
-        return bad();
-      }
-      p_->class_def(definition->second);
-      const auto& prior = written->second;
-      if (!prior.natural && (prior.value || alignment->value)) {
-        s_.diag(alignment->at, Diag::class_alignment_uncertain_layout);
-        return bad();
-      }
-      if (alignment->value && alignment->value < prior.natural) {
-        s_.diag(alignment->at, Diag::class_alignment_weak);
-        return bad();
-      }
-      if (prior.natural && alignment->effective(prior.natural) != prior.effective(prior.natural)) {
-        s_.diag(alignment->at, Diag::class_alignment_mismatch);
-        return bad();
-      }
-    }
+    if (!check_class_alignment_redeclaration(std::to_underlying(sem.entity), *alignment)) return bad();
     if (!class_declared(sem, key, at)) return bad();
     p_->class_alignments_.emplace(k_, std::move(*alignment));
+  }
+
+  bool check_class_alignment_redeclaration(u32 cls, const Program::ClassAlignment& alignment) {
+    const auto mode = s_.compatibility();
+    const auto definition = p_->class_items_.find(cls);
+    const bool defined = definition != p_->class_items_.end() && definition->second < k_;
+    if (mode == ast::Compatibility::gcc) {
+      if (defined) {
+        const u32 first = ps_.index() - ps_.pos();
+        for (const auto& specifier : alignment.specifiers) s_.diag(specifier.first - first, Diag::class_alignment_ignored);
+      } else {
+        for (u32 at : alignment.zeros) s_.diag(at, Diag::class_alignment_zero);
+      }
+      return true;
+    }
+    const bool clang = mode == ast::Compatibility::clang;
+    if (defined) {
+      const auto written = p_->class_alignments_.find(definition->second);
+      if (written == p_->class_alignments_.end()) {
+        s_.diag(alignment.at, Diag::class_alignment_missing);
+        return false;
+      }
+      if (clang && !alignment.value) return true;
+      p_->class_def(definition->second);
+      const auto& prior = written->second;
+      if (!prior.natural && (prior.value || alignment.value)) {
+        s_.diag(alignment.at, Diag::class_alignment_uncertain_layout);
+        return false;
+      }
+      if (!clang && alignment.value && alignment.value < prior.natural) {
+        s_.diag(alignment.at, Diag::class_alignment_weak);
+        return false;
+      }
+      if (prior.natural && alignment.effective(prior.natural) != prior.effective(prior.natural)) {
+        s_.diag(alignment.at, Diag::class_alignment_mismatch);
+        return false;
+      }
+    } else if (clang) {
+      const auto declarations = p_->decls_.find(cls);
+      if (declarations != p_->decls_.end()) {
+        for (const auto& [item, previous] : declarations->second) {
+          if (item >= k_) continue;
+          const auto written = p_->class_alignments_.find(item);
+          if (written != p_->class_alignments_.end() && written->second.value != alignment.value) {
+            s_.diag(alignment.at, Diag::class_alignment_mismatch);
+            return false;
+          }
+        }
+      }
+    }
+    return true;
   }
 
   // A class definition at namespace scope ([class.pre]): `class-key identifier { … }`, then
@@ -5065,7 +5110,10 @@ private:
     sem.is_final = is_final;
     if (!template_) sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();
-    if (alignment) p_->class_alignments_.emplace(k_, std::move(*alignment));
+    if (alignment) {
+      for (u32 at : alignment->zeros) s_.diag(at, Diag::class_alignment_zero);
+      p_->class_alignments_.emplace(k_, std::move(*alignment));
+    }
     s_.own.push_back({name, sem});
     if (!bases.empty()) p_->set_bases(s_.types().class_of(sem.type), std::move(bases));
     if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
@@ -6960,6 +7008,9 @@ private:
         std::string candidate = owner;
         while (candidate != ns && p_->is_inline_namespace(candidate, k_)) candidate = Program::parent_of(candidate);
         if (candidate != ns || !Program::encloses(p_->ns_of(k_), owner)) continue;
+        target = owner;
+      }
+      if (fn) {
         if (type != prior_type) {
           // Match the whole function type with only its outer language linkage substituted.
           // An unspecified linkage inherits that of this redeclaration ([dcl.link]).
@@ -6972,9 +7023,10 @@ private:
             continue;
           }
         }
-        target = owner;
-      } else if (fn && type != prior_type) {
-        continue;
+        if (explicit_lang && ((ds->flags ^ sem.flags) & sema::decl_flag::lang_c)) {
+          linkage_conflict = true;
+          continue;
+        }
       }
       mem = *ds, has_mem = true;
       c_namespace = std::move(target);
@@ -6990,6 +7042,7 @@ private:
     }
     sem.entity = mem.entity;
     sem.linkage = mem.linkage;
+    if (fn && type != s_.types().canonical(mem.type)) sem.type = mem.type;
     if (c_namespace && (mem.flags & sema::decl_flag::lang_c)) {
       sem.type = mem.type;
       sem.flags |= sema::decl_flag::lang_c;
@@ -8693,22 +8746,29 @@ private:
       }
       if (fn && !d.qualified && !operator_function_ok(d)) return false;
       if (fn) {
-        if (!explicit_lang && !template_ && std::ranges::any_of(prior, [&](const ast::DeclSema& p) {
-              return p.kind == ast::DeclKind::function && (p.flags & sema::decl_flag::lang_c) &&
-                     !(p.flags & sema::decl_flag::template_) && same_function_parameters(p.type, d.type);
-            }))
-          lang = LangLinkage::c;  // [dcl.link]/6: inherited from a corresponding declaration
+        const sema::TypeRec& r = types.rec(d.type);
+        LangLinkage type_linkage = r.linkage;
+        if (!explicit_lang && !template_) {
+          // [dcl.link]/6: the name and the function type inherit independently.
+          for (const auto& earlier : prior | std::views::reverse) {
+            if (earlier.kind != ast::DeclKind::function || (earlier.flags & sema::decl_flag::template_) ||
+                !same_function_parameters(earlier.type, d.type))
+              continue;
+            if (earlier.flags & sema::decl_flag::lang_c) lang = LangLinkage::c;
+            type_linkage = types.rec(earlier.type).linkage;
+            break;
+          }
+        }
         if (ordinary_friend && is_function_def && lang == LangLinkage::c) {
           s_.diag(d.name_at, Diag::friend_c_linkage);
           return false;
         }
-        const sema::TypeRec& r = types.rec(d.type);
         if (r.fn_cv != sema::Cv::none && !d.qualified) {
           s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
           return false;
         }
         std::vector<QualType> ps = r.params;
-        sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv, r.fn_ref, r.fn_noexcept);
+        sem.type = types.function(r.inner, ps, r.variadic, type_linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
         if (lang == LangLinkage::c) flags |= sema::decl_flag::lang_c;
         if (r.variadic) flags |= sema::decl_flag::variadic;
         for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
@@ -8854,6 +8914,10 @@ private:
         const ast::DeclSema& p = prior.back();
         if ((p.kind == ast::DeclKind::function) != fn || p.kind == ast::DeclKind::type_alias || p.kind == ast::DeclKind::enumerator) {
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+          return false;
+        }
+        if (fn && explicit_lang && ((p.flags ^ sem.flags) & sema::decl_flag::lang_c)) {
+          s_.diag(d.name_at, Diag::linkage_conflict, d.name);
           return false;
         }
         const bool canonical_match = fn && (allocation || ordinary_friend ||
@@ -9145,9 +9209,10 @@ private:
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
     if (!fn && definition && !pattern) s_.check_destructor_access(d.type, d.name_at);
-    if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))
-      if (auto entity = s_.immediate_result_entity(value))
-        s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
+    if (value != ConstId::none &&
+        (requires_constinit || s_.folded_immediate_result != EntityId::none ||
+         (spec.is_constexpr && s_.compatibility() != ast::Compatibility::spec)))
+      s_.check_immediate_initializer(value, init.begin);
     s_.permit_constant_initializer(d.begin, d.type, value);
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
@@ -10499,6 +10564,8 @@ bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record,
 void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record,
                                       std::vector<engine::Diagnostic>& diags) {
   auto written = class_alignments_.find(item);
+  const bool gcc = compatibility() == ast::Compatibility::gcc;
+  const bool clang = compatibility() == ast::Compatibility::clang;
   const auto declared = decls_.find(std::to_underlying(cls));
   if (declared == decls_.end()) return;
   const auto& declarations = declared->second;
@@ -10506,8 +10573,17 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
     return declaration.first < item && class_alignments_.contains(declaration.first);
   };
   const auto& source = items_->items[item];
+  if (gcc && (written == class_alignments_.end() || !written->second.value)) {
+    // GCC retains the most recent nonzero forward alignment when the definition supplies none.
+    for (const auto& declaration : declarations | std::views::filter(prior_alignment)) {
+      const auto earlier = class_alignments_.find(declaration.first);
+      if (earlier->second.value && (written == class_alignments_.end() || !written->second.value ||
+                                   earlier->first > written->first))
+        written = earlier;
+    }
+  }
   if (written == class_alignments_.end()) {
-    if (std::ranges::any_of(declarations, prior_alignment)) {
+    if (!gcc && std::ranges::any_of(declarations, prior_alignment)) {
       const u32 at = source.names.empty() ? 0 : source.names.front().offset;
       diags.push_back({{std::to_underlying(id(item)), at}, sema::diag_id(Diag::class_alignment_missing), {}});
     }
@@ -10531,7 +10607,14 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
     return;
   }
   alignment.natural = layout->align;
-  if (alignment.value && alignment.value < alignment.natural) {
+  if (gcc) {
+    if (alignment.value > alignment.natural) record.explicit_alignment = alignment.value;
+    return;
+  }
+  const bool prior_zero = clang && std::ranges::any_of(declarations, [&](const auto& declaration) {
+    return prior_alignment(declaration) && !class_alignments_.at(declaration.first).value;
+  });
+  if (!prior_zero && alignment.value && alignment.value < alignment.natural) {
     s.diag(alignment.at, Diag::class_alignment_weak);
     return;
   }
@@ -10541,6 +10624,13 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
   for (const auto& declaration : declarations | std::views::filter(prior_alignment)) {
     const u32 previous = declaration.first;
     const auto& prior = class_alignments_.at(previous);
+    if (clang) {
+      if (prior.value && prior.value != alignment.effective(1)) {
+        s.diag(alignment.at, Diag::class_alignment_mismatch);
+        return;
+      }
+      continue;
+    }
     if (prior.value && prior.value < alignment.natural) {
       s.diag_at({std::to_underlying(id(previous)), prior.at}, Diag::class_alignment_weak);
       return;

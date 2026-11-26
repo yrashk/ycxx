@@ -167,12 +167,81 @@ def check_dependency_html(document, plan):
     assert not any(node.attrs.get('data-dependency-probe') == '1' for node in parsed.elements)
 
 
+def check_dependency_changes_html(document, definition, changes):
+    # Module discovery also imports the plan fact checks here.
+    from project_module_graph import PlanHTML
+
+    parsed = PlanHTML(document)
+    if changes is None:
+        assert not parsed.sections('dependency-changes'), 'show compared unavailable dependency graphs'
+        return
+    section = parsed.section('dependency-changes', 'Dependency changes')
+    if not changes:
+        assert 'No dependency changes.' in section.visible(), section.visible()
+        return
+
+    table, = (node for node in section.descendants if node.tag == 'table')
+    assert [node.visible().strip() for node in table.descendants if node.tag == 'th'] == [
+        'Dependency', 'Before', 'After',
+    ]
+    rows = [[node for node in row.descendants if node.tag == 'td']
+            for row in table.descendants if row.tag == 'tr']
+    rows = [row for row in rows if row]
+    assert len(rows) == len(changes), rows
+    source = parsed.section('manifest', 'build.ycxx')
+    anchors = {node.attrs.get('id'): node for node in source.descendants}
+    lines = definition.splitlines()
+    for row, group in zip(rows, changes):
+        label, before, after = row
+        edge = (group['after'] or group['before'])[0]
+        fields = ('consumer', 'producer', 'usage', 'binding', 'output')
+        assert [node.visible() for node in label.descendants if node.tag == 'code'] == [
+            edge[key] for key in fields if key in edge
+        ], (edge, label.visible())
+        for side, cell in (('before', before), ('after', after)):
+            locations = [edge['location'] for edge in group[side]]
+            count = len(locations)
+            noun = 'occurrence' if count == 1 else 'occurrences'
+            assert cell.visible().strip().startswith(f'{count} {noun}'), (group, cell.visible())
+            sites = [f"{site['path']}:{site['line']}:{site['column']}" for site in locations]
+            assert [node.visible().strip() for node in cell.descendants if node.tag == 'li'] == sites, group
+            links = [(node.attrs['href'], node.visible()) for node in cell.descendants if node.tag == 'a']
+            expected = []
+            if side == 'after':
+                for site, text in zip(locations, sites):
+                    line = site['line']
+                    anchor = f'manifest-line-{line}'
+                    expected.append((f'#{anchor}', text))
+                    assert anchors[anchor].visible() == lines[line - 1], site
+            assert links == expected, (group, links)
+    assert not any(node.attrs.get('data-dependency-probe') == '1' for node in parsed.elements)
+    assert not any(node.attrs.get('data-saved-dependency-probe') == '1' for node in parsed.elements)
+
+
 def scope_state(scope):
     state = {}
     for path in scope.rglob('*'):
         stat = path.lstat()
         state[path.relative_to(scope)] = stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_mode
     return state
+
+
+def compare_dependencies(ycxx, scope, snapshot, current, expected):
+    before = scope_state(scope)
+    args = ('--against', snapshot.name)
+    encoded = show(ycxx, scope, '--format=json', *args)
+    assert show(ycxx, scope, '--format=json', *args) == encoded, 'dependency comparison changed between reads'
+    diff = json.loads(encoded)
+    assert diff['schema'] == 1 and diff['target'] == 'app', diff
+    if expected is None:
+        assert 'dependency_changes' not in diff, diff
+    else:
+        assert diff.get('dependency_changes') == expected, (diff.get('dependency_changes'), expected)
+    document = show(ycxx, scope, '--format=html', *args).decode('utf-8')
+    check_dependency_changes_html(document, current['definition'], expected)
+    check_dependency_html(document, current)
+    assert scope_state(scope) == before, 'dependency comparison changed the workspace'
+    return diff
 
 
 def check_catalog_html(document, definition, targets):
@@ -422,6 +491,33 @@ def check_views(ycxx, scope, definition):
     return snapshot
 
 
+def check_dependency_identities(ycxx, scope, current):
+    graph = current['dependency_graph']
+    library, = (edge for edge in graph['edges'] if edge['usage'] == 'deps')
+    bound, = (edge for edge in graph['edges'] if edge['usage'] == 'inputs')
+    escaped_site = {'path': '<b data-saved-dependency-probe="1">&.ycxx', 'line': 50, 'column': 9}
+    repeated_library = {**library, 'location': escaped_site}
+    retired_output = {**bound, 'output': 'retired-schema'}
+    retired_binding = {**bound, 'binding': 'retired-binding'}
+    saved = {**graph, 'edges': [*graph['edges'], retired_binding, retired_output, repeated_library]}
+    snapshot = scope / 'saved-dependencies.json'
+    snapshot.write_text(json.dumps({**current, 'dependency_graph': saved}), encoding='utf-8')
+
+    changes = [
+        {'before': [repeated_library, library], 'after': [library]},
+        {'before': [retired_output], 'after': []},
+        {'before': [retired_binding], 'after': []},
+    ]
+    diff = compare_dependencies(ycxx, scope, snapshot, current, changes)
+    assert diff['changes'] == [], diff
+    if 'module_graph' in current:
+        assert 'module_changes' in diff, diff
+
+    # A partial saved graph cannot establish that any occurrence is absent.
+    snapshot.write_text(json.dumps({**current, 'dependency_graph': {**saved, 'complete': False}}), encoding='utf-8')
+    assert compare_dependencies(ycxx, scope, snapshot, current, None)['changes'] == []
+
+
 def check_diff(ycxx, scope, definition, snapshot):
     before = scope / 'before.json'
     earlier_schema_1 = {key: value for key, value in snapshot.items() if key != 'dependency_graph'}
@@ -430,13 +526,12 @@ def check_diff(ycxx, scope, definition, snapshot):
     after = show_json(ycxx, scope)
     assert after['definition'] == snapshot['definition'] == definition, 'the glob changed without a manifest edit'
 
-    diff = show_json(ycxx, scope, '--against', before.name)
+    diff = compare_dependencies(ycxx, scope, before, after, None)
     new_source = fact(after, 'source', 'app', 'auto/new.cc')
     changes = diff['changes']
     assert len(changes) == 1 and changes[0]['change'] == 'added', diff
     assert changes[0]['after'] == new_source and changes[0].get('before') is None, diff
-    document = show(ycxx, scope, '--format=html', '--against', before.name).decode('utf-8')
-    check_dependency_html(document, after)
+    check_dependency_identities(ycxx, scope, after)
 
     baseline = scope / 'after.json'
     baseline.write_text(json.dumps(after), encoding='utf-8')
@@ -445,7 +540,8 @@ def check_diff(ycxx, scope, definition, snapshot):
     manifest.write_bytes(shifted.encode('utf-8'))
     moved = show_json(ycxx, scope)
     assert fact(moved, 'source', 'app', 'auto/new.cc')['line'] == new_source['line'] + 2
-    assert show_json(ycxx, scope, '--against', baseline.name)['changes'] == [], 'provenance alone changed the plan'
+    moved_diff = compare_dependencies(ycxx, scope, baseline, moved, [])
+    assert moved_diff['changes'] == [], 'provenance alone changed the plan'
 
     (scope / 'auto' / 'new.cc').unlink()
     removed = show_json(ycxx, scope, '--against', baseline.name)['changes']

@@ -13,6 +13,99 @@ from system_includes import DARWIN, LINUX, NATIVE_LINUX
 
 
 MODES = ('spec', 'gcc', 'clang')
+CLASS_HEAD_ALIGNMENT = '''\
+#if defined(WEAK)
+struct alignas(1) Payload { long long value; };
+static_assert(alignof(Payload) == 8);
+#elif defined(WEAK_AFTER_ZERO)
+struct alignas(0) Payload;
+struct alignas(1) Payload { long long value; };
+#ifdef GCC_MODE
+static_assert(alignof(Payload) == 8);
+#endif
+#elif defined(OPAQUE)
+struct alignas(8) Payload;
+struct alignas(16) Payload;
+Payload* pointer;
+#elif defined(OPAQUE_ZERO)
+struct alignas(0) Payload;
+struct alignas(8) Payload;
+Payload* pointer;
+#elif defined(MISSING)
+struct alignas(16) Payload;
+struct Payload { char value; };
+static_assert(alignof(Payload) == 16);
+#elif defined(REPLACE)
+struct alignas(16) Payload;
+struct alignas(8) Payload { char value; };
+static_assert(alignof(Payload) == 8);
+#elif defined(FORWARD_CHAIN)
+struct alignas(16) Payload;
+struct alignas(8) Payload;
+struct alignas(0) Payload { char value; };
+static_assert(alignof(Payload) == 8);
+#elif defined(ZERO_FIRST)
+struct alignas(0) Payload;
+struct alignas(16) Payload { long long value; };
+static_assert(alignof(Payload) == 16);
+#elif defined(ZERO_ON_DEFINITION)
+struct alignas(8) Payload;
+struct alignas(0) Payload { long long value; };
+static_assert(alignof(Payload) == 8);
+#elif defined(ZERO_LATER)
+struct alignas(16) Payload { char value; };
+struct alignas(0) Payload;
+static_assert(alignof(Payload) == 16);
+#elif defined(LATE_STRONGER)
+struct Payload { char value; };
+struct alignas(16) Payload;
+static_assert(alignof(Payload) == 1);
+#else
+struct alignas(16) alignas(8) alignas(0) Payload { char value; };
+#ifdef GCC_MODE
+static_assert(alignof(Payload) == 8);
+#else
+static_assert(alignof(Payload) == 16);
+#endif
+#endif
+'''
+CLASS_HEAD_ALIGNMENT_CASES = {
+    'WEAK': ('gcc',), 'WEAK_AFTER_ZERO': ('gcc', 'clang'),
+    'OPAQUE': ('spec', 'gcc'), 'OPAQUE_ZERO': ('spec', 'gcc'), 'MISSING': ('gcc',), 'REPLACE': ('gcc',),
+    'FORWARD_CHAIN': ('gcc',), 'ZERO_FIRST': ('gcc', 'clang'),
+    'ZERO_ON_DEFINITION': ('spec', 'gcc'), 'ZERO_LATER': ('gcc', 'clang'),
+    'LATE_STRONGER': ('gcc',),
+}
+FUNCTION_LANGUAGE_LINKAGE = '''\
+extern "C" typedef int CFunction(int);
+using CxxFunction = int(int);
+#ifdef SPEC_MODE
+static_assert(!__is_same(CFunction, CxxFunction));
+#else
+static_assert(__is_same(CFunction, CxxFunction));
+#endif
+#if defined(OVERLOAD)
+int pick(CFunction*) { return 1; }
+int pick(CxxFunction*) { return 2; }
+#elif defined(CONFLICT)
+extern "C" int conflict(int);
+extern "C++" int conflict(int);
+#elif defined(QUALIFIED_CONFLICT)
+namespace N { extern "C" int conflict(int); }
+extern "C++" int N::conflict(int) { return 0; }
+#else
+extern "C" int named(int);
+int named(int n) { return n * 2; }
+CFunction declared;
+int declared(int n) { return n + 1; }
+static_assert(__is_same(decltype(named), CFunction));
+static_assert(__is_same(decltype(declared), CFunction));
+namespace N { CFunction declare_in_namespace; }
+int N::declare_in_namespace(int n) { return n + 2; }
+static_assert(__is_same(decltype(N::declare_in_namespace), CFunction));
+int consume(CFunction* function) { return function(31); }
+#endif
+'''
 LINE = '''\
 constexpr unsigned reported(unsigned value = __builtin_LINE()) { return value; }
 #define INVOKE() reported()
@@ -149,8 +242,75 @@ def preprocess_and_syntax(world):
         return warm
 
     (world.scope / 'version.cpp').write_text('__cplusplus\n')
+    (world.scope / 'class-head-alignment.cpp').write_text(CLASS_HEAD_ALIGNMENT)
     (world.scope / 'line.cpp').write_text(LINE)
     (world.scope / 'descriptor.cpp').write_text(DESCRIPTOR)
+    (world.scope / 'immediate-escape.cpp').write_text('''\
+consteval int value(int n) { return n; }
+#ifdef GLOBAL_POINTER
+constexpr auto escaped = value;
+#elif defined(GLOBAL_REFERENCE)
+int (&escaped)(int) = (0, value);
+#elif defined(LOCAL_POINTER)
+consteval int call() { constexpr auto p = &value; return p(42); }
+static_assert(call() == 42);
+#elif defined(LOCAL_REFERENCE)
+void call() { constexpr int (&p)(int) = value; }
+#else
+consteval int consume(int (*p)(int)) { return p(42); }
+static_assert(consume(&value) == 42);
+constexpr int ordinary = (&value)(42);
+static_assert(ordinary == 42);
+#endif
+''')
+    (world.scope / 'dependent-template.cpp').write_text('''\
+struct Owner { template<class T> using Alias = T; };
+template<template<class> class> struct Carrier {};
+#ifdef TEMPLATE_ARGUMENT
+template<class Q> using Result = Carrier<Q::Alias>;
+static_assert(__is_same(Result<Owner>, Carrier<Owner::Alias>));
+#elif defined(EXPLICIT_TEMPLATE)
+template<class Q> using Result = typename Q::template Alias<int>;
+#else
+template<class Q> using Result = typename Q::Alias<int>;
+#endif
+#ifndef TEMPLATE_ARGUMENT
+static_assert(__is_same(Result<Owner>, int));
+#endif
+''')
+    (world.scope / 'alias-identity.cpp').write_text('''\
+template<template<class...> class> struct Identity {};
+template<class T> struct Original {};
+template<class T> using Forward = Original<T>;
+template<class T> using Nested = Forward<T>;
+template<class T> using Transform = Original<T*>;
+template<class T> requires true using Constrained = Original<T>;
+template<class... T> struct Variadic {};
+template<class... T> using ForwardPack = Variadic<T...>;
+template<class T = int> struct Defaulted {};
+template<class T = int> using SameDefault = Defaulted<T>;
+template<class T = long> using DifferentDefault = Defaulted<T>;
+struct Owner { template<class T> using Member = Original<T>; };
+template<class Q> using Selected = Identity<Q::template Member>;
+static_assert(!__is_same(Identity<Original>, Identity<Transform>));
+static_assert(!__is_same(Identity<Original>, Identity<Constrained>));
+static_assert(!__is_same(Identity<Defaulted>, Identity<DifferentDefault>));
+#ifdef GCC_MODE
+static_assert(__is_same(Identity<Original>, Identity<Forward>));
+static_assert(__is_same(Identity<Original>, Identity<Nested>));
+static_assert(__is_same(Identity<Variadic>, Identity<ForwardPack>));
+static_assert(__is_same(Identity<Defaulted>, Identity<SameDefault>));
+static_assert(__is_same(Identity<Original>, Identity<Owner::Member>));
+static_assert(__is_same(Identity<Original>, Selected<Owner>));
+#else
+static_assert(!__is_same(Identity<Original>, Identity<Forward>));
+static_assert(!__is_same(Identity<Original>, Identity<Nested>));
+static_assert(!__is_same(Identity<Variadic>, Identity<ForwardPack>));
+static_assert(!__is_same(Identity<Defaulted>, Identity<SameDefault>));
+static_assert(!__is_same(Identity<Original>, Identity<Owner::Member>));
+static_assert(!__is_same(Identity<Original>, Selected<Owner>));
+#endif
+''')
     (world.scope / 'memchr.cpp').write_text('static_assert(__builtin_memchr("abc", \'a\', 10) != nullptr);\n')
     (world.scope / 'memcmp.cpp').write_text('static_assert(__builtin_memcmp("abc", "bbc", 10) < 0);\n')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
@@ -377,6 +537,13 @@ int use() { return transform(7); }
             flags.append('-DCLANG_MODE')
         invoke(*flags, '-fsyntax-only', 'line.cpp')
         invoke(*flags, '-fsyntax-only', 'descriptor.cpp')
+        invoke(*flags, '-fsyntax-only', 'immediate-escape.cpp')
+        for case in ('GLOBAL_POINTER', 'GLOBAL_REFERENCE', 'LOCAL_POINTER', 'LOCAL_REFERENCE'):
+            invoke(*flags, f'-D{case}', '-fsyntax-only', 'immediate-escape.cpp', status=mode != 'spec')
+        invoke(*flags, '-DEXPLICIT_TEMPLATE', '-fsyntax-only', 'dependent-template.cpp')
+        invoke(*flags, '-fsyntax-only', 'dependent-template.cpp', status=mode != 'gcc')
+        invoke(*flags, '-DTEMPLATE_ARGUMENT', '-fsyntax-only', 'dependent-template.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'alias-identity.cpp')
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
         invoke(*flags, '-fsyntax-only', 'nan.cpp', status=mode != 'gcc')
@@ -400,6 +567,21 @@ int use() { return transform(7); }
         invoke(*flags, '-freflection', '-DUNMATCHED_CLOSER', '-fsyntax-only', 'attribute-splice.cpp', status=1)
         for target in (LINUX, DARWIN):
             invoke(target, *flags, '-fsyntax-only', 'member-alignment.cpp')
+            _, _, diagnostic = invoke(target, *flags, '-fsyntax-only', 'class-head-alignment.cpp')
+            assert (b'zero class alignment' in diagnostic) == (mode == 'gcc'), (target, mode, diagnostic)
+            _, _, diagnostic = invoke(target, *flags, '-Wno-attributes', '-fsyntax-only', 'class-head-alignment.cpp')
+            assert b'warning:' not in diagnostic, (target, mode, diagnostic)
+            for case, accepted in CLASS_HEAD_ALIGNMENT_CASES.items():
+                _, _, diagnostic = invoke(target, *flags, '-D' + case, '-fsyntax-only',
+                                          'class-head-alignment.cpp', status=mode not in accepted)
+                if mode not in accepted:
+                    assert any(message in diagnostic for message in (
+                        b'different alignment requirement', b'requested alignment is weaker',
+                        b'definition must specify alignment',
+                    )), (target, mode, case, diagnostic)
+                if mode == 'gcc' and case in ('LATE_STRONGER', 'ZERO_LATER'):
+                    assert b'class alignment is ignored' in diagnostic and b'zero class alignment' not in diagnostic, (
+                        target, mode, case, diagnostic)
         for i, (owner, _) in enumerate(offset_spellings):
             expected = mode == owner
             invoke(*flags, f'-DEXPECTED={int(expected)}', '-fsyntax-only', f'offset-{i}.cpp')
@@ -421,11 +603,10 @@ int use() { return transform(7); }
         invoke(*flags, '-fsyntax-only', 'spaceship.cpp')
         invoke(*flags, '-DONLY_UNEQUAL', '-fsyntax-only', 'spaceship.cpp', status=mode == 'gcc')
         invoke(*flags, '-DCONTROL_ONLY', '-fsyntax-only', 'alias-adl.cpp')
-        if mode != 'gcc':
-            invoke(*flags, '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode == 'clang')
+        invoke(*flags, '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode != 'spec')
         invoke(*flags, '-fsyntax-only', 'alias-adl.cpp', status=mode == 'clang')
-        if mode == 'clang':
-            invoke(*flags, '-DORIGINAL', '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=1)
+        invoke(*flags, '-DORIGINAL', '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode != 'gcc')
+        if mode != 'spec':
             invoke(*flags, '-DORIGINAL', '-fsyntax-only', 'alias-adl.cpp', status=1)
         invoke(*flags, '-fsyntax-only', 'array-cv.cpp')
         invoke(*flags, '-DMUTATE', '-fsyntax-only', 'array-cv.cpp', status=mode != 'spec')
@@ -509,6 +690,36 @@ def mixed_class_calls(world, gxx):
     assert result == (0, b'', b'') and (scope / 'calls.o').read_bytes() == objects['-fcompat=spec'], result
 
 
+def mixed_class_alignment(world, gxx):
+    scope = world.scope
+    header = CLASS_HEAD_ALIGNMENT + 'int read_payload(Payload*);\n'
+    (scope / 'alignment-peer.cpp').write_text(header + '''\
+int read_payload(Payload* objects) { return sizeof(Payload) * 100 + objects[1].value; }
+''')
+    (scope / 'alignment-caller.cpp').write_text(header + '''\
+int main() {
+  Payload objects[2] = {{1}, {17}};
+  return read_payload(objects) != sizeof(Payload) * 100 + 17;
+}
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        peer = gxx if mode == 'gcc' else clang
+        if not peer:
+            continue
+        definitions = ['-DGCC_MODE'] if mode == 'gcc' else []
+        subprocess.run([peer, '-std=c++26', *definitions, '-c', 'alignment-peer.cpp', '-o', 'alignment-peer.o'],
+                       cwd=scope, check=True, capture_output=True, timeout=40)
+        command = ['-fcompat=' + mode, '-Wno-attributes', *definitions,
+                   '-c', 'alignment-caller.cpp', '-o', 'alignment-caller.o']
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([gxx, 'alignment-caller.o', 'alignment-peer.o', '-o', 'alignment-calls'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'alignment-calls'], cwd=scope, check=True, timeout=20)
+
+
 def mixed_constraints(world, gxx):
     scope = world.scope
     definitions = '\n'.join(fn + ' { return 1; }' for fn in CONSTRAINED_FUNCTIONS)
@@ -541,6 +752,57 @@ def mixed_constraints(world, gxx):
                                     cwd=scope, capture_output=True, timeout=40)
             assert linked.returncode == 0, (mode, linked.stderr)
             subprocess.run([scope / 'constraints'], cwd=scope, check=True, timeout=20)
+
+
+def function_language_linkage(world, gxx):
+    scope = world.scope
+    (scope / 'language-linkage.cpp').write_text(FUNCTION_LANGUAGE_LINKAGE)
+    (scope / 'language-peer.cpp').write_text('''\
+extern "C" int named(int);
+int declared(int);
+namespace N { int declare_in_namespace(int); }
+#ifdef SPEC_MODE
+#ifdef __APPLE__
+#define ABI_NAME "__Z7consumePFYiiE"
+#else
+#define ABI_NAME "_Z7consumePFYiiE"
+#endif
+int consume(int (*)(int)) asm(ABI_NAME);
+#else
+int consume(int (*)(int));
+#endif
+int main() {
+  return consume(&named) != 62 || consume(&declared) != 32 || consume(&N::declare_in_namespace) != 33;
+}
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        definitions = ['-DSPEC_MODE'] if mode == 'spec' else []
+        flags = ['-fcompat=' + mode, *definitions]
+        for target in (LINUX, DARWIN):
+            for case, rejected in [('OVERLOAD', mode != 'spec'), ('CONFLICT', True), ('QUALIFIED_CONFLICT', True)]:
+                args = [target, *flags, '-D' + case, '-fsyntax-only', 'language-linkage.cpp']
+                cold = world.cxx(args, scope, world.cold, timeout=30)
+                warm = world.cxx(args, scope, world.daemon, timeout=30)
+                assert cold == warm and warm[0] == rejected, (mode, target, case, cold, warm)
+            command = [target, *flags, '-c', 'language-linkage.cpp', '-o', 'language.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                prefix = b'_' if target == DARWIN else b''
+                bare = b'_Z7consumePFYiiE' if mode == 'spec' else b'_Z7consumePFiiE'
+                symbols = (scope / 'language.o').read_bytes().split(b'\0')
+                assert all(prefix + name in symbols for name in (bare, b'named', b'_Z8declaredi')), (mode, target, symbols)
+        peer = gxx if mode in ('spec', 'gcc') else clang
+        if peer:
+            subprocess.run([peer, '-std=c++26', *definitions, '-c', 'language-peer.cpp', '-o', 'language-peer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            command = [*flags, '-c', 'language-linkage.cpp', '-o', 'language-native.o']
+            result = world.cxx(command, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([gxx, 'language-native.o', 'language-peer.o', '-o', 'language-calls'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'language-calls'], cwd=scope, check=True, timeout=20)
 
 
 def compile_database(world):
@@ -579,7 +841,9 @@ def main():
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)
+        mixed_class_alignment(world, gxx)
         mixed_constraints(world, gxx)
+        function_language_linkage(world, gxx)
         compile_database(world)
         world.same_daemon('compatibility modes', pid)
     finally:

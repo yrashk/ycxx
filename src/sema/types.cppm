@@ -26,6 +26,11 @@ using ast::u64;
 using ast::u8;
 using i64 = std::int64_t;
 
+// [dcl.link]: the draft distinguishes function types by language linkage.
+constexpr LangLinkage function_type_linkage(LangLinkage lang, ast::Compatibility mode) {
+  return mode == ast::Compatibility::spec ? lang : LangLinkage::cxx;
+}
+
 // Width in bits and signedness of an integral type on the target.
 struct IntShape {
   u32 bits;
@@ -1378,7 +1383,7 @@ struct World {
   // specification is the target's `<string.h>`'s, so a written declaration or definition of the
   // function is the same entity, with one symbol ([dcl.link]): glibc's `__THROW` is
   // `noexcept(true)` in C++, the macOS SDK's declarations have none.
-  ast::DeclSema string_function(const StringFunction& f) {
+  ast::DeclSema string_function(const StringFunction& f, ast::Compatibility mode) {
     const auto c_type = [&](CType t) {
       const QualType void_type = types.builtin(Builtin::void_);
       const QualType char_type = types.builtin(Builtin::char_);
@@ -1395,7 +1400,7 @@ struct World {
     std::vector<QualType> params;
     for (CType t : std::span(f.params).first(f.arity)) params.push_back(c_type(t));
     const bool nonthrowing = target.operating_system == ast::OperatingSystem::linux_;
-    const QualType type = types.function(c_type(f.result), params, false, LangLinkage::c, Cv::none,
+    const QualType type = types.function(c_type(f.result), params, false, function_type_linkage(LangLinkage::c, mode), Cv::none,
                                          ast::RefQual::none, nonthrowing);
     ast::DeclSema d = implicit_function(
         entities.entity({.kind = EntityKind::function, .name = ins.names.intern(f.name), .type = type, .lang = LangLinkage::c}),
