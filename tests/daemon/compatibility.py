@@ -4176,6 +4176,139 @@ def compile_database(world):
     expect(editor.finish(), 0, 'compatibility LSP shutdown')
 
 
+def mixed_empty_class_arguments(world, gxx):
+    scope = world.scope
+    (scope / 'empty-class-provider.cpp').write_text('''
+struct Empty {};
+int peer_empty(int, Empty, int);
+int ycxx_empty(int a, Empty, int b) { return a * 10 + b; }
+int ycxx_calls_empty() { return peer_empty(1, Empty{}, 2); }
+''')
+    (scope / 'empty-class-caller.cpp').write_text('''
+struct Empty {};
+int ycxx_empty(int, Empty, int);
+int ycxx_calls_empty();
+int peer_empty(int a, Empty, int b) { return a * 10 + b; }
+int main() { return ycxx_empty(3, Empty{}, 4) != 34 || ycxx_calls_empty() != 12; }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-c', 'empty-class-provider.cpp', '-o', 'empty-class.o']
+            objects = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                objects.append((scope / 'empty-class.o').read_bytes())
+            assert objects[0] == objects[1], (mode, target)
+            peer = gxx if mode == 'gcc' or (mode == 'spec' and target == LINUX) else clang
+            native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+            if peer and native:
+                subprocess.run([peer, '-std=c++26', 'empty-class-caller.cpp', 'empty-class.o', '-o', 'empty-class'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'empty-class'], cwd=scope, check=True, timeout=20)
+
+
+def historical_syntax_modes(world, gxx):
+    scope = world.scope
+    own = Path(__file__).resolve().parents[1] / 'own'
+    cases = (
+        ('namespaces/c-linkage-duplicate-definition.reject.cpp', ('gcc',)),
+        ('templates/s3-review-partial-not-more-specialized.reject.cpp', ('gcc',)),
+        ('templates/destructor-specialization-after-use.reject.cpp', ('clang',)),
+        ('array-allocation-syntax/void-delete.reject.cpp', ()),
+        ('casts/reinterpret-pointer-integral-discarded.reject.cpp', ('gcc',)),
+        ('inherit/elaborated-injected-base-access.reject.cpp', ('clang',)),
+        ('classes/defaulted-destructor/private-aggregate-member.reject.cpp', ('gcc',)),
+        ('consteval/named-result-expired-member.reject.cpp', ('gcc',)),
+        ('consteval/nonvirtual-member-invocation-static-runtime-object.reject.cpp', ('gcc',)),
+        ('throw-expression/unknown-bound-array.accept.cpp', ('spec', 'clang')),
+        ('throw-expression/conditional-cast-throw.reject.cpp', ('gcc',)),
+        ('stmt/switch-constexpr-past-vacuous.accept.cpp', ('spec', 'clang')),
+        ('block-try-catch/named-function-pointer-default.reject.cpp', ('clang',)),
+        ('block-try-catch/abstract-function-pointer-default.reject.cpp', ('clang',)),
+    )
+    checks = []
+    for path, accepted in cases:
+        (scope / Path(path).name).write_text((own / path).read_text())
+        checks.append((Path(path).name, accepted))
+    controls = (
+        ('terminal-switch-label.cpp', ('spec', 'clang'),
+         'void f(int n) { switch (n) { case 1: default: } }'),
+        ('terminal-switch-label-semicolon.cpp', MODES,
+         'void f(int n) { switch (n) { case 1: default: ; } }'),
+        ('permutation-member.cpp', ('gcc',), '''
+template<class T, class U> struct P { int primary; };
+template<class T, class U> struct P<U,T> { int selected; };
+int f() { P<int,char> p{7}; return p.selected; }
+'''),
+        ('unpermuted-template.cpp', (),
+         'template<class T> struct X {}; template<class T> struct X<T> {};'),
+        ('ordinary-private-nested-type.cpp', (),
+         'struct P { private: struct E {}; }; using X = struct P::E;'),
+        ('ordinary-injected-type.cpp', (),
+         'struct B {}; struct P : private B {}; using X = P::B;'),
+        ('cast-result-used.cpp', (),
+         'constexpr const void* p = reinterpret_cast<const void*>(1UL);'),
+        ('cast-operand-side-effect.cpp', (),
+         'int n; static_assert((static_cast<void>(reinterpret_cast<const void*>(++n)), true));'),
+        ('expired-record-read.cpp', (), '''
+struct S { int n; constexpr int value() const { return n; } };
+constexpr bool expired() { const S* p; { S x{7}; p = &x; } return p->value() == 7; }
+static_assert(expired());
+'''),
+        ('null-member-receiver.cpp', (), '''
+struct S { constexpr int value() const { return 7; } };
+static_assert(static_cast<S*>(nullptr)->value() == 7);
+'''),
+        ('switch-bypassed-unused.cpp', MODES, '''
+constexpr int f(int n) {
+  switch (n) {
+  case 1: int unused; return 13;
+  case 2: return 7;
+  }
+  return 0;
+}
+static_assert(f(2) == 7);
+'''),
+        ('catch-default-lookup.cpp', (),
+         'void f() { try {} catch (int (*)(int = missing_name)) {} }'),
+    )
+    for name, accepted, source in controls:
+        (scope / name).write_text(source)
+        checks.append((name, accepted))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            options = [target, '-fcompat=' + mode]
+            for name, accepted in checks:
+                command = [*options, '-fsyntax-only', name]
+                cold, warm = (world.cxx(command, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == int(mode not in accepted), (mode, target, name, cold, warm)
+            duplicate = [*options, '-c', 'c-linkage-duplicate-definition.reject.cpp', '-o', 'duplicate.o']
+            cold, warm = (world.cxx(duplicate, scope, env, timeout=40) for env in (world.cold, world.daemon))
+            assert cold == warm and warm[0] == 1, (mode, target, cold, warm)
+
+    (scope / 'immediate-receiver-effects.cpp').write_text('''
+int calls;
+struct Probe { static consteval int value() { return 7; } };
+Probe receiver() { ++calls; return {}; }
+extern "C" int run() { int result = receiver().value(); return result == 7 && calls == 1; }
+''')
+    (scope / 'immediate-receiver-caller.cpp').write_text('extern "C" int run(); int main() { return !run(); }\n')
+    for target in (LINUX, DARWIN):
+        command = [target, '-fcompat=gcc', '-c', 'immediate-receiver-effects.cpp', '-o', 'immediate-receiver.o']
+        objects = []
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (target, result)
+            objects.append((scope / 'immediate-receiver.o').read_bytes())
+        assert objects[0] == objects[1], target
+        if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+            subprocess.run([gxx, '-std=c++26', 'immediate-receiver-caller.cpp', 'immediate-receiver.o',
+                            '-o', 'immediate-receiver'], cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'immediate-receiver'], cwd=scope, check=True, timeout=20)
+
+
 def general_mode_tests(world, gxx):
     pid = preprocess_and_syntax(world)
     mangling(world)
@@ -4192,6 +4325,7 @@ def general_mode_tests(world, gxx):
         # PARITY: by design: native array new is currently available on Linux x86-64.
         wide_array_allocations(world, gxx)
     mixed_darwin_class_calls(world, gxx)
+    mixed_empty_class_arguments(world, gxx)
     mixed_class_alignment(world, gxx)
     mixed_tail_padding(world, gxx)
     overlapping_member_layout(world, gxx)
@@ -4209,6 +4343,7 @@ def general_mode_tests(world, gxx):
     mixed_source_location(world, gxx)
     concrete_transform_signatures(world)
     immediate_template_escalation(world)
+    historical_syntax_modes(world, gxx)
     compile_database(world)
     world.same_daemon('compatibility modes', pid)
 

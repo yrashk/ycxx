@@ -630,6 +630,13 @@ public:
     if (!e.ok() || ast::kind_of(e.id) != ast::Nodes::index_of<T>()) return std::nullopt;
     return b_->get<T>(e.id);
   }
+  ExprInfo expression_info(NodeId id) {
+    ExprInfo info{};
+    ast::dispatch<ast::Nodes>(ast::kind_of(id), [&]<class T>(std::type_identity<T>) {
+      if constexpr (requires(T value) { value.info; }) info = ins().ast.get<T>(id).info;
+    });
+    return info;
+  }
 
   QualType builtin(Builtin k) { return types().builtin(k); }
 
@@ -8520,13 +8527,6 @@ public:
     };
     bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
 
-    auto expression_info = [&](NodeId id) {
-      ExprInfo info{};
-      ast::dispatch<ast::Nodes>(ast::kind_of(id), [&]<class T>(std::type_identity<T>) {
-        if constexpr (requires(T value) { value.info; }) info = ins().ast.get<T>(id).info;
-      });
-      return info;
-    };
     auto discarded_temporary_throwing = [&](Child child, u32 offset) {
       const auto info = expression_info(child.id);
       return info.category == ValueCategory::prvalue && destructor_throwing(info.type, offset + child.at);
@@ -9867,7 +9867,7 @@ public:
       operand.begin += p->operand.at;
       operand.id = p->operand.id;
     }
-    const auto cast = as<ast::Conversion>(operand);
+    const auto cast = as<ast::ImplicitConversion>(operand);
     if (!cast || (cast->conversion != ast::ConversionKind::integral_to_pointer &&
                   cast->conversion != ast::ConversionKind::pointer_to_integral))
       return e;
@@ -13289,7 +13289,7 @@ public:
       for (;;) {
         if (auto p = as<ast::Paren>(arm)) {
           arm = Ex{p->operand.id};
-        } else if (auto c = as<ast::Conversion>(arm); c && c->conversion == ast::ConversionKind::to_void &&
+        } else if (auto c = as<ast::ImplicitConversion>(arm); c && c->conversion == ast::ConversionKind::to_void &&
                    compatibility() == ast::Compatibility::gcc) {
           arm = Ex{c->operand.id};
         } else {

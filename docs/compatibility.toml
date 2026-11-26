@@ -1293,3 +1293,172 @@ gcc = "Keep the tested written operators and operands in the dependent type and 
 clang = "Same as GCC."
 probe = 'template<class... Ts> int f(Ts...[0+0]) { return 1; } int call() { return f<int>(0); }'
 evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "empty-class-argument-transport"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "Apple arm64 calling convention, AAPCS64 §6.8.2, AMD64 psABI §3.2.3, Itanium C++ ABI §3.1.2.3, #116, #641"
+prior = "Omit a trivial empty class argument on both targets, as observed with Clang. The GCC Darwin mixed-object fixture is expected to fail."
+spec = "Omit the call-trivial empty argument per the Apple arm64 convention and the AMD64 NO_CLASS classification."
+gcc = "Omit the tested one-byte empty argument on x86-64 Linux. On arm64 Darwin, the recorded GCC behavior is to pass the byte, consuming a parameter register."
+clang = "Same as spec."
+limits = "Covers fixed direct calls using naturally aligned one-byte classes with trivial call operations, with adjacent scalar arguments. The Darwin GCC rule still needs a new native mixed-object result."
+evidence = ["tests/own/abi/empty-classes.run.cpp", "tests/daemon/compatibility.py", "https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms", "https://github.com/yrashk/ycxx/commit/41b46a11c2aa34dc5fb6daebf1812b93a01e8955"]
+
+[[divergence]]
+id = "c-linkage-cross-namespace-duplicate-definition"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.link], [basic.def.odr], #446"
+prior = "Diagnose two definitions of the same C-linkage function during semantic analysis, including across namespaces."
+spec = "Reject repeated definitions in the translation unit."
+gcc = "GCC 16.2 accepts the tested definitions in syntax-only mode. Its assembler rejects the repeated symbol during object generation."
+clang = "Same as spec."
+evidence = ["tests/own/namespaces/c-linkage-duplicate-definition.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 ELF and upstream Clang 23.1.6 ELF and Mach-O syntax and object probes"]
+
+[[divergence]]
+id = "nonspecializing-permuted-class-template-arguments"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[temp.spec.partial.general], [temp.spec.partial.order], #88"
+prior = "Reject the unconstrained partial specialization because it is no more specialized than its primary."
+spec = "Require a partial specialization to be more specialized than its primary."
+gcc = "Accept a direct permutation of the primary's ordinary type parameters in the tested unconstrained partial specialization and instantiate that specialization. Reject the same parameters in unchanged order."
+clang = "Same as spec."
+evidence = ["tests/own/templates/s3-review-partial-not-more-specialized.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax and member selection probes"]
+
+[[divergence]]
+id = "destructor-specialization-after-cleanup-use"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[temp.expl.spec], [temp.inst], [class.dtor]"
+prior = "Diagnose an explicit destructor specialization after a cleanup that used the primary."
+spec = "Diagnose the tested specialization after use. The draft permits an implementation to omit this diagnostic."
+gcc = "Same diagnostic decision as spec."
+clang = "Accept the tested destructor specialization after an earlier cleanup in the same translation unit."
+evidence = ["tests/own/templates/destructor-specialization-after-use.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 C++26 acceptance probes on ELF and Mach-O"]
+
+[[divergence]]
+id = "delete-void-pointer-extension"
+status = "shared"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.delete], docs/EXTENSIONS.md, DECISIONS §1.2"
+prior = "Require a pointer to an object as the delete[] operand."
+spec = "Reject delete[] on void*."
+gcc = "Same as spec under the common extension policy."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts delete[] on void* as an extension and issues -Wdelete-incomplete."
+evidence = ["tests/own/array-allocation-syntax/void-delete.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax and object probes"]
+
+[[divergence]]
+id = "discarded-constexpr-reinterpretation"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [expr.context], [expr.reinterpret.cast], #199"
+prior = "A reached reinterpret_cast prevents evaluation even when the result is discarded."
+spec = "Reject the reached reinterpret_cast in constant evaluation."
+gcc = "In the tested discarded expressions, evaluate the integer operand and omit its conversion to a pointer. A used cast result or an operand with nonconstant effects still fails."
+clang = "Same as spec."
+evidence = ["tests/own/casts/reinterpret-pointer-integral-discarded.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 probes for discarded, retained and effectful operands"]
+
+[[divergence]]
+id = "elaborated-injected-base-access"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[basic.lookup.elab], [class.access.general], [class.access.base]"
+prior = "Check the accessibility of an injected class name through the inheritance path, including in an elaborated type specifier."
+spec = "Use type-only lookup and enforce base access."
+gcc = "Same as spec."
+clang = "Accept the tested private base's injected type in a qualified elaborated type specifier, including through an intermediate class. Ordinary qualified use and a declared private nested class still fail."
+evidence = ["tests/own/inherit/elaborated-injected-base-access.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 qualified lookup probes"]
+
+[[divergence]]
+id = "aggregate-element-private-destructor"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.init.aggr], [class.dtor], #157"
+prior = "Require access to the aggregate element's written destructor at the initializer even when its cleanup is trivial."
+spec = "Check the tested element's destructor at the point of aggregate initialization."
+gcc = "Accept the tested privately destructible element when its aggregate class has access to the destructor."
+clang = "Same as spec."
+limits = "Covers an ordinary aggregate with a trivial defaulted element destructor and friendship for its enclosing aggregate. Union variant initialization is tracked separately."
+evidence = ["tests/own/classes/defaulted-destructor/private-aggregate-member.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 C++26 syntax probes"]
+
+[[divergence]]
+id = "constexpr-expired-member-receiver"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[basic.life], [expr.const], #975"
+prior = "Reject a nonstatic call after the object lifetime ends even when the body ignores the object."
+spec = "Diagnose a call on the expired object."
+gcc = "Allow the tested constant call through the expired local object's pointer if the member does not read the object. A field read and a null receiver remain invalid."
+clang = "Same as spec."
+evidence = ["tests/own/consteval/named-result-expired-member.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 expired-object, field access and null receiver probes"]
+
+[[divergence]]
+id = "immediate-static-member-runtime-receiver"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const.imm], [expr.call], [expr.ref]"
+prior = "Evaluate the discarded receiver as part of the static member's immediate invocation."
+spec = "Require the complete invocation, including the receiver expression, to be constant."
+gcc = "Accept the tested nonconstant receiver, fold the selected static immediate call, and preserve the receiver's runtime effects."
+clang = "Same as spec."
+limits = "Covers ordinary static immediate members with supported result representations."
+evidence = ["tests/own/consteval/nonvirtual-member-invocation-static-runtime-object.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 runtime effects and upstream Clang 23.1.6 rejection probes"]
+
+[[divergence]]
+id = "throw-unknown-bound-array-decay"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.throw], [except.throw]"
+prior = "Decay the array before determining the exception object type."
+spec = "Decay the expression of incomplete array type to a pointer to its complete element type."
+gcc = "Reject the tested array operand before decaying it."
+clang = "Same as spec."
+evidence = ["tests/own/throw-expression/unknown-bound-array.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 C++26 syntax probes"]
+
+[[divergence]]
+id = "conditional-void-cast-of-throw"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.cond], [expr.throw]"
+prior = "Recognize only a throw-expression with optional surrounding parentheses as the exceptional void operand."
+spec = "A void cast of a throw-expression does not give the conditional expression the other operand's type."
+gcc = "Treat the tested static_cast<void> of a throw as the throw-expression operand. A comma expression ending in a throw still fails."
+clang = "Same as spec."
+evidence = ["tests/own/throw-expression/conditional-cast-throw.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 conditional operand probes"]
+
+[[divergence]]
+id = "terminal-switch-label"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[stmt.label], [stmt.block], P2324, #337"
+prior = "A case or default label can end a compound statement without a following statement."
+spec = "Permit the trailing label and treat it as followed by a null statement."
+gcc = "Reject the tested trailing case or default label unless a statement follows it."
+clang = "Same as spec."
+evidence = ["tests/own/stmt/label-end-of-block.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 switch labels and explicit null-statement control"]
+
+[[divergence]]
+id = "constexpr-switch-dispatch-vacuous-local"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[stmt.dcl], [basic.life], [expr.const], #341"
+prior = "Begin the vacuously initialized object's lifetime on the dispatch edge and permit its later assignment."
+spec = "Permit assignment to the vacuously initialized local during constant evaluation."
+gcc = "Reject the tested assignment following switch dispatch past the declaration as a modification from outside the constant evaluation."
+clang = "Same as spec."
+evidence = ["tests/own/stmt/switch-constexpr-past-vacuous.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 constant-evaluation switch probes"]
+
+[[divergence]]
+id = "catch-function-pointer-parameter-default"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[dcl.fct.default], [except.handle]"
+prior = "Reject a parameter default written in the exception declaration's function-pointer type."
+spec = "Require the default argument to be written in the parameter list of a function declaration or another permitted context."
+gcc = "Same as spec for the tested named and abstract function pointers."
+clang = "Accept the tested default on a named or abstract function pointer in an exception declaration. Still diagnose an invalid default argument expression."
+evidence = ["tests/own/block-try-catch/named-function-pointer-default.reject.cpp", "tests/own/block-try-catch/abstract-function-pointer-default.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 exception-declaration probes"]

@@ -122,6 +122,7 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
+  bool darwin_passes_empty_argument = false;
   // A 128-bit integer passes and returns as two 64-bit integer words, low first: in registers
   // when two are left, else whole in 16-byte-aligned stack (AMD64 psABI §3.2.3; AAPCS64 C.9,
   // without C.8's even-numbered register, as Apple's convention has it). Unset for a calling
@@ -507,7 +508,7 @@ class Lowering {
         if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
         if (!config_.sysv_amd64 && object.contains_explicit_alignment)
           return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
-        if (omits_class_transport(object)) {  // the parameter or result still has an object in this frame
+        if (omits_class_transport(object, result)) {  // the parameter or result still has an object in this frame
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
           continue;
@@ -1037,7 +1038,7 @@ class Lowering {
             if (!config_.sysv_amd64 && object.contains_explicit_alignment)
               return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
             // L1 already has an object for the argument or result. Omit only its transport.
-            if (omits_class_transport(object, fixed_direct)) continue;
+            if (omits_class_transport(object, class_result, fixed_direct)) continue;
           }
           if (class_result) {
             result_pieces = class_pieces(c);
@@ -1380,6 +1381,8 @@ class Lowering {
       std::uint32_t passed_words = in_registers ? registers : words;
       return {passed_words, T::i64, l.size, chunks};
     }
+    if (config_.darwin_passes_empty_argument && l.empty && l.size == 1)
+      return {1, T::i8, 1};
     if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64, l.size};
     if (l.size > config_.composite_in_registers) return {};
     return {words, T::i64, l.size};
@@ -1392,11 +1395,12 @@ class Lowering {
     return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
            (l.sysv_stack_record || (!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
-  // Darwin omits empty call-trivial arguments and results (#116). System V transports no
-  // value for a NO_CLASS record in a fixed direct call or its definition (#641).
-  bool omits_class_transport(const TypeLayout& l, bool fixed_direct = true) const {
+  // Apple's Darwin convention omits empty call-trivial arguments (#116). GCC transports the
+  // one-byte empty argument. System V omits a NO_CLASS record in fixed direct calls (#641).
+  bool omits_class_transport(const TypeLayout& l, bool result, bool fixed_direct = true) const {
     if (config_.sysv_amd64) return fixed_direct && l.sysv_empty_record;
-    return l.kind == TypeKind::record && l.trivial_calls && l.empty;
+    return l.kind == TypeKind::record && l.trivial_calls && l.empty &&
+           (result || !config_.darwin_passes_empty_argument || l.size != 1);
   }
   // An ABI-local class object. AAPCS64 rounds it up to permit full-word accesses.
   ValueId frame_object(const TypeLayout& l) {
