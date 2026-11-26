@@ -608,6 +608,8 @@ written default member initializer are value-initialized.
   initializes its selected member. A nonthrowing constructor works on both targets, and the
   hosted Linux subset above can unwind the construction. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
+  GCC mode accepts empty union allocation when the tested variant's nested member or base
+  has a usable trivial defaulted constructor. [#1483](https://github.com/yrashk/ycxx/issues/1483)
 - namespace-scope union templates support the same rules for concrete nontrivially destructible
   variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
 - classes and unions: data and static members, named data members of unnamed union type,
