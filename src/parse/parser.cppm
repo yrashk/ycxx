@@ -2737,7 +2737,7 @@ public:
   // declaration ([basic.scope.pdecl]), so later ones and their defaults may name it. Not yet:
   // template template parameters, packs and type-constraints.
   // `keyword` false: a lambda's template-parameter-list, without `template` ([expr.prim.lambda.general]).
-  bool template_head(u16 depth, bool keyword = true) {
+  bool template_head(u16 depth, bool keyword = true, bool template_parameter_head = false) {
     s_->template_scopes.emplace_back();
     s_->head_constraints.clear();
     if ((keyword && !expect(Tk::kw_template)) || !expect(Tk::less)) return false;
@@ -2745,7 +2745,7 @@ public:
     ++angle_;
     if (!is(Tk::greater)) {
       do {
-        auto p = template_parameter(depth, u16(s_->template_scopes.back().size()), ok);
+        auto p = template_parameter(depth, u16(s_->template_scopes.back().size()), ok, template_parameter_head);
         if (!p) break;
         // [temp.param]: the names of a head's parameters are distinct.
         for (const ast::TemplateParamSema& q : s_->template_scopes.back())
@@ -2770,7 +2770,7 @@ public:
     return true;
   }
 
-  std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok) {
+  std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok, bool template_parameter_head) {
     ast::TemplateParamSema p{};
     p.depth = depth;
     p.index = index;
@@ -2783,8 +2783,16 @@ public:
     // A type-constraint ([temp.param]/2): `C T`, `C<args> T`, `N::C T`: a type parameter whose
     // constraint is `C<T, args…>` ([temp.constr.decl]/3).
     u32 concept_name = 0;
-    if (std::optional<ast::DeclSema> c = type_constraint_ahead(concept_name)) {
+    std::optional<ast::TemplateParamSema> dependent_concept;
+    if (template_parameter_head && is(Tk::identifier) && kind(1) != Tk::coloncolon)
+      if (const auto* named = s_->template_param(name_of(tok())); named && named->concept_template) dependent_concept = *named;
+    const auto c = type_constraint_ahead(concept_name);
+    if (c || dependent_concept) {
       u32 at = pos();
+      if (dependent_concept && s_->compatibility() != ast::Compatibility::clang) {
+        s_->diag(at, Diag::concept_dependent_template_head);
+        ok = false;
+      }
       for (u32 j = 0; j <= concept_name; ++j) bump();  // its nested-name-specifier and name
       std::vector<ast::TemplateArg> cargs;
       if (is(Tk::less)) {
@@ -2802,9 +2810,11 @@ public:
         p.name = name_of(tok());
         bump();
       }
-      p.type_constraint = written_concept(*c, cargs);
+      p.type_constraint = dependent_concept ? s_->concept_parameter_id(*dependent_concept, cargs) : written_concept(*c, cargs);
       cargs.insert(cargs.begin(), s_->templates().type_arg(p.type));
-      if (auto normal = s_->concept_constraint(*c, cargs, at)) {
+      auto normal = dependent_concept ? s_->templates().substitute_constraint(s_->concept_parameter_id(*dependent_concept, cargs), {})
+                                      : s_->concept_constraint(*c, cargs, at);
+      if (normal) {
         if (p.pack) {
           const std::array packs{u32(depth) << 16 | index};
           *normal = s_->ins().intern_value(ast::VFoldConstraint{
@@ -2902,21 +2912,30 @@ public:
   // A template template parameter ([temp.param]/1): `template<…> class TT = X`, `template<…>
   // class... TTs`. Its own head is at the next depth, in scope only in that head.
   std::optional<ast::TemplateParamSema> template_template_parameter(ast::TemplateParamSema p, bool& ok) {
-    std::vector<sema::ConstId> constraints = s_->head_constraints;
-    bool head = template_head(u16(p.depth + 1));
+    auto outer_constraints = std::move(s_->head_constraints);
+    bool head = template_head(u16(p.depth + 1), true, true);
+    const u32 clause_at = pos();
+    const bool clause = head && accept(Tk::kw_requires);
+    if (clause) {
+      const auto before = s_->diag_count();
+      const auto constraint = constraint_expression(true, &p.type_constraint);
+      head = !s_->has_error_since(before);
+      if (constraint != ConstId::none) s_->head_constraints.push_back(constraint);
+    }
+    auto constraints = std::exchange(s_->head_constraints, std::move(outer_constraints));
     std::vector<ast::TemplateParamSema> inner = std::move(s_->template_scopes.back());
     s_->template_scopes.pop_back();
     if (!head) {
       ok = false;
       return std::nullopt;
     }
-    // A constrained head needs [temp.arg.template]/3's constraint check (#271).
-    if (!s_->head_constraints.empty() || is(Tk::kw_requires)) {
-      s_->diag(pos(), Diag::not_supported, Tk::kw_requires);
+    const bool dependent = std::ranges::any_of(constraints, [&](ConstId value) { return concept_dependent_constraint(value); });
+    if ((clause || !constraints.empty()) && (!dependent || s_->compatibility() != ast::Compatibility::clang)) {
+      if (dependent) s_->diag(clause_at, Diag::concept_dependent_template_head);
+      else s_->diag(clause_at, Diag::not_supported, Tk::kw_requires);  // [temp.arg.template]/3 (#271)
       ok = false;
       return std::nullopt;
     }
-    s_->head_constraints = std::move(constraints);
     p.concept_template = s_->compatibility() != ast::Compatibility::gcc && accept(Tk::kw_concept);
     if (!p.concept_template && !accept(Tk::kw_class) && !accept(Tk::kw_typename)) {
       expect(Tk::kw_class);
@@ -2943,6 +2962,17 @@ public:
       p.default_ = *a;
     }
     return p;
+  }
+
+  bool concept_dependent_constraint(ConstId value) {
+    const auto& values = s_->ins().values;
+    if (values.is<ast::VConceptParameter>(value)) return true;
+    if (values.is<ast::VFoldConstraint>(value))
+      return concept_dependent_constraint(values.get<ast::VFoldConstraint>(value).operand);
+    if (values.is<ast::VConstraint>(value))
+      return std::ranges::any_of(s_->ins().seqs.elements(values.get<ast::VConstraint>(value).operands),
+                                 [&](ConstId operand) { return concept_dependent_constraint(operand); });
+    return false;
   }
   // The last token of a template-name alone ([temp.arg.template]/1): a class or alias template
   // or a template template parameter, followed by the argument's end.

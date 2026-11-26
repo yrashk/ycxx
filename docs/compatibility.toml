@@ -786,6 +786,18 @@ probe = 'template<class T, template<class> concept... C> concept All = (C<T> && 
 evidence = ["tests/daemon/compatibility.py", "The explicit overload and mixed-pack examples at the draft pin", "GCC 16.2 and upstream Clang 23.1.6 C++26 acceptance, satisfaction, overload and primary object symbol probes on x86-64 Linux and arm64 Darwin"]
 
 [[divergence]]
+id = "concept-dependent-template-template-head"
+status = "pending"
+mode_status = { spec = "pending", gcc = "supported", clang = "pending" }
+reference = "[temp.param]/21, [temp.constr.concept], [temp.arg.template]"
+prior = "Reject concept-dependent type constraints and requires-clauses in template template parameter heads."
+spec = "Reject a concept-dependent constraint on a template template parameter."
+gcc = "Reject the concept template parameter syntax before checking the inner head."
+clang = "Accept the tested concept-dependent type constraints and requires-clauses. Accept an unconstrained template argument. Reject the tested constrained arguments, including one constrained by the concept supplied for C."
+probe = 'template<template<class> concept C, template<C> class TT> struct Box;'
+evidence = ["tests/draft/temp/temp.param-11.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax, template argument matching and ELF and Mach-O primary symbols"]
+
+[[divergence]]
 id = "constrained-builtin-predicate-symbol"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

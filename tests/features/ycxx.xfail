@@ -319,11 +319,7 @@ draft/temp/temp.arg.template-4.reject.cpp errors elsewhere: 'template' not suppo
 draft/temp/temp.arg.type-1.accept.cpp 'template' not supported yet
 draft/temp/temp.class.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.atomic-1.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.concept-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.normal-3.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.normal-4.accept.cpp 'template' not supported yet
-draft/temp/temp.constr.normal-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-5.accept.cpp 'template' not supported yet
@@ -388,9 +384,7 @@ draft/temp/temp.names-4.reject.cpp errors elsewhere: 'template' not supported ye
 draft/temp/temp.names-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.over.link-4.accept.cpp 'template' not supported yet
 draft/temp/temp.param-1.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.param-11.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.param-2.accept.cpp 'class' not supported yet
-draft/temp/temp.param-3.accept.cpp 'template' not supported yet
 draft/temp/temp.param-4.reject.cpp errors elsewhere: 'using' not supported yet
 draft/temp/temp.param-7.accept.cpp 'template' not supported yet
 draft/temp/temp.pre-2.reject.cpp errors elsewhere: 'template' not supported yet

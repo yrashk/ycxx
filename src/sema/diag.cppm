@@ -352,6 +352,7 @@ enum class Diag : std::uint32_t {
   bound_member_not_called [[=message{Severity::error, "a reference to the non-static member function '{0:n}' must be called"}]],
   // [temp]
   invalid_template_parameter_type [[=message{Severity::error, "a non-type template parameter must have a structural type"}]],
+  concept_dependent_template_head [[=message{Severity::error, "a template template parameter cannot have a concept-dependent constraint"}]],
   template_args_mismatch [[=message{Severity::error, "the template arguments do not match the parameters of '{0:n}'"}]],
   template_argument_narrowing [[=message{Severity::error, "narrowing conversion of {0:i} from '{1:t}' to '{2:t}' in a template argument"}]],
   not_a_template [[=message{Severity::error, "'{0:n}' is not a template"}]],

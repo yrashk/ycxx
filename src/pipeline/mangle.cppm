@@ -696,7 +696,7 @@ class Mangler {
     // A trailing requires-clause is still part of the subsequent function signature.
     const bool plain_arguments = compatibility_ == ast::Compatibility::gcc && scope != ast::EntityId::none &&
                                  in_.types.is<ast::TFunction>(c);
-    auto args = plain_arguments ? template_args(spec.args) : specialization_args(spec);
+    auto args = plain_arguments ? template_args(spec.args) : specialization_args(spec, *n);
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
@@ -1487,10 +1487,20 @@ class Mangler {
   }
   // Clang's <template-param-decl> for parameter `p` (an extension beyond the published ABI):
   // `Ty`, `Tn <type>`, `Tt <decl>* E`, `Tp <decl>` for a pack.
-  std::expected<std::string, std::string> param_decl(const ast::TemplateParamSema& p) {
+  std::expected<std::string, std::string> param_decl(const ast::TemplateParamSema& p, std::string_view owner = {}) {
     std::string r = p.pack ? "Tp" : "";
     if (p.kind == ast::TemplateArgKind::type) {
       if (p.type_constraint == ast::ConstId::none) return r + "Ty";
+      if (in_.values.is<ast::VConceptParameter>(p.type_constraint)) {
+        const auto concept_ = in_.values.get<ast::VConceptParameter>(p.type_constraint);
+        r += "TkN" + std::string(owner) + source_name(in_.names.spelling(concept_.name));
+        if (in_.seqs.size(concept_.arguments)) {
+          auto args = template_args(in_.seqs.elements(concept_.arguments));
+          if (!args) return args;
+          r += *args;
+        }
+        return r + 'E';
+      }
       const auto c = in_.values.get<ast::VDepConcept>(p.type_constraint);
       const ClassName n = classes_ ? classes_(c.concept_) : ClassName{};
       if (n.name.empty()) return std::unexpected("a constrained template parameter whose concept is unknown");
@@ -1517,9 +1527,14 @@ class Mangler {
     }
     r += "Tt";
     for (const ast::TemplateParamSema& q : in_.seqs.elements(p.params)) {
-      auto d = param_decl(q);
+      auto d = param_decl(q, owner);
       if (!d) return d;
       r += *d;
+    }
+    if (p.type_constraint != ast::ConstId::none) {
+      auto requirement = expression(p.type_constraint);
+      if (!requirement) return requirement;
+      r += "Q" + *requirement;
     }
     return r + "E";
   }
@@ -1528,7 +1543,7 @@ class Mangler {
   // is not the parameter's ([temp.arg.template]).
   std::expected<std::string, std::string> own_template_args(std::span<const ast::TemplateArg> args,
                                                             std::span<const ast::TemplateParamSema> params,
-                                                            const std::vector<std::uint8_t>& same_heads) {
+                                                            const std::vector<std::uint8_t>& same_heads, std::string_view owner) {
     std::string out = "I";
     for (std::size_t i = 0; i < args.size(); ++i) {
       const ast::TemplateArg& a = args[i];
@@ -1542,11 +1557,17 @@ class Mangler {
         const bool gcc = compatibility_ == ast::Compatibility::gcc;
         const bool placeholder = in_.types.is<ast::TAuto>(in_.types.canon(p.type));
         const bool value_prefix = placeholder ? !gcc || !empty : !gcc && (dependent(p.type) || empty);
+        const bool concept_dependent_head = p.kind == ast::TemplateArgKind::template_ &&
+            (p.type_constraint != ast::ConstId::none ||
+             std::ranges::any_of(in_.seqs.elements(p.params), [&](const ast::TemplateParamSema& q) {
+               return in_.values.is<ast::VConceptParameter>(q.type_constraint);
+             }));
         const bool decl = p.kind == ast::TemplateArgKind::value    ? value_prefix
-                          : p.kind == ast::TemplateArgKind::template_ ? !p.concept_template && (empty ? !gcc : !same)
+                          : p.kind == ast::TemplateArgKind::template_ ? !p.concept_template &&
+                                                                        (concept_dependent_head || (empty ? !gcc : !same))
                                                                       : p.type_constraint != ast::ConstId::none;
         if (decl) {
-          auto d = param_decl(p);
+          auto d = param_decl(p, owner);
           if (!d) return d;
           out += *d;
         }
@@ -1558,8 +1579,8 @@ class Mangler {
     return out + "E";
   }
 
-  std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec) {
-    auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
+  std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec, std::string_view owner = {}) {
+    auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads, owner);
     if (!args || spec.head.tokens == Fp128{}) return args;
     auto head = constraint_suffix(spec.head, true);
     if (!head) return head;

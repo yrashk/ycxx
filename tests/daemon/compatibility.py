@@ -3151,6 +3151,63 @@ int main() {{ return f(7) != {result}; }}
                     subprocess.run([scope / 'concept-pack-call'], cwd=scope, check=True, timeout=20)
 
 
+def concept_dependent_template_heads(world):
+    scope = world.scope
+    (scope / 'concept-dependent-head.cpp').write_text('''
+template<class T> concept Yes = sizeof(T) > 0;
+template<class T> struct Plain { int n; };
+template<Yes T> struct Constrained { int n; };
+#if CASE == 0
+template<template<class> concept C, template<C> class TT>
+#elif CASE == 1
+template<template<class> concept C, template<class T> requires C<T> class TT>
+#else
+template<template<class> concept C, template<class T> requires (C<T> && true) class TT>
+#endif
+int f(int n) { return n; }
+#ifdef CONSTRAINED
+int keep() { return f<Yes, Constrained>(7); }
+#else
+int keep() { return f<Yes, Plain>(7); }
+#endif
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    symbols = ('_Z1fI3YesTtTkN1f1CEE5PlainEii', '_Z1fI3YesTtTyQ1CITL0__EE5PlainEii',
+               '_Z1fI3YesTtTyQaa1CITL0__ELb1EE5PlainEii')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for case, name in enumerate(symbols):
+                flags = [target, '-fcompat=' + mode, f'-DCASE={case}']
+                compile_ = [*flags, '-c', 'concept-dependent-head.cpp', '-o', 'concept-dependent-head.o']
+                outputs = []
+                for env in (world.cold, world.daemon):
+                    result = world.cxx(compile_, scope, env, timeout=40)
+                    assert result[0] == (0 if mode == 'clang' else 1), (mode, target, case, result)
+                    if mode == 'spec':
+                        assert b'concept-dependent constraint' in result[2], result
+                    if mode == 'clang':
+                        outputs.append((scope / 'concept-dependent-head.o').read_bytes())
+                if mode != 'clang':
+                    continue
+                symbol = prefix + name
+                names = outputs[1].split(b'\0')
+                assert outputs[0] == outputs[1] and symbol.encode() in names, (
+                    mode, target, case, symbol, [n for n in names if b'_Z1f' in n])
+                rejection = [*flags, '-DCONSTRAINED', '-fsyntax-only', 'concept-dependent-head.cpp']
+                cold, warm = (world.cxx(rejection, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == 1, (mode, target, case, cold, warm)
+                native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+                if clang and native:
+                    (scope / 'concept-dependent-head-caller.cpp').write_text(f'''
+extern "C" int call(int) asm("{symbol}");
+int main() {{ return call(7) != 7; }}
+''')
+                    subprocess.run([clang, '-std=c++26', 'concept-dependent-head-caller.cpp', 'concept-dependent-head.o',
+                                    '-o', 'concept-dependent-head'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'concept-dependent-head'], cwd=scope, check=True, capture_output=True, timeout=20)
+
+
 def constrained_lambda_members(world, gxx):
     scope = world.scope
     (scope / 'constrained-lambda.cpp').write_text('''\
@@ -4167,6 +4224,7 @@ def main():
         fold_constraint_substitution_failures(world)
         constrained_parameter_packs(world, gxx)
         concept_template_parameters(world)
+        concept_dependent_template_heads(world)
         constraint_expression_symbols(world, gxx)
         constrained_lambda_members(world, gxx)
         written_trait_constraint_symbols(world, gxx)

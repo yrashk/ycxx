@@ -63,7 +63,8 @@ struct TemplateParamSema {
   // `depth + 1`; empty otherwise.
   SeqId<TemplateParamSema> params{};
   u8 rank_type_default = 0;  // substituting the written type default can check a dependent rank
-  ConstId type_constraint = ConstId::none;  // concept and its explicit arguments, for linkage
+  // The written type constraint or the requires-clause of a template template parameter.
+  ConstId type_constraint = ConstId::none;
   bool concept_template = false;  // `template<...> concept C`
   constexpr bool operator==(const TemplateParamSema&) const = default;
 };

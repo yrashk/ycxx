@@ -2039,6 +2039,10 @@ public:
     auto decl = template_decl(a.templ);
     if (!decl) return false;
     std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(p.params);
+    if (decl->constraints != ConstId::none && compatibility == ast::Compatibility::clang &&
+        (p.type_constraint != ConstId::none || std::ranges::any_of(ps, [&](const ast::TemplateParamSema& inner) {
+          return ins().values.is<ast::VConceptParameter>(inner.type_constraint);
+        }))) return false;
     std::vector<ast::TemplateParamSema> as = ins().seqs.elements(decl->template_params);
     std::vector<TemplateArg> synth;
     if (!ps.empty()) {
