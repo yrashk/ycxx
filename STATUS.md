@@ -3604,6 +3604,14 @@ identity. Inspection reports the staged path and selector and links the
 input edge to the producer. The staged tool example watches an executable
 script that writes a generated C++ header.
 
+A `cpp.host_executable` rule compiles disk sources and their includes with
+the resident host compiler and linker (#1559). An ordinary generator can
+stage `artifact("name", "executable")` as an argument or as its selected tool.
+Target variants reuse the host request, and generator receipts use the bytes
+and executable mode of the staged image. Watch follows the tool's C++ inputs.
+Read-only plans show its host triple and the artifact dependency.
+[Native host tool example](examples/project-build/native-host-tool/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
