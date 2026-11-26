@@ -96,9 +96,19 @@ struct PlanDependencyEdge {
   ManifestLocation location;
 };
 
+struct PlanValueDependencyEdge {
+  std::string consumer;
+  std::string producer;
+  std::string usage;
+  std::string binding;
+  std::string export_name;
+  ManifestLocation location;
+};
+
 struct DependencyGraphInspection {
   bool complete = true;
   std::vector<PlanDependencyEdge> edges = {};
+  std::optional<std::vector<PlanValueDependencyEdge>> value_edges = std::nullopt;
 };
 
 struct DependencyOccurrenceChange {
