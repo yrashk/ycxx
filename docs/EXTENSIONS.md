@@ -9,6 +9,9 @@ The extensions listed here are available in all three compatibility modes, inclu
 `-fcompat` selects the behavior of an extension where the modes differ, such as the choice of a
 conflicting asm label. See [the compatibility table](compatibility.toml).
 
+GCC mode diagnoses a dependent built-in type transform when emitting a function signature
+that names it. The built-ins remain available for type computation in every mode.
+
 | Extension | Needed by | What ycxx does | Since |
 | --- | --- | --- | --- |
 | GNU attributes `__attribute__((…))`, before a declaration, among its decl-specifiers, and after a declarator | the macOS SDK's `<stdio.h>` family (`__printflike`, `__deprecated_msg`, `__swift_nonisolated_unsafe`), `sys/cdefs.h` | Parses the syntax and skips unrecognized attributes ([dcl.attr.grammar]/6) | #133 |

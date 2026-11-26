@@ -337,6 +337,32 @@ int lookup(Arg value) { return through_alias(value); }
 #endif
 #endif
 ''')
+    (world.scope / 'array-cv.cpp').write_text('''\
+void check() {
+  const int a[1][2] = {{1, 2}};
+  volatile int b[1] = {3};
+  auto [row] = a;
+  const auto [element] = b;
+#if defined(GCC_MODE) || defined(CLANG_MODE)
+  static_assert(__is_same(decltype(row), const int[2]));
+  static_assert(__is_same(decltype(element), const volatile int));
+#else
+  static_assert(__is_same(decltype(row), int[2]));
+  static_assert(__is_same(decltype(element), const int));
+#endif
+#ifdef MUTATE
+  row[0] = 4;
+#endif
+}
+''')
+    (world.scope / 'trait-symbol.cpp').write_text('''\
+#ifdef IN_BODY
+template<class T> auto transform(T n) { using U = __remove_cv(T); return U(n); }
+#else
+template<class T> __remove_cv(T) transform(T n) { return n; }
+#endif
+int use() { return transform(7); }
+''')
     default = invoke('-E', 'version.cpp')
     assert b'202603L' in default[1], default
     pid = world.pid()
@@ -401,6 +427,15 @@ int lookup(Arg value) { return through_alias(value); }
         if mode == 'clang':
             invoke(*flags, '-DORIGINAL', '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=1)
             invoke(*flags, '-DORIGINAL', '-fsyntax-only', 'alias-adl.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'array-cv.cpp')
+        invoke(*flags, '-DMUTATE', '-fsyntax-only', 'array-cv.cpp', status=mode != 'spec')
+        invoke(*flags, '-fsyntax-only', 'trait-symbol.cpp')
+        _, _, diagnostic = invoke(*flags, '-c', 'trait-symbol.cpp', '-o', 'trait-symbol.o', status=mode == 'gcc')
+        if mode == 'gcc':
+            assert b'dependent built-in type trait' in diagnostic, diagnostic
+        else:
+            assert b'_Z9transformIiEu11__remove_cvIT_ES0_\0' in (world.scope / 'trait-symbol.o').read_bytes()
+        invoke(*flags, '-DIN_BODY', '-c', 'trait-symbol.cpp', '-o', 'trait-body.o')
         if mode != 'gcc':
             expected_layout = '12' if mode == 'clang' else '8'
             invoke(DARWIN, *flags, '-DEXPECTED=' + expected_layout, '-fsyntax-only', 'layout.cpp')

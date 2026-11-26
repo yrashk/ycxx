@@ -1,7 +1,8 @@
-"""Inspect source, resolved provenance, semantic build diffs, and workspace targets (#1256, #1392)."""
+"""Inspect source, resolved provenance, semantic build diffs, and workspace targets (#1256, #1392, #1441)."""
 
 import html
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -228,6 +229,54 @@ cpp.library "Z-first" {{ sources = ["other.cc"] }}
     assert scope_state(scope) == before, 'catalog touched a nested workspace or package recipe'
 
 
+def check_catalog_rejection(ycxx, scope, env, diagnostic, *, format_='json', line=None):
+    before = scope_state(scope)
+    runtime = Path(env['YCXX_RUNTIME_DIR'])
+    runtime_before = scope_state(runtime)
+    try:
+        result = subprocess.run([ycxx, 'show', '--targets', f'--format={format_}'],
+                                cwd=scope, env=env, capture_output=True, timeout=20)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f'catalog blocked reading {scope / "build.ycxx"}') from error
+    assert result.returncode == 1 and not result.stdout, result
+    stderr = result.stderr.decode('utf-8')
+    location = 'build.ycxx' if line is None else f'build.ycxx:{line}:'
+    assert diagnostic in stderr and location in stderr, stderr
+    assert scope_state(scope) == before and scope_state(runtime) == runtime_before, 'rejected catalog wrote state'
+
+
+def check_catalog_manifest_paths(ycxx, scope, env):
+    for name in ('fifo', 'linked-fifo', 'directory', 'linked-file'):
+        (scope / name).mkdir(parents=True)
+    fifo = scope / 'fifo' / 'build.ycxx'
+    os.mkfifo(fifo, 0o600)
+    (scope / 'linked-fifo' / 'build.ycxx').symlink_to(fifo)
+    (scope / 'directory' / 'build.ycxx').mkdir()
+    for name in ('fifo', 'linked-fifo', 'directory'):
+        check_catalog_rejection(ycxx, scope / name, env, 'not a regular file')
+
+    linked = scope / 'linked-file'
+    definition = 'cpp.library "é" {}\n  cpp.library "库/🚀" {}\n'
+    (linked / 'definition.ycxx').write_text(definition, encoding='utf-8')
+    (linked / 'build.ycxx').symlink_to('definition.ycxx')
+    check_catalog(ycxx, linked, env, definition, [('é', 'cpp.library'), ('库/🚀', 'cpp.library')])
+
+
+def check_catalog_manifest_encoding(ycxx, scope, env):
+    scope.mkdir(parents=True)
+    manifest = scope / 'build.ycxx'
+    for definition, line in (
+        (b'# target names\ncpp.library "caf\xe9" {}\n', 2),
+        (b'# bad comment \xe9\ncpp.library "valid" {}\n', 1),
+        (b'cpp.library "overlong \xc0\xaf" {}\n', 1),
+        (b'cpp.library "surrogate \xed\xa0\x80" {}\n', 1),
+        (b'cpp.library "out of range \xf4\x90\x80\x80" {}\n', 1),
+    ):
+        manifest.write_bytes(definition)
+        for format_ in ('json', 'text', 'html'):
+            check_catalog_rejection(ycxx, scope, env, 'invalid UTF-8', format_=format_, line=line)
+
+
 def check_unresolved(ycxx, scope, definition):
     assert show(ycxx, scope, '--format=source') == definition.encode('utf-8')
     plan = show_json(ycxx, scope)
@@ -317,6 +366,8 @@ def main():
         cold_catalog = check_catalog(ycxx, scope, env, definition, INSPECTION_TARGETS)
         check_catalog_options(ycxx, scope, env)
         check_catalog_scopes(ycxx, scope / 'catalog-nesting', env)
+        check_catalog_manifest_paths(ycxx, scope / 'catalog-paths', env)
+        check_catalog_manifest_encoding(ycxx, scope / 'catalog-encoding', env)
         check_unresolved(ycxx, scope, definition)
         (scope / '.ycxx').mkdir()
         try:
