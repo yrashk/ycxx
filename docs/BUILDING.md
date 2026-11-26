@@ -1,8 +1,9 @@
 # Building ycxx
 
-ycxx is built by GCC 16.2 (`-freflection -fcontracts`) against libycxx, the submodule at
-`deps/libycxx`, with `import std;` (DECISIONS §3.1, §3.3). You need CMake 3.30 or later, Ninja
-and Python 3.10 or later. Linux x86_64 and macOS arm64 are supported.
+ycxx is built by GCC 16.2 (`-freflection -fcontracts`) with `import std;`
+(DECISIONS §3.1, §3.3). The default standard library is libycxx. An optional CMake configuration
+builds against GCC's libstdc++. You need CMake 3.30 or later, Ninja and Python 3.10 or later.
+The project targets Linux x86_64 and macOS arm64.
 
 ```sh
 tools/build                      # configures build/ on first use, builds, runs the smoke test
@@ -61,6 +62,48 @@ provisioned on its own: `deps/libycxx/tools/toolchain/provision --clang-only`.
 
 CMake target names are `ycxxc*` and our options are `YCXXC_*`, because libycxx owns `ycxx*` and
 `YCXX_*`.
+
+## Linking ycxx into a C++ application
+
+Use CMake with GCC 16.2, Ninja, and the same C++ standard library as your ycxx build.
+The source targets include `ycxx::engine`, `ycxx::preprocessor`, `ycxx::frontend`,
+`ycxx::ir`, `ycxx::object`, `ycxx::linker`, `ycxx::compiler`, and `ycxx::project_build`.
+The [embedding examples](../examples/embedding) use the query engine and compiler pipeline
+as independent components.
+
+- `YCXXC_BUILD_SHARED_LIBS=ON` builds shared components. The default builds static archives.
+- `YCXXC_STDLIB=libycxx` selects the libycxx bootstrap runtime. This is the default.
+- `YCXXC_STDLIB=system` selects the configured GCC installation's libstdc++ and its `std` module.
+  It also builds libycxx's portable execution component against that same libstdc++.
+- `YCXXC_LIBYCXX_SOURCE_DIR` selects the libycxx checkout. For work on both repositories, point
+  it at a checkout with the portable provider and shared-mode contract handler.
+
+```sh
+cmake -S . -B build-system -G Ninja -DYCXXC_STDLIB=system
+cmake --build build-system --target ycxxc
+```
+
+Add the ycxx checkout with `add_subdirectory` for a source build. To install the component
+libraries and their CMake targets, build with `YCXXC_INSTALL=ON`, then run `cmake --install`.
+Use a separate build directory and installation prefix for each linkage and standard-library choice.
+In a separate CMake build, use `find_package(ycxx CONFIG REQUIRED)` and link the component
+you need. Set `CMAKE_PREFIX_PATH` to the installation prefix and build the examples with
+`YCXX_EMBED_INSTALLED=ON`, then run `ctest --test-dir <consumer-build> --output-on-failure`.
+The stock configuration also tests catching an exception from a separately built shared library.
+For an installed compiler session, pass the include paths to `ycxx::pp::Config`.
+The package exposes `ycxx_RESOURCE_DIR` for the compiler resource headers and
+`ycxx_TARGET_INCLUDE_DIR` for the target libycxx headers.
+`ycxx_STDLIB` identifies the standard library used to build the package.
+
+For an SDK built on arm64 macOS with the target runtime, `ycxx_DARWIN_RUNTIME_ARCHIVES` gives
+the installed archive paths in link order. Use them for `ycxx::pipeline::ArchiveLinkInputs`
+along with `ycxx_DARWIN_RUNTIME_UNDEFINED`, which lists the initial undefined symbols.
+Both lists come from the runtime configuration used to build the SDK. The
+`ycxx::pipeline::darwin_runtime()` helper gives the build-tree defaults used by the CLI.
+
+The C++ interfaces use modules and the selected runtime's C++ types. Compile their consumers
+with the matching compiler and runtime. A compiler session owns the values returned by its
+queries, including object and diagnostic data. Copy values that need to survive a session update.
 
 ## Preprocessor policy
 

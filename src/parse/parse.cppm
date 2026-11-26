@@ -1897,10 +1897,11 @@ public:
 
 private:
   struct ClassAlignment {
-    u8 value = 0;  // the strictest written alignment, including a zero-only sequence
+    u8 value = 0;  // the selected written alignment, zero for a zero-only sequence
     u32 at = 0;    // in the item, for diagnostics
     u64 natural = 0;  // once the definition's natural alignment has been computed
     std::vector<std::pair<u32, u32>> specifiers;  // the applied ranges in the region
+    std::vector<u32> zeros;  // zero operands that GCC diagnoses, relative to the item
     bool dependent = false;  // a member's alignment is checked again when its class is instantiated
     u64 effective(u64 natural_alignment) const { return value ? value : natural_alignment; }
   };
@@ -4306,12 +4307,19 @@ private:
     return true;
   }
 
-  // Whether integral type `t` represents `v` (`big`: the unsigned value of v's bits, 2^63 or more).
-  bool holds(QualType t, std::int64_t v, bool big) {
-    sema::IntShape sh = sema::shape(s_.world().target, *s_.types().builtin_of(t));
-    if (big) return !sh.is_signed && sh.bits == 64;
-    if (sh.is_signed) return sh.bits >= 64 || (v >= -(std::int64_t(1) << (sh.bits - 1)) && v < (std::int64_t(1) << (sh.bits - 1)));
-    return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
+  struct EnumValue {
+    ast::Bits128 bits{};
+    bool negative = false;
+  };
+
+  // An unsigned 128-bit value can have its high bit set while remaining positive.
+  bool holds(QualType t, EnumValue value) {
+    const auto builtin = *s_.types().builtin_of(t);
+    const auto shape = builtin == sema::Builtin::bool_ ? sema::IntShape{1, false}
+                                                       : sema::shape(s_.world().target, builtin);
+    if ((value.negative && !shape.is_signed) || (!value.negative && shape.is_signed && ast::is_negative(value.bits)))
+      return false;
+    return ast::wrap(value.bits, shape.bits, shape.is_signed) == value.bits;
   }
 
   u32 after_definition_attributes() {
@@ -4816,6 +4824,7 @@ private:
   std::optional<Program::ClassAlignment> read_alignment(std::vector<ast::AnnotationSema>& annotations, bool field = false) {
     sema::Sema::ImmediateReferenceScope references(s_, /*allowed=*/true);
     sema::Sema::ClassAlignmentOperand operand_context(s_);
+    const bool last_nonzero = !field && s_.compatibility() == ast::Compatibility::gcc;
     Program::ClassAlignment alignment;
     alignment.at = ps_.pos();
     while (ps_.is(Tk::kw_alignas)) {
@@ -4869,7 +4878,8 @@ private:
         s_.diag(at, field ? Diag::field_alignment_unsupported : Diag::class_alignment_unsupported);
         return std::nullopt;
       }
-      if (bits.lo > alignment.value) {
+      if (last_nonzero && bits.lo == 0) alignment.zeros.push_back(at);
+      if (last_nonzero ? bits.lo != 0 : bits.lo > alignment.value) {
         alignment.value = u8(bits.lo);
         alignment.at = at;
       }
@@ -4909,30 +4919,60 @@ private:
       s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
       return bad();
     }
-    const auto cls = std::to_underlying(sem.entity);
-    if (const auto definition = p_->class_items_.find(cls); definition != p_->class_items_.end() && definition->second < k_) {
-      const auto written = p_->class_alignments_.find(definition->second);
-      if (written == p_->class_alignments_.end()) {
-        s_.diag(alignment->at, Diag::class_alignment_missing);
-        return bad();
-      }
-      p_->class_def(definition->second);
-      const auto& prior = written->second;
-      if (!prior.natural && (prior.value || alignment->value)) {
-        s_.diag(alignment->at, Diag::class_alignment_uncertain_layout);
-        return bad();
-      }
-      if (alignment->value && alignment->value < prior.natural) {
-        s_.diag(alignment->at, Diag::class_alignment_weak);
-        return bad();
-      }
-      if (prior.natural && alignment->effective(prior.natural) != prior.effective(prior.natural)) {
-        s_.diag(alignment->at, Diag::class_alignment_mismatch);
-        return bad();
-      }
-    }
+    if (!check_class_alignment_redeclaration(std::to_underlying(sem.entity), *alignment)) return bad();
     if (!class_declared(sem, key, at)) return bad();
     p_->class_alignments_.emplace(k_, std::move(*alignment));
+  }
+
+  bool check_class_alignment_redeclaration(u32 cls, const Program::ClassAlignment& alignment) {
+    const auto mode = s_.compatibility();
+    const auto definition = p_->class_items_.find(cls);
+    const bool defined = definition != p_->class_items_.end() && definition->second < k_;
+    if (mode == ast::Compatibility::gcc) {
+      if (defined) {
+        const u32 first = ps_.index() - ps_.pos();
+        for (const auto& specifier : alignment.specifiers) s_.diag(specifier.first - first, Diag::class_alignment_ignored);
+      } else {
+        for (u32 at : alignment.zeros) s_.diag(at, Diag::class_alignment_zero);
+      }
+      return true;
+    }
+    const bool clang = mode == ast::Compatibility::clang;
+    if (defined) {
+      const auto written = p_->class_alignments_.find(definition->second);
+      if (written == p_->class_alignments_.end()) {
+        s_.diag(alignment.at, Diag::class_alignment_missing);
+        return false;
+      }
+      if (clang && !alignment.value) return true;
+      p_->class_def(definition->second);
+      const auto& prior = written->second;
+      if (!prior.natural && (prior.value || alignment.value)) {
+        s_.diag(alignment.at, Diag::class_alignment_uncertain_layout);
+        return false;
+      }
+      if (!clang && alignment.value && alignment.value < prior.natural) {
+        s_.diag(alignment.at, Diag::class_alignment_weak);
+        return false;
+      }
+      if (prior.natural && alignment.effective(prior.natural) != prior.effective(prior.natural)) {
+        s_.diag(alignment.at, Diag::class_alignment_mismatch);
+        return false;
+      }
+    } else if (clang) {
+      const auto declarations = p_->decls_.find(cls);
+      if (declarations != p_->decls_.end()) {
+        for (const auto& [item, previous] : declarations->second) {
+          if (item >= k_) continue;
+          const auto written = p_->class_alignments_.find(item);
+          if (written != p_->class_alignments_.end() && written->second.value != alignment.value) {
+            s_.diag(alignment.at, Diag::class_alignment_mismatch);
+            return false;
+          }
+        }
+      }
+    }
+    return true;
   }
 
   // A class definition at namespace scope ([class.pre]): `class-key identifier { … }`, then
@@ -5077,7 +5117,10 @@ private:
     sem.is_final = is_final;
     if (!template_) sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();
-    if (alignment) p_->class_alignments_.emplace(k_, std::move(*alignment));
+    if (alignment) {
+      for (u32 at : alignment->zeros) s_.diag(at, Diag::class_alignment_zero);
+      p_->class_alignments_.emplace(k_, std::move(*alignment));
+    }
     s_.own.push_back({name, sem});
     if (!bases.empty()) p_->set_bases(s_.types().class_of(sem.type), std::move(bases));
     if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
@@ -5499,11 +5542,6 @@ private:
         s_.diag(u.begin, Diag::enum_base_not_integral);
         return bad();
       }
-      // Enumerator values are kept in 64 bits, so a 128-bit underlying type is not yet (#1176).
-      if (types.is(u.type, sema::Builtin::int128) || types.is(u.type, sema::Builtin::unsigned_int128)) {
-        s_.diag(u.begin, Diag::not_supported, Tk::kw___int128);
-        return bad();
-      }
       fixed = sema::Types::unqualified(types.canonical(u.type));
     } else if (scoped) {
       fixed = s_.builtin(sema::Builtin::int_);  // [dcl.enum]/5: int unless given
@@ -5592,11 +5630,13 @@ private:
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
     // The template checks the list with dependent values; replay evaluates them ([temp.inst]).
     const bool pattern = cls != EntityId::none && !inst_ && types.is_dependent(types.class_type(cls));
-    struct EnumValue {
-      std::int64_t bits = 0;
-      bool big = false;  // an unsigned value of 2^63 or more
-    };
+    using sema::Builtin;
+    const bool clang = s_.compatibility() == ast::Compatibility::clang;
+    constexpr Builtin promotions[] = {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long,
+                                      Builtin::long_long, Builtin::unsigned_long_long,
+                                      Builtin::int128, Builtin::unsigned_int128};
     std::optional<EnumValue> next = EnumValue{};
+    bool increment_overflow = false;
     // Before the closing brace an enumerator has its initializer's type, or the previous one's,
     // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
     QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
@@ -5630,17 +5670,10 @@ private:
             // A nested enum instantiation can diagnose the error outside this item's result.
             if (replay != EntityId::none) return;
             if (unnamed && inst_) return bad();
-          } else if (sema::shape(s_.world().target, *types.builtin_of(v.type())).bits > 64) {
-            // Enumerator values are kept in 64 bits and typed by their initializers until the
-            // closing brace ([dcl.enum]/5), so a 128-bit initializer is not yet (#1176).
-            s_.diag(x.begin, Diag::not_supported, Tk::kw___int128);
-            return bad();
           } else {
-            sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
-            sema::u64 bits = s_.world().values.rec(*c).bits;
-            const bool extend = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1);
-            value = EnumValue{std::int64_t(extend ? bits | ~((sema::u64{1} << sh.bits) - 1) : bits),
-                              !sh.is_signed && (bits >> 63) != 0};
+            const auto sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
+            const auto bits = ast::int_bits(s_.ins(), *c);
+            value = EnumValue{bits, sh.is_signed && ast::is_negative(bits)};
             if (fixed) {
               Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
               if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
@@ -5649,32 +5682,38 @@ private:
             }
           }
         }
+      } else if (increment_overflow) {
+        no_enum_type(en_at);  // [dcl.enum]/5: the increment exceeds even the widest supported integer.
       } else if (!value) {
         if (!fixed) prev_type = s_.builtin(sema::Builtin::dependent);
       } else if (!values.empty()) {
-        if (const auto& previous = values.back(); previous && previous->big && previous->bits == -1) {
-          no_enum_type(en_at);  // [dcl.enum]/5: no type holds the incremented value
-          value->big = false;
-        }
         // An incremented value outside the previous type widens to an integral type that holds it.
-        if (!fixed && !holds(prev_type, value->bits, value->big)) {
-          for (sema::Builtin b : {sema::Builtin::int_, sema::Builtin::unsigned_int, sema::Builtin::long_, sema::Builtin::unsigned_long})
-            if (holds(s_.builtin(b), value->bits, value->big)) {
-              prev_type = s_.builtin(b);
-              break;
-            }
+        if (!fixed && !holds(prev_type, *value)) {
+          const auto candidates = std::span(promotions).first(clang ? 6 : std::size(promotions));
+          const auto next_type = std::ranges::find_if(candidates, [&](Builtin b) { return holds(s_.builtin(b), *value); });
+          if (next_type != candidates.end()) {
+            prev_type = s_.builtin(*next_type);
+          } else if (clang && value->bits == ast::Bits128{0, 1}) {
+            const auto written = s_.world().values.integer(s_.builtin(Builtin::unsigned_int128), value->bits);
+            s_.diag(en_at, Diag::enum_increment_truncation, written);
+            value = EnumValue{};
+          } else {
+            no_enum_type(en_at);
+          }
         }
-        if (fixed) {
-          QualType ll = s_.builtin(value->big ? sema::Builtin::unsigned_long_long : sema::Builtin::long_long);
-          Ex lit = s_.literal(ll, s_.world().values.integer(ll, sema::u64(value->bits)), ast::ValueCategory::prvalue, en_at, en_at);
-          if (s_.narrows(lit, *fixed)) s_.diag(en_at, Diag::narrowing, ll, *fixed);
+        if (fixed && !holds(*fixed, *value)) {
+          const auto written = s_.builtin(value->negative ? Builtin::int128 : Builtin::unsigned_int128);
+          s_.diag(en_at, Diag::narrowing, written, *fixed);
         }
       }
-      // The next implicit value, past INT64_MAX into the unsigned values.
+      // Increment a mathematical integer represented in up to 128 bits.
       next.reset();
-      if (value)
-        next = EnumValue{std::int64_t(sema::u64(value->bits) + 1),
-                         value->big || value->bits == std::numeric_limits<std::int64_t>::max()};
+      increment_overflow = false;
+      if (value) {
+        const auto added = ast::wide::add(value->bits, {1, 0});
+        increment_overflow = !value->negative && ast::wide::is_zero(added);
+        if (!increment_overflow) next = EnumValue{added, value->negative && !ast::wide::is_zero(added)};
+      }
       if (!enumerator_names.insert(en).second)
         s_.diag(en_at, Diag::conflicting_declaration, en);  // [dcl.enum]/2: unique within the list
       // [basic.scope.scope]: an unscoped enumerator is declared in the enclosing scope.
@@ -5692,7 +5731,7 @@ private:
           }
       }
       const EntityId x = unnamed ? EntityId::none : enumerator_entity(en);
-      const ConstId c = value ? s_.world().values.integer(prev_type, sema::u64(value->bits)) : ConstId::none;
+      const ConstId c = value ? s_.world().values.integer(prev_type, value->bits) : ConstId::none;
       if (!unnamed) {
         if (!value) p_->value_dependent_member(x);
         else if (!pattern) p_->set_constant(x, c, k_);
@@ -5720,34 +5759,29 @@ private:
     if (!fixed && has_dependent_value) {
       er.underlying.reset();
     } else if (!fixed) {
-      using sema::Builtin;
-      const bool negative = std::ranges::any_of(values, [](const auto& v) { return v->bits < 0 && !v->big; });
-      Builtin u = Builtin::unsigned_int;
-      if (!negative) {
-        sema::u64 hi = 0;
-        for (const auto& v : values) hi = std::max(hi, sema::u64(v->bits));
-        if (hi > std::numeric_limits<std::uint32_t>::max()) u = Builtin::unsigned_long;
-      } else if (std::ranges::any_of(values, [](const auto& v) { return v->big; })) {
-        no_enum_type(name_at);  // [dcl.enum]/7: no integral type holds them all
-        u = Builtin::long_;
+      const bool negative = std::ranges::any_of(values, [](const auto& v) { return v->negative; });
+      const auto all_fit = [&](Builtin type) {
+        return std::ranges::all_of(values, [&](const auto& v) { return holds(s_.builtin(type), *v); });
+      };
+      const Builtin ordinary[] = {negative ? Builtin::int_ : Builtin::unsigned_int,
+                                  negative ? Builtin::long_ : Builtin::unsigned_long};
+      const auto underlying = std::ranges::find_if(ordinary, all_fit);
+      if (underlying != std::end(ordinary)) {
+        er.underlying = s_.builtin(*underlying);
+      } else if (clang) {
+        s_.diag(name_at, Diag::enum_range_truncation);
+        er.underlying = s_.builtin(negative ? Builtin::long_long : Builtin::unsigned_long_long);
       } else {
-        auto [lo, hi] = std::ranges::minmax(values | std::views::transform([](const auto& v) { return v->bits; }));
-        u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
-                                                                                                             : Builtin::long_;
+        const Builtin extended = negative ? Builtin::int128 : Builtin::unsigned_int128;
+        if (!all_fit(extended)) no_enum_type(name_at);
+        er.underlying = s_.builtin(extended);
       }
-      er.underlying = s_.builtin(u);
-      // [conv.prom]/3: the first of int, unsigned int, long, unsigned long that holds every
-      // value of the enumeration (its range, [dcl.enum]/8: these hold it when they hold the
-      // enumerators).
-      Builtin p = Builtin::unsigned_long;
-      for (Builtin c : {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long}) {
-        const bool all = std::ranges::all_of(values, [&](const auto& v) { return holds(s_.builtin(c), v->bits, v->big); });
-        if (all) {
-          p = c;
-          break;
-        }
-      }
-      er.promotion = s_.builtin(p);
+      // [conv.prom]/3: use the first standard type that holds the range, then the
+      // smallest suitable extended type, preferring a signed type of the same rank.
+      const auto candidates = std::span(promotions).first(clang ? 6 : std::size(promotions));
+      const auto promotion = std::ranges::find_if(candidates, all_fit);
+      if (promotion != candidates.end()) er.promotion = s_.builtin(*promotion);
+      else er.promotion = clang ? s_.builtin(Builtin::long_long) : *er.underlying;
     }
     if (unnamed) {
       if (er.enumerators.empty() || !ps_.expect(Tk::r_brace)) return bad();
@@ -5771,7 +5805,7 @@ private:
       sema::EnumeratorRec& xr = er.enumerators[i];
       if (unnamed) xr.entity = enumerator_entity(xr.name);
       if (values[i] && er.underlying) {
-        xr.value = s_.world().values.integer(*er.underlying, sema::u64(values[i]->bits));
+        xr.value = s_.world().values.integer(*er.underlying, values[i]->bits);
         p_->set_constant(xr.entity, xr.value, k_);
       } else {
         p_->value_dependent_member(xr.entity);
@@ -6188,8 +6222,8 @@ private:
         const auto& owner = s_.world().entities.rec(c.entity);
         const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
                                      p_->is_namespace(p_->outermost_class_scope(c.entity));
-        // Replay the written object ref-qualifier for the supported deleted copy-assignment form.
-        // member_function_or_static checks the copy-assignment parameter and declaration context.
+        // Replay the written object ref-qualifier for deleted special-member assignment.
+        // member_function_or_static checks the parameter and declaration context.
         const bool deleted_template_assignment = !spec.is_static && !member_template_ &&
             owner.templ != EntityId::none && p_->is_namespace(owner.scope) &&
             s_.ins().names.spelling(d.name) == "operator=" && plain_deleted_body();
@@ -6990,6 +7024,9 @@ private:
         std::string candidate = owner;
         while (candidate != ns && p_->is_inline_namespace(candidate, k_)) candidate = Program::parent_of(candidate);
         if (candidate != ns || !Program::encloses(p_->ns_of(k_), owner)) continue;
+        target = owner;
+      }
+      if (fn) {
         if (type != prior_type) {
           // Match the whole function type with only its outer language linkage substituted.
           // An unspecified linkage inherits that of this redeclaration ([dcl.link]).
@@ -7002,9 +7039,10 @@ private:
             continue;
           }
         }
-        target = owner;
-      } else if (fn && type != prior_type) {
-        continue;
+        if (explicit_lang && ((ds->flags ^ sem.flags) & sema::decl_flag::lang_c)) {
+          linkage_conflict = true;
+          continue;
+        }
       }
       mem = *ds, has_mem = true;
       c_namespace = std::move(target);
@@ -7020,6 +7058,7 @@ private:
     }
     sem.entity = mem.entity;
     sem.linkage = mem.linkage;
+    if (fn && type != s_.types().canonical(mem.type)) sem.type = mem.type;
     if (c_namespace && (mem.flags & sema::decl_flag::lang_c)) {
       sem.type = mem.type;
       sem.flags |= sema::decl_flag::lang_c;
@@ -8083,10 +8122,14 @@ private:
       const auto& owner = s_.world().entities.rec(c.entity);
       const bool supported_class = p_->is_namespace(p_->outermost_class_scope(c.entity)) &&
                                    ((s_.template_scopes.empty() && !inst_) || (deleted && owner.templ != EntityId::none));
-      if (!supported_class || !parameter || types.rec(*parameter).rvalue_ref) {
+      // [class.copy.assign], [dcl.fct.def.delete]: an explicitly deleted move assignment
+      // is still a declared overload. Defaulting and virtual moves need separate support.
+      if (!supported_class || !parameter || ((defaulted || is_virtual) && types.rec(*parameter).rvalue_ref)) {
         s_.diag(d.name_at, Diag::not_supported, defaulted ? Tk::kw_default : Tk::kw_delete);
         return false;
       }
+      // A trailing requires-clause must affect overload viability ([over.match.viable], #1417).
+      if (deleted && types.rec(*parameter).rvalue_ref && !finish_member_definition_declarator()) return false;
       if (defaulted) {
         const auto f = types.rec(d.type);
         const auto source = types.rec(*parameter);
@@ -8202,6 +8245,8 @@ private:
         }
       }
       sem.type = d.type;
+      if (s_.compatibility() == ast::Compatibility::clang && !s_.require_concrete_object(d.type, d.name_at))
+        return false;
       if (spec.is_inline || spec.is_constexpr) {
         // An inline static member defines an object ([class.static.data]).
         if (!s_.require_complete(d.type, d.name_at) || !s_.require_concrete_object(d.type, d.name_at) ||
@@ -8647,9 +8692,11 @@ private:
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !(effective_extern && !has_init);
-    if (!fn && definition &&
-        (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
-      return false;
+    if (!fn) {
+      if ((definition || s_.compatibility() == ast::Compatibility::clang) && !s_.require_concrete_object(d.type, d.name_at))
+        return false;
+      if (definition && !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+    }
     if (!attach_function_annotations(sem, spec, d, fn && !template_ && !explicit_)) return false;
     if (definition) flags |= sema::decl_flag::definition;
     const bool reference = types.is_reference(d.type);
@@ -8724,22 +8771,29 @@ private:
       }
       if (fn && !d.qualified && !operator_function_ok(d)) return false;
       if (fn) {
-        if (!explicit_lang && !template_ && std::ranges::any_of(prior, [&](const ast::DeclSema& p) {
-              return p.kind == ast::DeclKind::function && (p.flags & sema::decl_flag::lang_c) &&
-                     !(p.flags & sema::decl_flag::template_) && same_function_parameters(p.type, d.type);
-            }))
-          lang = LangLinkage::c;  // [dcl.link]/6: inherited from a corresponding declaration
+        const sema::TypeRec& r = types.rec(d.type);
+        LangLinkage type_linkage = r.linkage;
+        if (!explicit_lang && !template_) {
+          // [dcl.link]/6: the name and the function type inherit independently.
+          for (const auto& earlier : prior | std::views::reverse) {
+            if (earlier.kind != ast::DeclKind::function || (earlier.flags & sema::decl_flag::template_) ||
+                !same_function_parameters(earlier.type, d.type))
+              continue;
+            if (earlier.flags & sema::decl_flag::lang_c) lang = LangLinkage::c;
+            type_linkage = types.rec(earlier.type).linkage;
+            break;
+          }
+        }
         if (ordinary_friend && is_function_def && lang == LangLinkage::c) {
           s_.diag(d.name_at, Diag::friend_c_linkage);
           return false;
         }
-        const sema::TypeRec& r = types.rec(d.type);
         if (r.fn_cv != sema::Cv::none && !d.qualified) {
           s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
           return false;
         }
         std::vector<QualType> ps = r.params;
-        sem.type = types.function(r.inner, ps, r.variadic, lang, r.fn_cv, r.fn_ref, r.fn_noexcept);
+        sem.type = types.function(r.inner, ps, r.variadic, type_linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
         if (lang == LangLinkage::c) flags |= sema::decl_flag::lang_c;
         if (r.variadic) flags |= sema::decl_flag::variadic;
         for (const parse::Param& p : d.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
@@ -8885,6 +8939,10 @@ private:
         const ast::DeclSema& p = prior.back();
         if ((p.kind == ast::DeclKind::function) != fn || p.kind == ast::DeclKind::type_alias || p.kind == ast::DeclKind::enumerator) {
           s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+          return false;
+        }
+        if (fn && explicit_lang && ((p.flags ^ sem.flags) & sema::decl_flag::lang_c)) {
+          s_.diag(d.name_at, Diag::linkage_conflict, d.name);
           return false;
         }
         const bool canonical_match = fn && (allocation || ordinary_friend ||
@@ -10531,6 +10589,8 @@ bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record,
 void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record,
                                       std::vector<engine::Diagnostic>& diags) {
   auto written = class_alignments_.find(item);
+  const bool gcc = compatibility() == ast::Compatibility::gcc;
+  const bool clang = compatibility() == ast::Compatibility::clang;
   const auto declared = decls_.find(std::to_underlying(cls));
   if (declared == decls_.end()) return;
   const auto& declarations = declared->second;
@@ -10538,8 +10598,17 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
     return declaration.first < item && class_alignments_.contains(declaration.first);
   };
   const auto& source = items_->items[item];
+  if (gcc && (written == class_alignments_.end() || !written->second.value)) {
+    // GCC retains the most recent nonzero forward alignment when the definition supplies none.
+    for (const auto& declaration : declarations | std::views::filter(prior_alignment)) {
+      const auto earlier = class_alignments_.find(declaration.first);
+      if (earlier->second.value && (written == class_alignments_.end() || !written->second.value ||
+                                   earlier->first > written->first))
+        written = earlier;
+    }
+  }
   if (written == class_alignments_.end()) {
-    if (std::ranges::any_of(declarations, prior_alignment)) {
+    if (!gcc && std::ranges::any_of(declarations, prior_alignment)) {
       const u32 at = source.names.empty() ? 0 : source.names.front().offset;
       diags.push_back({{std::to_underlying(id(item)), at}, sema::diag_id(Diag::class_alignment_missing), {}});
     }
@@ -10563,7 +10632,14 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
     return;
   }
   alignment.natural = layout->align;
-  if (alignment.value && alignment.value < alignment.natural) {
+  if (gcc) {
+    if (alignment.value > alignment.natural) record.explicit_alignment = alignment.value;
+    return;
+  }
+  const bool prior_zero = clang && std::ranges::any_of(declarations, [&](const auto& declaration) {
+    return prior_alignment(declaration) && !class_alignments_.at(declaration.first).value;
+  });
+  if (!prior_zero && alignment.value && alignment.value < alignment.natural) {
     s.diag(alignment.at, Diag::class_alignment_weak);
     return;
   }
@@ -10573,6 +10649,13 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
   for (const auto& declaration : declarations | std::views::filter(prior_alignment)) {
     const u32 previous = declaration.first;
     const auto& prior = class_alignments_.at(previous);
+    if (clang) {
+      if (prior.value && prior.value != alignment.effective(1)) {
+        s.diag(alignment.at, Diag::class_alignment_mismatch);
+        return;
+      }
+      continue;
+    }
     if (prior.value && prior.value < alignment.natural) {
       s.diag_at({std::to_underlying(id(previous)), prior.at}, Diag::class_alignment_weak);
       return;
@@ -10583,6 +10666,8 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
     }
   }
   if (alignment.value > alignment.natural) record.explicit_alignment = alignment.value;
+  else if (prior_zero && alignment.value && alignment.value < alignment.natural)
+    record.clang_weak_alignment = alignment.value;
 }
 
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
@@ -10630,6 +10715,21 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     if (can_complete && member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     const bool implicit_move = can_complete && special_members(item, *cls, rec, &out.diags);
     pure_final_overriders(rec, *cls);
+    if (can_complete && rec.is_abstract() && compatibility() == ast::Compatibility::clang) {
+      // A nondefining static declaration can name its own class while the class is incomplete.
+      for (const sema::MemberDeclRec& member : rec.members) {
+        if (!member.is_static || member.is_function) continue;
+        const QualType element = w_->types.innermost_array_element(member.type);
+        if (!w_->types.is_class(element) || w_->types.class_of(element) != *cls) continue;
+        const auto declaration = member_decl(member.entity);
+        if (!declaration) continue;
+        const auto& source = items_->items[index(declaration->item)];
+        const auto name = std::ranges::find(source.names, w_->ins.names.spelling(member.name), &items::DeclName::name);
+        const u32 at = name == source.names.end() ? 0 : name->offset;
+        out.diags.push_back({{std::to_underlying(declaration->item), at}, sema::diag_id(Diag::abstract_object),
+                             {{std::to_underlying(element), w_->types.fp(element)}}});
+      }
+    }
     if (can_complete) classify_defaulted_default_ctor(rec, out.diags);
     if (can_complete) {
       complete_virtual_members(item, *cls, rec, members, member_declarations_valid);
@@ -12212,41 +12312,46 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       return !types.is_reference(t) && classes_.move_nontrivial(t);
     });
   }
-  // The Darwin Clang layout rule uses a trivial class ([class.prop]/2: its
-  // default constructor, copy and move operations and destructor trivial), and standard-layout
-  // (/3: one access for all its data members, no reference members, and its data members all
-  // in one class of the hierarchy), whose members and bases are too.
+  // Itanium C++ ABI §1.1, §2.4: these properties decide whether a derived class can reuse padding.
   auto pod_type = [&](QualType t) {
     while (types.is_array(t)) t = types.rec(t).inner;
     if (types.is_reference(t)) return false;
     const sema::ClassRec* m = types.is_class(t) ? classes_.find(types.class_of(t)) : nullptr;
     return !m || m->pod;
   };
-  // [dcl.fct.def.default]/5: a first-declaration defaulted or deleted assignment is not
-  // user-provided. Its fields still have to satisfy the layout predicate below.
-  const bool user_provided_assignment = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
-    return m.is_function && !m.is_static && !m.explicit_defaulted_assignment && !m.is_deleted &&
-           w_->ins.names.spelling(m.name) == "operator=";
+  // [dcl.fct.def.default]/5: defaulting a special member on a later declaration is user-provided.
+  const auto first_defaulted = [&](const sema::MemberDeclRec& member) {
+    const auto decl = member_decl(member.entity);
+    const auto first = decl ? decl_sema(*decl) : std::nullopt;
+    return first && defaulted_member_definition(index(decl->item), *first);
+  };
+  const bool user_provided_member = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& member) {
+    return (member.is_ctor || member.is_dtor || assignment_parameter(member, ct)) &&
+           !member.is_deleted && !first_defaulted(member);
   });
-  bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
-                      return rec.access_of(a.entity) != rec.access_of(b.entity);
-                    }) == rec.fields.end();
-  bool data_in_bases = std::ranges::any_of(rec.bases, [&](const sema::BaseRec& b) {
-    const sema::ClassRec* r = classes_.find(b.cls);
-    return r && (!r->fields.empty() || !r->pod);
-  });
-  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && rec.destructor_usable &&
-            rec.destructor == EntityId::none &&
-            !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_provided_assignment &&
-            std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
-            std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
-            std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
-            (rec.fields.empty() || !data_in_bases);
-  // The Itanium default uses the C++03 aggregate rule for this layout decision.
-  if (compatibility_ != ast::Compatibility::clang || w_->target.operating_system != ast::OperatingSystem::darwin)
-    rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
-      return rec.access_of(f.entity) == ast::Access::public_;
+  rec.pod = !rec.layout_requires_virtual_support && !user_provided_member &&
+            std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&
+            std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); });
+  if (compatibility_ == ast::Compatibility::clang && w_->target.operating_system == ast::OperatingSystem::darwin) {
+    // Darwin Clang also requires a default constructor and a standard-layout field arrangement.
+    const bool default_constructor = !rec.user_ctors || std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
+      return m.is_ctor && types.rec(m.type).params.empty() && (m.is_deleted || first_defaulted(m));
     });
+    const bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
+      return rec.access_of(a.entity) != rec.access_of(b.entity);
+    }) == rec.fields.end();
+    rec.pod = rec.pod && default_constructor && one_access && std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) {
+      const auto* base = classes_.find(b.cls);
+      return !base || (base->pod && (rec.fields.empty() || base->fields.empty()));
+    });
+  } else {
+    // The Itanium rule uses the C++03 aggregate layout. Section 2.4 finalization reserves
+    // the full size of an otherwise POD record even with potentially overlapping fields.
+    rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
+      return rec.access_of(f.entity) == ast::Access::public_ &&
+             (compatibility_ != ast::Compatibility::gcc || !f.no_unique_address);
+    });
+  }
   if (!user_copy_assignment || defaulted_assignment)
     declare_copy_assignment(item, cls, rec, !user_copy_assignment, deletes_implicit_copy);
   return implicit_move;

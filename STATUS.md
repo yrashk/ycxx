@@ -3,6 +3,15 @@
 What is true of the code today. Work in progress and its owners are tracked in
 [GitHub issues](https://github.com/yrashk/ycxx/issues).
 
+## Embedding
+
+- CMake builds independently linkable static or shared libraries for the query engine,
+  preprocessor, front end, IR, object formats, linker, compiler and project build.
+- The bootstrap build can use libycxx or GCC's system libstdc++. The system build uses
+  libycxx's portable execution provider for senders, scopes and the scheduler.
+- The CMake SDK exports typed C++ module interfaces. The engine and compiler samples exercise
+  build-tree and installed-package consumption. See [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+
 ## Bootstrapping (2026-11-17)
 
 - Charter written: [README.md](README.md), [DECISIONS.md](DECISIONS.md) (scope, provenance,
@@ -78,6 +87,14 @@ What is true of the code today. Work in progress and its owners are tracked in
   translation-unit configuration and is read from editor compilation commands. The
   [compatibility table](docs/compatibility.toml) records prior choices, mode behavior and probes. Constrained function
   templates use the current `Q` and `Tk` forms for supported requires-clauses and type constraints.
+  GCC mode selects the last nonzero class-head alignment and carries a preceding alignment
+  into a definition that supplies none. Clang mode checks alignment consistency on opaque
+  class declarations. The compatibility table records Clang's underalignment case separately.
+  Spec mode distinguishes C and C++ function types and encodes the C type with `FY` in a
+  mangled signature. GCC and Clang modes use one type for both. C function names retain their
+  C linkage and unmangled symbols in every mode.
+  Compiler modes also select the documented wide array bound conversions, constexpr byte
+  comparisons, empty union initializers, and abstract result checks.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -1362,6 +1379,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- A constant expression can read a scalar field through a reference to an indexed element of
+  a namespace-scope constexpr array of supported flat aggregates. L1 keeps the array element
+  and field in the address path and checks the index against the array bound ([expr.sub],
+  [expr.ref], [expr.const]). [#1403](https://github.com/yrashk/ycxx/issues/1403)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
   initializer's object, including through a conditional glvalue. Reading a later field on
@@ -2142,7 +2163,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Both the interpreter and native code use the L1 join with nullable temporary addresses. Conditional
   nontrivial destruction and reference lifetime extension remain under [#157](https://github.com/yrashk/ycxx/issues/157).
 
-## Local class prvalue selection (#740)
+## Class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
   aggregate field, or a fixed-array element directly ([expr.cond], [expr.comma], [dcl.init.aggr],
@@ -2153,6 +2174,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   later initializer clauses and are destroyed with the rest of the full-expression's
   temporaries in reverse order ([class.temporary]). Tests in `tests/own/class-selection/`
   check both arms, later sibling initialization, and temporary and object destruction.
+- A native by-value return can initialize its result object from a built-in conditional
+  with nonthrowing evaluation and cleanup. In the supported mixed case, overload
+  resolution copy-initializes a prvalue from the cv-unqualified lvalue arm of the same
+  class. A selected prvalue can initialize the result even when copy and move are deleted.
+  The result's lifetime starts before temporary destruction, which precedes destruction
+  of the function's locals ([stmt.return], [basic.life]).
 - This slice supports nonthrowing initializers and cleanup. More general cleanup during
   unwinding remains in #219. Potentially overlapping subobjects remain under #301 and #304,
   other class initializer contexts under #740, and other conditional temporaries under #157.
@@ -2314,14 +2341,15 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - In symbols, `Dy <type> <expression>` is a substitution candidate. Spec and GCC modes use the
   converted constant index and the bound pack as `J <args> E`. Clang mode preserves a written
   literal's type and uses a placeholder for a bound pack (DECISIONS §1.7).
-- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
-  parameter-index form, and asm labels pin GCC's constant form.
+- GCC and Clang modes retain the written identity of supported named indices and operator
+  expressions. Spec mode uses the converted value. A named enumerator keeps its enum type in
+  compiler modes, and a named constant uses an entity reference.
+- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*` and
+  `tests/daemon/compatibility.py`. The cross-target and native mixed-object checks cover written
+  and literal indices, repeated substitutions, and class-bound packs.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. ycxx mangles an enumerator or a named
-  constant as a converted integer. Clang and GCC write the enumerator as an enum-typed literal
-  and a namespace constant as an external-name primary (#796). With these,
-  libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+  signature (#209). In a body that arithmetic works.
 
 ## Functional conversions with pack expansions (#915)
 
@@ -2857,14 +2885,15 @@ Other arguments diagnose an unsupported spelling when the body is instantiated.
 
 ## Source location builtins (#327)
 
-`__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
-source line, including through macro expansion and `#line`. An omitted ordinary function
+`__builtin_LINE()` is a zero-argument constant expression. Its type is `unsigned int` in spec
+and Clang modes and `int` in GCC mode. It uses the presumed source line, including through
+macro expansion and `#line`. An omitted ordinary function
 argument evaluates its default with the invocation line, which nested defaults inherit.
 The interpreter and native code share the same scoped evaluation. Translation units with the
 builtin track presumed lines in their semantic input.
 [Design](docs/design/source-line-defaults.md)
 
-Linux x86-64 supports the pinned libycxx `std::source_location::current()` descriptor
+x86-64 Linux and arm64 Darwin support the pinned libycxx `std::source_location::current()` descriptor
 for ordinary omitted arguments. The descriptor stores the presumed filename, line,
 one-based byte column and enclosing function in translation-unit-local storage.
 Resident results observe edits to presumed filenames and columns as well as lines.
@@ -3231,8 +3260,9 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   GCC as black boxes). A class holding one is placed the same way.
 - Not yet:
   - A 128-bit integer through an ellipsis, or named in a variadic function on x86-64 (#1247).
-  - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
-    are diagnosed as not supported (#1176).
+- **Enumerations**: retain extended integer values and use them in fixed underlying types.
+  The modes select the unfixed underlying type and overflow behavior documented in
+  [the compatibility matrix](docs/compatibility.toml) (#1176).
 - Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
   peer, native arithmetic against constant evaluation, and calls in both directions with a Clang
   peer), and `unit.linux_int128` runs the native ones on x86-64 Linux with GCC and Clang peers.
@@ -3352,6 +3382,32 @@ planner field, and manifest location. Artifact edges name the output, and
 named input edges also give the consumer binding. Unresolved rules can yield
 an incomplete graph with the edges resolved so far. The HTML report shows
 these records under **Dependencies**, with links into the manifest.
+
+The `dependency_graph.value_edges` array records resolved typed export
+bindings (#1477). A value edge names the consumer, usage (`capabilities`
+or `facts`), binding, producer, and export, with the manifest location of
+the `value(...)` reference. Graph completeness applies to both edge arrays.
+HTML plans and comparisons show current edges under **Value bindings**,
+with source links.
+
+`ycxx show --against` compares occurrence counts by consumer, usage,
+producer, output, and binding when both plans have complete dependency
+graphs (#1464).
+JSON includes before and after edge records for each changed count. HTML
+shows those counts under **Dependency changes** and links current sites to
+the manifest. Moved references preserve the count, and older snapshots
+without a dependency graph can still compare plan facts.
+
+When both plans have complete graphs with `value_edges`, `ycxx show --against`
+also compares typed binding occurrence counts by consumer, usage, binding,
+producer, and export (#1493). JSON records before and after occurrences in
+`value_binding_changes`. HTML shows counts and source sites under
+**Value binding changes**, with links for sites in the current manifest.
+
+The **Target dependencies** panel in standalone HTML plans and comparisons
+starts at the selected target (#1499). Artifact and value uses link to the
+producer's card and to their sites in `build.ycxx`. Shared producers have
+one card, and incomplete plans show the links resolved so far.
 
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
@@ -3493,14 +3549,31 @@ Inspection reports current helper identity or availability without launching
 the action. The Make adapter uses these declarations for its C compiler and
 archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
+A rule-emitted generator can select an executable artifact with
+`tool = input("name")` (#1505). The producer's named output is staged using
+its bytes and executable mode, which enter the consumer's ordinary action
+identity. Inspection reports the staged path and selector and links the
+input edge to the producer. The staged tool example watches an executable
+script that writes a generated C++ header.
+
+A witness can also use `tool = input("name")` to run a staged executable
+artifact (#1515). The staged-witness example classifies the generated
+analyzer's stdout into a typed score and generates a C++ constant from it.
+An analyzer edit with the same score updates the witness evidence and
+reuses the header and native build.
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
 adding receipt provenance to the consumer's arguments. The shader reflection
 example consumes the same fragment SPIR-V receipt as its runtime bundle and
-generates a C++ header from the descriptor layout. An equal layout preserves
-native work. Read-only inspection and watch reobserve the producer graph,
-including the selected tools and input files. [#1258](https://github.com/yrashk/ycxx/issues/1258)
+generates a C++ header from the descriptor layout. The sample includes uniform
+buffers and one-dimensional literal `sampler2D` arrays, with typed descriptor
+kinds and element counts. Its executable checks the count in the bundled SPIR-V.
+An equal layout preserves native work. Read-only inspection and watch reobserve
+the producer graph, including the selected tools and input files.
+[#1258](https://github.com/yrashk/ycxx/issues/1258)
+[#1486](https://github.com/yrashk/ycxx/issues/1486)
 
 ## The engine trace (#245, 2026-11-19)
 
@@ -3781,6 +3854,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   declaration, including with an lvalue or rvalue ref-qualifier. Specializations preserve
   deletion and diagnose a selected deleted overload.
   [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+- Ordinary classes and class templates accept an unconstrained, nonvirtual deleted move assignment
+  on its first in-class declaration. It affects implicit special members and remains a candidate
+  after specialization. A diagnostic is required when it wins overload resolution.
+  [#244](https://github.com/yrashk/ycxx/issues/244) · [#1417](https://github.com/yrashk/ycxx/issues/1417)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
@@ -4357,6 +4434,11 @@ values, end to end; results match Clang's bit for bit.
 - On Linux x86-64, a dependent `__builtin_fabsl` call in a template definition keeps its
   `long double` result type. When instantiation selects the call and the operand is concrete,
   a well-formed call receives the unsupported x87 value diagnostic ([stmt.if], [temp.inst], #201).
+- `__builtin_nansl("")` is recognized as a `long double` prvalue in libycxx's `<limits>`
+  template, including when the arm is discarded or the expression is unevaluated. A reached
+  constant evaluation or native emission diagnoses the unsupported signaling NaN value.
+  `__has_builtin` answers 0 on all targets. x87 signaling NaN values remain in #645, and other
+  GNU builtin payloads remain in #248. [#1397](https://github.com/yrashk/ycxx/issues/1397)
 - `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
 - Tests: `tests/own/floating` (84 spec-only, and 4 from the review: literals, conversions, constant evaluation, run
   tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
@@ -4792,6 +4874,10 @@ Each is removed once ycxx compiles itself.
   - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
     its importers cannot read ("failed to read compiled module cluster: Bad file data").
   - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
+- **The interpreter's byte comparison is defined in its implementation unit** (`src/interp/ops.cpp`).
+  - Cause: with stock libstdc++, GCC 16.2 cannot read the `ycxx.interp:machine` partition when
+    it contains the body of `Machine::compare_bytes`.
+  - Fix: belongs in GCC. The definition can return to the partition when ycxx compiles itself.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`, `src/ir`, `ycxx.hash`'s `Fp128`).
   - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
     struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by

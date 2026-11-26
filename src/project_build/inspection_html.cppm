@@ -50,12 +50,23 @@ constexpr std::string_view styles = R"HTML(
   .facts th { color: var(--muted); font-size: .76rem; font-weight: 670; }
   .facts th:first-child { width: 22%; }
   .facts th:last-child { width: 38%; }
-  .catalog th:first-child { width: 40%; }
+  .catalog th:first-child, .dependency-comparison th:first-child { width: 40%; }
   .catalog th:last-child { width: 31%; }
+  .dependency-comparison th:last-child { width: 30%; }
   .dependencies th:last-child { width: 26%; }
-  .catalog code, .dependencies code { white-space: pre-wrap; }
-  .dependencies .origin { display: block; }
+  .catalog code, .dependencies code, .dependency-comparison code { white-space: pre-wrap; }
+  .dependencies .origin, .dependency-comparison .origin { display: block; }
+  .dependency-sites { margin: .15rem 0 0; padding-inline-start: 1rem; }
   .dependency-notice { padding: .75rem 1.1rem; background: #f8f7f2; }
+  .plan-target { padding: .75rem 1.1rem; overflow-wrap: anywhere; scroll-margin-block: .65rem; }
+  .plan-target + .plan-target { border-top: 1px solid var(--border); }
+  .plan-target:target { background: #e5f1f3; box-shadow: inset .18rem 0 var(--link); }
+  .plan-target h3 { margin: 0 0 .3rem; font-size: 1rem; }
+  .plan-target code { white-space: pre-wrap; }
+  .plan-target > ul { margin: 0; padding: 0; list-style: none; }
+  .plan-target li { padding: .3rem 0; }
+  .plan-target li .origin { margin-inline-start: .65rem; }
+  .plan-target .empty { padding: 0; }
   .owner, .fact-name, .location { display: block; }
   .owner, .origin, .fact-name { color: var(--muted); font-size: .86rem; }
   .fact-value, .fact-name, .origin { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -257,6 +268,96 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
   out += "</tbody></table></section>\n";
 }
 
+void append_dependency_detail(std::string& out, std::string_view label, std::optional<std::string_view> value) {
+  if (!value) return;
+  out += R"(<span class="origin">)";
+  out += label;
+  out += " <code>";
+  escaped(out, *value);
+  out += "</code></span>";
+}
+
+void append_dependency_location(std::string& out, const ManifestLocation& location, std::size_t lines) {
+  out += R"(<span class="location">)";
+  const auto& [path, line, column] = location;
+  append_manifest_ref(out, path, line, column, path == "build.ycxx" && line > 0 && line <= lines);
+  out += "</span>";
+}
+
+template <class Edge>
+void append_dependency_sites(std::string& out, const std::vector<Edge>& edges, std::size_t lines) {
+  std::format_to(std::back_inserter(out), R"(<span class="origin">{} {}</span>)",
+                 edges.size(), edges.size() == 1 ? "occurrence" : "occurrences");
+  if (edges.empty()) return;
+  out += R"(<ul class="dependency-sites">)";
+  for (const auto& edge : edges) {
+    out += "<li>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</li>";
+  }
+  out += "</ul>";
+}
+
+template <class Edge>
+void append_dependency_identity(std::string& out, const Edge& edge) {
+  out += "<code>";
+  escaped(out, edge.consumer);
+  out += "</code> → <code>";
+  escaped(out, edge.producer);
+  out += R"(</code><code class="origin">)";
+  escaped(out, edge.usage);
+  out += "</code>";
+}
+
+void append_dependency_changes(std::string& out, std::span<const DependencyOccurrenceChange> changes, std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="dependency-changes"><h2 id="dependency-changes">Dependency changes</h2>)";
+  if (changes.empty()) {
+    out += R"(<p class="empty">No dependency changes.</p></section>)";
+    return;
+  }
+  out += R"(<table class="facts dependency-comparison" aria-labelledby="dependency-changes">
+  <thead><tr><th scope="col">Dependency</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>
+)";
+  for (const auto& change : changes) {
+    const auto& edge = change.after.empty() ? change.before.front() : change.after.front();
+    out += "<tr><td>";
+    append_dependency_identity(out, edge);
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, "Output", edge.output);
+    out += "</td><td>";
+    append_dependency_sites(out, change.before, 0);
+    out += "</td><td>";
+    append_dependency_sites(out, change.after, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_value_binding_changes(std::string& out, std::span<const ValueBindingOccurrenceChange> changes,
+                                  std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="value-binding-changes"><h2 id="value-binding-changes">Value binding changes</h2>)";
+  if (changes.empty()) {
+    out += R"(<p class="empty">No value binding changes.</p></section>)";
+    return;
+  }
+  out += R"(<table class="facts dependency-comparison" aria-labelledby="value-binding-changes">
+  <thead><tr><th scope="col">Value binding</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>
+)";
+  for (const auto& change : changes) {
+    const auto& edge = change.after.empty() ? change.before.front() : change.after.front();
+    out += "<tr><td>";
+    append_dependency_identity(out, edge);
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, "Export", edge.export_name);
+    out += "</td><td>";
+    append_dependency_sites(out, change.before, 0);
+    out += "</td><td>";
+    append_dependency_sites(out, change.after, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
 void append_dependencies(std::string& out, const DependencyGraphInspection& graph, std::size_t lines) {
   out += R"(<section class="panel" aria-labelledby="dependencies"><h2 id="dependencies">Dependencies</h2>)";
   if (!graph.complete)
@@ -276,25 +377,106 @@ void append_dependencies(std::string& out, const DependencyGraphInspection& grap
     out += "</code></td><td><code>";
     escaped(out, edge.usage);
     out += "</code>";
-    if (edge.binding) {
-      out += R"(<span class="origin">Binding <code>)";
-      escaped(out, *edge.binding);
-      out += "</code></span>";
-    }
+    append_dependency_detail(out, "Binding", edge.binding);
     out += "</td><td><code>";
     escaped(out, edge.producer);
     out += "</code>";
-    if (edge.output) {
-      out += R"(<span class="origin">Output <code>)";
-      escaped(out, *edge.output);
-      out += "</code></span>";
-    }
-    out += R"(</td><td><span class="location">)";
-    const auto& [path, line, column] = edge.location;
-    append_manifest_ref(out, path, line, column, path == "build.ycxx" && line > 0 && line <= lines);
-    out += "</span></td></tr>\n";
+    append_dependency_detail(out, "Output", edge.output);
+    out += "</td><td>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</td></tr>\n";
   }
   out += "</tbody></table></section>\n";
+}
+
+void append_value_bindings(std::string& out, std::span<const PlanValueDependencyEdge> edges,
+                           bool complete, std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="value-bindings"><h2 id="value-bindings">Value bindings</h2>)";
+  if (!complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved value bindings so far.</p>)";
+  if (edges.empty()) {
+    out += R"(<p class="empty">)";
+    out += complete ? "No value bindings." : "No resolved value bindings yet.";
+    out += "</p></section>\n";
+    return;
+  }
+  out += R"(<table class="facts dependencies" aria-labelledby="value-bindings">
+  <thead><tr><th scope="col">Consumer</th><th scope="col">Usage</th><th scope="col">Producer</th><th scope="col">Declared at</th></tr></thead><tbody>
+)";
+  for (const auto& edge : edges) {
+    out += "<tr><td><code>";
+    escaped(out, edge.consumer);
+    out += "</code></td><td><code>";
+    escaped(out, edge.usage);
+    out += "</code>";
+    append_dependency_detail(out, "Binding", edge.binding);
+    out += "</td><td><code>";
+    escaped(out, edge.producer);
+    out += "</code>";
+    append_dependency_detail(out, "Export", edge.export_name);
+    out += "</td><td>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_target_dependencies(std::string& out, std::string_view selected, const DependencyGraphInspection& graph,
+                                std::size_t lines) {
+  struct TargetInputs {
+    std::size_t id = 0;
+    std::vector<const PlanDependencyEdge*> artifacts;
+    std::vector<const PlanValueDependencyEdge*> values;
+  };
+  std::map<std::string_view, TargetInputs> targets;
+  const auto selected_target = targets.try_emplace(selected).first;
+  for (const auto& edge : graph.edges) {
+    targets[edge.consumer].artifacts.push_back(&edge);
+    targets.try_emplace(edge.producer);
+  }
+  if (graph.value_edges) {
+    for (const auto& edge : *graph.value_edges) {
+      targets[edge.consumer].values.push_back(&edge);
+      targets.try_emplace(edge.producer);
+    }
+  }
+  std::size_t id = 0;
+  for (auto& target : targets | std::views::values) target.id = id++;
+
+  out += R"(<section class="panel" aria-labelledby="target-dependencies"><h2 id="target-dependencies">Target dependencies</h2>)";
+  if (!graph.complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved target dependencies so far.</p>)";
+  const auto append_input = [&](const auto& edge, std::string_view label, std::optional<std::string_view> detail) {
+    std::format_to(std::back_inserter(out), R"(<li><a href="#plan-target-{}"><code>)", targets.at(edge.producer).id);
+    escaped(out, edge.producer);
+    out += R"(</code></a><code class="origin">)";
+    escaped(out, edge.usage);
+    out += "</code>";
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, label, detail);
+    append_dependency_location(out, edge.location, lines);
+    out += "</li>\n";
+  };
+  const auto append_target = [&](std::string_view name, const TargetInputs& target) {
+    std::format_to(std::back_inserter(out), R"(<article class="plan-target" id="plan-target-{}"><h3><code>)", target.id);
+    escaped(out, name);
+    out += "</code></h3>";
+    if (target.artifacts.empty() && target.values.empty()) {
+      out += R"(<p class="empty">)";
+      out += graph.complete ? "No resolved inputs." : "No resolved inputs yet.";
+      out += "</p>";
+    } else {
+      out += "<ul>";
+      for (const auto* edge : target.artifacts) append_input(*edge, "Output", edge->output);
+      for (const auto* edge : target.values) append_input(*edge, "Export", edge->export_name);
+      out += "</ul>";
+    }
+    out += "</article>\n";
+  };
+  append_target(selected_target->first, selected_target->second);
+  for (const auto& [name, target] : targets)
+    if (name != selected) append_target(name, target);
+  out += "</section>\n";
 }
 
 std::string_view module_label(std::string_view value) {
@@ -625,7 +807,11 @@ export namespace ycxx::build {
 
 std::string render_inspection_html(const PlanInspection& inspection,
                                    const std::vector<PlanChange>* changes = nullptr,
-                                   const std::optional<ModuleGraphComparison>& modules = std::nullopt) {
+                                   const std::optional<ModuleGraphComparison>& modules = std::nullopt,
+                                   const std::optional<std::vector<DependencyOccurrenceChange>>& dependency_changes =
+                                       std::nullopt,
+                                   const std::optional<std::vector<ValueBindingOccurrenceChange>>& value_binding_changes =
+                                       std::nullopt) {
   auto out = begin_report(std::format("Build plan · {}", inspection.target));
   out += "<h1>Build plan for <code>";
   escaped(out, inspection.target);
@@ -641,7 +827,14 @@ std::string render_inspection_html(const PlanInspection& inspection,
   } else if (changes) {
     append_changes(out, *changes, lines);
   }
-  if (inspection.dependency_graph) append_dependencies(out, *inspection.dependency_graph, lines);
+  if (dependency_changes) append_dependency_changes(out, *dependency_changes, lines);
+  if (value_binding_changes) append_value_binding_changes(out, *value_binding_changes, lines);
+  if (inspection.dependency_graph) {
+    const auto& graph = *inspection.dependency_graph;
+    append_target_dependencies(out, inspection.target, graph, lines);
+    append_dependencies(out, graph, lines);
+    if (graph.value_edges) append_value_bindings(out, *graph.value_edges, graph.complete, lines);
+  }
   append_facts(out, inspection.facts, lines);
   out += "</div>";
   append_manifest(out, definition);

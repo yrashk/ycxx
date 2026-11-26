@@ -96,10 +96,29 @@ struct PlanDependencyEdge {
   ManifestLocation location;
 };
 
+struct PlanValueDependencyEdge {
+  std::string consumer;
+  std::string producer;
+  std::string usage;
+  std::string binding;
+  std::string export_name;
+  ManifestLocation location;
+};
+
 struct DependencyGraphInspection {
   bool complete = true;
   std::vector<PlanDependencyEdge> edges = {};
+  std::optional<std::vector<PlanValueDependencyEdge>> value_edges = std::nullopt;
 };
+
+template<class Edge>
+struct OccurrenceChange {
+  std::vector<Edge> before;
+  std::vector<Edge> after;
+};
+
+using DependencyOccurrenceChange = OccurrenceChange<PlanDependencyEdge>;
+using ValueBindingOccurrenceChange = OccurrenceChange<PlanValueDependencyEdge>;
 
 struct PlanInspection {
   int schema = 1;

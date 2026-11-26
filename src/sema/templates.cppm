@@ -351,16 +351,16 @@ public:
       auto es = substitute_args(ins().seqs.elements(r.args), b);
       if (!es) return std::nullopt;
       if (ins().values.is_dependent(*i))
-        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)));
+        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)), r.written_index);
       return select_element(*es, *i);
     }
     TypeRec p = types().rec(r.inner);
     auto a = b.at(p.depth, p.index);
-    if (!a) return types().pack_index(r.inner, *i);
+    if (!a) return types().pack_index(r.inner, *i, r.written_index);
     if (a->kind == TemplateArgKind::type && types().kind(a->type) == TypeKind::template_param && types().rec(a->type).pack)
-      return types().pack_index(types().canonical(a->type), *i);
+      return types().pack_index(types().canonical(a->type), *i, r.written_index);
     if (a->kind != TemplateArgKind::pack) return std::nullopt;
-    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems);
+    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems, r.written_index);
     return select_element(elements(*a), *i);
   }
   // The element of a pack's arguments at the constant `index`, a type ([dcl.type.pack.index]/2:
@@ -1316,7 +1316,8 @@ public:
              pr.args == ar.args;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
     case TypeKind::pack_index:  // non-deduced, above
-      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.pack == ar.pack && pr.args == ar.args;
+      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.written_index == ar.written_index &&
+             pr.pack == ar.pack && pr.args == ar.args;
     case TypeKind::placeholder: return pr.decltype_auto == ar.decltype_auto;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
