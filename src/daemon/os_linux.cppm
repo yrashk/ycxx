@@ -21,7 +21,7 @@ inline constexpr std::string_view os_name = "linux";
 std::string executable_path() {
   std::error_code ec;
   auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
-  return ec ? std::string() : p.native_encoded_string();
+  return ec ? std::string() : p.native();
 }
 
 std::optional<std::uint32_t> peer_uid(int fd) {

@@ -158,6 +158,7 @@ struct TPackIndex {
   ConstId index;
   SeqId<TemplateArg> elems;
   u8 bound;
+  ConstId written = ConstId::none;  // expression identity used by compiler compatibility modes
 };
 
 // A type-transforming built-in applied to a dependent type, `__remove_cv(T)` (docs/EXTENSIONS.md):

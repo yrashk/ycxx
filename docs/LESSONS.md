@@ -336,6 +336,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Toolchain
 
+- **GCC's stock contract runtime needs the link driver flag.** Compile and link with
+  `-fcontracts` in the system standard-library configuration. The driver adds
+  `libstdc++exp`, which contains the default contract handler and its reporter.
+  The libycxx configuration gets its handler from libycxx's own runtime.
+
 - **A sandbox command's `/dev/shm` is private to that command.** A compiler built there by one
   command was inaccessible to the next.
   - Do: build and test in the same command when using `/dev/shm`. Copy the binary and test logs
@@ -393,6 +398,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     verbatim and reduce them. #283's trigger was an inline constructor in an *intermediate*
     module, and #46's was a template specialization instantiated in the imported interface.
   - Learned on #726.
+- **An in-tree package and its consumers need the same `std` module provider.**
+  The standalone benchmark target brought its own module flags and dependency
+  into the compiler build. CMake generated a second `std` BMI for its
+  consumers, and GCC on macOS reported a CRC mismatch when a test also imported
+  `ycxx.unit`.
+  - Do: pass the compiler's shared options target to the in-tree package.
+    Keep the standalone dependency path for external consumers. Compare the
+    `std` entries in the generated `.modmap` files when diagnosing a mismatch.
+  - Learned on #1414.
+
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.

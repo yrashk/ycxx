@@ -1,10 +1,11 @@
-// std::execution (P2300) from libycxx, in the shapes the query engine uses (DECISIONS §4.3):
+// ycxx::exec (P2300) from libycxx, in the shapes the query engine uses (DECISIONS §4.3):
 // work on parallel_scheduler, when_all, a counting_scope joined before results are read, stop
 // tokens, and a coroutine awaiting a sender.
 import std;
+import ycxx.execution;
 import bootstrap.smoke;
 
-namespace ex = std::execution;
+namespace ex = ycxx::exec;
 
 namespace {
 
@@ -19,7 +20,7 @@ ex::task<int> awaiting(ex::parallel_scheduler sched) {
 int main() {
   auto sched = ex::get_parallel_scheduler();
 
-  auto [x, y] = std::this_thread::sync_wait(
+  auto [x, y] = ycxx::exec::sync_wait(
       ex::when_all(ex::schedule(sched) | ex::then([] { return 6; }),
                    ex::schedule(sched) | ex::then([] { return 7; })))
                     .value();
@@ -33,19 +34,19 @@ int main() {
                   ex::upon_error([](std::exception_ptr) noexcept {}),
               scope.get_token());
   }
-  std::this_thread::sync_wait(scope.join());
+  ycxx::exec::sync_wait(scope.join());
   smoke::check(done.load() == 16, "counting_scope join");
 
-  std::stop_source stop;
+  ex::inplace_stop_source stop;
   stop.request_stop();
-  auto [seen] = std::this_thread::sync_wait(
-                    ex::write_env(ex::read_env(std::get_stop_token) |
-                                      ex::then([](std::stoppable_token auto t) { return t.stop_requested(); }),
-                                  ex::prop(std::get_stop_token, stop.get_token())))
+  auto [seen] = ycxx::exec::sync_wait(
+                    ex::write_env(ex::read_env(ycxx::exec::get_stop_token) |
+                                      ex::then([](ex::stoppable_token auto t) { return t.stop_requested(); }),
+                                  ex::prop(ycxx::exec::get_stop_token, stop.get_token())))
                     .value();
   smoke::check(seen, "stop token reaches the work");
 
-  auto [r] = std::this_thread::sync_wait(awaiting(sched)).value();
+  auto [r] = ycxx::exec::sync_wait(awaiting(sched)).value();
   smoke::check(r == 42, "task awaiting senders");
   return smoke::result("execution");
 }
