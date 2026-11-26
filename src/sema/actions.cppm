@@ -350,6 +350,9 @@ inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs functi
 inline constexpr u8 type_dependent = 16;  // the producer proved dependence even without a structural type
 inline constexpr u8 dependent_integral_arithmetic = 32;  // integral arithmetic depending on value parameters
 inline constexpr u8 structural_projection = 64;  // a class parameter field in a member alias argument
+static_assert((ast::Conditional::unchecked_class_copy &
+               (dependent | immediate_address | unrepresented_value | deferred_decay_copy | type_dependent |
+                dependent_integral_arithmetic | structural_projection)) == 0);
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -12677,6 +12680,7 @@ public:
 
   // [expr.cond]
   Ex conditional(Ex cond, Ex t, Ex f, u32 q_at, bool retain_class_parameter = false) {
+    constexpr u8 unchecked_copy = ast::Conditional::unchecked_class_copy;
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
     auto throws = [&](Ex arm) {
@@ -12690,6 +12694,7 @@ public:
       Ex c = to_bool(cond, cond.begin);
       if (!c.ok()) return {NodeId::none, begin, end};
       ExprInfo info = throws_then ? f.info : t.info;
+      info.flags &= ~unchecked_copy;
       if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
@@ -12714,7 +12719,6 @@ public:
     Ex c = to_bool(cond, cond.begin);
     if (!c.ok()) return {NodeId::none, begin, end};
     ExprInfo info;
-    bool unchecked_class_copy = false;
     // [expr.cond]/4.1: glvalues of one category, of a class and its base class: the derived one
     // converted to the base, as reference binding does.
     if (t.glvalue() && t.cat() == f.cat() && types().is_class(t.type()) && types().is_class(f.type())) {
@@ -12730,6 +12734,7 @@ public:
         return {NodeId::none, begin, end};
       }
       info = t.info;
+      info.flags &= ~unchecked_copy;
     } else if (t.glvalue() != f.glvalue() &&
                (t.cat() == ValueCategory::lvalue || f.cat() == ValueCategory::lvalue) &&
                types().is_class(t.type()) && same_unqualified(t.type(), f.type()) &&
@@ -12742,12 +12747,13 @@ public:
       if (!source.ok()) return {NodeId::none, begin, end};
       info = {type, ValueCategory::prvalue, 0};
     } else {
-      unchecked_class_copy = (t.glvalue() && types().is_class(t.type())) ||
-                             (f.glvalue() && types().is_class(f.type()));
+      const bool unchecked_class_copy = (t.glvalue() && types().is_class(t.type())) ||
+                                        (f.glvalue() && types().is_class(f.type()));
       Ex a = rvalue(t), b = rvalue(f);
       QualType ta = a.type(), tb = b.type();
       if (ta == tb) {
-        info = {ta, ValueCategory::prvalue, 0};  // [expr.cond]/7.1: the same type, no conversion
+        // [expr.cond]/7.1: the same type, no further conversion.
+        info = {ta, ValueCategory::prvalue, unchecked_class_copy ? unchecked_copy : u8{0}};
       } else if (types().is_void(ta) && types().is_void(tb)) {
         info = {ta, ValueCategory::prvalue, 0};
       } else if (types().is_arithmetic(ta) && types().is_arithmetic(tb)) {
@@ -12789,8 +12795,7 @@ public:
       t = a;
       f = b;
     }
-    return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin), unchecked_class_copy},
-                begin, end, info);
+    return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
   }
 
   // [expr.call]: a call to a named function or through a pointer to function. Each argument

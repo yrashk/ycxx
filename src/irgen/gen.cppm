@@ -972,7 +972,7 @@ class Gen {
       return initialize(p, child(e, comma.rhs), zeroed, true);
     }
     const auto choice = get<ast::Conditional>(e);
-    if (selecting_return_ && choice.unchecked_class_copy)
+    if (selecting_return_ && (choice.info.flags & ast::Conditional::unchecked_class_copy))
       unsupported(e, "with an unresolved class copy in a return selection");
     const auto then_value = child(e, choice.then_), else_value = child(e, choice.else_);
     if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
