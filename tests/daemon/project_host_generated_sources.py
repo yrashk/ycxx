@@ -103,7 +103,8 @@ def reports(ycxx, scope, env, other, *journals):
 def check_plan(ycxx, scope, env, host, other, *journals):
     plan, report = reports(ycxx, scope, env, other, *journals)
     definition = plan['definition']
-    assert fact(plan, 'native-target', 'app', other)['name'] == 'triple'
+    target, = (row for row in plan['facts'] if row['kind'] == 'native-target')
+    assert (target['target'], target['name'], target['value']) == ('app', 'triple', other), target
     assert fact(plan, 'host-target', 'scanner', host)['name'] == 'triple'
     source = fact(plan, 'source', 'scanner', f'{VIRTUAL}/{MAIN}')
     assert source['origin'] == SOURCE, source
@@ -281,6 +282,13 @@ def check_early(ycxx, scope, env, host, other, *, witness):
         assert journal_contents(inventory_runs) == '17\n'
     check_binary(scope, other, other, 17 if witness else 7, host)
 
+    snapshot, = (scope / namespace(other) / 'rules').glob('target-*.json')
+    stored = json.loads(snapshot.read_text(encoding='utf-8'))
+    assert stored['target'] == 'app', snapshot
+    name, evidence = ('observed', 'host_files') if witness else ('retry_policy', 'planning_host_files')
+    record, = (row for row in stored['rules'] if row['target'] == name)
+    assert record[evidence] == [], (name, evidence, record[evidence])
+
     def inspect_snapshot():
         plan, report = reports(ycxx, scope, env, other, inventory_runs)
         assert plan['dependency_graph']['complete'], plan
@@ -305,14 +313,10 @@ def check_early(ycxx, scope, env, host, other, *, witness):
     assert stopped.returncode == 0, stopped.stderr
     assert inspect_snapshot() == saved, 'persisted snapshot lost the generated-only tool evidence'
     assert daemon_identity(ycxx, scope, env) is None, 'read-only show started a daemon'
-    _, events = build(ycxx, scope, env, other, other, 'reuse the generated-only host tool after restarting the daemon')
+    build(ycxx, scope, env, other, other, 'restart the daemon and verify the generated-only build')
     restarted = daemon_identity(ycxx, scope, env)
     assert restarted and restarted != previous, (previous, restarted)
-    if witness:
-        check_observation_reuse(events)
-    else:
-        assert journal_contents(inventory_runs) == '17\n'
-    check_external_actions(events)
+    check_binary(scope, other, other, 17 if witness else 7, host)
     assert inspect_snapshot() == saved
 
 

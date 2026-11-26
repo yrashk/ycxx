@@ -13,7 +13,7 @@
 //   :cond    #if expressions ([cpp.cond])
 //
 // `pp(file)` is an engine query over the main file's text and its `Source` (its name, working
-// directory and configuration). Every file it includes is read as a `FileContent` input, provided
+// directory and configuration). Every disk file it includes is read as a `FileContent` input, provided
 // on first read (daemon design §5.1, #93), so editing a header invalidates the `pp` cells that read
 // it. The region cache of the process's session for the configuration still shares regions between
 // units, where their traces verify; contextual queries (#16) will replace it.

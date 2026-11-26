@@ -294,7 +294,7 @@ class Session {
   // How disk-backed main files are read: the disk or the owner's file table.
   // Set before any unit is named.
   void set_reader(std::function<std::optional<std::string>(const std::string&)> read) { read_ = std::move(read); }
-  // The file at `absolute` changed: the main-file text of every registered unit of it. At
+  // The file at `absolute` changed: the main-file text of every disk-backed unit of it. At
   // quiescence (inside `apply`); whether any input changed.
   bool set_main_file(const std::string& absolute, const std::optional<std::string>& text) {
     std::vector<std::uint32_t> ns;
