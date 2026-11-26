@@ -52,7 +52,10 @@ constexpr std::string_view styles = R"HTML(
   .facts th:last-child { width: 38%; }
   .catalog th:first-child { width: 40%; }
   .catalog th:last-child { width: 31%; }
-  .catalog code { white-space: pre-wrap; }
+  .dependencies th:last-child { width: 26%; }
+  .catalog code, .dependencies code { white-space: pre-wrap; }
+  .dependencies .origin { display: block; }
+  .dependency-notice { padding: .75rem 1.1rem; background: #f8f7f2; }
   .owner, .fact-name, .location { display: block; }
   .owner, .origin, .fact-name { color: var(--muted); font-size: .86rem; }
   .fact-value, .fact-name, .origin { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -250,6 +253,46 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
     out += "</td><td>";
     append_location(out, fact, lines);
     out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_dependencies(std::string& out, const DependencyGraphInspection& graph, std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="dependencies"><h2 id="dependencies">Dependencies</h2>)";
+  if (!graph.complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved dependencies so far.</p>)";
+  if (graph.edges.empty()) {
+    out += R"(<p class="empty">)";
+    out += graph.complete ? "No dependencies." : "No resolved dependencies yet.";
+    out += "</p></section>\n";
+    return;
+  }
+  out += R"(<table class="facts dependencies" aria-labelledby="dependencies">
+  <thead><tr><th scope="col">Consumer</th><th scope="col">Usage</th><th scope="col">Producer</th><th scope="col">Declared at</th></tr></thead><tbody>
+)";
+  for (const auto& edge : graph.edges) {
+    out += "<tr><td><code>";
+    escaped(out, edge.consumer);
+    out += "</code></td><td><code>";
+    escaped(out, edge.usage);
+    out += "</code>";
+    if (edge.binding) {
+      out += R"(<span class="origin">Binding <code>)";
+      escaped(out, *edge.binding);
+      out += "</code></span>";
+    }
+    out += "</td><td><code>";
+    escaped(out, edge.producer);
+    out += "</code>";
+    if (edge.output) {
+      out += R"(<span class="origin">Output <code>)";
+      escaped(out, *edge.output);
+      out += "</code></span>";
+    }
+    out += R"(</td><td><span class="location">)";
+    const auto& [path, line, column] = edge.location;
+    append_manifest_ref(out, path, line, column, path == "build.ycxx" && line > 0 && line <= lines);
+    out += "</span></td></tr>\n";
   }
   out += "</tbody></table></section>\n";
 }
@@ -598,6 +641,7 @@ std::string render_inspection_html(const PlanInspection& inspection,
   } else if (changes) {
     append_changes(out, *changes, lines);
   }
+  if (inspection.dependency_graph) append_dependencies(out, *inspection.dependency_graph, lines);
   append_facts(out, inspection.facts, lines);
   out += "</div>";
   append_manifest(out, definition);

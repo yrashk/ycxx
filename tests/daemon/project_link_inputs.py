@@ -8,6 +8,7 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
+from project_inspection import check_dependency_graph, dependency_edge, manifest_location
 from project_shader_bundle import check_external_actions, publication
 from runtime_dir import runtime_root
 
@@ -146,20 +147,37 @@ def inspect(ycxx, scope, env, journal, providers=(), *, owners=None, direct=None
     assert len(inputs) == len(declarations), inputs
     if not declarations:
         assert any(row['kind'] == 'unresolved' and row['target'] == 'app' for row in plan['facts']), plan
+        check_dependency_graph(plan, [], complete=False)
         return
     definition = plan['definition']
     offsets = {}
+    artifact_edges = []
     for position, (row, (owner, provider)) in enumerate(zip(inputs, declarations)):
         reference = f'artifact("{provider}", "archive")'
         start = definition.index(reference, offsets.get(owner, definition.index(f'"{owner}" {{')))
         offsets[owner] = start + len(reference)
-        location = definition.count('\n', 0, start) + 1, start - definition.rfind('\n', 0, start)
+        location = manifest_location(definition, start)
+        usage = 'link_inputs' if owner == 'app' else 'public_link_inputs'
         origin = f'declared in link_inputs as {reference}' if owner == 'app' else (
             f'inherited from {owner} (declared in public_link_inputs as {reference})')
         assert (row['target'], row['name'], row['value']) == (
             'app', str(position), f'.ycxx/virtual/{provider}/provider.a'), row
         assert row['origin'] == origin, row
-        assert (row['line'], row['column']) == location, row
+        assert (row['line'], row['column']) == (location['line'], location['column']), row
+        artifact_edges.append({'consumer': owner, 'producer': provider, 'usage': usage,
+                               'location': location, 'output': 'archive'})
+
+    direct_libraries = [('app', 'middle'), ('middle', 'leaf')]
+    if owners is not None:
+        direct_libraries.extend([('leaf', 'left'), ('leaf', 'right'), ('left', 'common'), ('right', 'common')])
+    library_edges = [
+        dependency_edge(definition, consumer, library, 'deps', json.dumps(library),
+                        start=definition.index(f'"{consumer}" {{'))
+        for consumer, library in direct_libraries
+    ]
+    note = dependency_edge(definition, 'app', 'z_provider', 'runtime_assets',
+                           'artifact("z_provider", "note")', output='note')
+    check_dependency_graph(plan, [*library_edges, *artifact_edges, note])
 
 
 def check_native_units_reused(events):
