@@ -3939,7 +3939,7 @@ int use() { S x; return x.f(7); }
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
-        value = 'Lm8E' if mode == 'clang' else 'szfpT'
+        value = 'szfpT' if mode == 'gcc' else 'Lm8E'
         symbols = {1: f'_ZNK1S1fIiEEiT_Qge{value}Li1E', 3: '_ZNK6RecordIiE1fIiEEiT_QgeszdefpTLi1E',
                    4: '_ZNK1S1fIiEEiT_QrqXclptfpT1hIS1_EEE'}
         for target in (LINUX, DARWIN):
@@ -3950,7 +3950,7 @@ int use() { S x; return x.f(7); }
                     rejection = [*flags, '-fsyntax-only', 'this-constraint.cpp']
                     cold, warm = (world.cxx(rejection, scope, env, timeout=40) for env in (world.cold, world.daemon))
                     assert cold == warm and warm[0] == 1, (mode, target, case, cold, warm)
-                    diagnostic = b'incomplete' if case == 2 else b'viable'
+                    diagnostic = b'incomplete' if case == 2 else b'no matching function'
                     assert diagnostic in warm[2], (mode, target, case, warm)
                     continue
                 command = [*flags, '-c', 'this-constraint.cpp', '-o', 'this-constraint.o']
@@ -3973,6 +3973,96 @@ int main() {{ return call(Empty{{}}, 19) != 19; }}
                     subprocess.run([peer, '-std=c++26', 'this-constraint-caller.cpp', 'this-constraint.o',
                                     '-o', 'this-constraint'], cwd=scope, check=True, capture_output=True, timeout=40)
                     subprocess.run([scope / 'this-constraint'], cwd=scope, check=True, timeout=20)
+
+
+def remaining_constraint_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'constraint-layout.cpp').write_text(r'''
+#if CASE == 0
+#define C (sizeof(int) >= 1 && sizeof(T) > 0)
+#elif CASE == 1
+#define C (alignof(int) >= 1 && sizeof(T) > 0)
+#elif CASE == 2
+#define C (sizeof("a\0b\0") >= 1 && sizeof(T) > 0)
+#else
+#define C (sizeof("\xff") >= 1 && sizeof(T) > 0)
+#endif
+template<class T> requires C int f(T) { return 7; }
+int call() { return f(7); }
+''')
+    (scope / 'constraint-cast.cpp').write_text('''
+struct Data { int member; };
+#if CASE == 0
+#define C requires(T* p) { reinterpret_cast<unsigned long>(p); }
+#elif CASE == 1
+#define C requires(T* p) { (void*)p; }
+#elif CASE == 2
+#define C requires(Data* p) { dynamic_cast<Data*>(p); sizeof(T); }
+#elif CASE == 3
+#define C requires(T obj, int T::*mem) { obj.*mem; }
+#elif CASE == 4
+#define C requires(T* obj, int T::*mem) { obj->*mem; }
+#elif CASE == 5
+#define C requires(T t) { __builtin_bit_cast(T, t); }
+#else
+#define C requires { __builtin_offsetof(T, member); }
+#endif
+template<class T> requires C int f(T*) { return 7; }
+int call() { return f((Data*)0); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        first, second = ('fL0p_', 'fL0p0_') if mode == 'clang' else ('fp_', 'fp0_')
+        clauses = (f'rQPT__Xrcm{first}E', f'rQPT__XcvPv{first}E', f'rQPS0__XdcS1_{first}XstT_E',
+                   f'rQT_MS1_i_Xds{first}{second}E', f'rQPT_MS1_i_Xpm{first}{second}E')
+        parameters = ('S2_', 'S2_', 'PS2_', 'PS1_', 'S2_')
+        casts = tuple(f'_Z1fI4DataQ{clause}Ei{parameter}' for clause, parameter in zip(clauses, parameters))
+        folded = ('Lm4E', 'Lm4E', 'Lm5E', 'Lm2E')
+        retained = ('sti', 'Lm4E', 'sztlA5_KcLS0_97ELS0_0ELS0_98EE', 'sztlA2_KcLS0_255EE')
+        layouts = tuple(
+            f'_Z1fIiQaage{operand}Li1EgtstT_Li0EEiS{2 if mode == "gcc" and case >= 2 else 0}_'
+            for case, operand in enumerate(retained if mode == 'gcc' else folded))
+        peer = gxx if mode == 'gcc' else clang
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            flags = [target, '-fcompat=' + mode]
+            native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+            for source, symbols, mixed_case, typ, argument in (
+                ('constraint-layout.cpp', layouts, 2, 'int', '7'),
+                ('constraint-cast.cpp', casts, 3, 'Data*', 'nullptr'),
+            ):
+                for case, name in enumerate(symbols):
+                    name = prefix + name
+                    command = [*flags, f'-DCASE={case}', '-c', source, '-o', 'remaining-constraint.o']
+                    outputs = []
+                    for env in (world.cold, world.daemon):
+                        result = world.cxx(command, scope, env, timeout=40)
+                        assert result == (0, b'', b''), (mode, target, source, case, result)
+                        outputs.append((scope / 'remaining-constraint.o').read_bytes())
+                    names = outputs[1].split(b'\0')
+                    assert outputs[0] == outputs[1] and name.encode() in names, (
+                        mode, target, source, case, name, [n for n in names if b'_Z1f' in n])
+                    if peer and native and case == mixed_case:
+                        (scope / 'remaining-constraint-caller.cpp').write_text(f'''
+struct Data {{ int member; }};
+extern "C" int f({typ}) asm("{name}");
+int main() {{ return f({argument}) != 7; }}
+''')
+                        subprocess.run([peer, '-std=c++26', 'remaining-constraint-caller.cpp', 'remaining-constraint.o',
+                                        '-o', 'remaining-constraint'], cwd=scope, check=True, capture_output=True, timeout=40)
+                        subprocess.run([scope / 'remaining-constraint'], cwd=scope, check=True, capture_output=True, timeout=20)
+            for case, builtin in enumerate((b'__builtin_bit_cast', b'__builtin_offsetof'), 5):
+                source = [*flags, f'-DCASE={case}', 'constraint-cast.cpp']
+                syntax = [*source, '-fsyntax-only']
+                cold, warm = (world.cxx(syntax, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm == (0, b'', b''), (mode, target, builtin, cold, warm)
+                codegen = [*source, '-c', '-o', 'remaining-constraint.o']
+                cold, warm = (world.cxx(codegen, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == (0 if mode == 'spec' else 1), (mode, target, builtin, cold, warm)
+                if mode == 'spec':
+                    assert b'__ycxx_constraint_' in (scope / 'remaining-constraint.o').read_bytes()
+                else:
+                    assert builtin in warm[2] and b'written constraint' in warm[2], warm[2]
 
 
 def compile_database(world):
@@ -4016,6 +4106,7 @@ def main():
         nested_template_symbols(world, gxx)
         lambda_constraint_expression_symbols(world, gxx)
         implicit_object_constraint_symbols(world, gxx)
+        remaining_constraint_symbols(world, gxx)
         lambda_conversion_symbols(world, gxx)
         floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.

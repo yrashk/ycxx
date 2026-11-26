@@ -467,11 +467,16 @@ struct [[=dependent]] VRequiresParameter {
   Cv cv;
 };
 
+// A builtin expression without an interoperable constraint encoding in either peer.
+struct VWrittenBuiltin {
+  NameId name;
+};
+
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack, VConstraintTemplate,
                                VDepCall, VDepMember, VDepConcept, VConceptParameter, VConstraintEnum, VDepField, VDepConditional,
                                VRequiresExpression, VRequiresParameter, VWrittenTrait, VWrittenNew, VWrittenDelete, VWrittenOperator, VWrittenCallee, VWrittenMember,
-                               VWrittenFold, VWrittenLambda, VWrittenThis, VFoldConstraint>;
+                               VWrittenFold, VWrittenLambda, VWrittenThis, VFoldConstraint, VWrittenBuiltin>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

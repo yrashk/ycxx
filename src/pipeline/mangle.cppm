@@ -890,6 +890,22 @@ class Mangler {
 
   // The <expression> of a template argument or a written dependent type (§5.1.6), #773.
   std::expected<std::string, std::string> expression(ast::ConstId v) {
+    if (compatibility_ == ast::Compatibility::gcc && in_.values.is<ast::VString>(v)) {
+      const auto literal = in_.values.get<ast::VString>(v);
+      const auto array = in_.types.get<ast::TArray>(in_.types.canon(ast::without_cv(in_.canonical(literal.type))));
+      auto array_type = type(literal.type);
+      if (!array_type) return array_type;
+      std::string encoded = "tl" + *array_type;
+      const auto units = in_.seqs.elements(literal.units);
+      std::size_t count = units.size();
+      while (count && units[count - 1] == 0) --count;
+      if (count) {
+        auto element = type(array.elem);
+        if (!element) return element;
+        for (const auto unit : units.first(count)) encoded += std::format("L{}{}E", *element, unit);
+      }
+      return encoded + 'E';
+    }
     if (in_.values.is<ast::VEntity>(v)) {
       const auto entity = in_.values.get<ast::VEntity>(v).entity;
       const auto name = objects_ ? objects_(entity) : std::nullopt;
@@ -980,9 +996,14 @@ class Mangler {
         auto cast = type(ast::with_cv(target.type, ast::Cv(target.cv)));
         if (!cast) return cast;
         const bool braced = token == lex::Tk::l_brace;
-        const bool static_cast_ = token == lex::Tk::kw_static_cast;
-        const bool multiple = !braced && !static_cast_ && operands.size() != 2;
-        std::string result = (braced ? "tl" : static_cast_ ? "sc" : "cv") + *cast;
+        const bool multiple = token == lex::Tk::l_paren && operands.size() != 2;
+        std::string_view code = "cv";
+        if (braced) code = "tl";
+        else if (token == lex::Tk::kw_static_cast) code = "sc";
+        else if (token == lex::Tk::kw_dynamic_cast) code = "dc";
+        else if (token == lex::Tk::kw_reinterpret_cast) code = "rc";
+        std::string result(code);
+        result += *cast;
         if (multiple) result += '_';
         for (ast::ConstId operand : std::span(operands).subspan(1)) {
           auto child = expression(operand);
@@ -996,6 +1017,7 @@ class Mangler {
       switch (token) {
       case lex::Tk::l_paren: code = "cl"; break;
       case lex::Tk::l_square: code = "ix"; break;
+      case lex::Tk::periodstar: code = "ds"; break;
       case lex::Tk::question: code = "qu"; break;
       case lex::Tk::kw_sizeof: {
         const bool decltype_type = operands.size() == 1 && in_.values.is<ast::VWrittenOperator>(operands.front()) &&
@@ -1282,20 +1304,27 @@ class Mangler {
     return encoded + '_';
   }
 
-  std::optional<ast::NameId> gcc_signature_trait(ast::ConstId value) {
+  struct UnmangleableBuiltin {
+    ast::NameId name;
+    bool type_trait;
+  };
+
+  std::optional<UnmangleableBuiltin> unmangleable_builtin(ast::ConstId value) {
     if (value == ast::ConstId::none) return std::nullopt;
-    if (in_.values.is<ast::VWrittenTrait>(value)) {
+    if (in_.values.is<ast::VWrittenBuiltin>(value))
+      return UnmangleableBuiltin{in_.values.get<ast::VWrittenBuiltin>(value).name, false};
+    if (compatibility_ == ast::Compatibility::gcc && in_.values.is<ast::VWrittenTrait>(value)) {
       const auto trait = in_.values.get<ast::VWrittenTrait>(value);
-      if (trait.gcc_predicate) return trait.name;
+      if (trait.gcc_predicate) return UnmangleableBuiltin{trait.name, true};
     }
     return ast::dispatch<ast::ValueKinds>(in_.values.kind(value), [&]<class T>(std::type_identity<T>) {
       const auto written = in_.values.get<T>(value);
-      std::optional<ast::NameId> found;
+      std::optional<UnmangleableBuiltin> found;
       auto visit = [&](this auto&& walk, const auto& object) -> void {
         ast::for_each_ref(object, [&]<class H>(const H& handle) {
           if (found) return;
           if constexpr (std::is_same_v<H, ast::ConstId>) {
-            found = gcc_signature_trait(handle);
+            found = unmangleable_builtin(handle);
           } else if constexpr (std::is_same_v<H, ast::SeqId<ast::ConstId>> ||
                                std::is_same_v<H, ast::SeqId<ast::TemplateArg>> ||
                                std::is_same_v<H, ast::SeqId<ast::WrittenRequirement>>) {
@@ -1311,13 +1340,15 @@ class Mangler {
   std::expected<std::string, std::string> constraint_suffix(const ast::WrittenConstraint& clause, bool template_head) {
     if (clause.tokens == Fp128{}) return std::string{};
     if (clause.expression != ast::ConstId::none) {
-      if (compatibility_ == ast::Compatibility::gcc) {
-        if (in_.values.is<ast::VDepParam>(clause.expression))
-          return std::string{};  // GCC 16 uses the unadorned symbol for a bare boolean template parameter.
-        if (auto trait = gcc_signature_trait(clause.expression)) {
-          if (template_head && in_.values.is<ast::VWrittenTrait>(clause.expression)) return std::string{};
-          return std::unexpected(std::format("the built-in type trait '{}' in a written constraint",
-                                             in_.names.spelling(*trait)));
+      if (compatibility_ == ast::Compatibility::gcc && in_.values.is<ast::VDepParam>(clause.expression))
+        return std::string{};  // GCC 16 uses the unadorned symbol for a bare boolean template parameter.
+      if (compatibility_ != ast::Compatibility::spec) {
+        if (auto builtin = unmangleable_builtin(clause.expression)) {
+          if (builtin->type_trait && template_head && in_.values.is<ast::VWrittenTrait>(clause.expression))
+            return std::string{};
+          return std::unexpected(std::format("the built-in {} '{}' in a written constraint",
+                                             builtin->type_trait ? "type trait" : "expression",
+                                             in_.names.spelling(builtin->name)));
         }
       }
       const auto checkpoint = candidates_.size();

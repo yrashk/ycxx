@@ -4603,6 +4603,7 @@ public:
         if (t && accept(Tk::r_paren) && !is(Tk::l_brace) && !is(Tk::period) && !is(Tk::arrow)) {
           Ex e = cast_expression();
           Ex r = s_->static_cast_to(e, *t, begin);
+          if (writing_constraint_atom_) record_written_operator(r, Tk::l_paren, {written_type(*t), written_atom(e)});
           return {r.id, begin, pos(), r.info};
         }
         s_->truncate_diags(n);
@@ -4777,6 +4778,12 @@ public:
     return result;
   }
 
+  bool fold_written_layout(Ex result, bool align) {
+    if (!align && s_->compatibility() == ast::Compatibility::gcc) return false;
+    const auto literal = s_->as<ast::Literal>(result);
+    return literal && s_->ins().values.is<ast::VInt>(literal->value);
+  }
+
   // unary-expression ([expr.unary]).
   Ex unary_expression() {
     deep_enough();  // `++`, `--` and `sizeof` take their operands through here
@@ -4829,7 +4836,8 @@ public:
               if (layout_argument_at_ == begin) return s_->dependent_layout_query(*t, align, begin, pos());
             }
             Ex r = s_->size_of(*t, align, begin, pos());
-            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok()) {
+            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok() &&
+                (!writing_constraint_atom_ || !fold_written_layout(r, align))) {
               if (const auto spelling = written_decltypes_.find(type_at); spelling != written_decltypes_.end())
                 record_written_operator(r, align ? Tk::kw_alignof : Tk::kw_sizeof, {spelling->second});
               else written_operators_.insert_or_assign(r.id, s_->layout_query_value(*t, align));
@@ -4862,12 +4870,8 @@ public:
                 s_->ins().values.is<ast::VWrittenThis>(s_->ins().seqs.at(op.operands, 0));
       }
       Ex r = defer ? s_->dependent_layout_query(e.type(), false, begin, pos()) : s_->size_of(e.type(), false, begin, pos());
-      if (writing_constraint_atom_) {
-        // Clang folds the size of a nondependent `this` pointer in its symbol.
-        const bool folded_this = s_->compatibility() == ast::Compatibility::clang &&
-            s_->ins().values.is<ast::VWrittenThis>(operand) && s_->as<ast::Literal>(r).has_value();
-        if (!folded_this) record_written_operator(r, Tk::kw_sizeof, {operand});
-      }
+      if (writing_constraint_atom_ && (s_->dependent(e) || !fold_written_layout(r, false)))
+        record_written_operator(r, Tk::kw_sizeof, {operand});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::coloncolon:
@@ -4915,6 +4919,7 @@ public:
 
   // This builtin takes a type-id and one assignment-expression (docs/EXTENSIONS.md).
   Ex bit_cast_expression(u32 begin) {
+    const NameId name = name_of(tok());
     bump();  // builtin name
     bump();  // '('
     Unangle unangle{angle_};
@@ -4923,11 +4928,15 @@ public:
     if (!destination || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
     Ex source = assignment_expression();
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    return s_->bit_cast(*destination, source, begin, pos(), type_at);
+    Ex result = s_->bit_cast(*destination, source, begin, pos(), type_at);
+    if (writing_constraint_atom_ && result.ok())
+      written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenBuiltin{name}));
+    return result;
   }
 
   // [support.types.layout]: a type-id and a direct non-static data member.
   Ex offsetof_expression(u32 begin) {
+    const NameId name = name_of(tok());
     bump();  // builtin name
     bump();  // '('
     int saved = std::exchange(angle_, 0);
@@ -4942,7 +4951,10 @@ public:
     NameId member = name_of(tok());
     bump();
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    return s_->offset_of(*type, member, begin, pos(), member_at);
+    Ex result = s_->offset_of(*type, member, begin, pos(), member_at);
+    if (writing_constraint_atom_ && result.ok())
+      written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenBuiltin{name}));
+    return result;
   }
 
   // postfix-expression ([expr.post]).
@@ -5499,11 +5511,8 @@ public:
       if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to(e, *t, begin, pos());
       else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
       else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
-      if ((writing_constraint_atom_ || writing_pack_index_) && cast == Tk::kw_static_cast && r.ok()) {
-        const QualType target = s_->types().canonical(*t);
-        const ConstId type = s_->ins().intern_value(ast::VType{ast::without_cv(target), u8(ast::cv_of(target))});
-        record_written_operator(r, cast, {type, written_atom(e)});
-      }
+      if (writing_constraint_atom_ || (writing_pack_index_ && cast == Tk::kw_static_cast))
+        record_written_operator(r, cast, {written_type(*t), written_atom(e)});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {

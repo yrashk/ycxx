@@ -287,8 +287,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 with -fabi-compat-version
 
 [[divergence]]
 id = "constrained-lambda-conversion-trailing-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], [temp.deduct.conv], Itanium C++ ABI §5.1.5.1 and the constraint mangling proposal"
 prior = "Take the invoker address directly and reject the tested constrained generic conversions."
 spec = "Check the call operator's constraints during conversion deduction. Use the selected call operator directly for a static lambda and its invoker otherwise."
@@ -299,8 +299,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 ELF with -fabi-compat-ver
 
 [[divergence]]
 id = "constrained-lambda-call-operator-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], [temp.constr.decl], Itanium C++ ABI §5.1.8 and the constraint mangling proposal"
 prior = "A lambda's written requires-clause is unsupported."
 spec = "The conversion template has the same associated constraints as the function call operator template. An emitted symbol uses the corresponding closure signature or trailing constraint according to its source placement."
@@ -628,12 +628,48 @@ status = "pending"
 mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
 reference = "[expr.prim.this], [class.mem.general], [temp.constr.atomic], Itanium C++ ABI §5.1.6.2"
 prior = "Ignore the in-class member function template's trailing constraint."
-spec = "Check the member's trailing clause with this in scope and the enclosing record's applicable completeness. Use fpT for a written reference to this."
+spec = "Check the member's trailing clause with this in scope and the enclosing record's applicable completeness. Fold a nondependent pointer-size query to its size-type literal. Use fpT for a dependent written reference to this."
 gcc = "Retain sizeof(this) as szfpT even when the pointer has nondependent type. Retain dereferencing the dependent this and a dependent member call."
 clang = "Fold the tested nondependent sizeof(this) to a size-type literal. Encode the dependent dereference and member call as GCC does."
 limits = "Both tested compilers reject sizeof(*this) when the enclosing ordinary class is incomplete, and an unsatisfied pointer-size constraint keeps the specialization out of overload resolution."
 probe = 'struct S { template<class T> int f(T n) const requires (sizeof(this) >= 1) { return n; } };'
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols for the nondependent pointer, dependent dereference and dependent member call, with completeness and unsatisfied-clause controls"]
+
+[[divergence]]
+id = "constraint-nondependent-layout-query-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.2, [expr.sizeof], [expr.alignof]"
+prior = "Retain the nondependent type operand or use the opaque constraint encoding for a string literal."
+spec = "Encode a non-instantiation-dependent layout query as a size-type literal. Retain dependent operands structurally."
+gcc = "Retain the tested sizeof type and expression operands, including a string encoded as a typed array initializer without trailing zero elements. Fold the tested nondependent type alignof."
+clang = "Same as spec for the tested type and string operands."
+probe = 'template<class T> requires (sizeof("a\0b\0") >= 1 && sizeof(T) > 0) int f(T);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols, including both string padding and nonzero byte controls"]
+
+[[divergence]]
+id = "constraint-cast-and-member-pointer-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.2"
+prior = "Use a constraint fingerprint for the tested C-style casts, dynamic_cast, reinterpret_cast and .* expressions."
+spec = "Encode a C-style conversion as cv, dynamic_cast as dc, reinterpret_cast as rc and the member-pointer operators as ds and pm."
+gcc = "Uses those structural encodings and its level-zero local requires-parameter references."
+clang = "Uses those structural encodings and level-one local requires-parameter references in the tested template-head clauses."
+probe = 'template<class T> requires requires(T obj, int T::*mem) { obj.*mem; } int f(T*);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O cast and member-pointer expression probes"]
+
+[[divergence]]
+id = "constraint-unmangleable-builtin-expression"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.2, docs/EXTENSIONS.md"
+prior = "Use the opaque vendor constraint encoding in every mode."
+spec = "Keep a distinct vendor constraint symbol for the tested builtin expressions without a published encoding."
+gcc = "Accept the expression in syntax-only compilation. Reject symbol emission for the tested __builtin_bit_cast and __builtin_offsetof constraints."
+clang = "Same as GCC."
+probe = 'template<class T> requires requires(T t) { __builtin_bit_cast(T, t); } int f(T*);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 object-emission probes on ELF and Mach-O"]
 
 [[divergence]]
 id = "constrained-operator-expression-symbol"
