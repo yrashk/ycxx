@@ -3,6 +3,15 @@
 What is true of the code today. Work in progress and its owners are tracked in
 [GitHub issues](https://github.com/yrashk/ycxx/issues).
 
+## Embedding
+
+- CMake builds independently linkable static or shared libraries for the query engine,
+  preprocessor, front end, IR, object formats, linker, compiler and project build.
+- The bootstrap build can use libycxx or GCC's system libstdc++. The system build uses
+  libycxx's portable execution provider for senders, scopes and the scheduler.
+- The CMake SDK exports typed C++ module interfaces. The engine and compiler samples exercise
+  build-tree and installed-package consumption. See [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+
 ## Bootstrapping (2026-11-17)
 
 - Charter written: [README.md](README.md), [DECISIONS.md](DECISIONS.md) (scope, provenance,
