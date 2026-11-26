@@ -541,8 +541,6 @@ struct Interners {
     contract_assert(empty.index == 0);
     [[maybe_unused]] SeqId<TemplateParamSema> no_head = intern_seq(std::span<const TemplateParamSema>{});
     contract_assert(no_head.index == 0);
-    [[maybe_unused]] const auto no_params = intern_seq(std::span<const ParamSema>{});
-    contract_assert(no_params.index == 0);
     [[maybe_unused]] const auto no_annotations = intern_seq(std::span<const AnnotationSema>{});
     contract_assert(no_annotations.index == 0);
     [[maybe_unused]] const auto no_qualifier = intern_seq(std::span<const NameId>{});
