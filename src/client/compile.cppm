@@ -149,7 +149,7 @@ namespace {
 
 // `pedantic` selects no warning: ycxx accepts the extensions it implements (docs/EXTENSIONS.md)
 // silently. Tests pass `-Wno-pedantic` so that the oracles accept them under `-pedantic-errors`.
-enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, pedantic, count };
+enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, constant_conversion, pedantic, count };
 
 struct WarningSelection {
   WarningFlag flag;
@@ -164,6 +164,7 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
   constexpr std::pair<std::string_view, WarningFlag> names[] = {
       {"all", WarningFlag::all}, {"extra", WarningFlag::extra}, {"multichar", WarningFlag::multichar},
       {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation},
+      {"constant-conversion", WarningFlag::constant_conversion},
       {"pedantic", WarningFlag::pedantic}};
   for (const auto& [name, flag] : names)
     if (arg == name) return WarningSelection{flag, enabled};
@@ -188,6 +189,7 @@ class WarningOptions {
       case lex::Warning::attributes: return selected(WarningFlag::attributes).value_or(true);
       case lex::Warning::sized_deallocation:
         return selected(WarningFlag::sized_deallocation).value_or(selected(WarningFlag::extra).value_or(false));
+      case lex::Warning::constant_conversion: return selected(WarningFlag::constant_conversion).value_or(true);
     }
     std::unreachable();
   }

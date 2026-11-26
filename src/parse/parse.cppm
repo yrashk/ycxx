@@ -8224,6 +8224,8 @@ private:
         }
       }
       sem.type = d.type;
+      if (s_.compatibility() == ast::Compatibility::clang && !s_.require_concrete_object(d.type, d.name_at))
+        return false;
       if (spec.is_inline || spec.is_constexpr) {
         // An inline static member defines an object ([class.static.data]).
         if (!s_.require_complete(d.type, d.name_at) || !s_.require_concrete_object(d.type, d.name_at) ||
@@ -8669,9 +8671,11 @@ private:
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !(effective_extern && !has_init);
-    if (!fn && definition &&
-        (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
-      return false;
+    if (!fn) {
+      if ((definition || s_.compatibility() == ast::Compatibility::clang) && !s_.require_concrete_object(d.type, d.name_at))
+        return false;
+      if (definition && !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+    }
     if (!attach_function_annotations(sem, spec, d, fn && !template_ && !explicit_)) return false;
     if (definition) flags |= sema::decl_flag::definition;
     const bool reference = types.is_reference(d.type);
@@ -10688,6 +10692,21 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     if (can_complete && member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     const bool implicit_move = can_complete && special_members(item, *cls, rec, &out.diags);
     pure_final_overriders(rec, *cls);
+    if (can_complete && rec.is_abstract() && compatibility() == ast::Compatibility::clang) {
+      // A nondefining static declaration can name its own class while the class is incomplete.
+      for (const sema::MemberDeclRec& member : rec.members) {
+        if (!member.is_static || member.is_function) continue;
+        const QualType element = w_->types.innermost_array_element(member.type);
+        if (!w_->types.is_class(element) || w_->types.class_of(element) != *cls) continue;
+        const auto declaration = member_decl(member.entity);
+        if (!declaration) continue;
+        const auto& source = items_->items[index(declaration->item)];
+        const auto name = std::ranges::find(source.names, w_->ins.names.spelling(member.name), &items::DeclName::name);
+        const u32 at = name == source.names.end() ? 0 : name->offset;
+        out.diags.push_back({{std::to_underlying(declaration->item), at}, sema::diag_id(Diag::abstract_object),
+                             {{std::to_underlying(element), w_->types.fp(element)}}});
+      }
+    }
     if (can_complete) classify_defaulted_default_ctor(rec, out.diags);
     if (can_complete) {
       complete_virtual_members(item, *cls, rec, members, member_declarations_valid);
