@@ -604,9 +604,7 @@ class Mangler {
         if (!target) return target;
         unqualified = "cv" + *target;
       }
-      std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
-      // A ref-qualifier follows the cv-qualifiers in a nested function name.
-      if (f.ref != ast::RefQual::none) cv += f.ref == ast::RefQual::lvalue ? "R" : "O";
+      const std::string cv = member_qualifiers(f);
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
       out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);
     }
@@ -687,8 +685,7 @@ class Mangler {
       auto trailing = trailing_constraint();
       if (!trailing) return trailing;
       *sig += *trailing;
-      std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
-      return local + "N" + cv + *p + unqualified + *args + "E" + *sig;
+      return local + "N" + member_qualifiers(f) + *p + unqualified + *args + "E" + *sig;
     }
     auto n = template_name(name, scope, special, internal_name);
     if (!n) return n;
@@ -705,10 +702,15 @@ class Mangler {
     auto trailing = constraint_suffix(spec.trailing, false);
     if (!trailing) return trailing;
     *sig += *trailing;
-    // In a <nested-name>, a member function template's cv-qualifiers follow the `N`.
-    ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
-    std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
-    return delimit_name(cv + *n + *args, scope) + *sig;
+    // In a <nested-name>, a member function template's qualifiers follow the `N`.
+    return delimit_name(member_qualifiers(in_.types.get<ast::TFunction>(c)) + *n + *args, scope) + *sig;
+  }
+  // A member function's <CV-qualifiers> then its <ref-qualifier> in a <nested-name>, in the order
+  // V K, then R or O (§5.1.5.3).
+  static std::string member_qualifiers(const ast::TFunction& f) {
+    std::string out = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
+    if (f.ref != ast::RefQual::none) out += f.ref == ast::RefQual::lvalue ? "R" : "O";
+    return out;
   }
   std::expected<std::string, std::string> signature_for_closure(const ast::TFunction& invoker, const ClassName& closure,
                                                                const TemplateSpec& spec, ast::EntityId scope,
