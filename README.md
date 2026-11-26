@@ -68,6 +68,8 @@ A typed witness can select the native artifact directly with
 `tool = input("name")` or use an executable generated from it.
 [Native host witness](examples/project-build/native-host-witness/README.md) ·
 [Host producer chain](examples/project-build/host-producer-witness/README.md)
+Rule packages can read generated inventories from the same host tool chains
+through `plan_inputs`. [Host planning input example](examples/project-build/host-planning-inputs/README.md)
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the

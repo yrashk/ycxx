@@ -1,0 +1,8 @@
+host_action "package" {
+    tool = cxx()
+    native_args = ["-nostdinc++", "-ffreestanding"]
+    args = ["-fPIC", "-shared", "-Iinputs/sdk",
+            input("source"), "-o", output("plugin")]
+    inputs = { source = "inventory.cc" }
+    outputs = { plugin = "rules.so" }
+}

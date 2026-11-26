@@ -3725,9 +3725,15 @@ witness (#1571). The coordinator captures the reachable host images and
 file observations together. Staged bytes and executable mode enter the
 action keys. The witness receipt stores raw evidence, and the classifier
 supplies the typed value. Equivalent artifacts or equal classified results
-allow downstream reuse. Rule planning inputs still require a producer chain
-independent of host executable artifacts (#1259).
+allow downstream reuse.
 [Host producer witness example](examples/project-build/host-producer-witness/README.md)
+
+Rule workers can read a generated inventory through `plan_inputs` when a
+native host tool runs upstream (#1574). Host observations drive watch and
+read-only staleness checks. Equal selected bytes reuse the rule worker and
+refresh provenance. A rule that also classifies a witness revalidates the
+planning reads and witness inputs before admitting the result.
+[Host planning input example](examples/project-build/host-planning-inputs/README.md)
 
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
