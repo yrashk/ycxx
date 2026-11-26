@@ -685,6 +685,18 @@ probe = 'template<class T> requires requires(T t) { __builtin_bit_cast(T, t); } 
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 object-emission probes on ELF and Mach-O"]
 
 [[divergence]]
+id = "constraint-literal-expression-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.3, [lex.fcon], [lex.string]"
+prior = "Use the opaque constraint encoding for the tested floating-point, string and nullptr literals."
+spec = "Encode floating-point values as fixed-width, high-byte-first hexadecimal, nullptr as LDnE, and strings by their array type. Preserve a written unary minus."
+gcc = "Encode the tested negative floating literal with the sign bit set and use a typed array initializer for a string literal."
+clang = "Same as spec. The tested long double symbol encodes x87 extended precision on x86-64 Linux and binary64 on arm64 Darwin."
+probe = 'template<class T> requires requires(T value) { value + -0.0; } int f(T);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols for positive literals, signed zero, nullptr and strings"]
+
+[[divergence]]
 id = "constrained-operator-expression-symbol"
 status = "shared"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

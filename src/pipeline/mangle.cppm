@@ -89,13 +89,15 @@ using ClassNames = std::function<ClassName(ast::EntityId)>;
 
 // A standalone <type> encoding, with an initially empty substitution table (§5.1.5).
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes,
-                                                     ast::Compatibility compatibility);
+                                                     ast::Compatibility compatibility,
+                                                     const ast::Target& target = ast::aarch64_darwin);
 
 // The Itanium <special-name> for a class-valued template parameter object.
 std::expected<std::string, std::string> mangled_template_parameter_object(const ast::Interners& in,
                                                                         const ast::TemplateArg& argument,
                                                                         const ClassNames& classes,
-                                                                        ast::Compatibility compatibility);
+                                                                        ast::Compatibility compatibility,
+                                                                        const ast::Target& target = ast::aarch64_darwin);
 
 // `scope` is the class or namespace a function is a member of, none for the global namespace.
 // Direct members of ::std use an <unscoped-name> with St (§5.1.5 and §5.1.10).
@@ -104,14 +106,16 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
                                                          ast::EntityId scope = ast::EntityId::none,
                                                          bool special = false, const FunctionNames& functions = {},
                                                          const ObjectNames& objects = {},
-                                                    ast::Compatibility compatibility = ast::Compatibility::spec);
+                                                    ast::Compatibility compatibility = ast::Compatibility::spec,
+                                                    const ast::Target& target = ast::aarch64_darwin);
 
 // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes = {},
                                                                ast::EntityId scope = ast::EntityId::none, bool special = false,
                                                                const FunctionNames& functions = {}, const ObjectNames& objects = {},
-                                                    ast::Compatibility compatibility = ast::Compatibility::spec);
+                                                    ast::Compatibility compatibility = ast::Compatibility::spec,
+                                                    const ast::Target& target = ast::aarch64_darwin);
 
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
@@ -127,7 +131,8 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     bool special = false, const TemplateSpec* spec = nullptr,
                                                     bool leading_underscore = true, const FunctionNames& functions = {},
                                                     const ObjectNames& objects = {},
-                                                    ast::Compatibility compatibility = ast::Compatibility::spec);
+                                                    ast::Compatibility compatibility = ast::Compatibility::spec,
+                                                    const ast::Target& target = ast::aarch64_darwin);
 
 }  // namespace ycxx::pipeline
 
@@ -205,8 +210,8 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 class Mangler {
  public:
   Mangler(const ast::Interners& in, const ClassNames& classes, const FunctionNames& functions, const ObjectNames& objects,
-          ast::Compatibility compatibility)
-      : in_(in), classes_(classes), functions_(functions), objects_(objects), compatibility_(compatibility) {}
+          ast::Compatibility compatibility, const ast::Target& target)
+      : in_(in), classes_(classes), functions_(functions), objects_(objects), compatibility_(compatibility), target_(target) {}
   // The depth of the head of the template whose specialization is mangled: its parameters are
   // `T_`, `T0_`, …
   ast::u16 own_depth = 0;
@@ -890,11 +895,14 @@ class Mangler {
 
   // The <expression> of a template argument or a written dependent type (§5.1.6), #773.
   std::expected<std::string, std::string> expression(ast::ConstId v) {
-    if (compatibility_ == ast::Compatibility::gcc && in_.values.is<ast::VString>(v)) {
+    if (in_.values.is<ast::VNullptr>(v)) return "LDnE";
+    if (in_.values.is<ast::VFloat>(v)) return floating_literal(in_.values.get<ast::VFloat>(v));
+    if (in_.values.is<ast::VString>(v)) {
       const auto literal = in_.values.get<ast::VString>(v);
-      const auto array = in_.types.get<ast::TArray>(in_.types.canon(ast::without_cv(in_.canonical(literal.type))));
       auto array_type = type(literal.type);
       if (!array_type) return array_type;
+      if (compatibility_ != ast::Compatibility::gcc) return "L" + *array_type + 'E';
+      const auto array = in_.types.get<ast::TArray>(in_.types.canon(ast::without_cv(in_.canonical(literal.type))));
       std::string encoded = "tl" + *array_type;
       const auto units = in_.seqs.elements(literal.units);
       std::size_t count = units.size();
@@ -991,6 +999,9 @@ class Mangler {
       const auto op = in_.values.get<ast::VWrittenOperator>(v);
       const auto operands = in_.seqs.elements(op.operands);
       const auto token = lex::Tk(op.token);
+      if (compatibility_ == ast::Compatibility::gcc && token == lex::Tk::minus && operands.size() == 1 &&
+          in_.values.is<ast::VFloat>(operands.front()))
+        return floating_literal(in_.values.get<ast::VFloat>(operands.front()), true);
       if (!operands.empty() && in_.values.is<ast::VType>(operands.front())) {
         const auto target = in_.values.get<ast::VType>(operands.front());
         auto cast = type(ast::with_cv(target.type, ast::Cv(target.cv)));
@@ -1668,11 +1679,27 @@ class Mangler {
     return std::nullopt;
   }
 
+  std::expected<std::string, std::string> floating_literal(ast::VFloat value, bool negate = false) {
+    const auto format = ast::float_format(in_, target_, value.type);
+    if (format == ast::FloatFormat::none) return std::unexpected("a target without this floating-point format");
+    const auto code = builtin_code(*ast::builtin_of(in_, value.type));
+    if (!code) return std::unexpected("a literal with an unsupported floating-point type");
+    const auto shape = ast::shape_of(format);
+    const unsigned width = shape.precision + shape.exponent + (format == ast::FloatFormat::x87_extended);
+    if (negate) {
+      if (width <= 64) value.bits.lo ^= ast::u64{1} << (width - 1);
+      else value.bits.hi ^= ast::u64{1} << (width - 65);
+    }
+    if (width <= 64) return std::format("L{}{:0{}x}E", *code, value.bits.lo, width / 4);
+    return std::format("L{}{:0{}x}{:016x}E", *code, value.bits.hi, (width - 64) / 4, value.bits.lo);
+  }
+
   const ast::Interners& in_;
   const ClassNames& classes_;
   const FunctionNames& functions_;
   const ObjectNames& objects_;
   ast::Compatibility compatibility_;
+  const ast::Target& target_;
   ast::u32 requires_depth_ = 0;
   bool template_head_constraint_ = false;
   std::vector<std::uint64_t> candidates_;  // in order of completion
@@ -1703,15 +1730,16 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 }
 
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes,
-                                                     ast::Compatibility compatibility) {
-  return Mangler(in, classes, {}, {}, compatibility).type(type);
+                                                     ast::Compatibility compatibility, const ast::Target& target) {
+  return Mangler(in, classes, {}, {}, compatibility, target).type(type);
 }
 
 std::expected<std::string, std::string> mangled_template_parameter_object(const ast::Interners& in,
                                                                         const ast::TemplateArg& argument,
                                                                         const ClassNames& classes,
-                                                                        ast::Compatibility compatibility) {
-  auto encoding = Mangler(in, classes, {}, {}, compatibility).template_arg(argument);
+                                                                        ast::Compatibility compatibility,
+                                                                        const ast::Target& target) {
+  auto encoding = Mangler(in, classes, {}, {}, compatibility, target).template_arg(argument);
   if (!encoding) return encoding;
   return "_ZTA" + *encoding;
 }
@@ -1719,8 +1747,9 @@ std::expected<std::string, std::string> mangled_template_parameter_object(const 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes,
                                                          ast::EntityId scope, bool special, const FunctionNames& functions,
-                                                         const ObjectNames& objects, ast::Compatibility compatibility) {
-  Mangler m(in, classes, functions, objects, compatibility);
+                                                         const ObjectNames& objects, ast::Compatibility compatibility,
+                                                         const ast::Target& target) {
+  Mangler m(in, classes, functions, objects, compatibility, target);
   auto e = m.encoding(name, type, scope, special);
   if (!e) return e;
   return "_Z" + *e;
@@ -1729,8 +1758,9 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes,
                                                                ast::EntityId scope, bool special, const FunctionNames& functions,
-                                                               const ObjectNames& objects, ast::Compatibility compatibility) {
-  Mangler m(in, classes, functions, objects, compatibility);
+                                                               const ObjectNames& objects, ast::Compatibility compatibility,
+                                                               const ast::Target& target) {
+  Mangler m(in, classes, functions, objects, compatibility, target);
   auto e = m.specialization_encoding(name, spec, scope, special);
   if (!e) return e;
   return "_Z" + *e;
@@ -1740,16 +1770,17 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     bool is_function, ast::LangLinkage lang,
                                                     const ClassNames& classes, ast::EntityId scope,
                                                     bool special, const TemplateSpec* spec, bool leading_underscore,
-                                                    const FunctionNames& functions, const ObjectNames& objects, ast::Compatibility compatibility) {
+                                                    const FunctionNames& functions, const ObjectNames& objects,
+                                                    ast::Compatibility compatibility, const ast::Target& target) {
   const std::string prefix = leading_underscore ? "_" : "";
   if (spec) {
-    auto m = mangled_specialization(in, name, *spec, classes, scope, special, functions, objects, compatibility);
+    auto m = mangled_specialization(in, name, *spec, classes, scope, special, functions, objects, compatibility, target);
     if (!m) return m;
     return prefix + *m;
   }
   if (scope != ast::EntityId::none && !is_function) {
     // A static data member or a namespace's variable (§5.1.2).
-    Mangler m(in, classes, functions, objects, compatibility);
+    Mangler m(in, classes, functions, objects, compatibility, target);
     auto encoding = m.object_encoding(name, scope);
     if (!encoding) return encoding;
     return prefix + "_Z" + *encoding;
@@ -1757,7 +1788,7 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
   // [basic.start.main]: only the global namespace's `main` is the program's.
   if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
     return prefix + std::string(name);
-  auto m = mangled_function(in, name, type, classes, scope, special, functions, objects, compatibility);
+  auto m = mangled_function(in, name, type, classes, scope, special, functions, objects, compatibility, target);
   if (!m) return m;
   return prefix + *m;
 }

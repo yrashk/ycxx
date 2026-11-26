@@ -3037,7 +3037,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::virtual_table || e.special == Special::type_info) {
-      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility);
+      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility, target);
       const bool table = e.special == Special::virtual_table;
       if (!encoding) {
         errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
@@ -3049,7 +3049,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
         if (emit_table_type_info && owned->primary_base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility, target);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -3064,7 +3064,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
           dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
         std::optional<std::string> base;
         if (dynamic->base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility, target);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -3079,7 +3079,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::template_parameter_object) {
-      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility);
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility, target);
       if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
       else {
         symbols.push_back({e.id, target_is_linux ? std::move(*name) : "_" + *name, obj::binding::global});
@@ -3096,7 +3096,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility);
+                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility, target);
     };
     auto name = encode(entry);
     if (!name) {

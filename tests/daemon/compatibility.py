@@ -4010,6 +4010,23 @@ struct Data { int member; };
 template<class T> requires C int f(T*) { return 7; }
 int call() { return f((Data*)0); }
 ''')
+    (scope / 'constraint-literal.cpp').write_text('''
+#if CASE == 0
+#define C requires(T n) { n + 0.5f; }
+#elif CASE == 1
+#define C requires(T n) { n + 0.5; }
+#elif CASE == 2
+#define C requires(T n) { n + 0x1.0000000000000002p0L; }
+#elif CASE == 3
+#define C requires(T* p) { p == nullptr; }
+#elif CASE == 4
+#define C requires(T n) { n + -0.0; }
+#else
+#define C requires(T n) { "abc"; }
+#endif
+template<class T> requires C int f(T) { return 7; }
+int call() { return f(7); }
+''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
         first, second = ('fL0p_', 'fL0p0_') if mode == 'clang' else ('fp_', 'fp0_')
@@ -4027,9 +4044,17 @@ int call() { return f((Data*)0); }
             prefix = '_' if target == DARWIN else ''
             flags = [target, '-fcompat=' + mode]
             native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+            extended = '3fff8000000000000001' if target == LINUX else '3ff0000000000000'
+            negative = 'Ld8000000000000000E' if mode == 'gcc' else 'ngLd0000000000000000E'
+            string = 'tlA4_KcLS1_97ELS1_98ELS1_99EE' if mode == 'gcc' else 'LA4_KcE'
+            literal_clauses = (f'rQT__Xpl{first}Lf3f000000EE', f'rQT__Xpl{first}Ld3fe0000000000000EE',
+                               f'rQT__Xpl{first}Le{extended}EE', f'rQPT__Xeq{first}LDnEE',
+                               f'rQT__Xpl{first}{negative}E', f'rQT__X{string}E')
+            literals = tuple(f'_Z1fIiQ{clause}EiS0_' for clause in literal_clauses)
             for source, symbols, mixed_case, typ, argument in (
                 ('constraint-layout.cpp', layouts, 2, 'int', '7'),
                 ('constraint-cast.cpp', casts, 3, 'Data*', 'nullptr'),
+                ('constraint-literal.cpp', literals, 2, 'int', '7'),
             ):
                 for case, name in enumerate(symbols):
                     name = prefix + name
