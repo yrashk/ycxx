@@ -1409,6 +1409,7 @@ public:
   // [dcl.attr.grammar]: each attribute argument must have balanced tokens.
   bool balanced_attributes() {
     const u32 count = past_attributes(0);
+    const bool clang = s_->compatibility() == ast::Compatibility::clang;
     std::vector<Tk> closing;
     for (u32 offset = 0; offset < count; ++offset) {
       switch (Tk token = kind(offset)) {
@@ -1420,6 +1421,9 @@ public:
       case Tk::r_paren:
       case Tk::r_brace:
       case Tk::r_splice:
+        // Clang skips an unmatched splice opener in an ordinary attribute argument.
+        if (clang && token == Tk::r_paren)
+          while (!closing.empty() && closing.back() == Tk::r_splice) closing.pop_back();
         if (closing.empty()) {
           s_->diag(pos() + offset, Diag::unexpected_token, token);
           return false;

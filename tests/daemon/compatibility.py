@@ -154,6 +154,23 @@ def preprocess_and_syntax(world):
     (world.scope / 'memchr.cpp').write_text('static_assert(__builtin_memchr("abc", \'a\', 10) != nullptr);\n')
     (world.scope / 'memcmp.cpp').write_text('static_assert(__builtin_memcmp("abc", "bbc", 10) < 0);\n')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
+    (world.scope / 'void-cast.cpp').write_text('''\
+#ifdef SINGLETON
+constexpr int value = 37;
+constexpr const void* erased = &value + 1;
+#else
+constexpr int matrix[2][2] = {{13, 37}, {83, 109}};
+constexpr const void* erased = matrix[0] + 2;
+#endif
+#ifdef UNRELATED
+constexpr const float* end = static_cast<const float*>(erased);
+#else
+constexpr const int* end = static_cast<const int*>(erased);
+#endif
+#ifdef READ_PREVIOUS
+static_assert(end[-1] == 37);
+#endif
+''')
     (world.scope / 'overflow.cpp').write_text('constexpr float value = __FLT_MAX__ * 2.0f;\n')
     (world.scope / 'warning.cpp').write_text("int value = 'ab';\n")
     (world.scope / 'macro.cpp').write_text('#define __INT64_C(c) c ## L\nstatic_assert(__INT64_C(4) == 4L);\n')
@@ -198,6 +215,17 @@ static_assert(!__builtin_is_virtual_base_of(const Incomplete, Incomplete));
 #endif
 ''')
     (world.scope / 'embed.bin').write_bytes(bytes((13, 255, 65)))
+    (world.scope / 'attribute-splice.cpp').write_text('''\
+struct Record {
+#ifdef UNMATCHED_OPENER
+  [[probe::annotation([: unavailable_name)]] int value;
+#elif defined(UNMATCHED_CLOSER)
+  [[probe::annotation(unavailable_name :])]] int value;
+#else
+  [[probe::annotation([: unavailable_name :])]] int value;
+#endif
+};
+''')
     offset_spellings = (('spec', 'offset'), ('gcc', 'gnu::offset'), ('gcc', '__gnu__::__offset__'),
                         ('clang', 'clang::offset'))
     for i, (_, spelling) in enumerate(offset_spellings):
@@ -262,6 +290,53 @@ template<class... Ts> int* address_twice(int& first, Ts&... rest) {
 int* forward_address(int& value) { return address(value); }
 #endif
 ''')
+    comparison = Path(__file__).resolve().parents[1] / 'own/three-way-comparison/inputs/compare.hpp'
+    shutil.copyfile(comparison, world.scope / 'compare.hpp')
+    (world.scope / 'spaceship.cpp').write_text('''\
+#include "compare.hpp"
+struct Order {
+  int n;
+  constexpr Order(std::strong_ordering o) noexcept : n(o < 0 ? -1 : o > 0 ? 1 : 0) {}
+#ifndef ONLY_UNEQUAL
+  friend constexpr bool operator==(Order& o, int) noexcept { return o.n == 0; }
+#endif
+  friend constexpr bool operator!=(Order& o, int) { return o.n != 0; }
+};
+struct Pair { int a, b; Order operator<=>(const Pair&) const = default; };
+#ifdef GCC_MODE
+static_assert(noexcept(Pair{} <=> Pair{}));
+#else
+static_assert(!noexcept(Pair{} <=> Pair{}));
+#endif
+static_assert((Pair{0, 1} <=> Pair{0, 2}).n == -1);
+static_assert((Pair{0, 4} <=> Pair{0, 4}).n == 0);
+''')
+    (world.scope / 'alias-adl.cpp').write_text('''\
+template<template<class> class T> struct Carrier {};
+namespace original {
+template<class T> struct Class {};
+int direct(Carrier<Class>);
+template<class T> int through_original(T);
+}
+namespace exposed {
+template<class T> using Forward = original::Class<T>;
+template<class T> using Transform = original::Class<T*>;
+template<class T> int through_alias(T);
+}
+int control(Carrier<original::Class> value) { return direct(value); }
+#ifndef CONTROL_ONLY
+#ifdef FORWARD
+using Arg = Carrier<exposed::Forward>;
+#else
+using Arg = Carrier<exposed::Transform>;
+#endif
+#ifdef ORIGINAL
+int lookup(Arg value) { return through_original(value); }
+#else
+int lookup(Arg value) { return through_alias(value); }
+#endif
+#endif
+''')
     default = invoke('-E', 'version.cpp')
     assert b'202603L' in default[1], default
     pid = world.pid()
@@ -279,6 +354,11 @@ int* forward_address(int& value) { return address(value); }
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
         invoke(*flags, '-fsyntax-only', 'nan.cpp', status=mode != 'gcc')
+        invoke(*flags, '-fsyntax-only', 'void-cast.cpp', status=mode == 'spec')
+        invoke(*flags, '-DSINGLETON', '-fsyntax-only', 'void-cast.cpp', status=mode != 'clang')
+        invoke(*flags, '-DUNRELATED', '-fsyntax-only', 'void-cast.cpp', status=1)
+        if mode == 'clang':
+            invoke(*flags, '-DREAD_PREVIOUS', '-fsyntax-only', 'void-cast.cpp')
         invoke(*flags, '-fsyntax-only', 'overflow.cpp', status=mode == 'gcc')
         diagnostic = invoke(*flags, '-Wno-all', '-fsyntax-only', 'warning.cpp')[2]
         assert (b'warning:' in diagnostic) == (mode == 'gcc'), diagnostic
@@ -288,6 +368,10 @@ int* forward_address(int& value) { return address(value); }
         invoke(*flags, '-fsyntax-only', 'incomplete-self.cpp')
         _, _, diagnostic = invoke(*flags, '-DINCOMPLETE', '-fsyntax-only', 'incomplete-self.cpp', status=1)
         assert b'incomplete' in diagnostic, diagnostic
+        invoke(*flags, '-freflection', '-fsyntax-only', 'attribute-splice.cpp')
+        invoke(*flags, '-freflection', '-DUNMATCHED_OPENER', '-fsyntax-only', 'attribute-splice.cpp',
+               status=mode != 'clang')
+        invoke(*flags, '-freflection', '-DUNMATCHED_CLOSER', '-fsyntax-only', 'attribute-splice.cpp', status=1)
         for target in (LINUX, DARWIN):
             invoke(target, *flags, '-fsyntax-only', 'member-alignment.cpp')
         for i, (owner, _) in enumerate(offset_spellings):
@@ -308,6 +392,15 @@ int* forward_address(int& value) { return address(value); }
         invoke(*flags, '-fsyntax-only', 'addressof-pack.cpp')
         invoke(*flags, '-DTWO_WRITTEN', '-fsyntax-only', 'addressof-pack.cpp', status=mode == 'gcc')
         invoke(*flags, '-DINSTANTIATE', '-fsyntax-only', 'addressof-pack.cpp', status=mode == 'gcc')
+        invoke(*flags, '-fsyntax-only', 'spaceship.cpp')
+        invoke(*flags, '-DONLY_UNEQUAL', '-fsyntax-only', 'spaceship.cpp', status=mode == 'gcc')
+        invoke(*flags, '-DCONTROL_ONLY', '-fsyntax-only', 'alias-adl.cpp')
+        if mode != 'gcc':
+            invoke(*flags, '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode == 'clang')
+        invoke(*flags, '-fsyntax-only', 'alias-adl.cpp', status=mode == 'clang')
+        if mode == 'clang':
+            invoke(*flags, '-DORIGINAL', '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=1)
+            invoke(*flags, '-DORIGINAL', '-fsyntax-only', 'alias-adl.cpp', status=1)
         if mode != 'gcc':
             expected_layout = '12' if mode == 'clang' else '8'
             invoke(DARWIN, *flags, '-DEXPECTED=' + expected_layout, '-fsyntax-only', 'layout.cpp')

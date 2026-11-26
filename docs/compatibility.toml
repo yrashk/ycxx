@@ -278,8 +278,8 @@ prior = "Preserve the identity of an alias template independently of its underly
 spec = "Treat the alias and the class template as separate template arguments."
 gcc = "Same as spec."
 clang = "Same as spec."
-gcc_observed = "A<T> = S<T> folds to S when used as a template template argument."
-clang_observed = "A and S produce distinct specializations."
+gcc_observed = "Folds an unconstrained forwarding alias with a matching parameter list and defaults to S. This includes forwarding a type pack or forwarding through another alias. A transformed or reordered argument list, a bound default, different defaults, or a requires-clause preserves alias identity in the probes."
+clang_observed = "Every tested alias produces a specialization distinct from the one for S."
 evidence = ["docs/design/ast.md"]
 
 [[divergence]]
@@ -367,16 +367,28 @@ evidence = ["tests/own/consteval/function-reference-constexpr.accept.cpp", "test
 
 [[divergence]]
 id = "constexpr-void-cast-one-past"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [basic.compound]"
 prior = "Follow the similar-object requirement."
 spec = "Reject a void-pointer constant-expression cast at the one-past position in the tested nested array."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Accepts the cast."
-clang_observed = "Accepts the cast."
-evidence = ["tests/own/consteval/erased-array-row-end.reject.cpp"]
+gcc = "Accept a cast to a similar type at the one-past position of an array. Reject the one-past singleton with a diagnostic."
+clang = "Accept a cast to a similar type at the one-past position of an array or singleton."
+gcc_observed = "Accepts the tested array casts. The singleton probe triggers an internal compiler error."
+evidence = ["tests/own/consteval/erased-array-row-end.reject.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constexpr-void-cast-nested-provenance"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [expr.add]"
+prior = "The cast at a nested array's one-past position was rejected before pointer arithmetic."
+spec = "Reject the cast."
+gcc = "Preserve the original array path after accepting the cast."
+clang = "Preserve the original array path after accepting the cast."
+gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array."
+clang_observed = "Preserves the prior row. Reading end[-1] succeeds, and dereferencing end is rejected."
+evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "structured-binding-array-cv"
@@ -393,16 +405,17 @@ evidence = ["tests/own/auto/p1-sb-array-cwg2506.run.cpp"]
 
 [[divergence]]
 id = "adl-alias-template-namespace"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "[basic.lookup.argdep]"
 prior = "Count the alias template named in a type-template argument among the associated entities."
 spec = "Find the function in the alias template's namespace."
 gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Fails to find it in the tested case."
-clang_observed = "Fails to find it in the tested case."
-evidence = ["tests/own/argument-dependent-lookup/class-template-template-argument-alias.accept.cpp"]
+clang = "Skip the alias and its underlying template when collecting associated namespaces for an alias template argument."
+gcc_observed = "For a forwarding alias A<T> = S<T>, ADL finds the namespace of S. For B<T> = S<T*>, it finds the alias namespace."
+clang_observed = "Neither the alias namespace nor the namespace of S is associated in either probe."
+limits = "GCC mode still needs to canonicalize forwarding aliases, as tracked in template-argument-alias-identity."
+evidence = ["tests/own/argument-dependent-lookup/class-template-template-argument-alias.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "plain-enum-overflow"
@@ -420,15 +433,26 @@ evidence = ["tests/own/classes/s4-enum-increment-overflow.reject.cpp"]
 
 [[divergence]]
 id = "member-attribute-splice-opener"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.attr.grammar], cfc798ac"
 prior = "Use the draft's balanced-token grammar."
 spec = "Diagnose the unmatched splice opener in an ordinary member attribute."
 gcc = "Same as spec."
+clang = "Accept a dangling splice opener before the closing parenthesis of an ordinary member attribute argument. Diagnose an unmatched splice closer."
+evidence = ["tests/own/decls/member-attribute-splice.reject.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "member-attribute-unmatched-delimiter"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[dcl.attr.grammar]"
+prior = "Require balanced argument tokens for ordinary attributes on nonstatic member declarations."
+spec = "Reject an unmatched opening bracket, brace, or parenthesis in the tested ordinary member attribute."
+gcc = "Same as spec."
 clang = "Same as spec."
-gcc_observed = "GCC with reflection enabled rejects the malformed attribute."
-clang_observed = "Clang 23 accepts the attribute in the recorded fixture."
+clang_observed = "Accepts the tested unknown attribute with an unmatched opener. A corresponding unmatched closer is diagnosed."
+probe = 'struct S { [[probe::annotation({ name)]] int member; };'
 evidence = ["tests/own/decls/member-attribute-splice.reject.cpp"]
 
 [[divergence]]
@@ -517,16 +541,14 @@ evidence = ["tests/own/ref-qualified-members/ref-qualified-mixed-redeclaration.r
 
 [[divergence]]
 id = "defaulted-spaceship-result-test"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "unverified" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[class.spaceship], #295, #1225"
 prior = "Test the synthesized comparison's lvalue result with vi != 0."
 spec = "Use vi != 0 to decide the body, deletion and exception specification."
-gcc = "Same as spec."
+gcc = "Test vi == 0. A result with only operator!= makes the comparison deleted."
 clang = "Same as spec."
-gcc_observed = "Uses vi == 0 and deletes the operator in the fixture."
-clang_observed = "Accepts the fixture, including its noexcept check."
-evidence = ["tests/own/three-way-comparison/defaulted-noexcept.accept.cpp"]
+evidence = ["tests/own/three-way-comparison/defaulted-noexcept.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "abstract-prvalue-contexts"
@@ -578,6 +600,12 @@ prior = "Fold an enumerator or constant variable used as a pack index to its int
 spec = "The mangler encodes the folded value for these expressions."
 gcc = "Same as spec."
 clang = "Same as spec."
-gcc_observed = "Encodes the name in the index expression."
-clang_observed = "Encodes the name in the index expression."
+gcc_observed = "Encodes a qualified namespace constant as an external-name primary (L_ZN1N4zeroEE). An unscoped enumerator is encoded as an enum-typed literal (LN1N3PosE0E)."
+clang_observed = "Uses the same encodings as GCC for the tested namespace constant and enumerator."
+probe = '''
+namespace N { inline constexpr unsigned zero = 0; enum Pos { first }; }
+template<class... Ts> int var(Ts...[N::zero]) { return 1; }
+template<class... Ts> int enu(Ts...[N::first]) { return 2; }
+int call() { return var<int>(0) + enu<int>(0); }
+'''
 evidence = ["STATUS.md"]

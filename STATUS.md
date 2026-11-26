@@ -30,6 +30,15 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Optimization design accepted: [`docs/design/optimization.md`](docs/design/optimization.md)
   (#3), summarized in DECISIONS §4.8. Throwaway spikes are in `spikes/optimization/`: e-graph
   extraction, and solver builds against libycxx.
+- `ycxx.cm` in `src/cm/` models bounded integers, Boolean 0/1 views, linear rows and
+  minimization. It emits stable FlatZinc with explicit failure for values beyond the
+  offline solver's integer range. Optional CTest runs exported models through Chuffed.
+  The standalone solver build pins HiGHS, CaDiCaL, and Chuffed by revision and archive
+  hash. See [optimizer experiments](docs/BUILDING.md#optimizer-experiments) and [#66](https://github.com/yrashk/ycxx/issues/66).
+- `ycxx.bench` in `packages/ycxx-bench/` provides calibrated, warmed sampling and balanced
+  comparisons, with typed callable properties and metadata. It reports clock and
+  host context, retained samples, and practical comparison verdicts. The optimizer
+  uses it for FlatZinc export timing. [Benchmark runner](packages/ycxx-bench/GUIDE.md).
 - AST design accepted: [`docs/design/ast.md`](docs/design/ast.md) (#2), summarized in DECISIONS
   §4.9. A throwaway spike is in `spikes/ast/`: a reflection-derived node schema, hash-consing,
   the red view and type canonicalization.
@@ -1921,7 +1930,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   including defaults and type packs. Reaching a class as a base or owner contributes its namespace.
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Ordinary calls also associate the declaring namespace of a namespace-scope type
-  template supplied as a template-template argument ([basic.lookup.argdep]).
+  template supplied as a template-template argument ([basic.lookup.argdep]). Clang mode
+  skips alias template arguments in this namespace walk.
 - Each associated namespace search uses preceding declarations that bind names in the scope.
   It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
@@ -2340,8 +2350,9 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   parameter-index form, and asm labels pin GCC's constant form.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. An index written as an enumerator or a
-  constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
+  signature (#209). In a body that arithmetic works. ycxx mangles an enumerator or a named
+  constant as a converted integer. Clang and GCC write the enumerator as an enum-typed literal
+  and a namespace constant as an external-name primary (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
 ## Functional conversions with pack expansions (#915)
@@ -3372,6 +3383,7 @@ provenance. The trace carries the compiler target for the request.
 with their declared rule kinds and source locations. JSON includes the same
 records with schema 1.
 HTML links each record to its declaration line in the displayed manifest.
+The catalog accepts a regular UTF-8 manifest and follows symlinks to one (#1441).
 
 Named-module discovery runs before native semantic analysis through
 `ModuleDirectives` and `ModuleGraph` (#1349). It follows the marked module
@@ -5006,7 +5018,8 @@ the body. A non-generic lambda body uses its own evaluation context.
   makes the operator deleted ([class.spaceship]/1.2, /2.2). The body is
   `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return R(std::strong_ordering::equal); }`
   (`defaulted_three_way_body`). Completion and the body build the same initialized local and
-  lvalue `vi != 0` test. The implicit exception specification covers the comparisons, the
+  lvalue result test. Spec and Clang modes use `vi != 0`; GCC mode checks `vi == 0` and returns
+  the result when the test is false. The implicit exception specification covers the comparisons, the
   lvalue tests, and initialization of either return value (#1225).
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
 - For non-assignment binary operators without comparison rewrites, an access, deletion or

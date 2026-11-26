@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(NOT TARGET ycxx::modules)
+  find_dependency(libycxx 0.1 CONFIG)
+endif()
+if(NOT TARGET ycxx::modules)
+  set(YCXXBench_FOUND FALSE)
+  set(YCXXBench_NOT_FOUND_MESSAGE "YCXXBench needs libycxx's ycxx::modules target.")
+  return()
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/YCXXBenchTargets.cmake")
+check_required_components(YCXXBench)
