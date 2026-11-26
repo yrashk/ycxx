@@ -94,7 +94,7 @@ std::expected<std::string, std::string> read_text(const std::filesystem::path& p
 }
 
 std::expected<std::string, std::string> read_catalog_manifest(const std::filesystem::path& path) {
-  const auto name = path.generic_native_encoded_string();
+  const auto name = path.generic_string<char>();
   std::error_code error;
   const auto status = std::filesystem::status(path, error);
   if (error || !std::filesystem::exists(status))
