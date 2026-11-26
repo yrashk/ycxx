@@ -8059,6 +8059,8 @@ private:
         s_.diag(d.name_at, Diag::not_supported, defaulted ? Tk::kw_default : Tk::kw_delete);
         return false;
       }
+      // A trailing requires-clause must affect overload viability ([over.match.viable], #1417).
+      if (deleted && types.rec(*parameter).rvalue_ref && !finish_constructor_declarator()) return false;
       if (defaulted) {
         const auto f = types.rec(d.type);
         const auto source = types.rec(*parameter);

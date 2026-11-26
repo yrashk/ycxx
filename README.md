@@ -589,8 +589,8 @@ written default member initializer are value-initialized.
 - first-declaration in-class defaulted copy assignment for ordinary classes without bases.
   The written operator keeps its access and assigns supported members in declaration order.
   [#244](https://github.com/yrashk/ycxx/issues/244)
-- first-declaration in-class deleted move assignment for nonvirtual members of ordinary classes
-  and class templates. Assignment diagnoses use of the selected deleted overload.
+- first-declaration in-class deleted move assignment for unconstrained, nonvirtual members of
+  ordinary classes and class templates. Assignment diagnoses use of the selected deleted overload.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
