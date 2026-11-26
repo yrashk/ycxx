@@ -3,6 +3,7 @@
 export module ycxx.build.project;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
@@ -253,12 +254,13 @@ Fp128 action_key(const GeneratorPlan& generator, const std::vector<ActionInput>&
   const auto key = [&](const Action& recipe) {
     return fingerprint(std::tie(recipe, inputs, generator.tool_fingerprint));
   };
-  if (!std::ranges::contains(action.args, ActionArg::Kind::target_triple, &ActionArg::kind)) return key(action);
+  const auto resolved_triple = [](const ActionArg& arg) { return !triple_arg_selector(arg.kind).empty(); };
+  if (std::ranges::none_of(action.args, resolved_triple)) return key(action);
 
   // The argv word determines the receipt. Keep its provenance on the plan for traces.
   auto recipe = action;
   for (auto& arg : recipe.args)
-    if (arg.kind == ActionArg::Kind::target_triple) arg.kind = ActionArg::Kind::literal;
+    if (resolved_triple(arg)) arg.kind = ActionArg::Kind::literal;
   return key(recipe);
 }
 
@@ -399,7 +401,7 @@ struct ModuleProviders {
 
 std::string module_path(const fs::path& path, const fs::path& cwd) {
   const auto relative = path.lexically_relative(cwd);
-  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_native_encoded_string();
+  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_string<char>();
 }
 
 std::string module_site(const pipeline::ModuleDirective& directive, const fs::path& cwd) {
@@ -565,7 +567,7 @@ struct WorkspaceBuild {
 
 namespace {
 
-std::string native(const fs::path& path) { return path.generic_native_encoded_string(); }
+std::string native(const fs::path& path) { return path.generic_string<char>(); }
 
 std::string_view explicit_triple(const ast::Target* target) {
   return target ? target->triple : std::string_view{};
@@ -1437,7 +1439,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                               std::optional<std::size_t> log_limit = std::nullopt) -> ActionResult {
     const auto scratch = build_directory(cwd, "jobs");
     if (!scratch) return {1, {}, scratch.error(), {}, ActionCompletion::setup_failed};
-    std::inplace_stop_source stop;
+    ycxx::exec::inplace_stop_source stop;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     bool timed_out = false;
     std::jthread monitor([&](std::stop_token finished) {
@@ -1474,9 +1476,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (tracer->values()) {
         if (witness_exit) event.value = std::format("exit status {}", result.exit_status);
         for (const auto& [index, arg] : std::views::enumerate(action.args)) {
-          if (arg.kind != ActionArg::Kind::target_triple) continue;
+          const auto selector = triple_arg_selector(arg.kind);
+          if (selector.empty()) continue;
           if (!event.value.empty()) event.value += '\n';
-          event.value += std::format("args[{}]: target_triple() = {}", index, arg.value);
+          event.value += std::format("args[{}]: {} = {}", index, selector, arg.value);
         }
       }
       if (event.outcome == engine::Outcome::failed)

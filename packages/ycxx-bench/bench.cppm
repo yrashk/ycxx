@@ -103,9 +103,11 @@ struct HostInfo {
   unsigned logical_cpus = 0;
 };
 
+enum class RssSource { unspecified, linux_proc_status, mach_task_basic_info };
+
 struct ProcessSample {
   Nanoseconds cpu_time{};
-  std::uint64_t peak_rss_bytes = 0;
+  std::optional<std::uint64_t> peak_rss_bytes;
   std::optional<Nanoseconds> thread_cpu_time;
   std::optional<std::uint64_t> rss_before_bytes;
   std::optional<std::uint64_t> rss_after_bytes;
@@ -116,6 +118,10 @@ struct ProcessSample {
   std::uint64_t block_input_operations = 0;
   std::uint64_t block_output_operations = 0;
   std::optional<double> host_cpu_busy_fraction;
+  RssSource rss_source = RssSource::unspecified;
+  // Platform resource-usage counter, retained separately from the coherent
+  // resident-memory snapshot. On Linux this can retain pre-exec history.
+  std::optional<std::uint64_t> rusage_max_rss_bytes;
 };
 
 struct Sample {
@@ -253,11 +259,16 @@ struct HostTicks {
   std::uint64_t busy;
   std::uint64_t total;
 };
+struct ResidentMemory {
+  std::uint64_t rss_bytes;
+  std::uint64_t peak_bytes;
+  RssSource source;
+};
 struct ProcessCounters {
   Nanoseconds cpu_time;
-  std::uint64_t peak_rss_bytes;
+  std::optional<std::uint64_t> rusage_max_rss_bytes;
   std::optional<Nanoseconds> thread_cpu_time;
-  std::optional<std::uint64_t> rss_bytes;
+  std::optional<ResidentMemory> memory;
   std::uint64_t minor_faults;
   std::uint64_t major_faults;
   std::uint64_t voluntary_switches;

@@ -12,6 +12,7 @@ def main():
         "unsat": ("=====UNSATISFIABLE=====",),
         "constant": ("----------", "=========="),
         "satisfy": ("x0 = -1;", "----------"),
+        "fusion": ("x0 = 0;", "x1 = 0;", "x2 = 1;", "x3 = 1;", "----------", "=========="),
     }
     for case, expected in cases.items():
         model = subprocess.check_output([fixture, "--emit", case], text=True, timeout=10)

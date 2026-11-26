@@ -1,6 +1,6 @@
 # The AST core (docs/design/ast.md, #32): handles, interners, the reflection-derived node schema,
 # frame builders and the red view.
-add_library(ycxxc_ast STATIC)
+add_library(ycxxc_ast ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_ast PUBLIC FILE_SET CXX_MODULES FILES
   fingerprint.cppm
   handles.cppm

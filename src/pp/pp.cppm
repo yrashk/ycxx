@@ -272,7 +272,7 @@ Paths& paths() {
 PathId source_path(const Source& source, std::string_view name) {
   std::filesystem::path path(name);
   if (path.is_relative() && !source.cwd.empty()) path = std::filesystem::path(source.cwd) / path;
-  return path_id(path.lexically_normal().generic_native_encoded_string());
+  return path_id(path.lexically_normal().generic_string<char>());
 }
 
 bool is_generated_path(const Source& source, PathId id) {
@@ -281,7 +281,7 @@ bool is_generated_path(const Source& source, PathId id) {
   auto state = std::filesystem::path(source.cwd) / ".ycxx";
   if (view == View::explicit_target_build) state = state / "targets" / source.config.target->triple;
   const auto root = (state / "virtual").lexically_normal();
-  const std::string prefix = root.generic_native_encoded_string() + '/';
+  const std::string prefix = root.generic_string<char>() + '/';
   return path_of(id).starts_with(prefix);
 }
 
@@ -577,7 +577,7 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
   auto normal = [&](std::string_view d) {
     std::filesystem::path p(d);
     if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
-    std::string s = p.lexically_normal().generic_native_encoded_string();
+    std::string s = p.lexically_normal().generic_string<char>();
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };

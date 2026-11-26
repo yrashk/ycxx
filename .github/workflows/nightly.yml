@@ -140,13 +140,13 @@ jobs:
           if-no-files-found: ignore
 
   # ThreadSanitizer (#105): ycxx and libycxx instrumented, the unit tests once and the concurrent
-  # ones repeated (tools/tsan). On the bare runner with a GCC built with libtsan (the action's
-  # comment says why not the container); building that GCC takes about 17 minutes on a cache miss.
+  # ones repeated (tools/tsan). Ubuntu 26.04 has glibc's fixes for libc-free dynamic executables
+  # (#1377). The bare runner lets the setup action lower vm.mmap_rnd_bits for TSan.
   tsan:
     needs: changed
     if: needs.changed.outputs.run == 'true' && !inputs.release-only
     name: linux-x86_64-tsan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4

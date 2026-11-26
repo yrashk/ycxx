@@ -21,7 +21,7 @@ executable passes its self-check.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-24). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-26). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -40,10 +40,17 @@ select the implemented GCC 16 and upstream Clang 23 behaviors. Use consistent mo
 when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
+**Embed the query engine or compiler.** Build the components as static or shared libraries
+with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the component
+APIs and examples in the [embedder guide](docs/EMBEDDING.md).
+
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 Use `ycxx show --targets` to list the workspace's declared target names and rule
 kinds before a build. Add `--format=html` for a catalog with links to their
 declarations in the manifest.
+Use `ycxx show app --format=html` to follow resolved library and named
+artifact dependencies back to their declarations. Add `--against before.json`
+to compare dependency counts with a saved JSON plan.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
@@ -53,7 +60,8 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 `.ycxx/targets/<triple>/out/app`. Pass the same option to `ycxx show app` to
 inspect that variant.
 Use `target_triple()` in a declared action's `args` to pass the selected triple
-to a host tool that generates a target-specific input.
+to a host tool that generates a target-specific input. Use `host_triple()`
+for the host's canonical triple across target configurations.
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
@@ -68,22 +76,29 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
 can be compared with the checkout and rendered as a standalone HTML report.
+In the HTML report, **Target dependencies** lets you follow producers and
+open their use sites in `build.ycxx`.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
+The plan's **Value bindings** section links each resolved binding to its
+use in `build.ycxx`. In a saved plan comparison, **Value binding changes**
+shows which bindings were added or removed.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
 owned names. The shader bundle plans its modules from a generated inventory
 using a named `plan_inputs` binding. The reflection
-example also uses a compiled shader's descriptor layout to generate `constexpr`
-C++ bindings. Shader edits with the same layout reuse the native executable.
+example uses a compiled shader's uniform buffers and fixed-size sampler arrays
+to generate `constexpr` C++ bindings. Shader edits with the same layout reuse
+the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
-Generated actions can track the executable bytes of declared helper tools.
+Generators and witnesses can track helper executables by path and run
+generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
@@ -99,6 +114,10 @@ move operations.
 [#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828) [#218](https://github.com/yrashk/ycxx/issues/218)
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
+Constructors and constructor templates, in classes and class templates, can be `explicit` or
+`explicit(condition)`. A condition that depends on a constructor template's own parameters is
+evaluated after deduction. Constructor templates check their `requires` constraints.
+[#715](https://github.com/yrashk/ycxx/issues/715) [#1398](https://github.com/yrashk/ycxx/issues/1398)
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
@@ -164,6 +183,11 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+A template argument is a type-id only when it parses as one. Functional casts such as `B<U(3)>`
+(with a typedef-name `U`), `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>` and `B<int((n))>`
+are constant expressions, while `F<int(int)>`, `F<U (&)[3]>` and `F<typename T::type(T)>` stay
+types. [#1190](https://github.com/yrashk/ycxx/issues/1190) · [#810](https://github.com/yrashk/ycxx/issues/810)
+
 Fixed reference and single-pointer arguments can deduce through a unique most-derived
 base that matches a named class-template parameter.
 [#1144](https://github.com/yrashk/ycxx/issues/1144)
@@ -174,6 +198,11 @@ parentheses or braces, including through namespace aliases. [#697](https://githu
 Class templates at namespace scope can delete their copy assignment on its first in-class
 declaration, including with an lvalue or rvalue ref-qualifier. Specializations retain the deleted
 overload. [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+
+Member functions and member templates of class templates can carry `&` and `&&` ref-qualifiers,
+as in `T base() &&` next to `const T& base() const&`. Calls choose the overload by the object's
+value category, and members defined outside the class keep their qualifier.
+[#311](https://github.com/yrashk/ycxx/issues/311)
 
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
@@ -438,7 +467,9 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 Both targets construct a class prvalue selected by the built-in conditional or comma operator
 directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
 The supported nonthrowing initializers keep temporaries alive through later initializer clauses
-and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
+and destroy them in reverse order. A native by-value return can construct the result directly
+from a nonthrowing built-in conditional, including a checked copy from a same-class lvalue.
+[#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -589,6 +620,9 @@ written default member initializer are value-initialized.
 - first-declaration in-class defaulted copy assignment for ordinary classes without bases.
   The written operator keeps its access and assigns supported members in declaration order.
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- first-declaration in-class deleted move assignment for unconstrained, nonvirtual members of
+  ordinary classes and class templates. Assignment diagnoses use of the selected deleted overload.
+  [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - ordinary namespace-scope classes without bases can implicitly move from an rvalue when their
@@ -634,6 +668,10 @@ written default member initializer are value-initialized.
   lookup through bases, derived-to-base conversions and base initializers. Unqualified
   injected class names respect base access in ordinary member bodies. Those bodies and ordinary
   in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
+  A class, class template or partial specialization can bring a base's member functions into its
+  own overload set with a using-declaration, including from a dependent base
+  (`template<class Fn> struct D : Fn { using Fn::operator(); };`). Its own functions with the same
+  parameters hide the base's. [#1150](https://github.com/yrashk/ycxx/issues/1150)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
@@ -712,8 +750,8 @@ written default member initializer are value-initialized.
   operands, including dependent operands in supported class-template bases and variable-template
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
-  cv `void` and object pointers (derived-to-base, `void*`, added qualifiers, `bool`), including
-  dependent operands in the same template contexts.
+  cv `void`, object and multi-level pointers (derived-to-base, `void*`, qualification conversions,
+  `bool`) and references to pointers, including dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
@@ -826,6 +864,8 @@ written default member initializer are value-initialized.
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
   Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
   expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
+  `__builtin_ctz`, used by libycxx's `<charconv>`, converts its argument to `unsigned int`
+  and counts trailing zero bits as an `int`. [#1479](https://github.com/yrashk/ycxx/issues/1479)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
@@ -1061,6 +1101,9 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   reproducible solver builds. The [optimizer experiments](docs/BUILDING.md#optimizer-experiments)
   cover a solver round trip, extraction comparisons, and export timing. Other C++26 projects
   can install or vendor the [YCXX Bench package](packages/ycxx-bench/README.md).
+- On x86-64 Linux, `-fycxx-optimize=heuristic` enables unsigned power-of-two division
+  rewrites. `-fycxx-optimize=solver` also enables quotient/remainder fusion.
+  [Model, validation and tracing](docs/design/optimization.md#93-unsigned-division-on-x86-64).
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
   The pinned library work includes scalar type traits in class-template bases and variable
   templates, including triviality and POD queries for non-record types, narrow-character object

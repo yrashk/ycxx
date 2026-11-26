@@ -918,6 +918,9 @@ longer be shared.
 ### 7.6 Pack indexing and binding packs
 
 `T...[I]` is `TPackIndex` while dependent and otherwise the selected element, with no sugar.
+The node stores the index value used in substitution. GCC and Clang modes also retain the
+written constant name, enum value, or supported operator expression when it affects dependent
+type identity and mangling.
 `e...[I]` is `PackIndex{Child pack; Child index}`, `VDepPackIndex` in canonical positions, and is
 replaced at substitution by the selected element's node ([expr.prim.pack.index]). A structured
 binding pack (P1061) with a dependent initializer is a pack `LocalRec` used through
