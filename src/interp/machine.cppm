@@ -78,6 +78,7 @@ struct VirtualTarget {
 
 struct Config {
   Mode mode = Mode::constant;
+  ast::Compatibility compatibility = ast::Compatibility::spec;
   u64 step_limit = u64{1} << 22;  // nodes executed
   u32 depth_limit = 512;          // nested calls ([implimits]: recursive constexpr calls)
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
@@ -1214,9 +1215,9 @@ Machine::Flow Machine::float_shape(QualType t, const Shape*& s) {
 }
 
 // fadd, fsub, fmul, fdiv, fneg, fabs. In constant mode ([expr.const], [expr.pre]/4), a division by zero
-// ([expr.mul]/4) and an arithmetic NaN result, which is not mathematically defined, are not
-// constant; an overflow to an infinity is, as in Clang, and so are fneg and fabs of a NaN, which
-// only change its sign. In runtime mode the operations are IEEE's.
+// ([expr.mul]/4) and a newly generated NaN are not constant. GCC mode also rejects overflow
+// from finite operands and permits propagation of a NaN operand. A change of sign on a NaN
+// is constant in every mode. Runtime operations use IEEE semantics.
 Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
   const ir::Node& nd = f.fn->node(n);
   const Shape* s;
@@ -1238,8 +1239,11 @@ Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
     case Op::fabs: r = std::fabs(x); break;
     default: return unsupported(n);
     }
-    if (config_.mode == Mode::constant && nd.op != Op::fneg && nd.op != Op::fabs && std::isnan(r))
-      return fail(Reason::float_nan);
+    if (config_.mode == Mode::constant && nd.op != Op::fneg && nd.op != Op::fabs) {
+      const bool gcc = config_.compatibility == ast::Compatibility::gcc;
+      if (std::isnan(r) && !(gcc && (std::isnan(x) || std::isnan(y)))) return fail(Reason::float_nan);
+      if (gcc && std::isinf(r) && std::isfinite(x) && std::isfinite(y)) return fail(Reason::float_overflow);
+    }
     return set(f, n, Value::floating(encode(r)));
   };
   if (s->width == 32) return compute(decode<float>(a.bits), decode<float>(b.bits));
@@ -1445,12 +1449,14 @@ Machine::Flow Machine::find_byte(const Value& s, const Value& c, u64 n, Value& o
   if (n == 0) return Flow::next;
   Bytes bytes;
   if (Flow f = bytes_at(s, bytes); f != Flow::next) return f;
+  const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
+  if (read_full_range && n > bytes.bound - bytes.index) return fail(Reason::past_end_access);
   for (u64 i = 0; i < n; ++i) {
     u8 byte = 0;
     if (Flow f = read_byte(bytes, i, byte); f != Flow::next) return f;
-    if (byte == u8(c.bits)) {
+    if (out.kind == VKind::null && byte == u8(c.bits)) {
       out = byte_pointer(bytes, i);
-      return Flow::next;
+      if (!read_full_range) return Flow::next;
     }
   }
   return Flow::next;
@@ -1464,14 +1470,17 @@ Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Valu
   Bytes left, right;
   if (Flow f = bytes_at(a, left); f != Flow::next) return f;
   if (Flow f = bytes_at(b, right); f != Flow::next) return f;
-  if (n > left.bound - left.index || n > right.bound - right.index) return fail(Reason::past_end_access);
+  if (config_.compatibility != ast::Compatibility::clang &&
+      (n > left.bound - left.index || n > right.bound - right.index))
+    return fail(Reason::past_end_access);
+  const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
   for (u64 i = 0; i < n; ++i) {
     u8 x = 0, y = 0;
     if (Flow f = read_byte(left, i, x); f != Flow::next) return f;
     if (Flow f = read_byte(right, i, y); f != Flow::next) return f;
-    if (x != y) {
+    if (out.bits == 0 && x != y) {
       out = Value::integer(x < y ? u64(-1) : 1);
-      return Flow::next;
+      if (!read_full_range) return Flow::next;
     }
   }
   return Flow::next;

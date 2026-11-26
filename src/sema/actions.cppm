@@ -120,6 +120,7 @@ class Questions {
 public:
   virtual bool exceptions_enabled() const { return true; }
   virtual bool rtti_enabled() const { return true; }
+  virtual ast::Compatibility compatibility() const { return ast::Compatibility::spec; }
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
@@ -1329,10 +1330,12 @@ public:
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
-  Ex dependent_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end) {
+  Ex dependent_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end,
+                                    bool qualified = false, bool global = false) {
     auto full = template_arguments(tmpl, args, begin);
     if (!full) return {NodeId::none, begin, end};
-    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full))});
+    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full)),
+                                                     ins().intern_seq(args), u8(qualified), u8(global)});
     return literal(types().referee(tmpl.type), value, ValueCategory::lvalue, begin, end);
   }
   // The initializer is replayed with bound arguments. Check the written arguments here without
@@ -1434,6 +1437,7 @@ public:
     return q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at);
   }
   u32 source_line_at(u32 at) { return q_->presumed_line(source_position(at)); }
+  ast::Compatibility compatibility() const { return q_->compatibility(); }
   std::optional<Diag> unresolved_default_source(const Ex& expression) {
     if (!default_source_observer_ || (!default_source_observer_->line &&
         default_source_observer_->descriptor_type == EntityId::none)) return std::nullopt;
@@ -8660,7 +8664,7 @@ public:
     return w_->values.address(types().pointer(type), w_->values.entity(entity), 0);
   }
 
-  Ex builtin_source_location(u32 begin, u32 end) {
+  Ex builtin_source_location(u32 begin, u32 end, u32 site) {
     const Ex fail{NodeId::none, begin, end};
     if (!w_->target.supports(ast::NativeOperation::source_location_descriptor)) {
       diag(begin, Diag::source_location_target);
@@ -8682,20 +8686,21 @@ public:
       diag(begin, Diag::source_location_default_member);
       return fail;
     }
-    return literal(type, source_location_address(descriptor, begin), ValueCategory::prvalue, begin, end);
+    return literal(type, source_location_address(descriptor, site), ValueCategory::prvalue, begin, end);
   }
 
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
-  Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
+  Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end, u32 paren_at) {
     using enum lex::BuiltinFunction;
     if (b.function == source_location) {
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
-      return builtin_source_location(begin, end);
+      return builtin_source_location(begin, end, q_->compatibility() == ast::Compatibility::gcc ? paren_at : begin);
     }
     if (b.function == source_line) {
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
-      const QualType type = builtin(Builtin::unsigned_int);
-      const u32 line = source_line_at(begin);
+      const bool gcc = q_->compatibility() == ast::Compatibility::gcc;
+      const QualType type = builtin(gcc ? Builtin::int_ : Builtin::unsigned_int);
+      const u32 line = source_line_at(gcc ? paren_at : begin);
       if (default_source_observer_) {
         // Constant probes retain unevaluated operands for proof, but the default's invocation
         // line is still unknown. Only an evaluated use binds the enclosing default to a line.
@@ -13368,9 +13373,11 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      // The descriptor uses the call's beginning, including a written member receiver.
-      // __builtin_LINE keeps its separate member-name anchor.
-      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at, begin);
+      // GCC uses the opening parenthesis for both builtins. Otherwise the descriptor uses the
+      // call's beginning and __builtin_LINE uses a written member name when present.
+      const bool gcc = q_->compatibility() == ast::Compatibility::gcc;
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i],
+                                gcc ? paren_at : invocation_at, gcc ? paren_at : begin);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }

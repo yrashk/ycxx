@@ -53,6 +53,16 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
 
 ## While working
 
+- For changes to accepted syntax, semantics, preprocessing values or the ABI, check the pinned
+  draft or published ABI and run the relevant GCC and upstream Clang black-box probes. When the
+  answers differ, update [docs/compatibility.toml](docs/compatibility.toml) with the reference,
+  observed behavior, support status for each mode, and regression coverage. Apply oracle-specific
+  choices through the translation unit's `-fcompat=spec|gcc|clang` setting. Keep the draft
+  expectation in `spec` mode and check every affected mode, including both cold and resident
+  compilation when the choice changes a cached result.
+- Keep the extensions in [docs/EXTENSIONS.md](docs/EXTENSIONS.md) available in every mode.
+  System and libycxx headers rely on these extensions and their feature probes. Record any
+  mode-dependent behavior of an extension in the compatibility table.
 - Write C++ the way fully implemented C++26 would have it (DECISIONS §3.2): concepts,
   modules, reflection instead of generators and boilerplate, contracts, coroutines and
   `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,
