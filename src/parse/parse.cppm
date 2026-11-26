@@ -3189,11 +3189,14 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   if (!dmi) return std::nullopt;
   const auto& entity = p_->world().entities.rec(field);
   const auto arguments = p_->class_args_.find(std::to_underlying(entity.scope));
-  auto& types = caller.types();
-  const bool array_fallback = fallback && dmi->braced && !types.is_dependent(entity.type) &&
-                              sema::Evaluator::constant_record_char_array(types, entity.type);
-  if (fallback && !array_fallback && (arguments == p_->class_args_.end() || !types.is_scalar(entity.type)))
-    return std::nullopt;
+  // The fold of a constant default, where an initialization selects it ([temp.inst]/3): a scalar
+  // member, or an array of scalars, which keeps no value of its own at declaration
+  // ([dcl.init.aggr]). A specialization's defaults and those whose value depends on being
+  // constant-evaluated have none either. Other nonconstant forms remain #118.
+  const auto& types = caller.types();
+  const QualType element = types.innermost_array_element(entity.type);
+  if (fallback && (types.is_dependent(entity.type) || !types.is_scalar(element))) return std::nullopt;
+  if (fallback && types.is_member_pointer(element) && types.is_array(entity.type)) return std::nullopt;
   if (dmi->invalid) return NodeId::none;
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
@@ -3250,17 +3253,13 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
     return NodeId::none;
   }
   if (fallback) {
-    // A stored value also initializes runtime objects. Only fold array elements whose values are
-    // independent of evaluation mode, including the value-initialized tail ([dcl.init.aggr]).
-    if (array_fallback) {
-      if (!replay.as<ast::InitList>(init)) return std::nullopt;
-      if (!std::ranges::all_of(replay.list_elements(init), [&](Ex element) {
-            return replay.as<ast::Literal>(element).has_value() || replay.as<ast::ValueInit>(element).has_value();
-          })) return std::nullopt;
-    }
-    const auto value = sema::Evaluator(replay, source).evaluate_initializer(init).value;
+    const auto evaluated = sema::Evaluator(replay, source).evaluate_initializer(init);
     if (instantiation_failed()) return NodeId::none;
-    if (!value) return std::nullopt;
+    // An `if consteval` saw constant evaluation: the value is the initializer's only where the
+    // initialization is manifestly constant-evaluated ([expr.const], [stmt.if]).
+    if (!evaluated.value || (evaluated.observed_constant_context && !caller.constant_reference_context))
+      return std::nullopt;
+    const auto value = evaluated.value;
     const Ex folded = replay.literal(sema::Types::unqualified(entity.type), *value, ast::ValueCategory::prvalue, 0, 0);
     return folded.id;
   }
@@ -6825,7 +6824,8 @@ private:
         } else {
           const std::size_t n = s_.diag_count();
           init = ps_.member_initializer(d.type, braced, form);
-          auto v = init.ok() && types.is_scalar(d.type) ? constant_initializer(init) : std::nullopt;
+          // A value that observed constant evaluation is not kept: most uses run at run time.
+          auto v = init.ok() && types.is_scalar(d.type) ? constant_initializer(init, false) : std::nullopt;
           s_.truncate_diags(n);
           if (v) value = *v;
           else init = {};
@@ -9960,8 +9960,11 @@ private:
     if (lang == LangLinkage::c) s_.diag(d.name_at, Diag::main_linkage);
   }
 
-  std::optional<ConstId> constant_initializer(Ex e) {
-    return sema::Evaluator(s_, q_).evaluate_initializer(e).value;
+  // `context_dependent` false: none for a value that holds only in constant evaluation.
+  std::optional<ConstId> constant_initializer(Ex e, bool context_dependent = true) {
+    const auto evaluated = sema::Evaluator(s_, q_).evaluate_initializer(e);
+    if (!context_dependent && evaluated.observed_constant_context) return std::nullopt;
+    return evaluated.value;
   }
 
   Program* p_;

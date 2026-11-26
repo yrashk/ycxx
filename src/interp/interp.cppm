@@ -44,6 +44,7 @@ struct Outcome {
   std::vector<Result> values;  // the entry's results: none for a void function
   Failure failure;
   u64 steps = 0;
+  bool observed_constant_context = false;  // an `if consteval` took its consteval edge
 };
 
 // Evaluates `entry` (a function body, or the thunk of an expression) with its parameters' values.
@@ -79,6 +80,7 @@ engine::query_task<Outcome> evaluate(H& host, const ast::Interners& in, const as
   }
   if (byte_capture && out.status != Outcome::Status::value) byte_capture->bytes.reset();
   out.steps = m.steps();
+  out.observed_constant_context = m.observed_constant_context();
   co_return out;
 }
 

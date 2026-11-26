@@ -534,6 +534,11 @@ declaration order and can call a function or read an earlier field through `this
 initializer takes precedence. The same rules apply to ordinary non-inline namespace objects,
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
+An array member of scalars with a constant default member initializer, such as `T w[N] = {};`
+in a class template or an ordinary class, is initialized by `S s;`, `S{}`, `new S` and aggregate
+initialization that omits it, with omitted elements zero. Constant evaluation of an object with
+an array member is not supported yet.
+[#1418](https://github.com/yrashk/ycxx/issues/1418) · [#1140](https://github.com/yrashk/ycxx/issues/1140)
 
 An out-of-line constructor evaluates a default member initializer with the namespace names
 visible where the initializer was written and lookup in the complete enclosing class.
