@@ -11,7 +11,13 @@ add_executable(engine_bench bench.cpp)
 target_link_libraries(engine_bench PRIVATE ycxxc_engine)
 
 # The scheduler (#15): thread counts, chaos, cancellation, hand-over, cycles across threads.
-ycxxc_unit_test(engine_scheduler scheduler_test.cpp ycxxc_engine)
+if(YCXXC_STDLIB STREQUAL "system")
+  set(YCXXC_SCHEDULER_REPLACEMENT_NAMESPACE "ycxx::__portable_std::execution::parallel_scheduler_replacement")
+else()
+  set(YCXXC_SCHEDULER_REPLACEMENT_NAMESPACE "std::execution::parallel_scheduler_replacement")
+endif()
+configure_file(scheduler_test.cpp.in scheduler_test.cpp @ONLY)
+ycxxc_unit_test(engine_scheduler "${CMAKE_CURRENT_BINARY_DIR}/scheduler_test.cpp" ycxxc_engine)
 
 # The engine's additions for the daemon (#95): providers, durabilities, reset_unobserved, counts.
 ycxxc_unit_test(engine_inputs inputs_test.cpp ycxxc_engine)

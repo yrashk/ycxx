@@ -40,10 +40,17 @@ select the implemented GCC 16 and upstream Clang 23 behaviors. Use consistent mo
 when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
+**Embed the query engine or compiler.** Build the components as static or shared libraries
+with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the engine and
+compiler examples in [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 Use `ycxx show --targets` to list the workspace's declared target names and rule
 kinds before a build. Add `--format=html` for a catalog with links to their
 declarations in the manifest.
+Use `ycxx show app --format=html` to follow resolved library and named
+artifact dependencies back to their declarations. Add `--against before.json`
+to compare dependency counts with a saved JSON plan.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
@@ -68,22 +75,30 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
 can be compared with the checkout and rendered as a standalone HTML report.
+In the HTML report, **Target dependencies** lets you follow producers and
+open their use sites in `build.ycxx`.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
+The plan's **Value bindings** section links each resolved binding to its
+use in `build.ycxx`. In a saved plan comparison, **Value binding changes**
+shows which bindings were added or removed.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
 owned names. The shader bundle plans its modules from a generated inventory
 using a named `plan_inputs` binding. The reflection
-example also uses a compiled shader's descriptor layout to generate `constexpr`
-C++ bindings. Shader edits with the same layout reuse the native executable.
+example uses a compiled shader's uniform buffers and fixed-size sampler arrays
+to generate `constexpr` C++ bindings. Shader edits with the same layout reuse
+the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
 Generated actions can track the executable bytes of declared helper tools.
+An action can also run a generated executable selected as a named artifact
+input.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
@@ -443,7 +458,9 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 Both targets construct a class prvalue selected by the built-in conditional or comma operator
 directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
 The supported nonthrowing initializers keep temporaries alive through later initializer clauses
-and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
+and destroy them in reverse order. A native by-value return can construct the result directly
+from a nonthrowing built-in conditional, including a checked copy from a same-class lvalue.
+[#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -593,6 +610,9 @@ written default member initializer are value-initialized.
   with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
 - first-declaration in-class defaulted copy assignment for ordinary classes without bases.
   The written operator keeps its access and assigns supported members in declaration order.
+  [#244](https://github.com/yrashk/ycxx/issues/244)
+- first-declaration in-class deleted move assignment for unconstrained, nonvirtual members of
+  ordinary classes and class templates. Assignment diagnoses use of the selected deleted overload.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
@@ -1053,6 +1073,13 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 
 ### In progress
 
+- Optimizer groundwork includes the bounded linear constraint model, FlatZinc export, and
+  reproducible solver builds. The [optimizer experiments](docs/BUILDING.md#optimizer-experiments)
+  cover a solver round trip, extraction comparisons, and export timing. Other C++26 projects
+  can install or vendor the [YCXX Bench package](packages/ycxx-bench/README.md).
+- On x86-64 Linux, `-fycxx-optimize=heuristic` enables unsigned power-of-two division
+  rewrites. `-fycxx-optimize=solver` also enables quotient/remainder fusion.
+  [Model, validation and tracing](docs/design/optimization.md#93-unsigned-division-on-x86-64).
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
   The pinned library work includes scalar type traits in class-template bases and variable
   templates, including triviality and POD queries for non-record types, narrow-character object

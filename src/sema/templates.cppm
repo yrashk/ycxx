@@ -353,16 +353,16 @@ public:
       auto es = substitute_args(ins().seqs.elements(r.args), b);
       if (!es) return std::nullopt;
       if (ins().values.is_dependent(*i))
-        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)));
+        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)), r.written_index);
       return select_element(*es, *i);
     }
     TypeRec p = types().rec(r.inner);
     auto a = b.at(p.depth, p.index);
-    if (!a) return types().pack_index(r.inner, *i);
+    if (!a) return types().pack_index(r.inner, *i, r.written_index);
     if (a->kind == TemplateArgKind::type && types().kind(a->type) == TypeKind::template_param && types().rec(a->type).pack)
-      return types().pack_index(types().canonical(a->type), *i);
+      return types().pack_index(types().canonical(a->type), *i, r.written_index);
     if (a->kind != TemplateArgKind::pack) return std::nullopt;
-    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems);
+    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems, r.written_index);
     return select_element(elements(*a), *i);
   }
   // The element of a pack's arguments at the constant `index`, a type ([dcl.type.pack.index]/2:
@@ -654,6 +654,8 @@ public:
         if (!types().is_class(*q)) return std::nullopt;
         auto templ = member_template_of(types().class_of(*q), r.name);
         if (!templ) return std::nullopt;
+        if (compatibility == ast::Compatibility::gcc && template_decl)
+          if (auto decl = template_decl(*templ)) *templ = template_argument_entity(*decl);
         return TemplateArg{TemplateArgKind::template_, QualType{}, ConstId::none, {}, *templ};
       }
       if (a.templ != EntityId::none || types().kind(a.type) != TypeKind::template_param) return a;
@@ -1320,7 +1322,8 @@ public:
              pr.args == ar.args;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
     case TypeKind::pack_index:  // non-deduced, above
-      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.pack == ar.pack && pr.args == ar.args;
+      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.written_index == ar.written_index &&
+             pr.pack == ar.pack && pr.args == ar.args;
     case TypeKind::placeholder: return pr.decltype_auto == ar.decltype_auto;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
@@ -1844,6 +1847,34 @@ public:
         return false;
     }
     return true;
+  }
+
+  // GCC uses the target's identity for an unconstrained alias that forwards its complete
+  // parameter list unchanged. An alias with different defaults still denotes its own template.
+  EntityId template_argument_entity(const ast::DeclSema& decl) {
+    if (compatibility != ast::Compatibility::gcc || decl.kind != ast::DeclKind::type_alias ||
+        decl.constraints != ConstId::none || !types().is_class(decl.type) || !template_decl)
+      return decl.entity;
+    const EntityRec& result = w_->entities.rec(types().class_of(decl.type));
+    if (result.templ == EntityId::none) return decl.entity;
+    const auto target = template_decl(result.templ);
+    if (!target || target->kind != ast::DeclKind::class_) return decl.entity;
+    const auto params = ins().seqs.elements(decl.template_params);
+    const auto target_params = ins().seqs.elements(target->template_params);
+    if (target_params.empty() || !heads_equivalent(params, target_params)) return decl.entity;
+    const auto own = own_args(params);
+    if (result.args != own) return decl.entity;
+    const auto renamed = Bindings::of(target_params[0].depth, own);
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      const auto& source = params[i];
+      const auto& target = target_params[i];
+      if (source.has_default != target.has_default) return decl.entity;
+      if (source.has_default && source.default_ != target.default_) {
+        const auto target_default = substitute_arg(target.default_, renamed, /*default_argument=*/true);
+        if (!target_default || *target_default != source.default_) return decl.entity;
+      }
+    }
+    return result.templ;
   }
 
   // The type template `templ` names with `args`, as a template-id says it ([temp.names]): a class
@@ -2592,6 +2623,7 @@ private:
   const Classes* classes_;
 
 public:
+  ast::Compatibility compatibility = ast::Compatibility::spec;
   // The definition of a class if it is complete at the deduction's point of use.
   std::function<const ClassRec*(EntityId)> class_definition;
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at

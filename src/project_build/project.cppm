@@ -3,6 +3,7 @@
 export module ycxx.build.project;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
@@ -399,7 +400,7 @@ struct ModuleProviders {
 
 std::string module_path(const fs::path& path, const fs::path& cwd) {
   const auto relative = path.lexically_relative(cwd);
-  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_native_encoded_string();
+  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_string<char>();
 }
 
 std::string module_site(const pipeline::ModuleDirective& directive, const fs::path& cwd) {
@@ -565,7 +566,7 @@ struct WorkspaceBuild {
 
 namespace {
 
-std::string native(const fs::path& path) { return path.generic_native_encoded_string(); }
+std::string native(const fs::path& path) { return path.generic_string<char>(); }
 
 std::string_view explicit_triple(const ast::Target* target) {
   return target ? target->triple : std::string_view{};
@@ -1437,7 +1438,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                               std::optional<std::size_t> log_limit = std::nullopt) -> ActionResult {
     const auto scratch = build_directory(cwd, "jobs");
     if (!scratch) return {1, {}, scratch.error(), {}, ActionCompletion::setup_failed};
-    std::inplace_stop_source stop;
+    ycxx::exec::inplace_stop_source stop;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     bool timed_out = false;
     std::jthread monitor([&](std::stop_token finished) {

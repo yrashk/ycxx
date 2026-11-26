@@ -5,7 +5,7 @@ if(APPLE)
 else()
   set(YCXXC_MEMORY_USABLE usable_linux.cppm)
 endif()
-add_library(ycxxc_memory STATIC)
+add_library(ycxxc_memory ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_memory PUBLIC FILE_SET CXX_MODULES FILES ${YCXXC_MEMORY_USABLE} memory.cppm)
 target_link_libraries(ycxxc_memory PUBLIC ycxxc_options)
 # The replacements of the allocation functions, linked into each program that counts (`ycxx`, and

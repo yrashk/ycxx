@@ -256,10 +256,21 @@ struct BodySema {
   constexpr bool operator==(const BodySema&) const = default;
 };
 
+enum class RequirementKind : u8 { type, expression, nested };
+
+// A requirement as written in a constraint's requires-expression, for ABI encoding.
+struct WrittenRequirement {
+  RequirementKind kind;
+  ConstId operand;
+  ConstId result_constraint = ConstId::none;
+  bool noexcept_ = false;
+  constexpr bool operator==(const WrittenRequirement&) const = default;
+};
+
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
-                                ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection>;
+                                ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection, WrittenRequirement>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

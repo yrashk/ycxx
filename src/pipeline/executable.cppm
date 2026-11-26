@@ -73,6 +73,7 @@ struct ProgramInputs {
   std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
   bool check_policies = false;
   std::optional<std::string> shared_soname = std::nullopt;
+  OptimizationMode optimization = OptimizationMode::none;
 };
 
 EffectVerification effect_link_verification(const ProgramInputs& in) {
@@ -344,22 +345,22 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
   std::error_code ec;
   auto st = std::filesystem::symlink_status(path, ec);
   if (st.type() == std::filesystem::file_type::directory)
-    return std::format("cannot write '{}': it is a directory", path.display_string());
+    return std::format("cannot write '{}': it is a directory", path.native());
   bool regular = st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink ||
                  st.type() == std::filesystem::file_type::not_found;
   if (st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink)
     std::filesystem::remove(path, ec);
   {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return std::format("cannot open '{}' for writing", path.display_string());
+    if (!f) return std::format("cannot open '{}' for writing", path.native());
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     f.close();
-    if (!f) return std::format("cannot write '{}'", path.display_string());
+    if (!f) return std::format("cannot write '{}'", path.native());
   }
   if (executable && regular) {
     using enum std::filesystem::perms;
     std::filesystem::permissions(path, owner_exec | group_exec | others_exec, std::filesystem::perm_options::add, ec);
-    if (ec) return std::format("cannot make '{}' executable: {}", path.display_string(), ec.message());
+    if (ec) return std::format("cannot make '{}' executable: {}", path.native(), ec.message());
   }
   return std::nullopt;
 }
@@ -376,7 +377,9 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     out.errors.push_back("checked ownership links require explicit objects and source inputs");
     co_return out;
   }
-  const auto compile_keys = in.tus | std::views::transform([&](TuId tu) { return Tu::Key{tu, in.check_policies}; });
+  const auto compile_keys = in.tus | std::views::transform([&](TuId tu) {
+    return Tu::Key{tu, in.check_policies, in.optimization};
+  });
   const auto tus = co_await cx.par_map<Tu>(compile_keys);
   for (std::size_t i = 0; i < in.tus.size(); ++i) {
     if (!tus[i].get().object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));

@@ -1,4 +1,10 @@
 // Read-only descriptions and semantic comparisons of build plans (#1256).
+module;
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 export module ycxx.build.inspection;
 
 import std;
@@ -9,6 +15,7 @@ import ycxx.build.manifest;
 import ycxx.build.module_graph_diff;
 import ycxx.build.plan;
 import ycxx.build.project;
+import ycxx.lex;
 import ycxx.lsp;
 
 export namespace ycxx::build {
@@ -32,6 +39,8 @@ struct PlanComparison {
   std::string target;
   std::vector<PlanChange> changes;
   std::optional<ModuleGraphChanges> module_changes = std::nullopt;
+  std::optional<std::vector<DependencyOccurrenceChange>> dependency_changes = std::nullopt;
+  std::optional<std::vector<ValueBindingOccurrenceChange>> value_binding_changes = std::nullopt;
 };
 
 namespace {
@@ -72,8 +81,50 @@ std::expected<PlanComparison, std::string> compare(const PlanInspection& before,
   return diff;
 }
 
+auto dependency_identity(const PlanDependencyEdge& edge) {
+  using Key = std::tuple<std::string_view, std::string_view, std::string_view,
+                         std::optional<std::string_view>, std::optional<std::string_view>>;
+  const auto view = [](const std::string& text) { return std::string_view(text); };
+  return Key{edge.consumer, edge.usage, edge.producer, edge.output.transform(view), edge.binding.transform(view)};
+}
+
+auto value_binding_identity(const PlanValueDependencyEdge& edge) {
+  using Key = std::tuple<std::string_view, std::string_view, std::string_view, std::string_view, std::string_view>;
+  return Key{edge.consumer, edge.usage, edge.binding, edge.producer, edge.export_name};
+}
+
+template<class Edge, class Identity>
+std::vector<OccurrenceChange<Edge>> compare_dependency_occurrences(
+    const std::vector<Edge>& before, const std::vector<Edge>& after, Identity identity) {
+  using Key = std::invoke_result_t<Identity, const Edge&>;
+  struct Occurrences {
+    std::vector<const Edge*> before;
+    std::vector<const Edge*> after;
+  };
+  std::map<Key, Occurrences> grouped;
+  for (const auto& edge : before) grouped[identity(edge)].before.push_back(&edge);
+  for (const auto& edge : after) grouped[identity(edge)].after.push_back(&edge);
+
+  const auto ordered_sites = [](const std::vector<const Edge*>& occurrences) {
+    std::vector<Edge> result;
+    result.reserve(occurrences.size());
+    for (const auto* edge : occurrences) result.push_back(*edge);
+    std::ranges::sort(result, {}, [](const auto& edge) {
+      const auto& [path, line, column] = edge.location;
+      return std::tie(path, line, column);
+    });
+    return result;
+  };
+  std::vector<OccurrenceChange<Edge>> changes;
+  for (const auto& [old_edges, new_edges] : grouped | std::views::values) {
+    if (old_edges.size() != new_edges.size())
+      changes.push_back({ordered_sites(old_edges), ordered_sites(new_edges)});
+  }
+  return changes;
+}
+
 std::expected<std::string, std::string> read_text(const std::filesystem::path& path, std::string_view kind) {
-  const auto name = path.generic_native_encoded_string();
+  const auto name = path.generic_string<char>();
   std::error_code error;
   std::ifstream file;
   if (!std::filesystem::is_directory(path, error)) file.open(path, std::ios::binary);
@@ -86,10 +137,64 @@ std::expected<std::string, std::string> read_text(const std::filesystem::path& p
   return text;
 }
 
+std::expected<std::string, std::string> read_catalog_manifest(const std::filesystem::path& path) {
+  const auto name = path.generic_string<char>();
+  std::error_code error;
+  const auto status = std::filesystem::status(path, error);
+  if (error || !std::filesystem::exists(status))
+    return std::unexpected(std::format("cannot open build definition '{}'", name));
+  const auto not_regular = [&] {
+    return std::unexpected(std::format("build definition '{}' is not a regular file", name));
+  };
+  if (!std::filesystem::is_regular_file(status)) return not_regular();
+
+  struct Fd {
+    explicit Fd(int value) : value(value) {}
+    Fd(const Fd&) = delete;
+    ~Fd() { if (value >= 0) ::close(value); }
+    int value;
+  };
+  // The path can change after status(). Check the opened file before reading it.
+  const Fd file(::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC));
+  if (file.value < 0) return std::unexpected(std::format("cannot open build definition '{}'", name));
+  struct stat opened{};
+  if (::fstat(file.value, &opened) != 0)
+    return std::unexpected(std::format("cannot stat build definition '{}'", name));
+  if (!S_ISREG(opened.st_mode)) return not_regular();
+
+  std::string contents;
+  std::array<char, 8192> buffer;
+  for (;;) {
+    const auto size = ::read(file.value, buffer.data(), buffer.size());
+    if (size == 0) return contents;
+    if (size < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(std::format("cannot read build definition '{}'", name));
+    }
+    contents.append(buffer.data(), static_cast<std::size_t>(size));
+  }
+}
+
+std::optional<SourceLocation> invalid_utf8_location(std::string_view text) {
+  auto rest = text;
+  while (!rest.empty()) {
+    const auto decoded = lex::unicode::decode_utf8(rest);
+    if (!decoded) {
+      const auto prefix = text.substr(0, text.size() - rest.size());
+      const auto line = static_cast<std::size_t>(std::ranges::count(prefix, '\n')) + 1;
+      const auto newline = prefix.rfind('\n');
+      const auto column = newline == std::string_view::npos ? prefix.size() + 1 : prefix.size() - newline;
+      return SourceLocation{line, column};
+    }
+    rest.remove_prefix(decoded->length);
+  }
+  return std::nullopt;
+}
+
 std::expected<PlanInspection, std::string> read_snapshot(const std::filesystem::path& path) {
   const auto text = read_text(path, "build snapshot");
   if (!text) return std::unexpected(text.error());
-  const auto name = path.generic_native_encoded_string();
+  const auto name = path.generic_string<char>();
   auto json = lsp::parse(*text);
   if (!json) return std::unexpected(std::format("{}: {}", name, json.error()));
   auto plan = lsp::from_json<PlanInspection>(*json);
@@ -127,8 +232,11 @@ std::string diff_text(const PlanComparison& diff) {
 std::expected<std::string, std::string> show_targets(const std::filesystem::path& cwd, InspectionFormat format) {
   if (format == InspectionFormat::source)
     return std::unexpected("--targets requires text, JSON, or HTML output");
-  const auto text = read_text(cwd / "build.ycxx", "build definition");
+  const auto text = read_catalog_manifest(cwd / "build.ycxx");
   if (!text) return std::unexpected(text.error());
+  if (const auto location = invalid_utf8_location(*text))
+    return std::unexpected(std::format("build.ycxx:{}:{}: invalid UTF-8 in build definition",
+                                       location->line, location->column));
   auto manifest = parse_manifest(*text);
   if (!manifest) {
     const auto& error = manifest.error();
@@ -169,17 +277,29 @@ std::expected<std::string, std::string> show_project(
     if (!before) return std::unexpected(before.error());
     auto diff = compare(*before, *inspected);
     if (!diff) return std::unexpected(diff.error());
-    if ((format == InspectionFormat::json || format == InspectionFormat::html) &&
-        before->module_graph && inspected->module_graph) {
-      auto modules = compare_module_graph(*before->module_graph, *inspected->module_graph);
-      if (!modules) return std::unexpected(std::move(modules.error()));
-      diff->module_changes = std::move(*modules);
+    if (format == InspectionFormat::json || format == InspectionFormat::html) {
+      if (before->module_graph && inspected->module_graph) {
+        auto modules = compare_module_graph(*before->module_graph, *inspected->module_graph);
+        if (!modules) return std::unexpected(std::move(modules.error()));
+        diff->module_changes = std::move(*modules);
+      }
+      const auto& old_dependencies = before->dependency_graph;
+      const auto& new_dependencies = inspected->dependency_graph;
+      if (old_dependencies && new_dependencies && old_dependencies->complete && new_dependencies->complete) {
+        diff->dependency_changes = compare_dependency_occurrences(old_dependencies->edges, new_dependencies->edges,
+                                                                   dependency_identity);
+        if (old_dependencies->value_edges && new_dependencies->value_edges)
+          diff->value_binding_changes = compare_dependency_occurrences(*old_dependencies->value_edges,
+                                                                       *new_dependencies->value_edges,
+                                                                       value_binding_identity);
+      }
     }
     if (format == InspectionFormat::json) return lsp::dump(lsp::to_json(*diff)) + "\n";
     if (format == InspectionFormat::html) {
       std::optional<ModuleGraphComparison> modules;
       if (diff->module_changes) modules.emplace(ModuleGraphComparison{*before->module_graph, *diff->module_changes});
-      return render_inspection_html(*inspected, &diff->changes, modules);
+      return render_inspection_html(*inspected, &diff->changes, modules, diff->dependency_changes,
+                                    diff->value_binding_changes);
     }
     return diff_text(*diff);
   }
