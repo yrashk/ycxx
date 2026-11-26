@@ -75,6 +75,7 @@ struct TypeRec {
   bool fn_noexcept = false;
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
+  ConstId written_index = ConstId::none;  // an index whose written expression affects type identity
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   ast::DepNameForm dep_form = ast::DepNameForm::plain;  // a dependent member's: with `args`, or a template
   u16 depth = 0;                     // a template parameter's position ([temp.param])
@@ -145,9 +146,11 @@ public:
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
   // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type;
   // with `elems`, that pack is bound to them and `index` is the dependent part.
-  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0}); }
-  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems) {
-    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1});
+  QualType pack_index(QualType pack, ConstId index, ConstId written = ConstId::none) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0, written});
+  }
+  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems, ConstId written = ConstId::none) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1, written});
   }
   // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
@@ -272,6 +275,7 @@ public:
       r.kind = TypeKind::pack_index;
       r.inner = x.pack;
       r.bound_value = x.index;
+      r.written_index = x.written;
       r.pack = x.bound != 0;  // the pack is bound to `args`
       r.args = x.elems;
     } else if (t.is<ast::TTemplateParam>(c)) {

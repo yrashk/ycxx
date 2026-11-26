@@ -1698,7 +1698,7 @@ public:
   // parameter pack and `index` is an integral constant, converted to std::size_t for the choice
   // and kept in its own type in the specifier, as the index of a symbol is. The selected element
   // once the pack is bound and the index known, the dependent specifier until then.
-  std::optional<QualType> pack_index_type(NameId name, u32 at, ConstId index, u32 index_at) {
+  std::optional<QualType> pack_index_type(NameId name, u32 at, ConstId index, u32 index_at, ConstId written) {
     const ast::TemplateParamSema* p = template_param(name);
     if (!p || p->kind != ast::TemplateArgKind::type || !p->pack) {
       diag(at, Diag::not_a_pack, name);
@@ -1714,12 +1714,12 @@ public:
       }
     }
     auto a = template_args.at(p->depth, p->index);
-    if (!a) return types().pack_index(p->type, index);
+    if (!a) return types().pack_index(p->type, index, written);
     if (a->kind != ast::TemplateArgKind::pack) {
       diag(index_at, Diag::not_supported, lex::Tk::l_square);
       return std::nullopt;
     }
-    if (dependent) return types().pack_index(p->type, index, a->elems);
+    if (dependent) return types().pack_index(p->type, index, a->elems, written);
     std::vector<TemplateArg> es = ins().seqs.elements(a->elems);
     auto r = templates().select_element(es, index);
     if (!r) diag(index_at, Diag::pack_index_range, ast::int_bits(ins(), index).lo, es.size());
@@ -10327,7 +10327,26 @@ public:
   Ex new_class_initializer(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin,
                            u32 end) {
     Ex fail{NodeId::none, begin, end};
-    if (braces) return list_init(t, *braces);
+    if (braces) {
+      if (braces->clauses.empty() && compatibility() == ast::Compatibility::gcc && is_union(t) && is_aggregate(t)) {
+        const auto& fields = class_rec(types().class_of(t))->fields;
+        // GCC checks the implicit default constructor on this allocation path. A variant with
+        // a nontrivial default constructor deletes it when no member has an initializer.
+        const bool has_default = std::ranges::any_of(fields, [](const FieldRec& field) {
+          return field.dmi || field.init != ConstId::none;
+        });
+        if (!has_default && std::ranges::any_of(fields, [&](const FieldRec& field) {
+              const QualType element = types().innermost_array_element(field.type);
+              const ClassRec* variant = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+              return variant && !variant->trivial_defaulted_default_ctor &&
+                     (has_member_inits(field.type) || default_deleted(field.type));
+            })) {
+          diag(begin, Diag::deleted_constructor, t);
+          return fail;
+        }
+      }
+      return list_init(t, *braces);
+    }
     if (args && args->empty()) return value_init(t, end, end);
     if (!args) {
       if (default_deleted(t)) {
@@ -10668,12 +10687,14 @@ public:
     ~ClassAlignmentOperand() { checking = saved; }
   };
 
-  // A dependent layout query whose enclosing construct reparses the written operand.
-  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
+  ConstId layout_query_value(QualType operand, bool align) {
     const std::array args{templates().type_arg(operand)};
     const auto op = align ? ast::DepOp::alignof_type : ast::DepOp::sizeof_type;
-    const auto value = ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
-    return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
+    return ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
+  }
+  // A dependent layout query whose enclosing construct reparses the written operand.
+  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
+    return literal(builtin(w_->target.size_type), layout_query_value(operand, align), ValueCategory::prvalue, begin, end);
   }
 
   // [expr.sizeof], [expr.alignof]: a `size_t` prvalue.
