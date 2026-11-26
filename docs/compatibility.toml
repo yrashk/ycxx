@@ -463,16 +463,14 @@ evidence = ["tests/own/templates/p4-function-pack-position.reject.cpp", "tests/d
 
 [[divergence]]
 id = "function-type-language-linkage"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
-reference = "[dcl.link], #287"
-prior = "Preserve language linkage in the function type."
-spec = "A C function type and a C++ function type with the same signature are distinct."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Treats the two function types as the same."
-clang_observed = "Treats the two function types as the same."
-evidence = ["src/ast/types.cppm", "tests/draft/DISAGREEMENTS.md"]
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.link]/1, /5, /6, Itanium C++ ABI §5.1.5.3, #287"
+prior = "Preserve distinct C function types on declarators. Erase the type's C linkage when a C++ function name is declared with a C function typedef and leave the distinct C function type's encoding unsupported."
+spec = "Keep C and C++ function types distinct, including typedefs, redeclarations, and overloads. Use FY for a C function type in a mangled signature. A name declared with C language linkage keeps its unmangled symbol."
+gcc = "Treat function types with otherwise identical C and C++ signatures as one type and use F in mangled signatures. Keep name linkage, including inherited C linkage and diagnostics for explicitly conflicting redeclarations."
+clang = "Same as GCC."
+evidence = ["src/ast/types.cppm", "tests/draft/dcl/dcl.link-2.accept.cpp", "tests/draft/DISAGREEMENTS.md", "tests/daemon/compatibility.py"]
 probe = 'extern "C" typedef int C(); using Cxx = int(); static_assert(!__is_same(C, Cxx));'
 
 [[divergence]]
@@ -525,16 +523,42 @@ evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/e
 
 [[divergence]]
 id = "class-head-alignment"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
-reference = "[dcl.align], #303"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.align]/4–6, #303, Itanium C++ ABI §2.2"
 prior = "Check the strictest of repeated class-head alignments and require consistent defining and nondefining declarations."
-spec = "Apply the pinned alignment and redeclaration rules."
-gcc = "Same as spec."
+spec = "Use the strictest nonzero alignment, diagnose weaker-than-natural alignment, and require equivalence with the definition. Distinct opaque declarations may both precede a definition."
+gcc = "Use the last nonzero class-head alignment and respect natural alignment as a minimum. An omitted or zero definition alignment inherits the latest nonzero forward alignment. A later aligned declaration leaves a complete class's layout unchanged."
+clang = "Use the strictest nonzero alignment. Diagnose different alignments even on two opaque declarations. Check a zero-only redeclaration according to whether it appears before, on, or after the definition."
+clang_observed = "On x86-64 Linux and AArch64 Darwin, accepts a leading alignas(0) on a forward declaration followed by a definition with a different request. A zero-only definition mismatches a preceding request greater than one. A zero-only redeclaration after an aligned definition is accepted. A zero and a nonzero request on successive opaque declarations cause a compiler failure. ycxx diagnoses the mismatch."
+probe = "struct alignas(16) alignas(8) alignas(0) X { char value; }; static_assert(alignof(X) == 8);"
+evidence = ["tests/own/layout/class-head-alignas/class-repeated.accept.cpp", "tests/own/layout/class-head-alignas/class-missing-definition-alignment.reject.cpp", "tests/own/layout/class-head-alignas/class-opaque-alignments.accept.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "class-head-zero-forward-weaken"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "partial" }
+reference = "[dcl.align]/4–6, Itanium C++ ABI §2.2"
+prior = "A weaker defining alignment is rejected."
+spec = "Reject a defining alignment below the natural alignment."
+gcc = "Accept the declaration and use the natural alignment."
+clang = "Accept the declaration and use the natural alignment."
+clang_observed = "After a zero-only forward alignment, accepts the weaker defining alignment. On x86-64 Linux and AArch64 Darwin it reports both sizeof and alignof as one for the probe. Evaluating offsetof for the long long member or emitting an object or a read of that member crashes the frontend."
+limits = "Clang mode matches declaration acceptance and keeps the natural class layout. The sizeof, alignof, and native object behavior still need a compatible policy for this case."
+probe = "struct alignas(0) X; struct alignas(1) X { long long value; }; static_assert(sizeof(X) == 1 && alignof(X) == 1);"
+evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "class-head-alignment-warnings"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.align]/4, #303"
+prior = "Accept alignas(0) silently."
+spec = "Accept a standalone definition's alignas(0) silently."
+gcc = "Warn under -Wattributes for a zero class-head alignment and for each alignment specifier ignored on an already defined class. -Wno-attributes suppresses these diagnostics."
 clang = "Same as spec."
-gcc_observed = "The fixtures record weaker alignment on repeated specifiers and acceptance of an omitted or mismatched defining alignment."
-clang_observed = "The opaque-alignment fixture records rejection of different alignments on forward declarations."
-evidence = ["tests/own/layout/class-head-alignas/class-repeated.accept.cpp", "tests/own/layout/class-head-alignas/class-missing-definition-alignment.reject.cpp", "tests/own/layout/class-head-alignas/class-opaque-alignments.accept.cpp"]
+probe = "struct alignas(0) X { char value; };"
+evidence = ["tests/own/layout/class-head-alignas/class-zero.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "mixed-ref-qualified-redeclaration"
