@@ -199,13 +199,14 @@ private:
   }
 
   // After the group opening at `j`. When a close is required, return `none` on a mismatch
-  // or at eof.
-  u32 match(u32 j, bool require_close = false) const {
+  // or at eof. A lookahead for a simple braced initializer also stops at a nested brace or semicolon.
+  u32 match(u32 j, bool require_close = false, bool stop_at_nested_brace_or_semi = false) const {
     Tk open = kind(j);
     Tk close = open == Tk::l_paren ? Tk::r_paren : open == Tk::l_square ? Tk::r_square : Tk::r_brace;
     std::vector<Tk> stack{close};
     for (++j; kind(j) != Tk::eof; ++j) {
       Tk k = kind(j);
+      if (stop_at_nested_brace_or_semi && (k == Tk::l_brace || k == Tk::semi)) return none;
       if (k == Tk::l_paren) stack.push_back(Tk::r_paren);
       else if (k == Tk::l_square) stack.push_back(Tk::r_square);
       else if (k == Tk::l_brace) stack.push_back(Tk::r_brace);
@@ -241,6 +242,23 @@ private:
       }
     }
     return require_close ? none : j;
+  }
+
+  // A complete base cannot end in either of these prefixes before its class body.
+  // Recognize a direct braced conversion at the start of a template argument list.
+  u32 braced_base_argument_end(u32 open) const {
+    if (open < 3) return none;
+    const Tk type = kind(open - 1);
+    const bool direct = (type == Tk::kw_int || type == Tk::identifier) &&
+                        kind(open - 2) == Tk::less && kind(open - 3) == Tk::identifier;
+    const bool qualified = type == Tk::identifier && open >= 6 && kind(open - 2) == Tk::coloncolon &&
+                           kind(open - 3) == Tk::identifier && kind(open - 4) == Tk::kw_typename &&
+                           kind(open - 5) == Tk::less && kind(open - 6) == Tk::identifier;
+    if (!direct && !qualified) return none;
+    // Stopping at the next opening brace keeps successive lookaheads disjoint.
+    const u32 end = match(open, /*require_close=*/true, /*stop_at_nested_brace_or_semi=*/true);
+    const Tk next = kind(end);
+    return next == Tk::greater || next == Tk::greatergreater ? end : none;
   }
 
   u32 item(u32 parent, const std::string& scope, u32& unnamed_types);
@@ -490,7 +508,6 @@ void Splitter::general(u32 k, u32& unnamed_types) {
   bool params = false;       // a declarator's parameter list was seen
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
   bool base_clause = false;  // a `:` after the class-key, before any parameter list
-  bool try_base_template_ids = true;
   bool typedef_ = false;
   auto finish_body = [&](u32 body_begin, u32 end) {
     at(k).kind = ItemKind::function;
@@ -508,20 +525,6 @@ void Splitter::general(u32 k, u32& unnamed_types) {
     case Tk::semi:
       at(k).end = i_ = j + 1;
       return;
-    case Tk::less:
-      if (base_clause && try_base_template_ids && kind(class_key) != Tk::kw_enum && prev == Tk::identifier) {
-        // Keep argument braces within a complete base template-id ([class.derived.general]).
-        const u32 end = match_angle(j, /*require_close=*/true);
-        const Tk next = kind(end);
-        if (next == Tk::l_brace || next == Tk::comma || next == Tk::coloncolon || next == Tk::ellipsis) {
-          j = end;
-          continue;
-        }
-        // After an ambiguous argument list, resume scanning without rescanning from each comparison.
-        try_base_template_ids = false;
-      }
-      ++j;
-      continue;
     case Tk::l_paren: {
       // An integer-literal-led `auto(...)` is an expression, including inside a template-id.
       const bool decay_copy = prev == Tk::kw_auto && kind(j + 1) == Tk::int_lit;
@@ -625,6 +628,12 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         j = match(j);
         continue;
       }
+      if (base_clause && kind(class_key) != Tk::kw_enum) {
+        if (const u32 end = braced_base_argument_end(j); end != none) {
+          j = end;
+          continue;
+        }
+      }
       if (class_key != none && (base_clause || (!params && is_class_head(class_key, j)))) {
         // A class or enum body; declarators may follow it.
         bool is_enum = kind(class_key) == Tk::kw_enum;
@@ -655,7 +664,6 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         }
         class_key = none;
         base_clause = false;
-        try_base_template_ids = true;
         params = false;
         continue;
       }
