@@ -633,7 +633,7 @@ public:
   ExprInfo expression_info(NodeId id) {
     ExprInfo info{};
     ast::dispatch<ast::Nodes>(ast::kind_of(id), [&]<class T>(std::type_identity<T>) {
-      if constexpr (requires(T value) { value.info; }) info = ins().ast.get<T>(id).info;
+      if constexpr (requires(T value) { value.info; }) info = b_->get<T>(id).info;
     });
     return info;
   }
@@ -941,6 +941,7 @@ public:
     if (class_prefix || (type_at && (injected || inherited_alias || enum_lookup || before_parameter))) {
       QualType selected = types().canonical(*first->type);
       const bool gcc_alias = compatibility() == ast::Compatibility::gcc && inherited_alias &&
+                             first->declaration != EntityId::none &&
                              w_->entities.rec(first->declaration).kind == EntityKind::type_alias;
       if (std::ranges::any_of(hits, [&](const Hit& h) {
             return !h.type || types().canonical(*h.type) != selected ||
@@ -8976,7 +8977,8 @@ public:
     const auto& entity = w_->entities.rec(function);
     if (entity.kind != EntityKind::function || entity.lang != LangLinkage::c || entity.scope != EntityId::none ||
         entity.linkage != ast::Linkage::external) return none;
-    const auto* library = string_function_named(ins().names.spelling(entity.name));
+    const NameId name = entity.name;
+    const auto* library = string_function_named(ins().names.spelling(name));
     if (!library || library->constant == none) return none;
     const auto expected = types().rec(w_->string_function(*library, compatibility()).type);
     if (expected.params != signature.params ||
@@ -8984,7 +8986,7 @@ public:
          signature.inner != types().pointer(types().add_cv(builtin(Builtin::void_), Cv::const_)))))
       return none;
     // A visible user definition is an ordinary function, even with a recognized declaration.
-    for (const auto& declaration : q_->namespace_members(EntityId::none, entity.name))
+    for (const auto& declaration : q_->namespace_members(EntityId::none, name))
       if (declaration.entity == function && (declaration.flags & decl_flag::definition)) return none;
     return library->constant;
   }
