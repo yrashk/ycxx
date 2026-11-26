@@ -21,8 +21,14 @@ static_assert(!same<cw<1>, cw<1u>>);
 static_assert(!same<cw<1>, cw<true>>);
 static_assert(same<cw<1>, cw<0 + 1>>);
 
-// A dependent argument deduces its type once substituted. (A dependent layout query as the
-// argument, `deduced<alignof(T)>` or `cw<sizeof(T)>`, is #1371's and #209's.)
+// A dependent argument deduces its type once substituted: a layout query as #1371 replays it,
+// and arguments passed through. (`cw<sizeof(T)>` as a class template argument is #209's.)
+template<class T> struct Layout {
+  static constexpr unsigned a = deduced<alignof(T)>;
+  static constexpr unsigned s = deduced<sizeof(T)>;
+};
+static_assert(Layout<char>::a == 21 && Layout<char>::s == 21);
+static_assert(Layout<int>::s == 0);
 template<class T, T V> struct Typed { using wrapped = cw<V>; static constexpr unsigned d = deduced<V>; };
 static_assert(same<Typed<unsigned long, 1>::wrapped::type, unsigned long>);
 static_assert(!same<Typed<unsigned long, 1>::wrapped, cw<1>>);
