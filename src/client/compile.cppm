@@ -149,7 +149,9 @@ namespace {
 
 // `pedantic` selects no warning: ycxx accepts the extensions it implements (docs/EXTENSIONS.md)
 // silently. Tests pass `-Wno-pedantic` so that the oracles accept them under `-pedantic-errors`.
-enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, constant_conversion, pedantic, count };
+enum class WarningFlag : std::uint8_t {
+  all, extra, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large, pedantic, count
+};
 
 struct WarningSelection {
   WarningFlag flag;
@@ -165,6 +167,7 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
       {"all", WarningFlag::all}, {"extra", WarningFlag::extra}, {"multichar", WarningFlag::multichar},
       {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation},
       {"constant-conversion", WarningFlag::constant_conversion},
+      {"enum-too-large", WarningFlag::enum_too_large},
       {"pedantic", WarningFlag::pedantic}};
   for (const auto& [name, flag] : names)
     if (arg == name) return WarningSelection{flag, enabled};
@@ -177,6 +180,15 @@ class WarningOptions {
  public:
   void select(WarningSelection selection) { flags_[std::to_underlying(selection.flag)] = selection.enabled; }
   void compatibility(ast::Compatibility mode) { multichar_in_all_ = mode != ast::Compatibility::gcc; }
+  void pedantic_errors() { pedantic_errors_ = true; }
+  void enum_too_large_error(bool enabled) {
+    enum_too_large_error_ = enabled;
+    if (enabled) select({WarningFlag::enum_too_large, true});
+  }
+
+  bool is_error(bool error, lex::Warning warning) const {
+    return error || (warning == lex::Warning::enum_too_large && enum_too_large_error_.value_or(pedantic_errors_));
+  }
 
   bool emits(bool error, lex::Warning warning) const {
     if (error) return true;
@@ -190,13 +202,16 @@ class WarningOptions {
       case lex::Warning::sized_deallocation:
         return selected(WarningFlag::sized_deallocation).value_or(selected(WarningFlag::extra).value_or(false));
       case lex::Warning::constant_conversion: return selected(WarningFlag::constant_conversion).value_or(true);
+      case lex::Warning::enum_too_large: return selected(WarningFlag::enum_too_large).value_or(true);
     }
     std::unreachable();
   }
 
  private:
   std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> flags_{};
+  std::optional<bool> enum_too_large_error_{};
   bool multichar_in_all_ = true;
+  bool pedantic_errors_ = false;
 };
 
 // What the c++-compatible command line asks for.
@@ -321,7 +336,10 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     }
     // Reflection and contracts are part of C++26, and ycxx's diagnostics are always plain:
     // what other compilers need these flags for is always on here.
-    else if (a == "-pedantic-errors" || a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
+    else if (a == "-pedantic-errors") o.warnings.pedantic_errors();
+    else if (a == "-Werror=enum-too-large") o.warnings.enum_too_large_error(true);
+    else if (a == "-Wno-error=enum-too-large") o.warnings.enum_too_large_error(false);
+    else if (a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
              a == "-fno-color-diagnostics")
       continue;
     else if (auto warning = warning_option(a)) o.warnings.select(*warning);
@@ -456,10 +474,12 @@ class Renderer {
  public:
   Renderer(std::string& err, std::string_view path, const WarningOptions& warnings)
       : err_(&err), path_(path), warnings_(warnings) {}
-  void diagnostic(const pipeline::Message& m) {
-    if (!warnings_.emits(m.error, m.warning)) return;
+  bool diagnostic(const pipeline::Message& m) {
+    if (!warnings_.emits(m.error, m.warning)) return false;
+    const bool error = warnings_.is_error(m.error, m.warning);
     std::format_to(std::back_inserter(*err_), "{}: {}: {}\n", m.where.empty() ? path_ : std::string_view(m.where),
-                   m.error ? "error" : "warning", m.text);
+                   error ? "error" : "warning", m.text);
+    return error;
   }
   void file_level(std::string_view message) { std::format_to(std::back_inserter(*err_), "{}: error: {}\n", path_, message); }
 
@@ -967,8 +987,9 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       continue;
     }
     Renderer render(d.err, path, opts->warnings);
-    for (const pipeline::Message& m : u.messages) render.diagnostic(m);
-    if (u.front_failed) {
+    bool has_errors = u.front_failed;
+    for (const pipeline::Message& m : u.messages) has_errors |= render.diagnostic(m);
+    if (has_errors) {
       failed = true;
       continue;
     }

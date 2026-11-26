@@ -58,6 +58,8 @@ enum class Diag : std::uint32_t {
   integer_literal_operator_conflict [[=message{Severity::error, "both a raw literal operator and a numeric literal operator template are visible"}]],
   integer_literal_operator_unsupported [[=message{Severity::error, "raw and template integer literal calls are not supported yet"}]],
   enum_no_type [[=message{Severity::error, "no integral type can hold every value of '{0:n}'"}]],
+  enum_increment_truncation [[=message{Severity::warning, "incremented enumerator value {0:i} is not representable in the largest integer type", lex::Warning::enum_too_large}]],
+  enum_range_truncation [[=message{Severity::warning, "enumeration values exceed range of largest integer", lex::Warning::enum_too_large}]],
   enum_base_required [[=message{Severity::error, "this declaration of unscoped enumeration '{0:n}' requires an underlying type"}]],
   enum_base_not_integral [[=message{Severity::error, "an enumeration base must name an integral type"}]],
   enum_base_mismatch [[=message{Severity::error, "enumeration '{0:n}' redeclared with a different underlying type"}]],

@@ -275,7 +275,8 @@ void append_dependency_location(std::string& out, const ManifestLocation& locati
   out += "</span>";
 }
 
-void append_dependency_sites(std::string& out, std::span<const PlanDependencyEdge> edges, std::size_t lines) {
+template <class Edge>
+void append_dependency_sites(std::string& out, const std::vector<Edge>& edges, std::size_t lines) {
   std::format_to(std::back_inserter(out), R"(<span class="origin">{} {}</span>)",
                  edges.size(), edges.size() == 1 ? "occurrence" : "occurrences");
   if (edges.empty()) return;
@@ -286,6 +287,17 @@ void append_dependency_sites(std::string& out, std::span<const PlanDependencyEdg
     out += "</li>";
   }
   out += "</ul>";
+}
+
+template <class Edge>
+void append_dependency_identity(std::string& out, const Edge& edge) {
+  out += "<code>";
+  escaped(out, edge.consumer);
+  out += "</code> → <code>";
+  escaped(out, edge.producer);
+  out += R"(</code><code class="origin">)";
+  escaped(out, edge.usage);
+  out += "</code>";
 }
 
 void append_dependency_changes(std::string& out, std::span<const DependencyOccurrenceChange> changes, std::size_t lines) {
@@ -299,15 +311,35 @@ void append_dependency_changes(std::string& out, std::span<const DependencyOccur
 )";
   for (const auto& change : changes) {
     const auto& edge = change.after.empty() ? change.before.front() : change.after.front();
-    out += "<tr><td><code>";
-    escaped(out, edge.consumer);
-    out += "</code> → <code>";
-    escaped(out, edge.producer);
-    out += R"(</code><code class="origin">)";
-    escaped(out, edge.usage);
-    out += "</code>";
+    out += "<tr><td>";
+    append_dependency_identity(out, edge);
     append_dependency_detail(out, "Binding", edge.binding);
     append_dependency_detail(out, "Output", edge.output);
+    out += "</td><td>";
+    append_dependency_sites(out, change.before, 0);
+    out += "</td><td>";
+    append_dependency_sites(out, change.after, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_value_binding_changes(std::string& out, std::span<const ValueBindingOccurrenceChange> changes,
+                                  std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="value-binding-changes"><h2 id="value-binding-changes">Value binding changes</h2>)";
+  if (changes.empty()) {
+    out += R"(<p class="empty">No value binding changes.</p></section>)";
+    return;
+  }
+  out += R"(<table class="facts dependency-comparison" aria-labelledby="value-binding-changes">
+  <thead><tr><th scope="col">Value binding</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>
+)";
+  for (const auto& change : changes) {
+    const auto& edge = change.after.empty() ? change.before.front() : change.after.front();
+    out += "<tr><td>";
+    append_dependency_identity(out, edge);
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, "Export", edge.export_name);
     out += "</td><td>";
     append_dependency_sites(out, change.before, 0);
     out += "</td><td>";
@@ -710,6 +742,8 @@ std::string render_inspection_html(const PlanInspection& inspection,
                                    const std::vector<PlanChange>* changes = nullptr,
                                    const std::optional<ModuleGraphComparison>& modules = std::nullopt,
                                    const std::optional<std::vector<DependencyOccurrenceChange>>& dependency_changes =
+                                       std::nullopt,
+                                   const std::optional<std::vector<ValueBindingOccurrenceChange>>& value_binding_changes =
                                        std::nullopt) {
   auto out = begin_report(std::format("Build plan · {}", inspection.target));
   out += "<h1>Build plan for <code>";
@@ -727,6 +761,7 @@ std::string render_inspection_html(const PlanInspection& inspection,
     append_changes(out, *changes, lines);
   }
   if (dependency_changes) append_dependency_changes(out, *dependency_changes, lines);
+  if (value_binding_changes) append_value_binding_changes(out, *value_binding_changes, lines);
   if (inspection.dependency_graph) {
     const auto& graph = *inspection.dependency_graph;
     append_dependencies(out, graph, lines);

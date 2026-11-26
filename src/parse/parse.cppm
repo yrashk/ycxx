@@ -4307,12 +4307,19 @@ private:
     return true;
   }
 
-  // Whether integral type `t` represents `v` (`big`: the unsigned value of v's bits, 2^63 or more).
-  bool holds(QualType t, std::int64_t v, bool big) {
-    sema::IntShape sh = sema::shape(s_.world().target, *s_.types().builtin_of(t));
-    if (big) return !sh.is_signed && sh.bits == 64;
-    if (sh.is_signed) return sh.bits >= 64 || (v >= -(std::int64_t(1) << (sh.bits - 1)) && v < (std::int64_t(1) << (sh.bits - 1)));
-    return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
+  struct EnumValue {
+    ast::Bits128 bits{};
+    bool negative = false;
+  };
+
+  // An unsigned 128-bit value can have its high bit set while remaining positive.
+  bool holds(QualType t, EnumValue value) {
+    const auto builtin = *s_.types().builtin_of(t);
+    const auto shape = builtin == sema::Builtin::bool_ ? sema::IntShape{1, false}
+                                                       : sema::shape(s_.world().target, builtin);
+    if ((value.negative && !shape.is_signed) || (!value.negative && shape.is_signed && ast::is_negative(value.bits)))
+      return false;
+    return ast::wrap(value.bits, shape.bits, shape.is_signed) == value.bits;
   }
 
   u32 after_definition_attributes() {
@@ -5535,11 +5542,6 @@ private:
         s_.diag(u.begin, Diag::enum_base_not_integral);
         return bad();
       }
-      // Enumerator values are kept in 64 bits, so a 128-bit underlying type is not yet (#1176).
-      if (types.is(u.type, sema::Builtin::int128) || types.is(u.type, sema::Builtin::unsigned_int128)) {
-        s_.diag(u.begin, Diag::not_supported, Tk::kw___int128);
-        return bad();
-      }
       fixed = sema::Types::unqualified(types.canonical(u.type));
     } else if (scoped) {
       fixed = s_.builtin(sema::Builtin::int_);  // [dcl.enum]/5: int unless given
@@ -5628,11 +5630,13 @@ private:
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
     // The template checks the list with dependent values; replay evaluates them ([temp.inst]).
     const bool pattern = cls != EntityId::none && !inst_ && types.is_dependent(types.class_type(cls));
-    struct EnumValue {
-      std::int64_t bits = 0;
-      bool big = false;  // an unsigned value of 2^63 or more
-    };
+    using sema::Builtin;
+    const bool clang = s_.compatibility() == ast::Compatibility::clang;
+    constexpr Builtin promotions[] = {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long,
+                                      Builtin::long_long, Builtin::unsigned_long_long,
+                                      Builtin::int128, Builtin::unsigned_int128};
     std::optional<EnumValue> next = EnumValue{};
+    bool increment_overflow = false;
     // Before the closing brace an enumerator has its initializer's type, or the previous one's,
     // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
     QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
@@ -5666,17 +5670,10 @@ private:
             // A nested enum instantiation can diagnose the error outside this item's result.
             if (replay != EntityId::none) return;
             if (unnamed && inst_) return bad();
-          } else if (sema::shape(s_.world().target, *types.builtin_of(v.type())).bits > 64) {
-            // Enumerator values are kept in 64 bits and typed by their initializers until the
-            // closing brace ([dcl.enum]/5), so a 128-bit initializer is not yet (#1176).
-            s_.diag(x.begin, Diag::not_supported, Tk::kw___int128);
-            return bad();
           } else {
-            sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
-            sema::u64 bits = s_.world().values.rec(*c).bits;
-            const bool extend = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1);
-            value = EnumValue{std::int64_t(extend ? bits | ~((sema::u64{1} << sh.bits) - 1) : bits),
-                              !sh.is_signed && (bits >> 63) != 0};
+            const auto sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
+            const auto bits = ast::int_bits(s_.ins(), *c);
+            value = EnumValue{bits, sh.is_signed && ast::is_negative(bits)};
             if (fixed) {
               Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
               if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
@@ -5685,32 +5682,38 @@ private:
             }
           }
         }
+      } else if (increment_overflow) {
+        no_enum_type(en_at);  // [dcl.enum]/5: the increment exceeds even the widest supported integer.
       } else if (!value) {
         if (!fixed) prev_type = s_.builtin(sema::Builtin::dependent);
       } else if (!values.empty()) {
-        if (const auto& previous = values.back(); previous && previous->big && previous->bits == -1) {
-          no_enum_type(en_at);  // [dcl.enum]/5: no type holds the incremented value
-          value->big = false;
-        }
         // An incremented value outside the previous type widens to an integral type that holds it.
-        if (!fixed && !holds(prev_type, value->bits, value->big)) {
-          for (sema::Builtin b : {sema::Builtin::int_, sema::Builtin::unsigned_int, sema::Builtin::long_, sema::Builtin::unsigned_long})
-            if (holds(s_.builtin(b), value->bits, value->big)) {
-              prev_type = s_.builtin(b);
-              break;
-            }
+        if (!fixed && !holds(prev_type, *value)) {
+          const auto candidates = std::span(promotions).first(clang ? 6 : std::size(promotions));
+          const auto next_type = std::ranges::find_if(candidates, [&](Builtin b) { return holds(s_.builtin(b), *value); });
+          if (next_type != candidates.end()) {
+            prev_type = s_.builtin(*next_type);
+          } else if (clang && value->bits == ast::Bits128{0, 1}) {
+            const auto written = s_.world().values.integer(s_.builtin(Builtin::unsigned_int128), value->bits);
+            s_.diag(en_at, Diag::enum_increment_truncation, written);
+            value = EnumValue{};
+          } else {
+            no_enum_type(en_at);
+          }
         }
-        if (fixed) {
-          QualType ll = s_.builtin(value->big ? sema::Builtin::unsigned_long_long : sema::Builtin::long_long);
-          Ex lit = s_.literal(ll, s_.world().values.integer(ll, sema::u64(value->bits)), ast::ValueCategory::prvalue, en_at, en_at);
-          if (s_.narrows(lit, *fixed)) s_.diag(en_at, Diag::narrowing, ll, *fixed);
+        if (fixed && !holds(*fixed, *value)) {
+          const auto written = s_.builtin(value->negative ? Builtin::int128 : Builtin::unsigned_int128);
+          s_.diag(en_at, Diag::narrowing, written, *fixed);
         }
       }
-      // The next implicit value, past INT64_MAX into the unsigned values.
+      // Increment a mathematical integer represented in up to 128 bits.
       next.reset();
-      if (value)
-        next = EnumValue{std::int64_t(sema::u64(value->bits) + 1),
-                         value->big || value->bits == std::numeric_limits<std::int64_t>::max()};
+      increment_overflow = false;
+      if (value) {
+        const auto added = ast::wide::add(value->bits, {1, 0});
+        increment_overflow = !value->negative && ast::wide::is_zero(added);
+        if (!increment_overflow) next = EnumValue{added, value->negative && !ast::wide::is_zero(added)};
+      }
       if (!enumerator_names.insert(en).second)
         s_.diag(en_at, Diag::conflicting_declaration, en);  // [dcl.enum]/2: unique within the list
       // [basic.scope.scope]: an unscoped enumerator is declared in the enclosing scope.
@@ -5728,7 +5731,7 @@ private:
           }
       }
       const EntityId x = unnamed ? EntityId::none : enumerator_entity(en);
-      const ConstId c = value ? s_.world().values.integer(prev_type, sema::u64(value->bits)) : ConstId::none;
+      const ConstId c = value ? s_.world().values.integer(prev_type, value->bits) : ConstId::none;
       if (!unnamed) {
         if (!value) p_->value_dependent_member(x);
         else if (!pattern) p_->set_constant(x, c, k_);
@@ -5756,34 +5759,29 @@ private:
     if (!fixed && has_dependent_value) {
       er.underlying.reset();
     } else if (!fixed) {
-      using sema::Builtin;
-      const bool negative = std::ranges::any_of(values, [](const auto& v) { return v->bits < 0 && !v->big; });
-      Builtin u = Builtin::unsigned_int;
-      if (!negative) {
-        sema::u64 hi = 0;
-        for (const auto& v : values) hi = std::max(hi, sema::u64(v->bits));
-        if (hi > std::numeric_limits<std::uint32_t>::max()) u = Builtin::unsigned_long;
-      } else if (std::ranges::any_of(values, [](const auto& v) { return v->big; })) {
-        no_enum_type(name_at);  // [dcl.enum]/7: no integral type holds them all
-        u = Builtin::long_;
+      const bool negative = std::ranges::any_of(values, [](const auto& v) { return v->negative; });
+      const auto all_fit = [&](Builtin type) {
+        return std::ranges::all_of(values, [&](const auto& v) { return holds(s_.builtin(type), *v); });
+      };
+      const Builtin ordinary[] = {negative ? Builtin::int_ : Builtin::unsigned_int,
+                                  negative ? Builtin::long_ : Builtin::unsigned_long};
+      const auto underlying = std::ranges::find_if(ordinary, all_fit);
+      if (underlying != std::end(ordinary)) {
+        er.underlying = s_.builtin(*underlying);
+      } else if (clang) {
+        s_.diag(name_at, Diag::enum_range_truncation);
+        er.underlying = s_.builtin(negative ? Builtin::long_long : Builtin::unsigned_long_long);
       } else {
-        auto [lo, hi] = std::ranges::minmax(values | std::views::transform([](const auto& v) { return v->bits; }));
-        u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
-                                                                                                             : Builtin::long_;
+        const Builtin extended = negative ? Builtin::int128 : Builtin::unsigned_int128;
+        if (!all_fit(extended)) no_enum_type(name_at);
+        er.underlying = s_.builtin(extended);
       }
-      er.underlying = s_.builtin(u);
-      // [conv.prom]/3: the first of int, unsigned int, long, unsigned long that holds every
-      // value of the enumeration (its range, [dcl.enum]/8: these hold it when they hold the
-      // enumerators).
-      Builtin p = Builtin::unsigned_long;
-      for (Builtin c : {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long}) {
-        const bool all = std::ranges::all_of(values, [&](const auto& v) { return holds(s_.builtin(c), v->bits, v->big); });
-        if (all) {
-          p = c;
-          break;
-        }
-      }
-      er.promotion = s_.builtin(p);
+      // [conv.prom]/3: use the first standard type that holds the range, then the
+      // smallest suitable extended type, preferring a signed type of the same rank.
+      const auto candidates = std::span(promotions).first(clang ? 6 : std::size(promotions));
+      const auto promotion = std::ranges::find_if(candidates, all_fit);
+      if (promotion != candidates.end()) er.promotion = s_.builtin(*promotion);
+      else er.promotion = clang ? s_.builtin(Builtin::long_long) : *er.underlying;
     }
     if (unnamed) {
       if (er.enumerators.empty() || !ps_.expect(Tk::r_brace)) return bad();
@@ -5807,7 +5805,7 @@ private:
       sema::EnumeratorRec& xr = er.enumerators[i];
       if (unnamed) xr.entity = enumerator_entity(xr.name);
       if (values[i] && er.underlying) {
-        xr.value = s_.world().values.integer(*er.underlying, sema::u64(values[i]->bits));
+        xr.value = s_.world().values.integer(*er.underlying, values[i]->bits);
         p_->set_constant(xr.entity, xr.value, k_);
       } else {
         p_->value_dependent_member(xr.entity);

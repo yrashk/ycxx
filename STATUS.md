@@ -2876,14 +2876,15 @@ Other arguments diagnose an unsupported spelling when the body is instantiated.
 
 ## Source location builtins (#327)
 
-`__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
-source line, including through macro expansion and `#line`. An omitted ordinary function
+`__builtin_LINE()` is a zero-argument constant expression. Its type is `unsigned int` in spec
+and Clang modes and `int` in GCC mode. It uses the presumed source line, including through
+macro expansion and `#line`. An omitted ordinary function
 argument evaluates its default with the invocation line, which nested defaults inherit.
 The interpreter and native code share the same scoped evaluation. Translation units with the
 builtin track presumed lines in their semantic input.
 [Design](docs/design/source-line-defaults.md)
 
-Linux x86-64 supports the pinned libycxx `std::source_location::current()` descriptor
+x86-64 Linux and arm64 Darwin support the pinned libycxx `std::source_location::current()` descriptor
 for ordinary omitted arguments. The descriptor stores the presumed filename, line,
 one-based byte column and enclosing function in translation-unit-local storage.
 Resident results observe edits to presumed filenames and columns as well as lines.
@@ -3250,8 +3251,9 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   GCC as black boxes). A class holding one is placed the same way.
 - Not yet:
   - A 128-bit integer through an ellipsis, or named in a variadic function on x86-64 (#1247).
-  - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
-    are diagnosed as not supported (#1176).
+- **Enumerations**: retain extended integer values and use them in fixed underlying types.
+  The modes select the unfixed underlying type and overflow behavior documented in
+  [the compatibility matrix](docs/compatibility.toml) (#1176).
 - Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
   peer, native arithmetic against constant evaluation, and calls in both directions with a Clang
   peer), and `unit.linux_int128` runs the native ones on x86-64 Linux with GCC and Clang peers.
@@ -3386,6 +3388,12 @@ JSON includes before and after edge records for each changed count. HTML
 shows those counts under **Dependency changes** and links current sites to
 the manifest. Moved references preserve the count, and older snapshots
 without a dependency graph can still compare plan facts.
+
+When both plans have complete graphs with `value_edges`, `ycxx show --against`
+also compares typed binding occurrence counts by consumer, usage, binding,
+producer, and export (#1493). JSON records before and after occurrences in
+`value_binding_changes`. HTML shows counts and source sites under
+**Value binding changes**, with links for sites in the current manifest.
 
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
@@ -3532,9 +3540,13 @@ A source-built rule package can stage a named generated artifact into an
 `facts` bindings resolve the stable `value("target", "field")` query without
 adding receipt provenance to the consumer's arguments. The shader reflection
 example consumes the same fragment SPIR-V receipt as its runtime bundle and
-generates a C++ header from the descriptor layout. An equal layout preserves
-native work. Read-only inspection and watch reobserve the producer graph,
-including the selected tools and input files. [#1258](https://github.com/yrashk/ycxx/issues/1258)
+generates a C++ header from the descriptor layout. The sample includes uniform
+buffers and one-dimensional literal `sampler2D` arrays, with typed descriptor
+kinds and element counts. Its executable checks the count in the bundled SPIR-V.
+An equal layout preserves native work. Read-only inspection and watch reobserve
+the producer graph, including the selected tools and input files.
+[#1258](https://github.com/yrashk/ycxx/issues/1258)
+[#1486](https://github.com/yrashk/ycxx/issues/1486)
 
 ## The engine trace (#245, 2026-11-19)
 

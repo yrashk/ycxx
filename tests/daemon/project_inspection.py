@@ -210,22 +210,32 @@ def check_value_bindings_html(document, plan):
     assert not any(node.attrs.get('data-value-probe') == '1' for node in parsed.elements)
 
 
-def check_dependency_changes_html(document, definition, changes):
+def check_dependency_changes_html(document, definition, changes, *, value_bindings=False):
     # Module discovery also imports the plan fact checks here.
     from project_module_graph import PlanHTML
 
     parsed = PlanHTML(document)
+    if value_bindings:
+        identifier, heading, label = 'value-binding-changes', 'Value binding changes', 'Value binding'
+        detail = 'export_name'
+    else:
+        identifier, heading, label = 'dependency-changes', 'Dependency changes', 'Dependency'
+        detail = 'output'
     if changes is None:
-        assert not parsed.sections('dependency-changes'), 'show compared unavailable dependency graphs'
+        assert not parsed.sections(identifier), ('show compared unavailable dependency graphs', identifier)
         return
-    section = parsed.section('dependency-changes', 'Dependency changes')
+    section = parsed.section(identifier, heading)
+    if value_bindings:
+        artifacts = parsed.section('dependency-changes', 'Dependency changes')
+        current = parsed.section('dependencies', 'Dependencies')
+        assert parsed.elements.index(artifacts) < parsed.elements.index(section) < parsed.elements.index(current)
     if not changes:
-        assert 'No dependency changes.' in section.visible(), section.visible()
+        assert f'No {heading.lower()}.' in section.visible(), section.visible()
         return
 
     table, = (node for node in section.descendants if node.tag == 'table')
     assert [node.visible().strip() for node in table.descendants if node.tag == 'th'] == [
-        'Dependency', 'Before', 'After',
+        label, 'Before', 'After',
     ]
     rows = [[node for node in row.descendants if node.tag == 'td']
             for row in table.descendants if row.tag == 'tr']
@@ -235,12 +245,14 @@ def check_dependency_changes_html(document, definition, changes):
     anchors = {node.attrs.get('id'): node for node in source.descendants}
     lines = definition.splitlines()
     for row, group in zip(rows, changes):
-        label, before, after = row
+        identity, before, after = row
         edge = (group['after'] or group['before'])[0]
-        fields = ('consumer', 'producer', 'usage', 'binding', 'output')
-        assert [node.visible() for node in label.descendants if node.tag == 'code'] == [
+        fields = ('consumer', 'producer', 'usage', 'binding', detail)
+        assert [node.visible() for node in identity.descendants if node.tag == 'code'] == [
             edge[key] for key in fields if key in edge
-        ], (edge, label.visible())
+        ], (edge, identity.visible())
+        if value_bindings:
+            assert 'Binding' in identity.visible() and 'Export' in identity.visible(), edge
         for side, cell in (('before', before), ('after', after)):
             locations = [edge['location'] for edge in group[side]]
             count = len(locations)
@@ -259,6 +271,7 @@ def check_dependency_changes_html(document, definition, changes):
             assert links == expected, (group, links)
     assert not any(node.attrs.get('data-dependency-probe') == '1' for node in parsed.elements)
     assert not any(node.attrs.get('data-saved-dependency-probe') == '1' for node in parsed.elements)
+    assert not any(node.attrs.get('data-value-binding-probe') == '1' for node in parsed.elements)
 
 
 def scope_state(scope):
@@ -284,6 +297,30 @@ def compare_dependencies(ycxx, scope, snapshot, current, expected):
     check_dependency_changes_html(document, current['definition'], expected)
     check_dependency_html(document, current)
     assert scope_state(scope) == before, 'dependency comparison changed the workspace'
+    return diff
+
+
+def compare_value_bindings(ycxx, scope, env, snapshot, current, expected):
+    before = scope_state(scope)
+    args = ('--against', str(snapshot))
+
+    def compare(format_):
+        result = run_client(ycxx, scope, env, 'show', 'app', f'--format={format_}', *args)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    encoded = compare('json')
+    assert compare('json') == encoded, 'value binding comparison changed between reads'
+    diff = json.loads(encoded)
+    assert diff['schema'] == 1 and diff['target'] == 'app', diff
+    if expected is None:
+        assert 'value_binding_changes' not in diff, diff
+    else:
+        assert diff.get('value_binding_changes') == expected, (diff.get('value_binding_changes'), expected)
+    document = compare('html')
+    check_dependency_changes_html(document, current['definition'], expected, value_bindings=True)
+    check_value_bindings_html(document, current)
+    assert scope_state(scope) == before, 'value binding comparison changed the workspace'
     return diff
 
 

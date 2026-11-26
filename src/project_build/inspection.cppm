@@ -40,6 +40,7 @@ struct PlanComparison {
   std::vector<PlanChange> changes;
   std::optional<ModuleGraphChanges> module_changes = std::nullopt;
   std::optional<std::vector<DependencyOccurrenceChange>> dependency_changes = std::nullopt;
+  std::optional<std::vector<ValueBindingOccurrenceChange>> value_binding_changes = std::nullopt;
 };
 
 namespace {
@@ -80,24 +81,32 @@ std::expected<PlanComparison, std::string> compare(const PlanInspection& before,
   return diff;
 }
 
-std::vector<DependencyOccurrenceChange> compare_dependency_occurrences(
-    const DependencyGraphInspection& before, const DependencyGraphInspection& after) {
+auto dependency_identity(const PlanDependencyEdge& edge) {
   using Key = std::tuple<std::string_view, std::string_view, std::string_view,
                          std::optional<std::string_view>, std::optional<std::string_view>>;
+  const auto view = [](const std::string& text) { return std::string_view(text); };
+  return Key{edge.consumer, edge.usage, edge.producer, edge.output.transform(view), edge.binding.transform(view)};
+}
+
+auto value_binding_identity(const PlanValueDependencyEdge& edge) {
+  using Key = std::tuple<std::string_view, std::string_view, std::string_view, std::string_view, std::string_view>;
+  return Key{edge.consumer, edge.usage, edge.binding, edge.producer, edge.export_name};
+}
+
+template<class Edge, class Identity>
+std::vector<OccurrenceChange<Edge>> compare_dependency_occurrences(
+    const std::vector<Edge>& before, const std::vector<Edge>& after, Identity identity) {
+  using Key = std::invoke_result_t<Identity, const Edge&>;
   struct Occurrences {
-    std::vector<const PlanDependencyEdge*> before;
-    std::vector<const PlanDependencyEdge*> after;
-  };
-  const auto key = [](const PlanDependencyEdge& edge) -> Key {
-    const auto view = [](const std::string& text) { return std::string_view(text); };
-    return {edge.consumer, edge.usage, edge.producer, edge.output.transform(view), edge.binding.transform(view)};
+    std::vector<const Edge*> before;
+    std::vector<const Edge*> after;
   };
   std::map<Key, Occurrences> grouped;
-  for (const auto& edge : before.edges) grouped[key(edge)].before.push_back(&edge);
-  for (const auto& edge : after.edges) grouped[key(edge)].after.push_back(&edge);
+  for (const auto& edge : before) grouped[identity(edge)].before.push_back(&edge);
+  for (const auto& edge : after) grouped[identity(edge)].after.push_back(&edge);
 
-  const auto ordered_sites = [](const std::vector<const PlanDependencyEdge*>& occurrences) {
-    std::vector<PlanDependencyEdge> result;
+  const auto ordered_sites = [](const std::vector<const Edge*>& occurrences) {
+    std::vector<Edge> result;
     result.reserve(occurrences.size());
     for (const auto* edge : occurrences) result.push_back(*edge);
     std::ranges::sort(result, {}, [](const auto& edge) {
@@ -106,7 +115,7 @@ std::vector<DependencyOccurrenceChange> compare_dependency_occurrences(
     });
     return result;
   };
-  std::vector<DependencyOccurrenceChange> changes;
+  std::vector<OccurrenceChange<Edge>> changes;
   for (const auto& [old_edges, new_edges] : grouped | std::views::values) {
     if (old_edges.size() != new_edges.size())
       changes.push_back({ordered_sites(old_edges), ordered_sites(new_edges)});
@@ -276,14 +285,21 @@ std::expected<std::string, std::string> show_project(
       }
       const auto& old_dependencies = before->dependency_graph;
       const auto& new_dependencies = inspected->dependency_graph;
-      if (old_dependencies && new_dependencies && old_dependencies->complete && new_dependencies->complete)
-        diff->dependency_changes = compare_dependency_occurrences(*old_dependencies, *new_dependencies);
+      if (old_dependencies && new_dependencies && old_dependencies->complete && new_dependencies->complete) {
+        diff->dependency_changes = compare_dependency_occurrences(old_dependencies->edges, new_dependencies->edges,
+                                                                   dependency_identity);
+        if (old_dependencies->value_edges && new_dependencies->value_edges)
+          diff->value_binding_changes = compare_dependency_occurrences(*old_dependencies->value_edges,
+                                                                       *new_dependencies->value_edges,
+                                                                       value_binding_identity);
+      }
     }
     if (format == InspectionFormat::json) return lsp::dump(lsp::to_json(*diff)) + "\n";
     if (format == InspectionFormat::html) {
       std::optional<ModuleGraphComparison> modules;
       if (diff->module_changes) modules.emplace(ModuleGraphComparison{*before->module_graph, *diff->module_changes});
-      return render_inspection_html(*inspected, &diff->changes, modules, diff->dependency_changes);
+      return render_inspection_html(*inspected, &diff->changes, modules, diff->dependency_changes,
+                                    diff->value_binding_changes);
     }
     return diff_text(*diff);
   }
