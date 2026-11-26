@@ -2653,8 +2653,14 @@ session's.*
   `cv void*` targets with added pointee qualifiers, Derived* to Base* through an accessible,
   unambiguous base of a complete Derived (an incomplete one gives false; virtual functions do not
   matter), the null pointer value, and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]). An
-  array pointee's qualifiers are its elements'. Function, member and multi-level pointers and
-  conversions to an array of unknown bound are diagnosed. Supported class-template bases and variable-template initializers
+  array pointee's qualifiers are its elements'. Multi-level pointers convert by qualification
+  conversions, with each level that adds qualifiers below const ones only, and a pointer to a
+  noexcept function converts to one to the plain function ([conv.fctptr]). References to
+  arithmetic, pointer and `std::nullptr_t` types follow [dcl.init.ref]/5: direct binding of a
+  reference-compatible operand (a qualification conversion of pointers to them), otherwise a
+  converted temporary for a const lvalue or rvalue reference, never for a reference-related
+  (similar) operand (/5.4, CWG2352; Clang 23 differs, GCC 16 agrees) (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
+  sources, are diagnosed (#1399). Supported class-template bases and variable-template initializers
   replay dependent operands and check class completeness at the demand. Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
