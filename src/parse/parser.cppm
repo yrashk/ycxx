@@ -4591,15 +4591,26 @@ public:
           const bool probe = bf->function == lex::BuiltinFunction::constant_p;
           s_->unevaluated += probe;
           // An argument may be a pack expansion, as a call's are ([expr.call], [temp.variadic]/5).
+          const bool gcc_addressof = bf->function == lex::BuiltinFunction::addressof &&
+                                     s_->compatibility() == ast::Compatibility::gcc;
+          bool written_expansion = false;
           bool unexpanded = false;
+          std::size_t written_arguments = 0;
           if (!is(Tk::r_paren))
-            do
-              for (const Ex& x : expandable([&] { return assignment_expression(); }, nullptr, &unexpanded))
+            do {
+              ++written_arguments;
+              for (const Ex& x : expandable([&] { return assignment_expression(); }, &written_expansion, &unexpanded))
                 args.push_back(x);
-            while (accept(Tk::comma));
+            } while (accept(Tk::comma));
           s_->unevaluated -= probe;
           angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          if (gcc_addressof && !s_->builtin_arity(1, written_arguments, begin))
+            return {NodeId::none, begin, pos()};
+          if (gcc_addressof && written_expansion && !unexpanded) {
+            s_->diag(begin, Diag::builtin_addressof_pack);
+            return {NodeId::none, begin, pos()};
+          }
           // Until the pack is expanded the arity is unknown: the call stays dependent, and the
           // instantiation checks the expanded arguments.
           if (unexpanded) {
