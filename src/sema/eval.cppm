@@ -58,19 +58,24 @@ public:
     if (r->fixed) return interp::EnumLayout{*r->underlying, std::nullopt};
 
     // [dcl.enum]: the hypothetical integer type with the minimum width that holds the enumerators.
-    i64 low = 0;
-    u64 high = 0;
+    ast::Bits128 low{}, high{};
+    const bool is_signed = ast::is_signed(w_->target, *w_->types.builtin_of(*r->underlying));
     for (const EnumeratorRec& enumerator : r->enumerators) {
       if (enumerator.value == ConstId::none) return std::nullopt;
       auto bits = w_->ins.values.get<ast::VInt>(enumerator.value).bits;
-      if (ast::is_negative(bits)) low = std::min(low, i64(bits.lo));
-      else high = std::max(high, bits.lo);
+      if (is_signed && ast::is_negative(bits)) {
+        if (ast::wide::slt(bits, low)) low = bits;
+      } else if (ast::wide::ult(high, bits)) {
+        high = bits;
+      }
     }
-    const auto magnitude_bits = low < 0 ? std::max(std::bit_width(~u64(low)), std::bit_width(high))
-                                        : std::max(1, std::bit_width(high));
-    const u64 maximum = magnitude_bits == 64 ? ~u64{0} : (u64{1} << magnitude_bits) - 1;
-    if (low < 0 && !std::in_range<i64>(maximum)) return std::nullopt;
-    const i64 minimum = low < 0 ? -i64(maximum) - 1 : 0;
+    const bool negative = ast::is_negative(low);
+    auto magnitude_bits = ast::wide::bit_width(high);
+    if (negative) magnitude_bits = std::max(magnitude_bits, ast::wide::bit_width(ast::wide::bit_not(low)));
+    else magnitude_bits = std::max(1u, magnitude_bits);
+    constexpr ast::Bits128 ones{~u64{0}, ~u64{0}};
+    const auto maximum = magnitude_bits == 128 ? ones : ast::wide::bit_not(ast::wide::shl(ones, magnitude_bits));
+    const auto minimum = negative ? ast::wide::bit_not(maximum) : ast::Bits128{};
     return interp::EnumLayout{*r->underlying, interp::EnumRange{minimum, maximum}};
   }
 

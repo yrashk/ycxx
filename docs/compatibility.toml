@@ -127,15 +127,15 @@ evidence = ["tests/daemon/compatibility.py", "tests/own/templates/member-alias-t
 
 [[divergence]]
 id = "pack-index-symbol"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.type.pack.index], #297, #777"
 prior = "GCC's converted constant index and encoding of the bound pack."
 spec = "Use the existing Dy encoding with the converted constant index and the bound argument pack."
 gcc = "Same as spec."
-clang = "Encode a written literal with its original integer type and use the bound-pack placeholder."
+clang = "Encode a written literal with its original integer type and encode a bound pack as _SUBSTPACK_."
 limits = "This entry covers literal indices and bound packs. Named and operator expressions have separate entries."
-evidence = ["tests/daemon/compatibility.py", "tests/own/abi/pack-index-constant-symbols.run.cpp"]
+evidence = ["tests/daemon/compatibility.py", "tests/own/abi/pack-index-constant-symbols.run.cpp", "GCC 16.2 and upstream Clang 23.1.6 primary symbols, including repeated literal substitution and a class-bound pack on ELF and Mach-O; native mixed-object calls"]
 
 [[divergence]]
 id = "function-template-argument-prefix"
@@ -178,14 +178,14 @@ evidence = ["tests/own/lambda/p2-impl-mangle.run.cpp", "tests/daemon/compatibili
 
 [[divergence]]
 id = "constexpr-memory-builtin-range"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[cstring.syn], [expr.const], #1092"
 prior = "memchr stopped at the first match as in Clang. memcmp required both objects to span the comparison as in GCC, then stopped at the first difference."
 spec = "Retain the C-library-based rule used for the ycxx builtins."
 gcc = "Require and read the full range for both builtins."
 clang = "Check bytes as read and stop at the first match or difference for both builtins."
-limits = "Constant evaluation uses ycxx's character-object model. See constexpr-memcmp-identical-address and constexpr-memory-integer-object for the separate identity and representation cases."
+limits = "This entry covers how far the builtins read once the byte range is modeled. Pointer identity, typed representations and padding are tracked in the separate constexpr-memory entries."
 evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/memchr-memcmp-reads-stop.accept.cpp", "tests/own/builtins/memchr-memcmp-whole-range.reject.cpp"]
 
 [[divergence]]
@@ -202,46 +202,69 @@ evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constexpr-memcmp-equal-address-distinct-paths"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [basic.compound]"
 prior = "Apply the byte-access checks to an equal address reached through different subobject paths."
 spec = "Reject the tested invalid reads. A count of zero needs no reads."
-gcc = "Same as prior."
+gcc = "Fold a scalar array's address and the address of its first element to zero at any count. At the common boundary of two nested char rows, use the following row's length. Comparing a complete nested array to its first row or first byte uses the row's length."
 clang = "Same as spec."
 gcc_observed = "For the equal addresses at the end of one char row and the beginning of the next, accepts comparison counts of one and two in either argument order and rejects counts three through five. An array of scalars and its first element compare equal even at larger counts. The complete nested array address and its first row or first byte compare equal only for one and two bytes in the probes. Equal addresses across adjacent record fields or reached by moving back from a row's start are rejected."
 clang_observed = "Rejects the tested positive counts and accepts zero on Linux x86-64 and Darwin arm64."
-limits = "An equal byte offset alone is insufficient to decide which GCC fold and bounds check apply."
 probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; static_assert(__builtin_memcmp(a[0] + 2, a[1], 2) == 0);'
-evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
 
 [[divergence]]
 id = "constexpr-memory-array-object-pointer"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [cstring.syn]"
 prior = "Require a pointer to an element (or to a scalar) for the modeled byte range."
 spec = "Reject reads through the tested pointers to whole array objects."
-gcc = "Same as prior."
+gcc = "Both memcmp and memchr read the underlying bytes through pointers to whole flat int arrays, whole nested char arrays, and individual char rows. A count extending beyond the selected array is rejected."
 clang = "Same as spec."
-gcc_observed = "Both memcmp and memchr read the underlying bytes through pointers to whole flat int arrays, whole nested char arrays, and individual char rows. A count extending beyond the selected array is rejected."
 clang_observed = "Rejects those pointer-to-array reads on Linux x86-64 and Darwin arm64."
 probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}, b[2][2] = {{1, 2}, {3, 5}}; static_assert(__builtin_memcmp(&a, &b, sizeof(a)) < 0);'
-evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes"]
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes"]
 
 [[divergence]]
 id = "constexpr-memory-integer-object"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [cstring.syn], #1092"
 prior = "Limit byte reads by these constexpr builtins to narrow character objects."
 spec = "Use the narrow-character constexpr model for these built-in extensions."
-gcc = "Compare the little-endian bytes of the supported integer scalars and array elements in memcmp. memchr still uses the narrow-character model."
+gcc = "Use the little-endian bytes of supported integer scalars and array elements in memcmp and memchr. A pointer returned by memchr can retain an offset within a scalar, including after constexpr initialization, and can be passed back to the byte builtins."
 clang = "Same as spec."
-gcc_observed = "Also permits memchr to find a byte in a constexpr int object."
-limits = "memchr needs a pointer that can denote a byte inside a noncharacter scalar."
+gcc_observed = "A match inside a scalar yields a distinct pointer value. Reads of the matched byte through a void-pointer cast to const unsigned char* are rejected. A count extending beyond the source object is rejected even if the first byte matches."
 probe = 'constexpr int a = 12, b = 13; static_assert(__builtin_memcmp(&a, &b, sizeof(a)) < 0);'
 evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/memchr-memcmp-whole-range.reject.cpp"]
+
+[[divergence]]
+id = "constexpr-memory-floating-enum-scalar"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [basic.types], [cstring.syn]"
+prior = "Reject constexpr byte reads of floating and enumeration objects."
+spec = "Same as prior for the built-in wrappers."
+gcc = "Read object representation bytes of the supported binary32, binary64 and enum values."
+clang = "Same as spec."
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 probes on Linux x86-64 and Darwin arm64"]
+
+[[divergence]]
+id = "constexpr-memory-extended-representations"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [basic.types], [cstring.syn]"
+prior = "Reject constexpr byte reads through the tested x87 long double, complete class, and pointer objects."
+spec = "Same as prior for the built-in wrappers."
+gcc = "Same as prior."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts the tested x87 long double, records with and without padding, a union with a scalar active member, and two null pointer objects in memcmp and memchr."
+clang_observed = "Upstream Clang rejects the corresponding typed byte reads on Linux x86-64 and Darwin arm64."
+limits = "Remaining GCC cases need representation for extended floats, object padding and active union variants, and pointer values."
+probe = 'struct S { char a; int b; }; constexpr S x{1, 2}, y{3, 2}; constexpr int n = __builtin_memcmp(&x, &y, sizeof(x));'
+evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes"]
 
 [[divergence]]
 id = "system-header-dialect"
@@ -380,6 +403,20 @@ probe = 'template<class T> requires (sizeof(T) > 0) int size(T) { return 1; } in
 evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "constrained-requires-expression-local-parameter-symbol"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.req], [temp.constr.atomic], Itanium C++ ABI §5.1.5.9"
+prior = "Use an opaque constraint symbol for the tested simple, compound and nested requirements."
+spec = "Same as prior. The published ABI's function-parameter grammar does not assign a scope level to requires-expression local parameters."
+gcc = "Same as prior."
+clang = "Same as prior."
+gcc_observed = "Uses rQ for a nonempty parameter list and fp_ for its first local parameter in either clause placement. Uses X for simple and compound requirements, N for noexcept, R for a result constraint and Q for a nested requirement. An explicitly empty parameter list uses rq, as does an omitted list. In the tested nested requires-expression, uses fp_ for the enclosing parameter and fL18446744073709551614p_ for the innermost one."
+clang_observed = "Uses fL0p_ for the first local parameter in a template-head constraint and fp_ in a trailing constraint on both targets. Encodes an explicitly empty list with rQv_. The tested nested requires-expression encodes both its enclosing and innermost local parameter references as fL0p_. The tested X, N, R and Q requirement markers match the GCC primary symbols."
+probe = 'template<class T> requires requires(T t) { t + t; } int f(T n) { return n; } int use() { return f(2); }'
+evidence = ["Black-box GCC 16.2 and Clang 23.1.6 symbol probes on Linux x86-64 and Darwin arm64"]
+
+[[divergence]]
 id = "amd64-narrow-scalar-extension"
 status = "shared"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -471,23 +508,23 @@ gcc = "Use the following row's start when the address is inside a complete neste
 clang = "Preserve the original array path after accepting the cast."
 gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array. At the end of the complete nested array the pointer compares equal to the last row's one-past pointer and can be advanced by one."
 clang_observed = "Preserves the prior row. Reading end[-1] succeeds, and dereferencing end is rejected."
-limits = "The address at the end of the complete array compares correctly. Arithmetic and dereferencing after that terminal cast still need GCC provenance."
+limits = "The complete-array terminal address compares correctly and can advance by one in GCC mode. Dereferencing after moving back from that terminal cast still needs GCC provenance."
 evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constexpr-out-of-bounds-pointer-formation"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.add]/4, [expr.const]"
 prior = "Require constexpr pointer arithmetic to stay within the array or at its one-past position."
 spec = "Reject forming an out-of-bounds pointer in a constant expression."
-gcc = "Currently follows the draft bounds check."
+gcc = "A constexpr pointer can be formed and compared before the start or beyond the one-past position of the tested arrays and singleton. Same-array subtraction and pointer arithmetic that brings it back in bounds preserve the original array."
 clang = "Same as spec."
 gcc_observed = "GCC 16.2 accepts comparing pointers formed before the start or beyond the one-past position of the tested flat or nested arrays, including after casting the last row's end through void*. Dereferencing the tested out-of-bounds flat-array pointer is rejected."
 clang_observed = "Clang 23.1.6 rejects the five address formation probes and the dereference probe on Linux x86-64 and Darwin arm64."
-limits = "GCC mode needs to represent the out-of-bounds address separately from access to an array element."
+limits = "An out-of-bounds pointer cannot access storage, even if its byte address matches a valid element of another row. The modeled byte offset is limited to the target's signed pointer difference width."
 probe = 'constexpr int a[] = {1, 2}; static_assert(a + 3 == a + 3);'
-evidence = ["Black-box -std=c++2c -pedantic-errors -fsyntax-only probes on GCC 16.2 and Clang 23.1.6 (Linux x86-64 and Darwin arm64)"]
+evidence = ["tests/daemon/compatibility.py", "Black-box -std=c++2c -pedantic-errors -fsyntax-only probes on GCC 16.2 and Clang 23.1.6 (Linux x86-64 and Darwin arm64)"]
 
 [[divergence]]
 id = "structured-binding-array-cv"
@@ -515,17 +552,26 @@ evidence = ["tests/own/argument-dependent-lookup/class-template-template-argumen
 
 [[divergence]]
 id = "plain-enum-overflow"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "partial" }
-reference = "[dcl.enum], #220"
-prior = "Diagnose values beyond the plain enum's supported underlying integer types, as Clang does."
-spec = "Diagnose the tested increment beyond unsigned long long."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Chooses unsigned __int128 and assigns the next enumerator the value 2^64."
-clang_observed = "Uses a 64-bit underlying type and wraps the next enumerator to zero with -Wenum-too-large. With -pedantic-errors it rejects the declaration."
-limits = "Clang mode currently matches the strict oracle verdict only."
-evidence = ["tests/own/classes/s4-enum-increment-overflow.reject.cpp"]
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.enum]/5–8, [conv.prom]/3, #220, #1176"
+prior = "Diagnose an increment past the 64-bit limit of the implementation."
+spec = "Preserve the incremented value 2^64, since the extended integer type represents it. The underlying type is unsigned __int128 and integral promotion selects signed __int128."
+gcc = "Same as spec in the tested enum with no negative enumerators."
+clang = "Wrap the implicitly incremented enumerator to zero. The tested enum uses unsigned long as its underlying and promoted type. Enable -Wenum-too-large by default and diagnose as an error under -pedantic-errors unless overridden."
+evidence = ["tests/own/classes/s4-enum-increment-overflow.accept.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "plain-enum-explicit-wide-initializer"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.enum]/5–8, [conv.prom]/3, #1176"
+prior = "Reject an explicitly wide enum initializer before choosing an underlying type."
+spec = "Preserve the value 2^127 in the unfixed enum, with unsigned __int128 for the underlying and promoted types. A written 128-bit underlying type also keeps the full values."
+gcc = "Same as spec in the tested cases."
+clang = "Warn with -Wenum-too-large and use unsigned long long for the tested unfixed enum, with long long for promotion. The enumerators are truncated to 64 bits after the closing brace. A written 128-bit underlying type preserves the full values."
+probe = 'enum E { first = ((unsigned __int128)1 << 127), next };'
+evidence = ["tests/own/int128/enum.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "member-attribute-splice-opener"
@@ -540,16 +586,27 @@ evidence = ["tests/own/decls/member-attribute-splice.reject.cpp", "tests/daemon/
 
 [[divergence]]
 id = "member-attribute-unmatched-delimiter"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.attr.grammar]"
 prior = "Require balanced argument tokens for ordinary attributes on nonstatic member declarations."
-spec = "Reject an unmatched opening bracket, brace, or parenthesis in the tested ordinary member attribute."
+spec = "Reject an unmatched bracket, brace, or parenthesis in the tested ordinary member attribute."
 gcc = "Same as spec."
-clang = "Same as spec."
-clang_observed = "Accepts the tested unknown attribute with an unmatched opener. A corresponding unmatched closer is diagnosed."
+clang = "Recover in an unknown attribute from the tested unmatched opener, unmatched closing brace or bracket, and missing outer argument parenthesis. Diagnose an excess closing parenthesis and malformed arguments of the tested known attribute."
 probe = 'struct S { [[probe::annotation({ name)]] int member; };'
-evidence = ["tests/own/decls/member-attribute-splice.reject.cpp"]
+evidence = ["tests/daemon/compatibility.py", "tests/own/decls/member-attribute-splice.reject.cpp"]
+
+[[divergence]]
+id = "member-attribute-crossed-delimiters"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.attr.grammar]"
+prior = "Require all delimiter types to nest in stack order."
+spec = "Diagnose crossed delimiter pairs in the attribute argument."
+gcc = "Balance each delimiter kind separately in the tested unknown attribute."
+clang = "Same as spec."
+probe = 'struct S { [[probe::annotation(({ name ) })]] int member; };'
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -Wno-attributes -fsyntax-only probes"]
 
 [[divergence]]
 id = "function-template-pack-position"

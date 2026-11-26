@@ -13,6 +13,47 @@ from system_includes import DARWIN, LINUX, NATIVE_LINUX
 
 
 MODES = ('spec', 'gcc', 'clang')
+ENUM_WIDTH = '''\
+enum Wide { high = 0xffffffffffffffffULL, increment, following = increment + 1 };
+#ifdef CLANG_MODE
+static_assert(sizeof(Wide) == 8);
+static_assert(__is_same(__underlying_type(Wide), unsigned long));
+static_assert(__is_same(decltype(+increment), unsigned long));
+static_assert(increment == 0 && following == 1);
+#else
+static_assert(sizeof(Wide) == 16);
+static_assert(__is_same(__underlying_type(Wide), unsigned __int128));
+static_assert(__is_same(decltype(+increment), __int128));
+static_assert(increment == (__int128(1) << 64));
+static_assert(following == (__int128(1) << 64) + 1);
+#endif
+
+enum Explicit { explicit_wide = ((unsigned __int128)1 << 127), explicit_next };
+#ifdef CLANG_MODE
+static_assert(__is_same(__underlying_type(Explicit), unsigned long long));
+static_assert(__is_same(decltype(+explicit_wide), long long));
+static_assert(static_cast<unsigned long long>(explicit_wide) == 0);
+static_assert(static_cast<unsigned long long>(explicit_next) == 1);
+#else
+static_assert(__is_same(__underlying_type(Explicit), unsigned __int128));
+static_assert(__is_same(decltype(+explicit_wide), unsigned __int128));
+static_assert(static_cast<unsigned __int128>(explicit_wide) == ((unsigned __int128)1 << 127));
+static_assert(static_cast<unsigned __int128>(static_cast<Explicit>(((unsigned __int128)1 << 127) + 113)) ==
+              ((unsigned __int128)1 << 127) + 113);
+#endif
+
+enum Fixed : unsigned __int128 { fixed_high = 0xffffffffffffffffULL, fixed_increment };
+static_assert(static_cast<unsigned __int128>(fixed_increment) == ((unsigned __int128)1 << 64));
+
+extern "C" Wide wide_enum(Wide value, unsigned long long key);
+#ifdef PROVIDER
+Wide wide_enum(Wide value, unsigned long long key) {
+  return value == increment && key == 17 ? following : high;
+}
+#elif defined(CONSUMER)
+int main() { return wide_enum(increment, 17) != following; }
+#endif
+'''
 CLASS_HEAD_ALIGNMENT = '''\
 #if defined(WEAK)
 struct alignas(1) Payload { long long value; };
@@ -525,6 +566,64 @@ constexpr unsigned left = 256, right = 1;
 static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
 #endif
 ''')
+    (world.scope / 'memchr-integer.cpp').write_text('''\
+constexpr unsigned num = 0x12131415;
+constexpr unsigned arr[] = {0x12131415, 0x30313233};
+#ifdef OVERSIZED
+static_assert(__builtin_memchr(&num, 0x15, sizeof(num) + 1) == &num);
+#else
+constexpr const void* middle = __builtin_memchr(&num, 0x14, sizeof(num));
+constexpr const void* later = __builtin_memchr(&num, 0x13, sizeof(num));
+static_assert(__builtin_memchr(&num, 0x15, sizeof(num)) == &num);
+static_assert(middle != nullptr && middle != &num);
+static_assert(__builtin_memchr(&num, 0x14, 2) == middle);
+static_assert(__builtin_memchr(&num, 0x18, sizeof(num)) == nullptr);
+static_assert(__builtin_memchr(arr, 0x33, sizeof(arr)) == arr + 1);
+static_assert(__builtin_memcmp(middle, middle, 123) == 0);
+static_assert(__builtin_memcmp(middle, later, 1) > 0);
+#endif
+''')
+    (world.scope / 'memory-array-object.cpp').write_text('''\
+constexpr char first[2][2] = {{1, 2}, {3, 4}}, second[2][2] = {{1, 2}, {3, 5}};
+constexpr unsigned ints[2] = {1, 2}, more[2] = {1, 3};
+#if defined(OVERSIZED)
+constexpr int bad = __builtin_memcmp(&first, &second, sizeof(first) + 1);
+#elif defined(ROW_OVERSIZED)
+constexpr int bad = __builtin_memcmp(first[0] + 2, first[1], 3);
+#elif defined(RECORD_FIELDS)
+struct Fields { char begin[2]; char end[2]; };
+constexpr Fields fields = {{1, 2}, {3, 4}};
+constexpr int bad = __builtin_memcmp(fields.begin + 2, fields.end, 1);
+#else
+static_assert(__builtin_memcmp(&first, &second, sizeof(first)) < 0);
+static_assert(__builtin_memcmp(&first[1], &second[1], sizeof(first[1])) < 0);
+static_assert(__builtin_memcmp(&ints, &more, sizeof(ints)) < 0);
+static_assert(__builtin_memchr(&first, 4, sizeof(first)) == &first[1][1]);
+static_assert(__builtin_memchr(&ints, 2, sizeof(ints)) == &ints[1]);
+static_assert(__builtin_memcmp(first[0] + 2, first[1], 2) == 0);
+static_assert(__builtin_memcmp(first[1], first[0] + 2, 2) == 0);
+static_assert(__builtin_memcmp(&first, &first[0], 2) == 0);
+static_assert(__builtin_memcmp(&first, first[0], 2) == 0);
+static_assert(__builtin_memcmp(&first[0], first[0], 123) == 0);
+static_assert(__builtin_memcmp(&ints, ints, 123) == 0);
+#endif
+''')
+    (world.scope / 'memory-scalar-object.cpp').write_text('''\
+#ifdef FLOAT
+constexpr float left = 1.0f, right = 1.000000119f;
+static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
+static_assert(__builtin_memchr(&left, 0x80, sizeof(left)) != nullptr);
+#elif defined(DOUBLE)
+constexpr double left[] = {1.0}, right[] = {2.0};
+static_assert(__builtin_memcmp(&left, &right, sizeof(left)) > 0);
+static_assert(__builtin_memchr(left, 0x3f, sizeof(left)) != nullptr);
+#else
+enum Bits : unsigned { low = 0x31, high = 0x32 };
+constexpr Bits left = low, right = high;
+static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
+static_assert(__builtin_memchr(&left, 0x31, sizeof(left)) == &left);
+#endif
+''')
     (world.scope / 'void-cast-nested.cpp').write_text('''\
 constexpr int table[2][2] = {{17, 23}, {83, 97}};
 #ifdef LAST
@@ -541,6 +640,36 @@ static_assert(end[-1] == 23);
 static_assert(end == table[1] + 2);
 #else
 static_assert(end == table[1]);
+#endif
+''')
+    (world.scope / 'constexpr-pointer-bounds.cpp').write_text('''\
+constexpr int flat[2] = {13, 37};
+constexpr int table[2][2] = {{13, 37}, {83, 109}};
+constexpr int singleton = 139;
+#if defined(READ_PAST)
+constexpr int value = *(flat + 3);
+#elif defined(READ_WRONG_ROW)
+constexpr int value = *(table[0] + 3);
+#elif defined(DIFF_WRONG_ROW)
+static_assert((table[0] + 3) - (table[1] + 1) == 0);
+#elif defined(DOWNCAST)
+constexpr auto erased = static_cast<const void*>(flat + 3);
+constexpr auto pointer = static_cast<const int*>(erased);
+#elif defined(TERMINAL_CAST)
+constexpr auto address = static_cast<const int*>(static_cast<const void*>(table[1] + 2));
+static_assert((address + 1) == (address + 1));
+#else
+constexpr auto past = flat + 3;
+constexpr auto before = flat - 1;
+constexpr auto singleton_past = &singleton + 2;
+constexpr auto wrong_row = table[0] + 3;
+static_assert(past - before == 4 && before < past);
+static_assert(past == flat + 3 && before == flat - 1);
+static_assert(*(past - 2) == 37 && *(before + 2) == 37);
+static_assert(*(singleton_past - 2) == 139);
+static_assert(wrong_row == table[1] + 1);
+static_assert(table[1] - 1 == table[0] + 1);
+static_assert(__builtin_memcmp(past, past, 5) == 0);
 #endif
 ''')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
@@ -615,6 +744,38 @@ struct Record {
   [[probe::annotation([: unavailable_name :])]] int value;
 #endif
 };
+''')
+    (world.scope / 'attribute-delimiters.cpp').write_text('''\
+struct S {
+#if defined(BRACE)
+  [[probe::annotation({ name)]] int value;
+#elif defined(BRACKET)
+  [[probe::annotation([ name)]] int value;
+#elif defined(PAREN)
+  [[probe::annotation(( name)]] int value;
+#elif defined(RIGHT_BRACE)
+  [[probe::annotation(} name)]] int value;
+#elif defined(RIGHT_BRACKET)
+  [[probe::annotation(] name)]] int value;
+#elif defined(RIGHT_PAREN)
+  [[probe::annotation(name))]] int value;
+#elif defined(CROSSED_BRACE)
+  [[probe::annotation(({ name ) })]] int value;
+#elif defined(CROSSED_BRACKET)
+  [[probe::annotation([{ name ] })]] int value;
+#elif defined(KNOWN_ATTRIBUTE)
+  [[nodiscard({ name)]] int value;
+#elif defined(MISSING_OUTER)
+  [[probe::annotation(name]] int value;
+#elif defined(UNQUALIFIED)
+  [[annotation({ name)]] int value;
+#elif defined(ATTR_LIST)
+  [[probe::annotation({ name), maybe_unused]] int value;
+#else
+  [[probe::annotation([name[2]])]] int value;
+#endif
+};
+static_assert(sizeof(S) == sizeof(int));
 ''')
     offset_spellings = (('spec', 'offset'), ('gcc', 'gnu::offset'), ('gcc', '__gnu__::__offset__'),
                         ('clang', 'clang::offset'))
@@ -808,10 +969,21 @@ int use() { return transform(7); }
             for case in ('', 'INT_ARRAY', 'INT128'):
                 case_flags = ['-D' + case] if case else []
                 invoke(target, *flags, *case_flags, '-fsyntax-only', 'memcmp-integer.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-fsyntax-only', 'memchr-integer.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-DOVERSIZED', '-fsyntax-only', 'memchr-integer.cpp', status=1)
+            invoke(target, *flags, '-fsyntax-only', 'memory-array-object.cpp', status=mode != 'gcc')
+            for case in ('OVERSIZED', 'ROW_OVERSIZED', 'RECORD_FIELDS'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-array-object.cpp', status=1)
+            for case in ('FLOAT', 'DOUBLE', 'ENUM'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-scalar-object.cpp', status=mode != 'gcc')
             invoke(target, *flags, '-fsyntax-only', 'void-cast-nested.cpp', status=mode == 'spec')
             invoke(target, *flags, '-DREAD_PREVIOUS', '-fsyntax-only', 'void-cast-nested.cpp', status=mode != 'clang')
             invoke(target, *flags, '-DREAD_NEXT', '-fsyntax-only', 'void-cast-nested.cpp', status=mode != 'gcc')
             invoke(target, *flags, '-DLAST', '-fsyntax-only', 'void-cast-nested.cpp', status=mode == 'spec')
+            invoke(target, *flags, '-fsyntax-only', 'constexpr-pointer-bounds.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-DTERMINAL_CAST', '-fsyntax-only', 'constexpr-pointer-bounds.cpp', status=mode != 'gcc')
+            for rejected in ('READ_PAST', 'READ_WRONG_ROW', 'DIFF_WRONG_ROW', 'DOWNCAST'):
+                invoke(target, *flags, '-D' + rejected, '-fsyntax-only', 'constexpr-pointer-bounds.cpp', status=1)
         invoke(*flags, '-fsyntax-only', 'nan.cpp', status=mode != 'gcc')
         invoke(*flags, '-fsyntax-only', 'void-cast.cpp', status=mode == 'spec')
         invoke(*flags, '-DSINGLETON', '-fsyntax-only', 'void-cast.cpp', status=mode != 'clang')
@@ -831,6 +1003,15 @@ int use() { return transform(7); }
         invoke(*flags, '-freflection', '-DUNMATCHED_OPENER', '-fsyntax-only', 'attribute-splice.cpp',
                status=mode != 'clang')
         invoke(*flags, '-freflection', '-DUNMATCHED_CLOSER', '-fsyntax-only', 'attribute-splice.cpp', status=1)
+        for target in (LINUX, DARWIN):
+            invoke(target, *flags, '-fsyntax-only', 'attribute-delimiters.cpp')
+            for case in ('BRACE', 'BRACKET', 'PAREN', 'RIGHT_BRACE', 'RIGHT_BRACKET', 'MISSING_OUTER',
+                         'UNQUALIFIED', 'ATTR_LIST'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'attribute-delimiters.cpp', status=mode != 'clang')
+            for case in ('CROSSED_BRACE', 'CROSSED_BRACKET'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'attribute-delimiters.cpp', status=mode != 'gcc')
+            for case in ('RIGHT_PAREN', 'KNOWN_ATTRIBUTE'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'attribute-delimiters.cpp', status=1)
         for target in (LINUX, DARWIN):
             invoke(target, *flags, '-fsyntax-only', 'member-alignment.cpp')
             _, _, diagnostic = invoke(target, *flags, '-fsyntax-only', 'class-head-alignment.cpp')
@@ -1116,6 +1297,41 @@ int main() { discard(); return calls != 1; }
         subprocess.run([scope / 'abstract-result'], cwd=scope, check=True, timeout=20)
 
 
+def wide_enumerations(world, gxx):
+    scope = world.scope
+    (scope / 'wide-enum.cpp').write_text(ENUM_WIDTH)
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        definitions = ['-DCLANG_MODE'] if mode == 'clang' else []
+        flags = ['-fcompat=' + mode, *definitions]
+        warning = b'incremented enumerator value 18446744073709551616'
+        for target in (LINUX, DARWIN):
+            for selection in ((), ('-pedantic-errors',), ('-Werror=enum-too-large',),
+                              ('-pedantic-errors', '-Wno-enum-too-large'),
+                              ('-pedantic-errors', '-Wno-error=enum-too-large')):
+                args = [target, *flags, *selection, '-fsyntax-only', 'wide-enum.cpp']
+                cold = world.cxx(args, scope, world.cold, timeout=40)
+                warm = world.cxx(args, scope, world.daemon, timeout=40)
+                rejected = mode == 'clang' and selection in (('-pedantic-errors',), ('-Werror=enum-too-large',))
+                assert cold == warm and warm[0] == rejected, (target, mode, selection, cold, warm)
+                assert (warning in warm[2]) == (mode == 'clang' and '-Wno-enum-too-large' not in selection), warm
+            args = [target, *flags, '-Wno-enum-too-large', '-DPROVIDER', '-c', 'wide-enum.cpp', '-o', 'wide-enum.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(args, scope, env, timeout=40)
+                assert result == (0, b'', b''), (target, mode, result)
+        peer = clang if mode == 'clang' else gxx
+        if peer:
+            subprocess.run([peer, '-std=c++26', *definitions, '-DCONSUMER', '-c', 'wide-enum.cpp', '-o', 'enum-peer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            args = [*flags, '-Wno-enum-too-large', '-DPROVIDER', '-c', 'wide-enum.cpp', '-o', 'enum-native.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(args, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, result)
+                subprocess.run([gxx, 'enum-native.o', 'enum-peer.o', '-o', 'enum-peer'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'enum-peer'], cwd=scope, check=True, timeout=20)
+
+
 def wide_array_allocations(world, gxx):
     scope = world.scope
     (scope / 'wide-array-peer.cpp').write_text('''\
@@ -1219,6 +1435,58 @@ template<class... Ts> int arithmetic_alternate(Ts...[0 + 0]) { return 2; }
             subprocess.run([gxx, 'pack-index-native.o', 'pack-index-consumer.o', '-o', 'pack-index-link'],
                            cwd=scope, check=True, capture_output=True, timeout=40)
             subprocess.run([scope / 'pack-index-link'], cwd=scope, check=True, timeout=20)
+
+
+def bound_pack_index_symbols(world, gxx):
+    scope = world.scope
+    signatures = (
+        'template<class... T> int two(T...[0] a, T...[1] b)',
+        'template<class... T> int three(T...[0] a, T...[0] b, T...[0]* p)',
+    )
+    member = 'template<class... T> struct S { template<int I> T...[I] get()'
+    calls = '''\
+    S<int, long> s;
+    return two<int, char>(4, 5) + three<int>(1, 1, nullptr) + s.get<1>() - 13;
+'''
+    definitions = (
+        signatures[0] + ' { return a + b; }',
+        signatures[1] + ' { return a + b + (p ? 1 : 0); }',
+        member + ' { return T...[I](I + 1); } };',
+        'int instantiate() {' + calls + '}',
+    )
+    declarations = [signature + ';' for signature in signatures]
+    declarations.extend([member + '; };', 'int main() {' + calls + '}'])
+    (scope / 'bound-pack-provider.cpp').write_text('\n'.join(definitions))
+    (scope / 'bound-pack-consumer.cpp').write_text('\n'.join(declarations))
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        index = 'i' if mode == 'clang' else 'm'
+        pack = '_SUBSTPACK_' if mode == 'clang' else 'JilE'
+        expected = (
+            f'_Z3twoIJicEEiDyT_L{index}0EDyS0_L{index}1E',
+            f'_Z5threeIJiEEiDyT_L{index}0ES1_PS1_',
+            f'_ZN1SIJilEE3getILi1EEEDy{pack}T_v',
+        )
+        for target in (LINUX, DARWIN):
+            command = [target, *flags, '-c', 'bound-pack-provider.cpp', '-o', 'bound-pack.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                prefix = '_' if target == DARWIN else ''
+                symbols = (scope / 'bound-pack.o').read_bytes().split(b'\0')
+                for symbol in expected:
+                    assert (prefix + symbol).encode() in symbols, (mode, target, symbol, [s for s in symbols if b'Dy' in s])
+        peer = clang if mode == 'clang' else gxx
+        if peer:
+            subprocess.run([peer, '-std=c++26', '-c', 'bound-pack-consumer.cpp', '-o', 'bound-pack-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            command = [*flags, '-c', 'bound-pack-provider.cpp', '-o', 'bound-pack-native.o']
+            result = world.cxx(command, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([gxx, 'bound-pack-native.o', 'bound-pack-consumer.o', '-o', 'bound-pack-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'bound-pack-link'], cwd=scope, check=True, timeout=20)
 
 
 def operator_constraints(world, gxx):
@@ -1361,8 +1629,10 @@ def main():
         mixed_constraints(world, gxx)
         function_language_linkage(world, gxx)
         mixed_abstract_result(world, gxx)
+        wide_enumerations(world, gxx)
         empty_union(world, gxx)
         pack_index_symbols(world, gxx)
+        bound_pack_index_symbols(world, gxx)
         operator_constraints(world, gxx)
         template_argument_prefixes(world, gxx)
         mixed_source_location(world, gxx)

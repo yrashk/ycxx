@@ -1241,14 +1241,19 @@ public:
       }
       if (gnu) bump();
       const u32 begin = index();
-      const Tk open = kind(), close = std_attr ? Tk::r_square : Tk::r_paren;
-      u32 depth = 0;
-      do {
-        if (is(open)) ++depth;
-        else if (is(close)) --depth;
-        bump();
-      } while (depth > 0 && !at_end());
-      const bool closed = depth == 0;
+      const auto end = std_attr ? items::standard_attribute_end(*r_, begin, end_) : std::nullopt;
+      bool closed = end.has_value();
+      if (end) seek(*end);
+      else {
+        const Tk open = kind(), close = std_attr ? Tk::r_square : Tk::r_paren;
+        u32 depth = 0;
+        do {
+          if (is(open)) ++depth;
+          else if (is(close)) --depth;
+          bump();
+        } while (depth > 0 && !at_end());
+        closed = depth == 0;
+      }
       if ((annotations || annotation_type_context) && std_attr && closed) {
         if (auto mixed = annotation_in_attribute_list(begin, index()))
           s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
@@ -1364,6 +1369,8 @@ public:
 
   u32 past_attribute_specifier(u32 ahead) const {
     Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+    if (open == Tk::l_square && kind(ahead + 1) == Tk::l_square)
+      if (auto end = items::standard_attribute_end(*r_, index() + ahead, end_)) return *end - index();
     u32 depth = 0;
     do {
       if (kind(ahead) == open) ++depth;
@@ -1382,12 +1389,86 @@ public:
       ahead = past_attribute_specifier(ahead + (gnu ? 1 : 0));
     }
   }
+
+  // Recognized attributes keep the normal grammar even when a peer recovers from a
+  // malformed argument on an unknown attribute. Vendor namespaces can add new spellings.
+  static bool known_attribute(std::string_view scope, std::string_view name) {
+    if (!scope.empty()) return scope == "gnu" || scope == "__gnu__" || scope == "clang" || scope == "__clang__" ||
+                               scope == "gsl" || scope == "msvc" || scope == "arm";
+    constexpr std::string_view names[] = {"assume", "carries_dependency", "deprecated", "fallthrough", "indeterminate",
+        "likely", "maybe_unused", "nodiscard", "noreturn", "no_unique_address", "unlikely"};
+    if (name.starts_with("__") && name.ends_with("__") && name.size() > 4) name = name.substr(2, name.size() - 4);
+    return std::ranges::contains(names, name);
+  }
+
+  std::optional<u32> attribute_argument_end(u32 open, u32 limit, ast::Compatibility mode) const {
+    std::vector<Tk> closing{Tk::r_paren};
+    std::vector<Tk> skipped;
+    for (u32 at = open + 1; at < limit; ++at) {
+      const Tk token = kind(at);
+      if (const Tk close = items::attribute_closer(token); close != Tk::eof) {
+        closing.push_back(close);
+        continue;
+      }
+      if (token != Tk::r_square && token != Tk::r_paren && token != Tk::r_brace && token != Tk::r_splice) continue;
+      const auto found = std::find(closing.rbegin(), closing.rend(), token);
+      if (found == closing.rend()) {
+        if (mode != ast::Compatibility::clang || (token != Tk::r_brace && token != Tk::r_square) ||
+            std::ranges::contains(skipped, token)) return std::nullopt;
+        continue;
+      }
+      const auto matched = std::prev(found.base());
+      if (mode == ast::Compatibility::gcc) {
+        closing.erase(matched);  // GCC balances each kind separately.
+      } else if (mode == ast::Compatibility::clang) {
+        skipped.insert(skipped.end(), std::next(matched), closing.end());
+        closing.erase(matched, closing.end());
+      } else {
+        if (matched != std::prev(closing.end())) return std::nullopt;
+        closing.pop_back();
+      }
+      if (closing.empty()) return at + 1;
+    }
+    if (mode == ast::Compatibility::clang) return limit;
+    return std::nullopt;
+  }
+
+  bool compiler_attribute_balanced(u32 first, u32 after, ast::Compatibility mode) const {
+    if (after < first + 4 || kind(after - 2) != Tk::r_square || kind(after - 1) != Tk::r_square) return false;
+    const u32 limit = after - 2;
+    for (u32 at = first + 2; at < limit;) {
+      if (kind(at) == Tk::comma) { ++at; continue; }
+      if (kind(at) != Tk::identifier) return false;
+      std::string_view scope;
+      if (kind(at + 1) == Tk::coloncolon && kind(at + 2) == Tk::identifier) {
+        scope = r_->name(tok(at));
+        at += 2;
+      }
+      const auto name = r_->name(tok(at++));
+      if (kind(at) == Tk::l_paren) {
+        const auto end = attribute_argument_end(at, limit, known_attribute(scope, name) ? ast::Compatibility::spec : mode);
+        if (!end) return false;
+        at = *end;
+      }
+      if (at != limit && kind(at) != Tk::comma) return false;
+    }
+    return true;
+  }
+
   // [dcl.attr.grammar]: each attribute argument must have balanced tokens.
   bool balanced_attributes() {
     const u32 count = past_attributes(0);
-    const bool clang = s_->compatibility() == ast::Compatibility::clang;
+    const auto mode = s_->compatibility();
     std::vector<Tk> closing;
     for (u32 offset = 0; offset < count; ++offset) {
+      if (mode != ast::Compatibility::spec && closing.empty() && kind(offset) == Tk::l_square &&
+          kind(offset + 1) == Tk::l_square) {
+        const u32 end = past_attribute_specifier(offset);
+        if (compiler_attribute_balanced(offset, end, mode)) {
+          offset = end - 1;
+          continue;
+        }
+      }
       switch (Tk token = kind(offset)) {
       case Tk::l_square: closing.push_back(Tk::r_square); break;
       case Tk::l_paren: closing.push_back(Tk::r_paren); break;
@@ -1398,7 +1479,7 @@ public:
       case Tk::r_brace:
       case Tk::r_splice:
         // Clang skips an unmatched splice opener in an ordinary attribute argument.
-        if (clang && token == Tk::r_paren)
+        if (mode == ast::Compatibility::clang && token == Tk::r_paren)
           while (!closing.empty() && closing.back() == Tk::r_splice) closing.pop_back();
         if (closing.empty()) {
           s_->diag(pos() + offset, Diag::unexpected_token, token);
