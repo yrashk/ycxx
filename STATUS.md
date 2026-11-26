@@ -3554,6 +3554,12 @@ identity. Inspection reports the staged path and selector and links the
 input edge to the producer. The staged tool example watches an executable
 script that writes a generated C++ header.
 
+A witness can also use `tool = input("name")` to run a staged executable
+artifact (#1515). The staged-witness example classifies the generated
+analyzer's stdout into a typed score and generates a C++ constant from it.
+An analyzer edit with the same score updates the witness evidence and
+reuses the header and native build.
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
