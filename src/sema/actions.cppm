@@ -11040,6 +11040,26 @@ public:
     return literal(builtin(w_->target.size_type), layout_query_value(operand, align), ValueCategory::prvalue, begin, end);
   }
 
+  Ex align_of_expression(Ex e, u32 begin, u32 end) {
+    while (auto parentheses = as<ast::Paren>(e)) e.id = parentheses->operand.id;
+    EntityId entity = EntityId::none;
+    if (auto member = as<ast::Member>(e)) entity = member->member;
+    else if (auto declaration = as<ast::DeclRef>(e)) entity = declaration->entity;
+    if (entity != EntityId::none) {
+      const EntityId owner = w_->entities.rec(entity).scope;
+      if (owner != EntityId::none && w_->entities.rec(owner).kind == EntityKind::class_) {
+        if (const auto* record = class_rec(owner)) {
+          const auto field = std::ranges::find(record->fields, entity, &FieldRec::entity);
+          if (field != record->fields.end() && field->explicit_alignment && !types().is_reference(field->type)) {
+            const auto size_type = builtin(w_->target.size_type);
+            return literal(size_type, w_->values.integer(size_type, field->explicit_alignment), ValueCategory::prvalue, begin, end);
+          }
+        }
+      }
+    }
+    return size_of(e.type(), true, begin, end);
+  }
+
   // [expr.sizeof], [expr.alignof]: a `size_t` prvalue.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(w_->target.size_type);

@@ -648,6 +648,19 @@ probe = 'template<class T> requires (sizeof("a\0b\0") >= 1 && sizeof(T) > 0) int
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols, including both string padding and nonzero byte controls"]
 
 [[divergence]]
+id = "alignof-expression-extension"
+status = "pending"
+mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+reference = "[expr.alignof], Itanium C++ ABI §5.1.6.2"
+prior = "Require the standard type-id operand in every mode."
+spec = "Require a type-id."
+gcc = "Accept an unevaluated expression operand, including an explicitly aligned field. Diagnose the extension under -Wpedantic. Use az for the tested nondependent expression in a constraint symbol."
+clang = "Accept the same operands and warn by default under -Wgnu-alignof-expression. Fold the tested nondependent expression to a size-type literal in a constraint symbol."
+limits = "Covers ordinary variables, non-static record fields, parenthesized or unary expression operands, and the bit-field rejection. The type-id form stays available in all modes."
+probe = 'int value; static_assert(alignof(value) == alignof(int));'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax, object and warning-flag probes"]
+
+[[divergence]]
 id = "constraint-cast-and-member-pointer-symbol"
 status = "pending"
 mode_status = { spec = "pending", gcc = "pending", clang = "pending" }

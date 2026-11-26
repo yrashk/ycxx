@@ -1019,13 +1019,14 @@ class Mangler {
       case lex::Tk::l_square: code = "ix"; break;
       case lex::Tk::periodstar: code = "ds"; break;
       case lex::Tk::question: code = "qu"; break;
+      case lex::Tk::kw_alignof:
       case lex::Tk::kw_sizeof: {
         const bool decltype_type = operands.size() == 1 && in_.values.is<ast::VWrittenOperator>(operands.front()) &&
             lex::Tk(in_.values.get<ast::VWrittenOperator>(operands.front()).token) == lex::Tk::kw_decltype;
-        code = decltype_type ? "st" : "sz";
+        if (token == lex::Tk::kw_alignof) code = decltype_type ? "at" : "az";
+        else code = decltype_type ? "st" : "sz";
         break;
       }
-      case lex::Tk::kw_alignof: code = "at"; break;
       case lex::Tk::kw_decltype: code = operands.size() == 1 ? "Dt" : "DT"; break;
       case lex::Tk::ellipsis: code = "sZ"; break;
       case lex::Tk::kw_noexcept: code = "nx"; break;

@@ -4848,20 +4848,24 @@ public:
         }
         i_ = back;
       }
-      if (align) {  // [expr.alignof]/1: a type-id only
+      if (align && s_->compatibility() == ast::Compatibility::spec) {
         s_->diag(pos(), Diag::expected_type_specifier);
         return {NodeId::none, begin, pos()};
       }
+      if (align)
+        s_->diag(begin, s_->compatibility() == ast::Compatibility::gcc ? Diag::expression_alignment_gcc
+                                                                      : Diag::expression_alignment_clang);
       ++s_->unevaluated;
       Ex e = unary_expression();
       --s_->unevaluated;
       if (!e.ok()) return {NodeId::none, begin, pos()};
       if (e.glvalue() && e.info.bit_width) {
-        s_->diag(begin, Diag::bit_field_size);
+        s_->diag(begin, align ? Diag::bit_field_alignment : Diag::bit_field_size);
         return {NodeId::none, begin, pos()};
       }
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
-      if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
+      if (!align && !e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin))
+        return {NodeId::none, begin, pos()};
       const auto operand = writing_constraint_atom_ ? written_atom(e) : ConstId::none;
       bool defer = false;
       if (defer_member_constraint_layout && s_->ins().values.is<ast::VWrittenOperator>(operand)) {
@@ -4869,9 +4873,10 @@ public:
         defer = Tk(op.token) == Tk::star && s_->ins().seqs.size(op.operands) == 1 &&
                 s_->ins().values.is<ast::VWrittenThis>(s_->ins().seqs.at(op.operands, 0));
       }
-      Ex r = defer ? s_->dependent_layout_query(e.type(), false, begin, pos()) : s_->size_of(e.type(), false, begin, pos());
+      Ex r = defer ? s_->dependent_layout_query(e.type(), align, begin, pos())
+                   : align ? s_->align_of_expression(e, begin, pos()) : s_->size_of(e.type(), false, begin, pos());
       if (writing_constraint_atom_ && (s_->dependent(e) || !fold_written_layout(r, false)))
-        record_written_operator(r, Tk::kw_sizeof, {operand});
+        record_written_operator(r, align ? Tk::kw_alignof : Tk::kw_sizeof, {operand});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::coloncolon:
