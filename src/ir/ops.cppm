@@ -53,8 +53,8 @@ export enum class Storage : std::uint8_t { automatic, temporary, dynamic, except
 // Initial state of an allocation's bytes ([dcl.init.general], P2795).
 export enum class Init : std::uint8_t { erroneous, indeterminate, zero };
 
-// What a `builtin` op computes; its u32 immediate. These are evaluated only in constant mode, on a
-// `consteval_br`'s consteval edge, whose runtime edge calls the C library function instead.
+// What a `builtin` op computes; its u32 immediate. The C library builtins use this op on the
+// constant edge of `consteval_br` and call the corresponding library function on the runtime edge.
 //   - `memchr` (!state, s, c, n) -> (!state, pointer): the first of the n bytes at `s` equal to
 //     `c` converted to unsigned char, or null; the bytes are read in order up to the match.
 //   - `memcmp` (!state, a, b, n) -> (!state, int): the sign of the first difference between the

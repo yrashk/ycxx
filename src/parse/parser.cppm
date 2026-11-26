@@ -4362,6 +4362,19 @@ public:
     return result;
   }
 
+  // Check the written argument before semantic conversions can erase its form.
+  bool empty_ordinary_string_argument(u32 first, u32 last) const {
+    auto tokens = std::span(r_->tokens).subspan(first, last - first);
+    while (tokens.size() >= 2 && tokens.front().kind == Tk::l_paren && tokens.back().kind == Tk::r_paren)
+      tokens = tokens.subspan(1, tokens.size() - 2);
+    if (tokens.empty() || tokens.front().kind != Tk::string_lit) return false;
+    const auto& spelling = r_->literal(tokens.front());
+    return spelling.encoding == lex::Encoding::ordinary && spelling.units.empty() &&
+           std::ranges::all_of(tokens.subspan(1), [](const Tok& token) {
+             return token.kind == Tk::string_lit && token.has(lex::tok_flag::continued);
+           });
+  }
+
   // primary-expression ([expr.prim]).
   Ex primary_expression() {
     u32 begin = pos();
@@ -4448,6 +4461,7 @@ public:
         if (const lex::BuiltinFunctionInfo* bf = s_->builtin_function(n)) {
           bump();
           bump();
+          const u32 args_begin = i_;
           std::vector<Ex> args;
           int saved = std::exchange(angle_, 0);
           const bool probe = bf->function == lex::BuiltinFunction::constant_p;
@@ -4462,6 +4476,12 @@ public:
           s_->unevaluated -= probe;
           angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          if (bf->function == lex::BuiltinFunction::nansl && (unexpanded || args.size() == 1) &&
+              std::ranges::all_of(args, [](const Ex& arg) { return arg.ok(); }) &&
+              !empty_ordinary_string_argument(args_begin, i_ - 1)) {
+            s_->diag(args_begin - begin_, Diag::builtin_nansl_string);
+            return {NodeId::none, begin, pos()};
+          }
           // Until the pack is expanded the arity is unknown: the call stays dependent, and the
           // instantiation checks the expanded arguments.
           if (unexpanded) {

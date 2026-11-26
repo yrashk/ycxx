@@ -8662,18 +8662,9 @@ public:
       return builtin_overflow_call(op, args, begin, end);
     }
     if (b.function == nansl) {
-      const Ex invalid{NodeId::none, begin, end};
-      if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return invalid;
-      Ex arg = args.front();
-      while (auto paren = as<ast::Paren>(arg)) arg.id = paren->operand.id;
-      const auto lit = as<ast::Literal>(arg);
-      if (!lit || !types().is_array(arg.type()) || !types().is(types().rec(arg.type()).inner, Builtin::char_) ||
-          !ins().values.is<ast::VString>(lit->value) ||
-          ins().seqs.size(ins().values.get<ast::VString>(lit->value).units) != 1) {
-        diag(arg.begin, Diag::builtin_nansl_string);
-        return invalid;
-      }
-      // The call's type is available independently of the target's signaling NaN value.
+      if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return {NodeId::none, begin, end};
+      // The parser checked the written literal. The call's type is available independently
+      // of the target's signaling NaN value.
       const ExprInfo info{builtin(Builtin::long_double), ValueCategory::prvalue, 0};
       return node(ast::BuiltinCall{info, ast::BuiltinOp::nansl, b_->list({at(args.front(), begin)})}, begin, end, info);
     }
