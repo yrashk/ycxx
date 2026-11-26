@@ -3673,7 +3673,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
   type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
   are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
-  `R(A...)` with a type parameter `R` is #1186.
+  `R(A...)` with a type parameter `R` is #1186. Braced conversions such as `Base<int{4}>`,
+  `Base<T{4}>`, and `Base<typename T::type{4}>` keep their argument braces inside the template-id
+  in a class-template base clause ([expr.type.conv], [class.derived.general], #1454).
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;

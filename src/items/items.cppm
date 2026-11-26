@@ -507,6 +507,18 @@ void Splitter::general(u32 k, u32& unnamed_types) {
     case Tk::semi:
       at(k).end = i_ = j + 1;
       return;
+    case Tk::less:
+      if (base_clause && kind(class_key) != Tk::kw_enum && prev == Tk::identifier) {
+        // Keep argument braces within a complete base template-id ([class.derived.general]).
+        const u32 end = match_angle(j, /*require_close=*/true);
+        const Tk next = kind(end);
+        if (next == Tk::l_brace || next == Tk::comma || next == Tk::coloncolon || next == Tk::ellipsis) {
+          j = end;
+          continue;
+        }
+      }
+      ++j;
+      continue;
     case Tk::l_paren: {
       // An integer-literal-led `auto(...)` is an expression, including inside a template-id.
       const bool decay_copy = prev == Tk::kw_auto && kind(j + 1) == Tk::int_lit;

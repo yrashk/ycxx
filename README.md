@@ -164,6 +164,10 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+A class template's base can use a braced conversion in a template argument, including
+`Base<int{4}>` and `Base<typename T::type{4}>`.
+[#1454](https://github.com/yrashk/ycxx/issues/1454)
+
 Fixed reference and single-pointer arguments can deduce through a unique most-derived
 base that matches a named class-template parameter.
 [#1144](https://github.com/yrashk/ycxx/issues/1144)
