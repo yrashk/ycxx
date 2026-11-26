@@ -624,8 +624,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream 
 
 [[divergence]]
 id = "constraint-implicit-object-expression-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.this], [class.mem.general], [temp.constr.atomic], Itanium C++ ABI §5.1.6.2"
 prior = "Ignore the in-class member function template's trailing constraint."
 spec = "Check the member's trailing clause with this in scope and the enclosing record's applicable completeness. Fold a nondependent pointer-size query to its size-type literal. Use fpT for a dependent written reference to this."
@@ -637,8 +637,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream 
 
 [[divergence]]
 id = "constraint-nondependent-layout-query-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.6.2, [expr.sizeof], [expr.alignof]"
 prior = "Retain the nondependent type operand or use the opaque constraint encoding for a string literal."
 spec = "Encode a non-instantiation-dependent layout query as a size-type literal. Retain dependent operands structurally."
@@ -663,8 +663,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6
 
 [[divergence]]
 id = "constraint-cast-and-member-pointer-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.6.2"
 prior = "Use a constraint fingerprint for the tested C-style casts, dynamic_cast, reinterpret_cast and .* expressions."
 spec = "Encode a C-style conversion as cv, dynamic_cast as dc, reinterpret_cast as rc and the member-pointer operators as ds and pm."
@@ -675,8 +675,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream 
 
 [[divergence]]
 id = "constraint-unmangleable-builtin-expression"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.6.2, docs/EXTENSIONS.md"
 prior = "Use the opaque vendor constraint encoding in every mode."
 spec = "Keep a distinct vendor constraint symbol for the tested builtin expressions without a published encoding."
@@ -800,13 +800,14 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary symbol probes wit
 
 [[divergence]]
 id = "constraint-array-allocation-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.new], Itanium C++ ABI §5.1.6.2"
 prior = "Keep an opaque token fingerprint for the allocation expression in a constraint."
 spec = "Use the allocation expression production and encode the written bound in the array type."
 gcc = "Emit na with the written array bound in the type, as in na_A2_T_E."
 clang = "Emits na_T_E for the tested new T[2], retaining the allocated element type."
+limits = "Covers arrays of supported integral and pointer element types. The probes also cover scalar placement new, initialized new, delete and delete[], including global qualification."
 probe = 'template<class T> requires requires { new T[2]; } int f(T);'
 evidence = ["tests/daemon/compatibility.py", "Itanium ABI allocation and expression productions", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbol probes"]
 
