@@ -35,6 +35,7 @@ namespace {
 // Preserve the bit values of earlier source configurations.
 constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08, small_pic_bit = 0x10;
 constexpr std::uint8_t compatibility_shift = 5, compatibility_mask = 0x60;
+constexpr std::uint8_t host_overlay_bit = 0x80;
 }
 
 export namespace ycxx::pp {
@@ -149,7 +150,8 @@ struct Source {
   Config config;
 };
 // Read a path in the source's view. A build view reserves a virtual directory for
-// generated contents under the workspace's selected build state directory.
+// generated contents under the workspace's selected build state directory. A disk
+// view with a host overlay serves its reserved directory from the configuration.
 const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name);
 const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name);
 
@@ -173,7 +175,16 @@ void serialize_into(engine::Sink& out, const Source& s) {
   if (!s.config.rtti_enabled) modes |= no_rtti_bit;
   if (s.config.pic == 2) modes |= pic_bit;
   if (s.config.pic == 1) modes |= small_pic_bit;
+  if (s.config.host_overlay) modes |= host_overlay_bit;
   engine::serialize(out, modes);
+  if (s.config.host_overlay) {
+    const auto& files = s.config.host_overlay->files();
+    engine::serialize(out, static_cast<std::uint64_t>(files.size()));
+    for (const auto& [path, contents] : files) {
+      engine::serialize(out, path);
+      engine::serialize(out, *contents);
+    }
+  }
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -194,8 +205,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
   const auto compatibility = (modes & compatibility_mask) >> compatibility_shift;
-  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit | small_pic_bit | compatibility_mask)) != 0 ||
-      compatibility > std::to_underlying(ast::Compatibility::clang) ||
+  if (compatibility > std::to_underlying(ast::Compatibility::clang) ||
       (modes & (pic_bit | small_pic_bit)) == (pic_bit | small_pic_bit))
     in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
@@ -203,6 +213,16 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
   s.config.pic = (modes & pic_bit) != 0 ? 2 : (modes & small_pic_bit) != 0 ? 1 : 0;
   s.config.compatibility = static_cast<ast::Compatibility>(compatibility);
+  if (modes & host_overlay_bit) {
+    HostOverlay::Files files;
+    const auto count = in.length();
+    for (std::size_t i = 0; i < count && !in.failed(); ++i) {
+      auto path = engine::deserialize<std::string>(in);
+      auto contents = engine::deserialize<std::string>(in);
+      if (!files.emplace(std::move(path), std::move(contents)).second) in.fail();
+    }
+    if (!in.failed()) s.config.host_overlay = std::make_shared<const HostOverlay>(std::move(files));
+  }
   return s;
 }
 
@@ -283,6 +303,20 @@ bool is_generated_path(const Source& source, PathId id) {
   const auto root = (state / "virtual").lexically_normal();
   const std::string prefix = root.generic_string<char>() + '/';
   return path_of(id).starts_with(prefix);
+}
+
+// Null means this view does not own the path. A disengaged value is a miss in the overlay.
+const std::optional<std::string>* host_overlay_content(const Source& source, PathId id) {
+  if (source.config.view != View::disk || !source.config.host_overlay) return nullptr;
+  const auto root = (std::filesystem::path(source.cwd) / ".ycxx/host/virtual").lexically_normal();
+  const auto prefix = root.generic_string<char>();
+  const auto& path = path_of(id);
+  if (!path.starts_with(prefix) || (path.size() > prefix.size() && path[prefix.size()] != '/'))
+    return nullptr;
+  const auto& files = source.config.host_overlay->files();
+  const auto found = files.find(path);
+  static const std::optional<std::string> absent;
+  return found == files.end() ? &absent : &found->second;
 }
 
 // Each attempted include records the input that answered it, including misses.
@@ -437,6 +471,7 @@ engine::provided<std::optional<std::string>> no_generated_file(PathId) { return 
 
 const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name) {
   const PathId id = source_path(source, name);
+  if (const auto* overlay = host_overlay_content(source, id)) return *overlay;
   if (source.config.view == View::editor)
     if (const auto& open = cx.fetch<Buffer>(id)) return open;
   if (is_generated_path(source, id)) return cx.fetch<GeneratedFile>(id);
@@ -445,6 +480,7 @@ const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Sour
 
 const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name) {
   const PathId id = source_path(source, name);
+  if (const auto* overlay = host_overlay_content(source, id)) return *overlay ? &**overlay : nullptr;
   if (source.config.view == View::editor)
     if (const auto* open = db.peek<Buffer>(id); open && *open) return &**open;
   const auto* content = is_generated_path(source, id) ? db.peek<GeneratedFile>(id) : db.peek<FileContent>(id);

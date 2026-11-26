@@ -268,6 +268,30 @@ library translation units, so edits can wake watch and refresh the staged
 host image.
 [Shared library diamond example](../../examples/project-build/host-cxx-libraries/README.md)
 
+### Generated headers on a native host executable (#1579)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    generated_headers = [artifact("scanner_config", "header")]
+}
+```
+
+The declared producer and its ordinary predecessors run before the host
+compile. That action chain must be independent of project-built native host
+tools. Generators keep the requesting plan's argument selectors. C++ still
+compiles the executable for the host.
+
+Each admitted producer directory exposes the declared output names and
+their exact bytes through the executable's own include configuration.
+The immutable snapshot uses stable logical paths under `.ycxx/host/virtual`.
+Host sources, inherited library includes, and other real paths keep the
+ordinary disk view. The selected app has its own generated include view.
+Equal visible files preserve the host compile, and equal linked executable
+bytes preserve consuming generator receipts. The coordinator shares staged
+producer outputs across ordinary builds, planning inputs, and witnesses.
+[Generated host header example](../../examples/project-build/host-generated-headers/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and

@@ -38,7 +38,14 @@ struct TemplateArg {
   ConstId value;              // none for a type
   SeqId<TemplateArg> elems{};  // a pack's elements; the empty list (index 0) otherwise
   EntityId templ = EntityId::none;  // a template_ argument's template; none while dependent
+  bool concept_template = false;
   constexpr bool operator==(const TemplateArg&) const = default;
+};
+
+struct FoldPackBinding {
+  u32 pack;  // parameter depth and index
+  SeqId<TemplateArg> elements;
+  constexpr bool operator==(const FoldPackBinding&) const = default;
 };
 
 // A template-parameter ([temp.param]) of a template-head: its name, its kind and position
@@ -62,7 +69,9 @@ struct TemplateParamSema {
   // `auto` or `decltype(auto)`. Its `type` is then its own position's `TTemplateParam`, the type
   // each argument deduces, which substitution reads from the bound value.
   Placeholder placeholder = Placeholder::none;
-  ConstId type_constraint = ConstId::none;  // concept and its explicit arguments, for linkage
+  // The written type constraint or the requires-clause of a template template parameter.
+  ConstId type_constraint = ConstId::none;
+  bool concept_template = false;  // `template<...> concept C`
   constexpr bool operator==(const TemplateParamSema&) const = default;
 };
 
@@ -80,6 +89,12 @@ struct ParamSema {
   NodeId default_arg;  // non-member functions only; members use default_arg(p, ctx) (§3.6)
   u16 flags;
   constexpr bool operator==(const ParamSema&) const = default;
+};
+
+struct AtomLambdaScope {
+  SeqId<TemplateParamSema> head{};
+  SeqId<ParamSema> parameters{};
+  constexpr bool operator==(const AtomLambdaScope&) const = default;
 };
 
 // [dcl.attr.annotation]: the type deduced by reflect_constant's by-value parameter, the
@@ -139,6 +154,7 @@ struct DeclSema {
   u8 written_field_alignment = 0;  // the strongest validated alignas, including the natural alignment
   WrittenConstraint head_constraint{};
   WrittenConstraint trailing_constraint{};
+  u8 wide_bit_width = 0;  // written width if greater than the declared type's size in bits
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
@@ -285,7 +301,7 @@ struct WrittenRequirement {
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
                                 ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection, WrittenRequirement,
-                                TemplateTypeSpelling>;
+                                TemplateTypeSpelling, FoldPackBinding, AtomLambdaScope>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);
