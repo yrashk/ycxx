@@ -105,6 +105,8 @@ struct Entity {
   // BOOTSTRAP: std::vector<bool>: GCC 16 writes a module unit exporting one that importers cannot read.
   std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
   ast::WrittenConstraint template_head_constraint{}, template_trailing_constraint{};
+  // A non-template member function's trailing requires-clause, which its name encodes (#1417).
+  ast::WrittenConstraint trailing_constraint{};
   // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label{};
   std::optional<ast::Loc> asm_label_at{};
@@ -2512,7 +2514,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
       return std::nullopt;
     return FunctionName{
-        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
+        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt,
+         fn.trailing_constraint},
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
@@ -2557,7 +2560,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
           std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
           n.local = std::make_shared<const LocalFunction>(LocalFunction{
               fname, fe.type, fe.scope, fe.special != Special::none,
-              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt, fe.trailing_constraint});
         } else {
           n.closure_variable = fe.id;
         }
@@ -2647,7 +2650,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility);
+                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility,
+                         e.trailing_constraint);
     };
     auto name = encode(entry);
     if (!name) {

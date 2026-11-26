@@ -4693,12 +4693,16 @@ private:
   // its pattern does, then substitutes the specialization's arguments into its atoms' mappings
   // ([temp.constr.normal]): nothing in it is checked before the member is used ([temp.inst]/17),
   // and a mapping that cannot be formed leaves it unsatisfied ([temp.constr.atomic]/3).
+  // Each member-declarator has its own ([class.mem.general]). A non-templated function's is
+  // diagnosed, then read and dropped, so the member is still declared.
   bool member_requires_clause(const std::vector<parse::Param>& params) {
-    if (!ps_.is(Tk::kw_requires)) return true;
-    if (!member_template_ && !s_.templated()) {
-      s_.diag(ps_.pos(), Diag::nontemplated_constraints);
-      return false;
+    if (!member_template_) {
+      trailing_requires_ = ConstId::none;
+      trailing_constraint_ = {};
     }
+    if (!ps_.is(Tk::kw_requires)) return true;
+    const bool nontemplated = !member_template_ && !s_.templated();
+    if (nontemplated) s_.diag(ps_.pos(), Diag::nontemplated_constraints);
     const std::size_t errors = s_.diag_count();
     const bool substitute = inst_ && !member_template_;
     sema::Bindings bound;
@@ -4715,12 +4719,17 @@ private:
       trailing_requires_ = normal ? *normal
                                   : s_.ins().intern_value(ast::VConstraint{1, s_.ins().intern_seq(std::span<const ConstId>{})});
     }
+    if (nontemplated) {
+      trailing_requires_ = ConstId::none;
+      trailing_constraint_ = {};
+    }
     return s_.diag_count() == errors;
   }
   // The identity a non-template member's trailing requires-clause gives it ([basic.scope.scope]/4):
-  // none without one.
+  // its own tokens, never a template-head's; none without one.
   sema::Fp128 member_constraints_fp() const {
-    return trailing_requires_ == ConstId::none ? sema::Fp128{} : constraints_fp_;
+    return trailing_requires_ == ConstId::none ? sema::Fp128{}
+                                               : ast::mix(ast::mix(sema::Fp128{}, u64(1)), trailing_constraint_.tokens);
   }
   // The fingerprint of a clause's tokens with each template parameter as its position: equal for
   // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
@@ -7111,7 +7120,11 @@ private:
   bool same_template(const sema::MemberDeclRec& r, bool member_template) {
     if (r.is_template != member_template) return false;
     const sema::EntityRec& e = p_->world().entities.rec(r.entity);
-    // A non-template member's trailing requires-clause must be equivalent ([temp.over.link]/6).
+    // An explicit specialization of a member names the specialization's member of that type, the
+    // one whose constraints are satisfied ([temp.expl.spec]); another definition repeats its
+    // trailing requires-clause ([temp.over.link]/6).
+    if (!member_template && explicit_)
+      return !r.ineligible && (r.constraints == ConstId::none || p_->satisfied(r.constraints, k_).value_or(true));
     if (!member_template) return e.constraints == member_constraints_fp();
     return e.head == head_fp(s_.template_scopes.back()) && e.constraints == constraints_fp_;
   }
@@ -8884,6 +8897,10 @@ private:
       }
       // A member's definition repeats its trailing requires-clause ([temp.over.link]/6).
       if (class_member && fn && !member_requires_clause(d.params)) return false;
+      if (class_member && fn && !member_template_) {
+        sem.constraints = trailing_requires_;
+        sem.trailing_constraint = trailing_constraint_;
+      }
       if (member_template_ && class_member) {
         // A member template's definition: its own head, the innermost ([temp.mem]/1).
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
@@ -12291,12 +12308,14 @@ void Program::eligible_special_members(u32 item, EntityId cls, sema::ClassRec& r
     if (const auto p = assignment_parameter(m, ct)) return types.rec(*p).rvalue_ref ? Kind::move_assignment : Kind::copy_assignment;
     return Kind::none;
   };
+  std::vector<Kind> kinds;
+  for (const sema::MemberDeclRec& m : rec.members) kinds.push_back(kind_of(m));
   // Satisfied in the specialization, its arguments substituted when its members were declared.
   std::vector<bool> satisfied(rec.members.size(), true);
   bool hard_error = false;  // already reported where the constraint is
   for (std::size_t i = 0; i < rec.members.size(); ++i) {
     const sema::MemberDeclRec& m = rec.members[i];
-    if (m.constraints == ConstId::none || kind_of(m) == Kind::none) continue;
+    if (m.constraints == ConstId::none || kinds[i] == Kind::none) continue;
     satisfied[i] = this->satisfied(m.constraints, point).value_or(true);
     hard_error |= satisfaction_failed(m.constraints);
   }
@@ -12305,7 +12324,7 @@ void Program::eligible_special_members(u32 item, EntityId cls, sema::ClassRec& r
   sema::Templates t = templates();
   for (std::size_t i = 0; i < rec.members.size(); ++i) {
     sema::MemberDeclRec& m = rec.members[i];
-    const Kind kind = kind_of(m);
+    const Kind kind = kinds[i];
     if (kind == Kind::none) continue;
     if (!satisfied[i]) {
       m.ineligible = true;
@@ -12313,7 +12332,7 @@ void Program::eligible_special_members(u32 item, EntityId cls, sema::ClassRec& r
     }
     for (std::size_t j = 0; j < rec.members.size() && !m.ineligible; ++j) {
       const sema::MemberDeclRec& o = rec.members[j];
-      if (j == i || !satisfied[j] || kind_of(o) != kind || (m.constraints == ConstId::none && o.constraints == ConstId::none))
+      if (j == i || !satisfied[j] || kinds[j] != kind || (m.constraints == ConstId::none && o.constraints == ConstId::none))
         continue;
       const auto a = types.rec(types.canonical(m.type));
       const auto b = types.rec(types.canonical(o.type));
@@ -12594,7 +12613,8 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
   };
   const auto provided_assignment = [&](bool move) {
     return std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
-      const auto parameter = m.explicit_defaulted_assignment || m.is_deleted ? std::nullopt : assignment_parameter(m, ct);
+      // An ineligible one does not count ([special]/6), as Clang and GCC lay classes out.
+      const auto parameter = m.explicit_defaulted_assignment || m.is_deleted || m.ineligible ? std::nullopt : assignment_parameter(m, ct);
       return parameter && types.rec(*parameter).rvalue_ref == move;
     });
   };

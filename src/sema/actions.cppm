@@ -6673,7 +6673,8 @@ public:
       records.push_back({.name = name, .entity = d.entity, .type = d.type, .is_function = true, .is_static = is_static,
                          .is_deleted = (d.flags & decl_flag::deleted) != 0,
                          .is_template = (d.flags & decl_flag::template_) != 0, .defaults = defaults_of(d),
-                         .is_virtual = d.is_virtual, .is_pure = d.is_pure});
+                         .is_virtual = d.is_virtual, .is_pure = d.is_pure,
+                         .constraints = (d.flags & decl_flag::template_) ? ConstId::none : trailing_constraints(d)});
       if (is_static) statics.push_back(d);
     }
     std::vector<const MemberDeclRec*> candidates;
@@ -6781,7 +6782,10 @@ public:
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called. A member function
     // template is a set to deduce from, as overloads are.
-    if (!m.is_function || (m.is_static && !m.is_template && member_functions(c, name).size() == 1)) {
+    // A constrained one is a set of one, whose constraints the use checks ([over.match.viable]/3,
+    // [over.over]/5).
+    if (!m.is_function || (m.is_static && !m.is_template && m.constraints == ConstId::none && !m.ineligible &&
+                           member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at, naming)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       auto mt = deduced_function(m.entity, m.type, begin);
@@ -6811,7 +6815,7 @@ public:
       d.type = member->type;
       d.kind = ast::DeclKind::function;
       d.flags = member->is_deleted ? decl_flag::deleted : 0;
-      d.constraints = ConstId::none;
+      d.constraints = member->ineligible ? unsatisfiable_constraint() : member->constraints;
       statics.push_back(d);
     }
     if (!statics.empty()) overloads_[key] = std::move(statics);
@@ -10970,8 +10974,40 @@ public:
       if (replaced) *replaced = builtin(Builtin::dependent);
       return builtin(Builtin::dependent);
     }
-    // An overload set, or its address, deduces nothing ([temp.deduct.call]/6); a template-id
-    // naming one specialization is not resolved yet (#335).
+    // An overload set of functions, none a template: trial deduction from each member whose
+    // constraints are satisfied, a result only when they all agree ([temp.deduct.call]/6.2).
+    // Members that differ only in their trailing requires-clauses can (#1417).
+    std::optional<QualType> overload_argument;
+    if (auto set = address_set(e); set && types().kind(t) == TypeKind::placeholder && !set->decls->empty()) {
+      bool templates_in_set = false, disagree = false;
+      for (const ast::DeclSema& d : *set->decls) {
+        if (d.flags & decl_flag::template_) templates_in_set = true;
+        if (templates_in_set || !constraints_satisfied(d) || types().has_placeholder(types().rec(d.type).inner)) continue;
+        const QualType ft = types().canonical(d.type);
+        if (overload_argument && *overload_argument != ft) disagree = true;
+        overload_argument = ft;
+      }
+      if (templates_in_set || disagree) overload_argument.reset();
+      if (overload_argument && set->address) overload_argument = types().pointer(*overload_argument);
+    }
+    if (overload_argument) {
+      Templates tm = templates();
+      const u16 depth = u16(template_scopes.size());
+      Bindings invent;
+      invent.placeholder = types().template_param(depth, 0);
+      std::vector<std::optional<TemplateArg>> out(1);
+      if (auto p0 = tm.substitute(t, invent)) {
+        auto [p, a, allow] = tm.call_pair(*p0, ArgShape{*overload_argument, !types().is_pointer(*overload_argument)}, depth);
+        if (tm.deduce(p, a, depth, out, allow) && out[0]) {
+          Bindings deduced;
+          deduced.placeholder = out[0]->type;
+          if (replaced) *replaced = out[0]->type;
+          if (auto r = tm.substitute(t, deduced)) return *r;
+        }
+      }
+    }
+    // Any other overload set, or its address, deduces nothing ([temp.deduct.call]/6); a
+    // template-id naming one specialization is not resolved yet (#335).
     if (types().is(e.type(), Builtin::overload_set) || is_bound_member(e) ||
         (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set))) {
       diag(at_, Diag::auto_deduction_failed, t, e.type());

@@ -622,3 +622,16 @@ clang = "Same as spec."
 gcc_observed = "Reports such a class as trivially copyable."
 clang_observed = "Reports such a class as not trivially copyable, as the draft says."
 evidence = ["tests/own/member-requires/no-eligible-copy.accept.cpp"]
+
+[[divergence]]
+id = "member-declarator-requires-clause"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[class.mem.general], #1417"
+prior = "A member-declarator's trailing requires-clause was not supported."
+spec = "Each member-declarator has its own requires-clause: in `int f() requires C, g();` only `f` is constrained."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Same as spec."
+clang_observed = "Gives `g` the requires-clause written for `f`."
+evidence = ["tests/own/member-requires/separate-declarators.run.cpp"]
