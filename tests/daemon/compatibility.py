@@ -4507,6 +4507,10 @@ def constraint_mode_tests(world, gxx):
 
 
 def main():
+    # Keep the oracle SDK and driver settings inside these test processes.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tests.driver.toolchain import load_toolchains_env
+    load_toolchains_env()
     ycxx, gxx, *groups = sys.argv[1:]
     group, = groups or ['all']
     if group not in ('all', 'general', 'abi', 'constraints'):
