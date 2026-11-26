@@ -592,6 +592,13 @@ private:
   bool constant_record_field(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
+    if (s_->compatibility() == ast::Compatibility::gcc) {
+      while (types.is_array(type)) {
+        const auto array = types.rec(type);
+        if (array.bound_value == ConstId::none) return false;
+        type = types.canonical(array.inner);
+      }
+    }
     if (Types::is_volatile(type)) return false;
     if (types.is_array(type)) return constant_record_char_array(types, type);
     if (types.is_pointer(type)) return true;
@@ -675,7 +682,7 @@ private:
           path.push_back(step.index);
         }
       }
-      return {vs.address(r.type, base, r.offset, path), 0, true};
+      return {vs.address(r.type, base, r.offset, path, r.gcc_nested_end), 0, true};
     }
     }
     return {};

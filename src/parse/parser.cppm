@@ -3441,6 +3441,10 @@ public:
   }
   sema::ConstId written_atom(Ex e) {
     if (const auto operand = written_operators_.find(e.id); operand != written_operators_.end()) return operand->second;
+    if (auto local = s_->as<ast::LocalRef>(e)) {
+      const auto parameter = written_requires_parameters_.find(local->local);
+      if (parameter != written_requires_parameters_.end()) return s_->ins().intern_value(parameter->second);
+    }
     if (auto p = s_->as<ast::Paren>(e)) {
       e.id = p->operand.id;
       return written_atom(e);
@@ -3509,7 +3513,7 @@ public:
     if (written) {
       *written = written_atom(e);
       if (r_->tokens[begin_ + begin].kind == Tk::kw_requires &&
-          !s_->ins().values.is<ast::VRequiresTypes>(*written)) *written = sema::ConstId::none;
+          !s_->ins().values.is<ast::VRequiresExpression>(*written)) *written = sema::ConstId::none;
     }
     // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
     std::vector<NameId> names;
@@ -3557,6 +3561,8 @@ public:
   bool writing_constraint_atom_ = false;
   bool writing_pack_index_ = false;
   std::map<NodeId, ConstId> written_operators_;
+  std::map<u32, ast::VRequiresParameter> written_requires_parameters_;
+  u32 written_requires_depth_ = 0;
 
   // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
   std::optional<ast::DeclSema> concept_name() {
@@ -3598,12 +3604,14 @@ public:
         : discard(sema.in_discarded_constraint_operand), saved(std::exchange(discard, discard || skipped)) {}
     ~DiscardedConstraintOperand() { discard = saved; }
   };
-  Truth nested_constraint(bool templated) {
-    Truth l = nested_conjunction(templated);
+  Truth nested_constraint(bool templated, ConstId* written = nullptr) {
+    Truth l = nested_conjunction(templated, written);
     while (accept(Tk::pipepipe)) {
       std::size_t n = s_->diag_count();
       const DiscardedConstraintOperand discard(*s_, l == Truth::yes);
-      Truth r = nested_conjunction(templated);
+      ConstId rhs = ConstId::none;
+      Truth r = nested_conjunction(templated, written ? &rhs : nullptr);
+      if (written) *written = written_constraint_op(1, *written, rhs);
       if (l == Truth::yes) {
         s_->drop_failures(n);
         continue;
@@ -3614,12 +3622,14 @@ public:
     }
     return l;
   }
-  Truth nested_conjunction(bool templated) {
-    Truth l = nested_operand(templated);
+  Truth nested_conjunction(bool templated, ConstId* written) {
+    Truth l = nested_operand(templated, written);
     while (accept(Tk::ampamp)) {
       std::size_t n = s_->diag_count();
       const DiscardedConstraintOperand discard(*s_, l == Truth::no || l == Truth::invalid);
-      Truth r = nested_operand(templated);
+      ConstId rhs = ConstId::none;
+      Truth r = nested_operand(templated, written ? &rhs : nullptr);
+      if (written) *written = written_constraint_op(0, *written, rhs);
       if (l == Truth::no || l == Truth::invalid) {
         s_->drop_failures(n);
         continue;
@@ -3629,7 +3639,7 @@ public:
     }
     return l;
   }
-  Truth nested_operand(bool templated) {
+  Truth nested_operand(bool templated, ConstId* written) {
     const u32 begin = index();
     const bool pattern = s_->in_pattern();
     // Use the pattern's grammar-correct boundary before performing any semantic checks.
@@ -3648,7 +3658,7 @@ public:
           deep_enough();
           bump();
           const int saved = std::exchange(angle_, 0);
-          const Truth group = nested_constraint(templated);
+          const Truth group = nested_constraint(templated, written);
           angle_ = saved;
           return expect(Tk::r_paren) ? group : Truth::invalid;
         }
@@ -3665,6 +3675,7 @@ public:
               std::exchange(record_nested_constraint_groups_, record_nested_constraint_groups_ || recording)};
     Ex e = binary_expression(3);
     const bool failed = s_->has_error_since(n) || !e.ok();
+    if (written && !failed) *written = written_atom(e);
     if (recording && !failed && index() > begin && operand_ends(false))
       questions().record_nested_constraint_operand(begin, index());
     if (failed) {
@@ -3695,8 +3706,11 @@ public:
     const TemplateIdLookahead lookahead{*this, true};
     u32 begin = pos();
     bump();
-    std::optional<std::vector<ast::TemplateArg>> written_types;
-    if (writing_constraint_atom_ && !is(Tk::l_paren)) written_types.emplace();
+    const bool writing = writing_constraint_atom_;
+    const bool parameter_list = is(Tk::l_paren);
+    const u32 outer_depth = written_requires_depth_;
+    std::vector<QualType> written_parameters;
+    std::vector<ast::WrittenRequirement> written_requirements;
     s_->push_scope();
     const bool templated = s_->templated();
     const bool substituting = s_->instantiating();
@@ -3705,14 +3719,27 @@ public:
     auto close_requires_scope = [&] {
       s_->pop_scope();
       s_->discard_local_declarations(first_local);
+      if (writing) {
+        written_requires_parameters_.erase(written_requires_parameters_.lower_bound(first_local),
+                                          written_requires_parameters_.end());
+        written_requires_depth_ = outer_depth;
+      }
     };
     bool ok = true;
     if (accept(Tk::l_paren)) {
       Suffix params = parameters(ok);
       ok = ok && s_->diag_count() == param_diags;
-      for (const Param& p : params.params)
-        if (p.name != s_->no_name())
-          s_->declare_local(p.name, p.type, sema::local_flag::parameter | ast::local_flag::requires_parameter, p.at, false);
+      if (writing && (!params.params.empty() || s_->compatibility() != ast::Compatibility::gcc))
+        ++written_requires_depth_;
+      for (const Param& p : params.params) {
+        const u32 index = static_cast<u32>(written_parameters.size());
+        if (writing) written_parameters.push_back(ast::without_cv(s_->types().canonical(p.type)));
+        if (p.name == s_->no_name()) continue;
+        const u32 local = s_->declare_local(p.name, p.type, sema::local_flag::parameter | ast::local_flag::requires_parameter,
+                                            p.at, false);
+        if (writing) written_requires_parameters_.emplace(local, ast::VRequiresParameter{outer_depth, index,
+                                                                      ast::cv_of(s_->types().canonical(p.type))});
+      }
     }
     if (!expect(Tk::l_brace)) {
       close_requires_scope();
@@ -3744,12 +3771,13 @@ public:
     const sema::Sema::RequiresBodyScope requirements{*s_};
     bool satisfied = true;
     bool dependent = false;
+    bool captured = writing;
     while (!is(Tk::r_brace) && !at_end()) {
       std::size_t n = s_->diag_count();
       u32 before = i_;
       bool failed = false;
       auto substitution_failed = [&] { return substituting && (failed || s_->has_error_since(n)); };
-      if (!is(Tk::kw_typename)) written_types.reset();
+      ast::WrittenRequirement written{ast::RequirementKind::expression, ConstId::none};
       if (is(Tk::kw_typename)) {  // a type-requirement
         const TypeRequirementScope requirement{*this};
         // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
@@ -3759,7 +3787,11 @@ public:
         }
         auto t = type_id();
         failed = !t;
-        if (written_types && t) written_types->push_back(s_->templates().type_arg(*t));
+        if (captured && t) {
+          const auto canonical = s_->types().canonical(*t);
+          written = {ast::RequirementKind::type, s_->ins().intern_value(
+              ast::VType{ast::without_cv(canonical), u8(ast::cv_of(canonical))})};
+        }
         if (t && s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
         ++s_->unevaluated;
@@ -3768,9 +3800,11 @@ public:
         expect(Tk::r_brace);
         bool dep = s_->dependent(e);
         failed = !e.ok();
+        if (captured) written.operand = written_atom(e);
         // `{ e } noexcept`: e is not potentially-throwing ([expr.prim.req.compound]/2), as the
         // operator `noexcept(e)` answers.
-        if (accept(Tk::kw_noexcept) && !dep && !failed && !substitution_failed()) {
+        written.noexcept_ = accept(Tk::kw_noexcept);
+        if (written.noexcept_ && !dep && !failed && !substitution_failed()) {
           ++s_->unevaluated;
           Ex answer = s_->unary_noexcept(e, e.begin, e.end);
           --s_->unevaluated;
@@ -3783,6 +3817,18 @@ public:
           if (std::optional<ast::DeclSema> c = concept_name()) {
             std::vector<ast::TemplateArg> args;
             if (is(Tk::less)) args = template_argument_list().value_or(std::vector<ast::TemplateArg>{});
+            if (captured && e.ok()) {
+              auto result_args = args;
+              if (s_->compatibility() == ast::Compatibility::gcc) {
+                const auto diagnostics = s_->diag_count();
+                result_args.insert(result_args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
+                if (auto full = s_->template_arguments(*c, result_args, at); full && !full->empty())
+                  result_args.assign(full->begin() + 1, full->end());
+                else captured = false;
+                s_->truncate_diags(diagnostics);
+              }
+              if (captured) written.result_constraint = written_concept(*c, result_args);
+            }
             if (!dep && e.ok()) {
               args.insert(args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
               auto nf = s_->concept_constraint(*c, args, at);
@@ -3798,7 +3844,8 @@ public:
         }
         if (dep) dependent = true;
       } else if (accept(Tk::kw_requires)) {  // a nested-requirement ([expr.prim.req.nested])
-        Truth t = nested_constraint(templated);
+        written.kind = ast::RequirementKind::nested;
+        Truth t = nested_constraint(templated, captured ? &written.operand : nullptr);
         if (t == Truth::dependent) dependent = true;
         else if (t != Truth::yes) failed = true;
       } else {  // a simple-requirement
@@ -3806,8 +3853,11 @@ public:
         Ex e = expression();
         --s_->unevaluated;
         failed = !e.ok();
+        if (captured) written.operand = written_atom(e);
         if (s_->dependent(e)) dependent = true;
       }
+      captured = captured && written.operand != ConstId::none;
+      if (captured) written_requirements.push_back(written);
       if (!substitution_failed()) {
         if (!expect(Tk::semi)) skip_to_semi();
         if (i_ == before) bump();  // no progress: drop the token
@@ -3827,9 +3877,10 @@ public:
     }
     expect(Tk::r_brace);
     close_requires_scope();
-    if (satisfied && written_types && !written_types->empty()) {
-      auto types = s_->ins().intern_seq(std::span<const ast::TemplateArg>(*written_types));
-      auto value = s_->ins().intern_value(ast::VRequiresTypes{types});
+    if (satisfied && captured && !written_requirements.empty()) {
+      auto parameters = s_->ins().intern_seq(std::span<const QualType>(written_parameters));
+      auto requirements = s_->ins().intern_seq(std::span<const ast::WrittenRequirement>(written_requirements));
+      auto value = s_->ins().intern_value(ast::VRequiresExpression{parameters, requirements, parameter_list});
       return s_->literal(s_->builtin(Builtin::bool_), value, ast::ValueCategory::prvalue, begin, pos());
     }
     if (satisfied && dependent) return s_->dependent_node({}, begin, pos(), s_->builtin(Builtin::bool_));
@@ -4429,7 +4480,8 @@ public:
     address_op_ = saved_address;
     if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
     Ex result = s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
-    if (writing_pack_index_ && (token == Tk::plus || token == Tk::minus || token == Tk::exclaim || token == Tk::tilde))
+    if ((writing_constraint_atom_ && !written_requires_parameters_.empty()) ||
+        (writing_pack_index_ && (token == Tk::plus || token == Tk::minus || token == Tk::exclaim || token == Tk::tilde)))
       record_written_operator(result, token, {written_atom(e)});
     return result;
   }

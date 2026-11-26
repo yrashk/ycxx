@@ -203,6 +203,7 @@ struct ClassShape {
   bool calls_abi_uncertain = false;
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
+  std::uint8_t clang_weak_alignment = 0;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
   bool dynamic_root = false;  // a dynamic class whose own vptr is at offset zero (#309)
@@ -908,7 +909,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
-            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment};
+            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment,
+            .unusable_class_alignment = e.unusable_class_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -918,8 +920,12 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TClass>(c)) {
     const auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
     // A peer object's field offsets are available through step(), with no native complete-object type.
-    if (const ClassShape* shape = shape_of(EntityId(key)); shape && shape->layout_requires_virtual_support)
-      return {};
+    if (const ClassShape* shape = shape_of(EntityId(key))) {
+      if (shape->clang_weak_alignment)
+        return {.kind = record, .size = shape->clang_weak_alignment, .align = shape->clang_weak_alignment,
+                .unusable_class_alignment = true};
+      if (shape->layout_requires_virtual_support) return {};
+    }
     if (auto done = records_.find(key); done != records_.end()) return done->second;
   }
   if (auto r = class_layout(c)) {
@@ -949,6 +955,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     for (const ir::SubObject& b : r->bases) {
       const auto base = type(b.type);
       l.layout_uncertain |= base.layout_uncertain;
+      l.unusable_class_alignment |= base.unusable_class_alignment;
       l.contains_explicit_alignment |= base.contains_explicit_alignment;
       if (!base.empty) parts.push_back(b);
     }
@@ -965,6 +972,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
       l.layout_uncertain |= m.layout_uncertain;
+      l.unusable_class_alignment |= m.unusable_class_alignment;
       l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
@@ -976,6 +984,10 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     if (hfa && count <= 4 && count * bytes == r->size) {
       l.hfa = std::uint8_t(count);
       l.hfa_bytes = bytes;
+    }
+    if (l.unusable_class_alignment) {
+      l.size = 0;
+      l.align = 1;
     }
     records_[std::to_underlying(in.types.get<ast::TClass>(c).entity)] = l;
     return l;
@@ -1053,6 +1065,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   const ClassShape* it = shape_of(EntityId(key));
+  if (it && it->clang_weak_alignment) return std::nullopt;
   if (!it || (it->layout_requires_virtual_support &&
                                it->peer_virtual_layout == sema::PeerVirtualLayout::none &&
                                it->peer_automatic_primary_base == EntityId::none))
@@ -1499,6 +1512,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
     if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) return {};
     auto l = layout.type(value);
+    if (l.unusable_class_alignment) return "a class whose requested alignment has no usable object layout";
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
                     : "defaulted copy ABI classification is unavailable for a parameter";
@@ -2107,6 +2121,7 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
 std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const QueryLayout& layout, QualType type,
                                                 ConstId init) {
   ir::TypeLayout l = layout.type(type);
+  if (l.unusable_class_alignment) return std::unexpected("an object whose class alignment has no usable layout");
   if (l.contains_member_pointer) return std::unexpected("static storage containing pointers to members");
   Bytes out;
   out.bytes.assign(l.size, 0);

@@ -54,6 +54,27 @@ Wide wide_enum(Wide value, unsigned long long key) {
 int main() { return wide_enum(increment, 17) != following; }
 #endif
 '''
+TAIL_PADDING = '''\
+#if defined(DEFAULTED_COPY)
+struct Base { int value; char byte; Base(const Base&) = default; };
+#elif defined(DELETED_COPY)
+struct Base { int value; char byte; Base(const Base&) = delete; };
+#elif defined(DELETED_DESTRUCTOR)
+struct Base { int value; char byte; ~Base() = delete; };
+#elif defined(ASSIGNMENT_TEMPLATE)
+struct Base { int value; char byte; template<class T> Base& operator=(T); };
+#elif defined(PRIVATE_MEMBERS)
+struct Base { private: int value; char byte; };
+#elif defined(OVERLAPPING_MEMBER)
+struct Base { int value; [[no_unique_address]] char byte; };
+#else
+struct Base { int value; char byte; };
+#endif
+struct Derived : Base { char tail; };
+#if defined(EXPECTED)
+static_assert(sizeof(Derived) == EXPECTED);
+#endif
+'''
 CLASS_HEAD_ALIGNMENT = '''\
 #if defined(WEAK)
 struct alignas(1) Payload { long long value; };
@@ -460,6 +481,42 @@ def preprocess_and_syntax(world):
 
     (world.scope / 'version.cpp').write_text('__cplusplus\n')
     (world.scope / 'class-head-alignment.cpp').write_text(CLASS_HEAD_ALIGNMENT)
+    (world.scope / 'tail-padding.cpp').write_text(TAIL_PADDING)
+    (world.scope / 'clang-under-alignment.cpp').write_text('''\
+struct alignas(0) Aligned;
+struct alignas(WIDTH) Aligned { long long member; };
+#ifdef GCC_MODE
+static_assert(sizeof(Aligned) == 8 && alignof(Aligned) == 8);
+static_assert(sizeof(Aligned[2]) == 16);
+#else
+static_assert(sizeof(Aligned) == WIDTH && alignof(Aligned) == WIDTH);
+static_assert(sizeof(Aligned[2]) == 2 * WIDTH);
+#endif
+static_assert(__is_same(decltype(Aligned::member), long long));
+#if defined(OBJECT)
+Aligned object;
+#elif defined(LOCAL)
+void local() { Aligned value; }
+#elif defined(MEMBER)
+long long read(Aligned* value) { return value->member; }
+#elif defined(COPY)
+void copy(Aligned* to, Aligned* from) { *to = *from; }
+#elif defined(PTR_ADD)
+Aligned* advance(Aligned* value) { return value + 1; }
+#elif defined(PTR_DIFF)
+long difference(Aligned* a, Aligned* b) { return a - b; }
+#elif defined(BY_VALUE)
+void consume(Aligned value) {}
+#elif defined(OFFSET)
+static_assert(__builtin_offsetof(Aligned, member) == 0);
+#elif defined(CONTAINS)
+struct Holder { Aligned object; long long later; };
+static_assert(sizeof(Holder) == 16);
+#else
+int report_size() { return sizeof(Aligned); }
+Aligned* pointer;
+#endif
+''')
     (world.scope / 'wide-array.cpp').write_text(WIDE_ARRAY)
     (world.scope / 'abstract-results.cpp').write_text(ABSTRACT_RESULTS)
     (world.scope / 'line.cpp').write_text(LINE)
@@ -624,6 +681,60 @@ static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
 static_assert(__builtin_memchr(&left, 0x31, sizeof(left)) == &left);
 #endif
 ''')
+    (world.scope / 'memory-record-object.cpp').write_text('''\
+struct Padded { char tag; unsigned word; };
+struct Tail { unsigned word; char tag; };
+struct WithArray { char tag; unsigned words[2]; };
+constexpr Padded low{3, 0x44332211}, equal{3, 0x44332211}, high{3, 0x44332212};
+#if defined(REUSE)
+constexpr const void* padding = __builtin_memchr(&low, 0, sizeof low);
+static_assert(__builtin_memcmp(padding, &equal, 1) < 0);
+#elif defined(LOCAL)
+constexpr bool local() {
+  constexpr Padded a{3, 4}, b{3, 5};
+  return __builtin_memcmp(&a, &b, sizeof a) < 0;
+}
+static_assert(local());
+#elif defined(ARRAY)
+constexpr Padded records[]{low, high};
+constexpr WithArray with_array{3, {1, 2}};
+static_assert(__builtin_memchr(&records, 0x12, sizeof records) == &records[1].word);
+static_assert(__builtin_memchr(&with_array, 2, sizeof with_array) == &with_array.words[1]);
+#else
+constexpr Tail tail{0x44332211, 3};
+static_assert(__builtin_memcmp(&low, &equal, sizeof low) == 0);
+static_assert(__builtin_memcmp(&low, &high, sizeof low) < 0);
+constexpr const void* padding = __builtin_memchr(&low, 0, sizeof low);
+static_assert(padding != nullptr && padding != &low);
+static_assert(__builtin_memcmp(padding, padding, 50) == 0);
+static_assert(__builtin_memchr(&low, 3, sizeof low) == &low);
+static_assert(__builtin_memchr(&low, 0x11, sizeof low) == &low.word);
+static_assert(__builtin_memchr(&tail, 0, sizeof tail) != nullptr);
+#endif
+''')
+    (world.scope / 'memory-pointer-object.cpp').write_text('''\
+#ifdef NON_NULL
+int object;
+constexpr int* pointer = &object;
+static_assert(__builtin_memchr(&pointer, 0, sizeof pointer) != nullptr);
+#elif defined(LOCAL)
+constexpr bool local() {
+  int* pointer = nullptr;
+  return __builtin_memchr(&pointer, 0, sizeof pointer) == &pointer;
+}
+static_assert(local());
+#else
+constexpr int* left = nullptr;
+constexpr int* right = nullptr;
+constexpr auto literal = nullptr;
+constexpr int* array[2] = {nullptr, nullptr};
+static_assert(__builtin_memcmp(&left, &right, sizeof left) == 0);
+static_assert(__builtin_memchr(&left, 0, sizeof left) == &left);
+static_assert(__builtin_memchr(&left, 1, sizeof left) == nullptr);
+static_assert(__builtin_memchr(&literal, 0, sizeof literal) == &literal);
+static_assert(__builtin_memchr(&array, 0, sizeof array) == &array);
+#endif
+''')
     (world.scope / 'void-cast-nested.cpp').write_text('''\
 constexpr int table[2][2] = {{17, 23}, {83, 97}};
 #ifdef LAST
@@ -632,7 +743,16 @@ constexpr const void* erased = table[1] + 2;
 constexpr const void* erased = table[0] + 2;
 #endif
 constexpr const int* end = static_cast<const int*>(erased);
-#ifdef READ_NEXT
+#if defined(TERMINAL_REENTER)
+constexpr auto advanced = end + 2;
+static_assert(advanced - 2 == end);
+static_assert(end - table[1] == 2);
+#elif defined(TERMINAL_BACKWARD)
+constexpr auto before_end = end - 1;
+static_assert(before_end == table[1] + 1);
+#elif defined(TERMINAL_READ)
+static_assert(end[-1] == 97);
+#elif defined(READ_NEXT)
 static_assert(*end == 83);
 #elif defined(READ_PREVIOUS)
 static_assert(end[-1] == 23);
@@ -946,6 +1066,18 @@ int use() { return transform(7); }
             if mode == 'clang':
                 # Materializing the call's result is observable when emitting the function body.
                 invoke(target, *flags, '-DCALL', '-c', 'abstract-results.cpp', '-o', 'abstract-results.o')
+        for target in (LINUX, DARWIN):
+            darwin_clang = target == DARWIN and mode == 'clang'
+            sizes = {
+                'DEFAULTED_COPY': 8 if darwin_clang else 12,
+                'DELETED_COPY': 8 if darwin_clang else 12,
+                'DELETED_DESTRUCTOR': 12,
+                'ASSIGNMENT_TEMPLATE': 12,
+                'PRIVATE_MEMBERS': 12 if darwin_clang else 8,
+                'OVERLAPPING_MEMBER': 8 if mode == 'gcc' else 12,
+            }
+            for case, size in sizes.items():
+                invoke(target, *flags, '-D' + case, f'-DEXPECTED={size}', '-fsyntax-only', 'tail-padding.cpp')
         invoke(*flags, '-fsyntax-only', 'line.cpp')
         invoke(*flags, '-fsyntax-only', 'descriptor.cpp')
         for target in (LINUX, DARWIN):
@@ -976,10 +1108,23 @@ int use() { return transform(7); }
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-array-object.cpp', status=1)
             for case in ('FLOAT', 'DOUBLE', 'ENUM'):
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-scalar-object.cpp', status=mode != 'gcc')
+            for case in ('', 'ARRAY', 'REUSE', 'LOCAL'):
+                args = ['-D' + case] if case else []
+                invoke(target, *flags, *args, '-fsyntax-only', 'memory-record-object.cpp',
+                       status=mode != 'gcc' or case in ('REUSE', 'LOCAL'))
+            for case in ('', 'NON_NULL', 'LOCAL'):
+                args = ['-D' + case] if case else []
+                invoke(target, *flags, *args, '-fsyntax-only', 'memory-pointer-object.cpp',
+                       status=mode != 'gcc' or bool(case))
             invoke(target, *flags, '-fsyntax-only', 'void-cast-nested.cpp', status=mode == 'spec')
             invoke(target, *flags, '-DREAD_PREVIOUS', '-fsyntax-only', 'void-cast-nested.cpp', status=mode != 'clang')
             invoke(target, *flags, '-DREAD_NEXT', '-fsyntax-only', 'void-cast-nested.cpp', status=mode != 'gcc')
             invoke(target, *flags, '-DLAST', '-fsyntax-only', 'void-cast-nested.cpp', status=mode == 'spec')
+            invoke(target, *flags, '-DLAST', '-DTERMINAL_REENTER', '-fsyntax-only', 'void-cast-nested.cpp',
+                   status=mode != 'gcc')
+            for case in ('TERMINAL_BACKWARD', 'TERMINAL_READ'):
+                invoke(target, *flags, '-DLAST', '-D' + case, '-fsyntax-only', 'void-cast-nested.cpp',
+                       status=mode != 'clang')
             invoke(target, *flags, '-fsyntax-only', 'constexpr-pointer-bounds.cpp', status=mode != 'gcc')
             invoke(target, *flags, '-DTERMINAL_CAST', '-fsyntax-only', 'constexpr-pointer-bounds.cpp', status=mode != 'gcc')
             for rejected in ('READ_PAST', 'READ_WRONG_ROW', 'DIFF_WRONG_ROW', 'DOWNCAST'):
@@ -1029,6 +1174,18 @@ int use() { return transform(7); }
                 if mode == 'gcc' and case in ('LATE_STRONGER', 'ZERO_LATER'):
                     assert b'class alignment is ignored' in diagnostic and b'zero class alignment' not in diagnostic, (
                         target, mode, case, diagnostic)
+            layout_flags = [*flags, '-DGCC_MODE'] if mode == 'gcc' else flags
+            for width in (1, 2, 4):
+                invoke(target, *layout_flags, f'-DWIDTH={width}', '-c', 'clang-under-alignment.cpp',
+                       '-o', 'clang-under-alignment.o', status=mode == 'spec')
+            for case in ('OBJECT', 'LOCAL', 'MEMBER', 'COPY', 'PTR_ADD', 'BY_VALUE', 'PTR_DIFF'):
+                invoke(target, *layout_flags, '-DWIDTH=1', '-D' + case, '-fsyntax-only', 'clang-under-alignment.cpp',
+                       status=mode == 'spec')
+                invoke(target, *layout_flags, '-DWIDTH=1', '-D' + case, '-c', 'clang-under-alignment.cpp',
+                       '-o', 'clang-under-alignment.o', status=mode == 'spec' or (mode == 'clang' and case != 'PTR_DIFF'))
+            for case in ('OFFSET', 'CONTAINS'):
+                invoke(target, *layout_flags, '-DWIDTH=1', '-D' + case, '-fsyntax-only', 'clang-under-alignment.cpp',
+                       status=mode != 'gcc')
         for i, (owner, _) in enumerate(offset_spellings):
             expected = mode == owner
             invoke(*flags, f'-DEXPECTED={int(expected)}', '-fsyntax-only', f'offset-{i}.cpp')
@@ -1135,6 +1292,39 @@ def mixed_class_calls(world, gxx):
     result = world.cxx(['-fcompat=gcc', '-fclass-call-abi=itanium', '-c', 'caller.cpp', '-o', 'calls.o'],
                        scope, world.daemon, timeout=40)
     assert result == (0, b'', b'') and (scope / 'calls.o').read_bytes() == objects['-fcompat=spec'], result
+
+
+def mixed_darwin_class_calls(world, gxx):
+    scope = world.scope
+    (scope / 'darwin-caller.cpp').write_text(CLASS_DECLARATIONS + CLASS_CALLER)
+    (scope / 'darwin-peer.cpp').write_text(CLASS_DECLARATIONS + CLASS_PEER)
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    objects = {}
+    for mode in MODES:
+        peer = (gxx if mode == 'gcc' else clang) if sys.platform == 'darwin' else None
+        command = [DARWIN, '-fcompat=' + mode, '-c', 'darwin-caller.cpp', '-o', 'darwin-caller.o']
+        if peer:
+            subprocess.run([peer, '-std=c++26', '-c', 'darwin-peer.cpp', '-o', 'darwin-peer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+        outputs = []
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            outputs.append((scope / 'darwin-caller.o').read_bytes())
+            if peer:
+                subprocess.run([gxx, 'darwin-caller.o', 'darwin-peer.o', '-o', 'darwin-class-calls'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                checked = subprocess.run([scope / 'darwin-class-calls'], cwd=scope, capture_output=True, timeout=20)
+                assert checked.returncode == 0, (mode, peer, env is world.daemon, checked.returncode, checked.stderr)
+        assert outputs[0] == outputs[1], mode
+        objects[mode] = outputs[0]
+    assert objects['spec'] == objects['clang'] and objects['spec'] != objects['gcc']
+    for rule, expected in (('itanium', 'spec'), ('apple', 'gcc')):
+        command = [DARWIN, '-fcompat=gcc', '-fclass-call-abi=' + rule, '-c', 'darwin-caller.cpp', '-o', 'darwin-caller.o']
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (rule, result)
+            assert (scope / 'darwin-caller.o').read_bytes() == objects[expected], rule
 
 
 def mixed_large_class_calls(world, gxx):
@@ -1520,6 +1710,75 @@ def operator_constraints(world, gxx):
             subprocess.run([scope / 'operator-link'], cwd=scope, check=True, timeout=20)
 
 
+def requires_expression_symbols(world, gxx):
+    scope = world.scope
+    preamble = '''\
+template<class T> concept Any = true;
+namespace N { template<class T, class U = int> concept Check = true; }
+struct Item { using type = int; };
+'''
+    cases = (
+        ('template<class T> requires requires (T t) { t + t; } int simple(T)', 'simple(1)'),
+        ('template<class T> requires requires (T t) { {t + t} noexcept; } int non_throwing(T)', 'non_throwing(1)'),
+        ('template<class T> requires requires (T t) { {t + t} -> Any; } int returns_any(T)', 'returns_any(1)'),
+        ('template<class T> requires requires { typename T::type; typename T::type; } int twice(T)', 'twice(Item{})'),
+        ('template<class T> int empty(T) requires requires () { sizeof(T); }', 'empty(1)'),
+        ('template<class T> int unnamed(T) requires requires (T, T b) { b; }', 'unnamed(1)'),
+        ('template<class T> int adjusted(T) requires requires (T a[3]) { *a; }', 'adjusted(1)'),
+        ('template<class T> int atoms(T) requires requires { requires sizeof(T) > 1 && sizeof(T) < 8; }', 'atoms(1)'),
+        ('template<class T> int inner(T) requires requires (T a) { requires requires (T b) { a + b; }; }', 'inner(1)'),
+        ('template<class T> int cv_param(T) requires requires (const T a, T b) { a + b; }', 'cv_param(1)'),
+        ('template<class T> int result(T) requires requires (T a) { {a} -> N::Check<T>; }', 'result(1)'),
+        ('template<class T> int result_default(T) requires requires (T a) { {a} -> N::Check; }', 'result_default(1)'),
+    )
+    calls = ' + '.join(call for _, call in cases)
+    definitions = '\n'.join(signature + ' { return 1; }' for signature, _ in cases)
+    declarations = '\n'.join(signature + ';' for signature, _ in cases)
+    (scope / 'requires-provider.cpp').write_text(preamble + definitions + f'\nint instantiate() {{ return {calls}; }}\n')
+    (scope / 'requires-consumer.cpp').write_text(
+        preamble + declarations + f'\nint main() {{ return {calls} - {len(cases)}; }}\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        param = 'fL0p_' if mode == 'clang' else 'fp_'
+        empty = 'rq' if mode == 'gcc' else 'rQv_'
+        nested = {'spec': 'fL0p_fp_', 'gcc': 'fp_fL18446744073709551614p_', 'clang': 'fL0p_fL0p_'}[mode]
+        qualifier = '' if mode == 'gcc' else 'K'
+        result = 'N1N5CheckEIS0_E' if mode == 'gcc' else 'N1N5CheckIS0_EE'
+        default = 'IiE' if mode == 'gcc' else ''
+        symbols = (
+            f'_Z6simpleIiQrQT__Xpl{param}{param}EEiS0_',
+            f'_Z12non_throwingIiQrQT__Xpl{param}{param}NEEiS0_',
+            f'_Z11returns_anyIiQrQT__Xpl{param}{param}R3AnyEEiS0_',
+            '_Z5twiceI4ItemQrqTNT_4typeETS2_EEiS1_',
+            f'_Z5emptyIiEiT_Q{empty}XstS0_E',
+            '_Z7unnamedIiEiT_QrQS0_S0__Xfp0_E',
+            '_Z8adjustedIiEiT_QrQPS0__Xdefp_E',
+            '_Z5atomsIiEiT_QrqQaagtstS0_Li1EltstS0_Li8EE',
+            f'_Z5innerIiEiT_QrQS0__QrQS0__Xpl{nested}EE',
+            f'_Z8cv_paramIiEiT_QrQS0_S0__Xplfp{qualifier}_fp0_E',
+            f'_Z6resultIiEiT_QrQS0__Xfp_R{result}E',
+            f'_Z14result_defaultIiEiT_QrQS0__Xfp_RN1N5CheckE{default}E',
+        )
+        command = ['-fcompat=' + mode, '-c', 'requires-provider.cpp', '-o', 'requires-provider.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for env in (world.cold, world.daemon):
+                outcome = world.cxx([target, *command], scope, env, timeout=40)
+                assert outcome == (0, b'', b''), (mode, target, outcome)
+                names = (scope / 'requires-provider.o').read_bytes().split(b'\0')
+                for symbol in symbols:
+                    assert (prefix + symbol).encode() in names, (mode, target, symbol, [n for n in names if b'_Z' in n])
+        peer = gxx if mode == 'gcc' else clang if mode == 'clang' else None
+        if peer:
+            outcome = world.cxx(command, scope, world.daemon, timeout=40)
+            assert outcome == (0, b'', b''), (mode, outcome)
+            subprocess.run([peer, '-std=c++26', '-c', 'requires-consumer.cpp', '-o', 'requires-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([gxx, 'requires-provider.o', 'requires-consumer.o', '-o', 'requires-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'requires-link'], cwd=scope, check=True, timeout=20)
+
+
 def template_argument_prefixes(world, gxx):
     scope = world.scope
     functions = [fn for fn, _, _, _ in PREFIX_FUNCTIONS if fn]
@@ -1586,6 +1845,37 @@ int main() {
             subprocess.run([scope / 'source-location'], cwd=scope, check=True, timeout=20)
 
 
+def mixed_tail_padding(world, gxx):
+    scope = world.scope
+    (scope / 'tail-reader.cpp').write_text(TAIL_PADDING + '''\
+extern "C" int read_tail(const Derived& object) { return object.tail; }
+''')
+    (scope / 'tail-peer.cpp').write_text(TAIL_PADDING + '''\
+extern "C" int read_tail(const Derived&);
+int main() {
+  Derived object;
+  object.tail = 17;
+  return read_tail(object) != 17;
+}
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for feature in ('PRIVATE_MEMBERS', 'OVERLAPPING_MEMBER'):
+            peer = clang if mode == 'clang' or (mode == 'spec' and feature == 'OVERLAPPING_MEMBER') else gxx
+            if not peer:
+                continue
+            definition = '-D' + feature
+            subprocess.run([peer, '-std=c++26', definition, '-c', 'tail-peer.cpp', '-o', 'tail-peer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            command = ['-fcompat=' + mode, definition, '-c', 'tail-reader.cpp', '-o', 'tail-reader.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, feature, result)
+                subprocess.run([gxx, 'tail-reader.o', 'tail-peer.o', '-o', 'tail-calls'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'tail-calls'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -1625,7 +1915,9 @@ def main():
             mixed_large_class_calls(world, gxx)
             # PARITY: by design: native array new is currently available on Linux x86-64.
             wide_array_allocations(world, gxx)
+        mixed_darwin_class_calls(world, gxx)
         mixed_class_alignment(world, gxx)
+        mixed_tail_padding(world, gxx)
         mixed_constraints(world, gxx)
         function_language_linkage(world, gxx)
         mixed_abstract_result(world, gxx)
@@ -1634,6 +1926,7 @@ def main():
         pack_index_symbols(world, gxx)
         bound_pack_index_symbols(world, gxx)
         operator_constraints(world, gxx)
+        requires_expression_symbols(world, gxx)
         template_argument_prefixes(world, gxx)
         mixed_source_location(world, gxx)
         compile_database(world)

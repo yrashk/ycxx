@@ -600,7 +600,7 @@ class Mangler {
       if (!args) return args;
       auto sig = signature(f, true);
       if (!sig) return sig;
-      *sig += constraint_suffix(spec.trailing);
+      *sig += constraint_suffix(spec.trailing, false);
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
       return local + "N" + cv + *p + unqualified + *args + "E" + *sig;
     }
@@ -612,7 +612,7 @@ class Mangler {
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
     auto sig = signature(in_.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
     if (!sig) return sig;
-    *sig += constraint_suffix(spec.trailing);
+    *sig += constraint_suffix(spec.trailing, false);
     // In a <nested-name>, a member function template's cv-qualifiers follow the `N`.
     ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
     std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
@@ -802,15 +802,10 @@ class Mangler {
       if (!args) return args;
       return unresolved_qualifier(n.scope, c.qualified, c.global) + source_name(n.name) + *args;
     }
-    if (in_.values.is<ast::VRequiresTypes>(v)) {
-      std::string r = "rq";
-      for (const auto& requirement : in_.seqs.elements(in_.values.get<ast::VRequiresTypes>(v).types)) {
-        auto t = type(requirement.type);
-        if (!t) return t;
-        r += "T" + *t;
-      }
-      return r + "E";
-    }
+    if (in_.values.is<ast::VRequiresExpression>(v))
+      return requires_expression(in_.values.get<ast::VRequiresExpression>(v));
+    if (in_.values.is<ast::VRequiresParameter>(v))
+      return requires_parameter(in_.values.get<ast::VRequiresParameter>(v));
     if (in_.values.is<ast::VInt>(v)) {
       const auto value = in_.values.get<ast::VInt>(v);
       return template_arg({ast::TemplateArgKind::value, value.type, v});
@@ -895,13 +890,91 @@ class Mangler {
     return qualifier + "E";
   }
 
-  std::string constraint_suffix(const ast::WrittenConstraint& clause) {
+  // Proposed in Itanium ABI issue #24: rq for an omitted list, rQ for an explicit list.
+  std::expected<std::string, std::string> requires_expression(const ast::VRequiresExpression& clause) {
+    const auto parameters = in_.seqs.elements(clause.parameters);
+    const bool list = clause.parameter_list && (!parameters.empty() || compatibility_ != ast::Compatibility::gcc);
+    std::string encoded = list ? "rQ" : "rq";
+    if (list) {
+      if (parameters.empty()) encoded += 'v';
+      for (const auto& parameter : parameters) {
+        auto p = type(parameter);
+        if (!p) return p;
+        encoded += *p;
+      }
+      encoded += '_';
+    }
+    struct RestoreDepth {
+      ast::u32& depth;
+      ast::u32 saved;
+      ~RestoreDepth() { depth = saved; }
+    } restore{requires_depth_, requires_depth_};
+    if (list) ++requires_depth_;
+    for (const auto& requirement : in_.seqs.elements(clause.requirements)) {
+      if (requirement.kind == ast::RequirementKind::type) {
+        const auto target = in_.values.get<ast::VType>(requirement.operand);
+        auto t = type(ast::with_cv(target.type, ast::Cv(target.cv)));
+        if (!t) return t;
+        encoded += 'T' + *t;
+        continue;
+      }
+      auto operand = expression(requirement.operand);
+      if (!operand) return operand;
+      encoded += (requirement.kind == ast::RequirementKind::nested ? 'Q' : 'X') + *operand;
+      if (requirement.noexcept_) encoded += 'N';
+      if (requirement.result_constraint != ast::ConstId::none) {
+        auto result = requirement_constraint(in_.values.get<ast::VDepConcept>(requirement.result_constraint));
+        if (!result) return result;
+        encoded += 'R' + *result;
+      }
+    }
+    return encoded + 'E';
+  }
+
+  std::expected<std::string, std::string> requirement_constraint(const ast::VDepConcept& constraint) {
+    const auto name = classes_ ? classes_(constraint.concept_) : ClassName{};
+    if (name.name.empty()) return std::unexpected("a result constraint whose concept name is unknown");
+    auto encoded = object_encoding(name.name, name.scope);
+    if (!encoded) return encoded;
+    const auto arguments = in_.seqs.elements(constraint.args);
+    if (arguments.empty()) return encoded;
+    auto args = template_args(arguments);
+    if (!args) return args;
+    if (compatibility_ != ast::Compatibility::gcc && encoded->starts_with('N'))
+      encoded->insert(encoded->size() - 1, *args);
+    else
+      *encoded += *args;
+    return encoded;
+  }
+
+  std::expected<std::string, std::string> requires_parameter(const ast::VRequiresParameter& parameter) const {
+    if (parameter.scope >= requires_depth_) return std::unexpected("a requires-expression parameter outside its scope");
+    ast::u64 level = requires_depth_ - parameter.scope - 1;
+    if (compatibility_ == ast::Compatibility::clang)
+      level = requires_depth_ - !template_head_constraint_;
+    else if (compatibility_ == ast::Compatibility::gcc)
+      level = ast::u64{0} - parameter.scope;
+    std::string encoded = level == 0 ? "fp" : std::format("fL{}p", level - 1);
+    if (compatibility_ != ast::Compatibility::gcc) {
+      if (std::to_underlying(parameter.cv) & 2) encoded += 'V';
+      if (std::to_underlying(parameter.cv) & 1) encoded += 'K';
+    }
+    if (parameter.index) encoded += std::to_string(parameter.index - 1);
+    return encoded + '_';
+  }
+
+  std::string constraint_suffix(const ast::WrittenConstraint& clause, bool template_head) {
     if (clause.tokens == Fp128{}) return {};
     if (clause.expression != ast::ConstId::none) {
       if (compatibility_ == ast::Compatibility::gcc && in_.values.is<ast::VDepParam>(clause.expression))
         return {};  // GCC 16 uses the unadorned symbol for a bare boolean template parameter
       const auto checkpoint = candidates_.size();
-      if (auto expr = expression(clause.expression)) return "Q" + *expr;
+      const bool old_template_head = std::exchange(template_head_constraint_, template_head);
+      const auto outside_requires_depth = std::exchange(requires_depth_, 0);
+      auto expr = expression(clause.expression);
+      template_head_constraint_ = old_template_head;
+      requires_depth_ = outside_requires_depth;
+      if (expr) return "Q" + *expr;
       candidates_.resize(checkpoint);
     }
     // Keep unsupported written expressions distinct from each other and from unconstrained
@@ -1093,7 +1166,7 @@ class Mangler {
     auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
     if (!args || spec.head.tokens == Fp128{}) return args;
     args->pop_back();
-    *args += constraint_suffix(spec.head) + "E";
+    *args += constraint_suffix(spec.head, true) + "E";
     return args;
   }
 
@@ -1210,6 +1283,8 @@ class Mangler {
   const FunctionNames& functions_;
   const ObjectNames& objects_;
   ast::Compatibility compatibility_;
+  ast::u32 requires_depth_ = 0;
+  bool template_head_constraint_ = false;
   std::vector<std::uint64_t> candidates_;  // in order of completion
 };
 

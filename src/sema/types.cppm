@@ -520,8 +520,8 @@ public:
     for (u32 unit : units) text.push_back(static_cast<char>(unit));
     return text;
   }
-  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}) {
-    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset});
+  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}, bool gcc_nested_end = false) {
+    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset, gcc_nested_end});
   }
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).
@@ -852,6 +852,7 @@ struct ClassRec {
   bool member_declarations_valid = false;  // no member declaration was lost to an error
   bool is_final = false;  // the class property's value from the definition ([class.pre])
   u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
+  u8 clang_weak_alignment = 0;  // the reported size and alignment when the peer has no usable layout
   bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
   // Its direct base classes, in declaration order ([class.derived.general]).
   std::vector<BaseRec> bases;
