@@ -1,6 +1,7 @@
 // #1417 [class.copy.assign], [special], [class.prop], [over.match.viable]: copy and move
 // assignment operator families with a constrained `= default`, a constrained user-provided
 // and a constrained `= delete` member; the eligible ones are called and decide triviality.
+// XFAIL: ycxx a deleted move assignment in a class template is not supported yet (#157), and type-trait built-ins do not classify class template specializations yet (#218)
 int user_assigns = 0;
 
 struct Heavy {

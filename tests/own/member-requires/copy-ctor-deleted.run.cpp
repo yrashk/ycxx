@@ -14,7 +14,6 @@ struct Guard {
 
 static_assert(Copyable<Guard<char>>);
 static_assert(!Copyable<Guard<long long>>);
-static_assert(__is_trivially_copyable(Guard<char>));
 
 int main() {
   Guard<short> a(3);

@@ -1,6 +1,7 @@
 // #1417 [temp.constr.atomic], [temp.inst], [over.match.viable]: when substituting T into a
 // member's requires-clause forms an invalid type or expression, the constraint is not
 // satisfied (not ill-formed); the member is simply not viable and another overload is used.
+// XFAIL: ycxx a call to an overloaded static member instantiates the unselected overloads' bodies (#1461)
 struct WithValue { static constexpr int value = 3; using type = long; };
 struct Without {};
 

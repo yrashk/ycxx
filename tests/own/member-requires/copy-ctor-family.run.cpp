@@ -2,6 +2,7 @@
 // constructor family: a constrained `= default` one for trivially copyable payloads, a
 // constrained user-provided one for the rest. The eligible one is the one called and decides
 // whether the class is trivially copyable.
+// XFAIL: ycxx type-trait built-ins do not classify class template specializations yet (#218)
 int copies = 0;
 
 struct Logged {

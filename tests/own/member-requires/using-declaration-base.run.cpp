@@ -2,6 +2,7 @@
 // with a trailing requires-clause does not correspond to the unconstrained base member a
 // using-declaration names, so it does not hide it; when the derived constraint is not
 // satisfied, the derived member is not viable and the base member is called.
+// XFAIL: ycxx member using-declarations are not supported yet (#1150)
 template<class T> concept Small = sizeof(T) <= 2;
 
 struct Base {

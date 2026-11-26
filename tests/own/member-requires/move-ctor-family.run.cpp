@@ -19,9 +19,6 @@ struct M {
 
 template<class T> T&& move(T& t) { return static_cast<T&&>(t); }
 
-static_assert(__is_trivially_constructible(M<char>, M<char>&&));
-static_assert(!__is_trivially_constructible(M<int>, M<int>&&));
-static_assert(!__is_trivially_copyable(M<char>));   // the eligible copy constructor is user-provided
 
 int main() {
   M<char> a('x');

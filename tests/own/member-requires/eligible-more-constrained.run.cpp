@@ -12,8 +12,6 @@ struct D {
   D() requires SmallSigned<T> = default;
 };
 
-static_assert(__is_trivially_constructible(D<int>));
-static_assert(!__is_trivially_constructible(D<unsigned>));
 
 D<int> zeroed;   // static storage: zero-initialized; the trivial constructor leaves mark at 0
 

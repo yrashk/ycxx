@@ -3,6 +3,7 @@
 // are not ordered by constraints, because a non-template function is more
 // partial-ordering-constrained than another only if, being member functions, both are
 // direct members of the same class ([temp.constr.order]). The call is ambiguous.
+// XFAIL: ycxx member using-declarations are not supported yet (#1150)
 template<class T> concept Small = sizeof(T) <= 2;
 
 struct Base {

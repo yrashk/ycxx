@@ -1,6 +1,7 @@
 // #1417 [class.dtor], [class.prop], [special]: the selected prospective destructor decides
 // whether the class is trivially destructible and trivially copyable; the other prospective
 // destructors do not matter.
+// XFAIL: ycxx type-trait built-ins do not classify class template specializations yet (#218)
 template<class T> concept Trivial = __is_trivially_destructible(T);
 
 struct Owner { ~Owner() {} };
