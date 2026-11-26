@@ -11654,7 +11654,10 @@ public:
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures)),
                     b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
-    s_.check_immediate_addresses(out_.value.tree, root.begin);
+    // A dependent invocation in a constexpr template can supply its immediate context
+    // when the function specializes. Its instantiated body checks the addresses.
+    if (!keeps || !f || !(f->flags & sema::decl_flag::constexpr_))
+      s_.check_immediate_addresses(out_.value.tree, root.begin);
     p_->generated_closure_members(out_.value.closures, k_, begin());
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);

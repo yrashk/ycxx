@@ -3446,10 +3446,11 @@ static_assert(sizeof(Wide) == 8 && alignof(Wide) == 4 && __builtin_offsetof(Wide
 static_assert(sizeof(WideShort) == 8 && alignof(WideShort) == 4 && __builtin_offsetof(WideShort, byte) == 5);
 static_assert(sizeof(WideChar) == 8 && alignof(WideChar) == 4 && __builtin_offsetof(WideChar, byte) == 5);
 static_assert(alignof(Huge) == HUGE_ALIGNMENT && sizeof(Huge) == HUGE_SIZE);
-static_assert(__builtin_offsetof(Derived, last) == HUGE_SIZE && sizeof(Derived) == HUGE_SIZE + HUGE_ALIGNMENT);
+static_assert(sizeof(Derived) == HUGE_SIZE + HUGE_ALIGNMENT);
 static_assert(sizeof(PrivateDerived) == PRIVATE_SIZE);
 extern "C" unsigned long long read_big(Huge&);
 extern "C" unsigned read_small(Wide&, WideShort&, WideChar&);
+extern "C" char replace_tail(Derived&);
 '''
     (scope / 'bit-fields-provider.cpp').write_text(fixture + '''\
 unsigned long long read_big(Huge& object) {
@@ -3464,11 +3465,18 @@ unsigned read_small(Wide& wide, WideShort& half, WideChar& byte) {
   byte.first = 23;
   return result;
 }
+char replace_tail(Derived& object) {
+  const char previous = object.last;
+  object.last = 77;
+  return previous;
+}
 ''')
     (scope / 'bit-fields-peer.cpp').write_text(fixture + '''\
 int main() {
   Huge h{0x100000002ULL, 5};
   if (read_big(h) != 0x100000007ULL || h.first != 0x123456789abcdef0ULL || h.byte != 5) return 1;
+  Derived d{{0x100000002ULL, 5}, 31};
+  if (replace_tail(d) != 31 || d.last != 77 || d.first != 0x100000002ULL || d.byte != 5) return 1;
   Wide upper{7, 11};
   WideShort half{13, 21};
   WideChar byte{29, 31};
