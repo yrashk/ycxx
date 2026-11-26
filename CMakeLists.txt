@@ -70,9 +70,11 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 include(cmake/ycxx-policy.cmake)
 
-add_subdirectory(packages/ycxx-bench)
-# Use the same GCC module dialect and sanitizer settings as the in-tree std module.
-target_link_libraries(ycxx_bench PUBLIC ycxxc_options)
+block(SCOPE_FOR VARIABLES)
+  # The package and its consumers import the same std module as the rest of ycxx.
+  set(YCXX_BENCH_OPTIONS_TARGET ycxxc_options)
+  add_subdirectory(packages/ycxx-bench)
+endblock()
 
 add_subdirectory(src)
 enable_testing()
