@@ -271,16 +271,16 @@ evidence = ["tests/own/floating/const-nan.reject.cpp", "tests/own/floating/revie
 
 [[divergence]]
 id = "template-argument-alias-identity"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.type], CWG1286, #208, 5bd86f55"
 prior = "Preserve the identity of an alias template independently of its underlying class template."
 spec = "Treat the alias and the class template as separate template arguments."
-gcc = "Same as spec."
+gcc = "Use the target's identity for an unconstrained alias forwarding the complete matching parameter list with matching defaults, including type packs and member aliases. Preserve the identity of other aliases."
 clang = "Same as spec."
 gcc_observed = "Folds an unconstrained forwarding alias with a matching parameter list and defaults to S. This includes forwarding a type pack or forwarding through another alias. A transformed or reordered argument list, a bound default, different defaults, or a requires-clause preserves alias identity in the probes."
 clang_observed = "Every tested alias produces a specialization distinct from the one for S."
-evidence = ["docs/design/ast.md"]
+evidence = ["docs/design/ast.md", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constrained-function-symbol"
@@ -354,16 +354,14 @@ evidence = ["tests/own/pp/embed-offset.accept.cpp", "tests/daemon/compatibility.
 
 [[divergence]]
 id = "constexpr-immediate-function-reference"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [dcl.constexpr]"
 prior = "Permit the supported constexpr reference or pointer binding to an immediate function under the pinned rules."
 spec = "Accept the pinned-draft binding cases."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Rejects the tested constexpr pointer initialization and reference binding."
-clang_observed = "Rejects the tested constexpr pointer initialization and reference binding."
-evidence = ["tests/own/consteval/function-reference-constexpr.accept.cpp", "tests/own/consteval/function-reference-binding.accept.cpp"]
+gcc = "Reject references to immediate functions stored outside an immediate invocation, and constexpr initializers whose value retains an immediate function pointer or reference. Immediate invocations may consume the pointer."
+clang = "Same as GCC."
+evidence = ["tests/own/consteval/function-reference-constexpr.accept.cpp", "tests/own/consteval/function-reference-binding.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constexpr-void-cast-one-past"
@@ -403,16 +401,15 @@ evidence = ["tests/own/auto/p1-sb-array-cwg2506.run.cpp", "tests/daemon/compatib
 
 [[divergence]]
 id = "adl-alias-template-namespace"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[basic.lookup.argdep]"
 prior = "Count the alias template named in a type-template argument among the associated entities."
 spec = "Find the function in the alias template's namespace."
-gcc = "Same as spec."
+gcc = "Associate the original template's namespace for a forwarding alias that shares its identity. Associate the alias namespace when the alias retains its identity."
 clang = "Skip the alias and its underlying template when collecting associated namespaces for an alias template argument."
 gcc_observed = "For a forwarding alias A<T> = S<T>, ADL finds the namespace of S. For B<T> = S<T*>, it finds the alias namespace."
 clang_observed = "Neither the alias namespace nor the namespace of S is associated in either probe."
-limits = "GCC mode still needs to canonicalize forwarding aliases, as tracked in template-argument-alias-identity."
 evidence = ["tests/own/argument-dependent-lookup/class-template-template-argument-alias.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
@@ -576,18 +573,16 @@ evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own
 
 [[divergence]]
 id = "dependent-template-disambiguator"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "unverified" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.names], #340"
 prior = "Require template for the supported dependent member alias template spelling."
 spec = "Require the syntactically applicable disambiguator."
-gcc = "Same as spec."
+gcc = "Allow the omitted keyword in the terminal member template-id of an explicit typename-type, as in typename T::M<int>."
 clang = "Same as spec."
-gcc_observed = "Accepts the omitted keyword in typename T::M<int> when substitution finds an alias template."
-clang_observed = "Rejects that omission and suggests the template keyword."
 limits = "Both reject omission when T::M is used as a template-template argument."
 probe = 'struct A { template<class U> using M = U; }; template<class T> using X = typename T::M<int>; static_assert(__is_same(X<A>, int));'
-evidence = ["STATUS.md", "tests/own/templates/member-alias-template-mangling.run.cpp"]
+evidence = ["STATUS.md", "tests/own/templates/member-alias-template-mangling.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "new-array-constant-unrepresentable-bound"

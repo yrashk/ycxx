@@ -1886,7 +1886,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Ordinary calls also associate the declaring namespace of a namespace-scope type
   template supplied as a template-template argument ([basic.lookup.argdep]). Clang mode
-  skips alias template arguments in this namespace walk.
+  skips alias template arguments in this namespace walk. GCC mode uses the original
+  template's identity and namespace when an unconstrained alias forwards the entire
+  matching parameter list and preserves the defaults.
 - Each associated namespace search uses preceding declarations that bind names in the scope.
   It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
@@ -4102,6 +4104,8 @@ static argument tracked in #1301 and #209.
   `template_` argument whose type is `TDepName`'s `template_name` form. Substitution applies Q's
   member alias template once Q is a class (`Templates::member_template_of`); a template template
   parameter bound to `Q::template M` gives `typename Q::template M<args>`.
+  GCC mode accepts the omitted keyword in a terminal member template-id of an explicit
+  `typename` type.
 - **Mangling:** `N <qualifier> <name> I…E E`, the template prefix a candidate, as Clang and GCC;
   `Q::template M` as a template argument follows the selected compatibility mode (DECISIONS §1.7).
 - Access is checked where one is named; it hides a base's member of its name, and an earlier
@@ -4115,8 +4119,8 @@ static argument tracked in #1301 and #209.
 - Not yet: checking member alias constraints and checking namespace alias constraints with
   dependent, defaulted or pack arguments or during substitution in requirements
   ([#234](https://github.com/yrashk/ycxx/issues/234)). Access through a dependent name substituted
-  in an alias template, as for a member type, remains open (#1199), as does `typename T::M<args>`
-  without `template` (the oracles disagree). Immediate calls in a member alias template's type
+  in an alias template, as for a member type, remains open (#1199).
+  Immediate calls in a member alias template's type
   still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
@@ -4593,7 +4597,9 @@ for calls and for selection against a static function-pointer target.
 - An ordinary free immediate function is diagnosed when its name escapes through a runtime
   pointer, reference argument, or constructor argument. The same check applies after overload
   selection. It preserves immediate invocations through a name or parenthesized name,
-  unevaluated operands, and manifestly constant-evaluated initializers and assertions (#102).
+  unevaluated operands, and manifestly constant-evaluated initializers and assertions. GCC and
+  Clang modes diagnose constexpr initializers whose result retains the pointer or reference.
+  An immediate invocation may still consume it (#102).
 - The Linux x86-64 backend supports calling through the address of an ordinary function with
   internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
