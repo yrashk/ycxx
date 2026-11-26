@@ -2324,14 +2324,15 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - In symbols, `Dy <type> <expression>` is a substitution candidate. Spec and GCC modes use the
   converted constant index and the bound pack as `J <args> E`. Clang mode preserves a written
   literal's type and uses a placeholder for a bound pack (DECISIONS §1.7).
-- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
-  parameter-index form, and asm labels pin GCC's constant form.
+- GCC and Clang modes retain the written identity of supported named indices and operator
+  expressions. Spec mode uses the converted value. A named enumerator keeps its enum type in
+  compiler modes, and a named constant uses an entity reference.
+- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*` and
+  `tests/daemon/compatibility.py`. The cross-target and native mixed-object checks cover written
+  and literal indices, repeated substitutions, and class-bound packs.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. ycxx mangles an enumerator or a named
-  constant as a converted integer. Clang and GCC write the enumerator as an enum-typed literal
-  and a namespace constant as an external-name primary (#796). With these,
-  libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+  signature (#209). In a body that arithmetic works.
 
 ## Functional conversions with pack expansions (#915)
 

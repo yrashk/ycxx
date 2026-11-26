@@ -10709,6 +10709,23 @@ public:
       return {NodeId::none, begin, end};
     }
     if (deferred_enum_layout(element)) return dependent_node({}, begin, end, st);
+    if (compatibility() == ast::Compatibility::clang && types().is_class(element)) {
+      const ClassRec* record = class_rec(types().class_of(element));
+      if (record && record->clang_weak_alignment) {
+        u64 reported = record->clang_weak_alignment;
+        if (!align) {
+          for (TypeRec array = types().rec(t); array.kind == TypeKind::array; array = types().rec(array.inner)) {
+            if (array.bound_value == ConstId::none ||
+                (array.bound && reported > std::numeric_limits<u64>::max() / array.bound)) {
+              diag(begin, Diag::sizeof_incomplete, t);
+              return {NodeId::none, begin, end};
+            }
+            reported *= array.bound;
+          }
+        }
+        return literal(st, w_->values.integer(st, reported), ValueCategory::prvalue, begin, end);
+      }
+    }
     if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
@@ -10918,6 +10935,7 @@ public:
   }
   // Also used on a class about to be published, before its own alignment has been applied.
   std::optional<ast::RecordLayout> record_layout(const ClassRec& c, EntityId ce) {
+    if (c.clang_weak_alignment) return std::nullopt;
     if (c.virtual_layout_unsupported && c.peer_virtual_layout == PeerVirtualLayout::none &&
         c.peer_automatic_primary_base == EntityId::none) return std::nullopt;
     std::vector<ast::Placed> bases, places;

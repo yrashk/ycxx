@@ -10647,6 +10647,8 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
     }
   }
   if (alignment.value > alignment.natural) record.explicit_alignment = alignment.value;
+  else if (prior_zero && alignment.value && alignment.value < alignment.natural)
+    record.clang_weak_alignment = alignment.value;
 }
 
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
@@ -12291,41 +12293,45 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       return !types.is_reference(t) && classes_.move_nontrivial(t);
     });
   }
-  // The Darwin Clang layout rule uses a trivial class ([class.prop]/2: its
-  // default constructor, copy and move operations and destructor trivial), and standard-layout
-  // (/3: one access for all its data members, no reference members, and its data members all
-  // in one class of the hierarchy), whose members and bases are too.
+  // Itanium C++ ABI §1.1, §2.4: these properties decide whether a derived class can reuse padding.
   auto pod_type = [&](QualType t) {
     while (types.is_array(t)) t = types.rec(t).inner;
     if (types.is_reference(t)) return false;
     const sema::ClassRec* m = types.is_class(t) ? classes_.find(types.class_of(t)) : nullptr;
     return !m || m->pod;
   };
-  // [dcl.fct.def.default]/5: a first-declaration defaulted or deleted assignment is not
-  // user-provided. Its fields still have to satisfy the layout predicate below.
-  const bool user_provided_assignment = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
-    return m.is_function && !m.is_static && !m.explicit_defaulted_assignment && !m.is_deleted &&
-           w_->ins.names.spelling(m.name) == "operator=";
+  // [dcl.fct.def.default]/5: defaulting a special member on a later declaration is user-provided.
+  const auto first_defaulted = [&](const sema::MemberDeclRec& member) {
+    const auto decl = member_decl(member.entity);
+    const auto first = decl ? decl_sema(*decl) : std::nullopt;
+    return first && defaulted_member_definition(index(decl->item), *first);
+  };
+  const bool user_provided_member = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& member) {
+    return (member.is_ctor || member.is_dtor || assignment_parameter(member, ct)) &&
+           !member.is_deleted && !first_defaulted(member);
   });
-  bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
-                      return rec.access_of(a.entity) != rec.access_of(b.entity);
-                    }) == rec.fields.end();
-  bool data_in_bases = std::ranges::any_of(rec.bases, [&](const sema::BaseRec& b) {
-    const sema::ClassRec* r = classes_.find(b.cls);
-    return r && (!r->fields.empty() || !r->pod);
-  });
-  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && rec.destructor_usable &&
-            rec.destructor == EntityId::none &&
-            !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_provided_assignment &&
-            std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
-            std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
-            std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
-            (rec.fields.empty() || !data_in_bases);
-  // The Itanium default uses the C++03 aggregate rule for this layout decision.
-  if (compatibility_ != ast::Compatibility::clang || w_->target.operating_system != ast::OperatingSystem::darwin)
-    rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
-      return rec.access_of(f.entity) == ast::Access::public_;
+  rec.pod = !rec.layout_requires_virtual_support && !user_provided_member &&
+            std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&
+            std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); });
+  if (compatibility_ == ast::Compatibility::clang && w_->target.operating_system == ast::OperatingSystem::darwin) {
+    // Darwin Clang also requires a default constructor and a standard-layout field arrangement.
+    const bool default_constructor = !rec.user_ctors || std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
+      return m.is_ctor && types.rec(m.type).params.empty() && (m.is_deleted || first_defaulted(m));
     });
+    const bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
+      return rec.access_of(a.entity) != rec.access_of(b.entity);
+    }) == rec.fields.end();
+    rec.pod = rec.pod && default_constructor && one_access && std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) {
+      const auto* base = classes_.find(b.cls);
+      return !base || (base->pod && (rec.fields.empty() || base->fields.empty()));
+    });
+  } else {
+    // The Itanium rule uses the C++03 aggregate layout, with an exception for overlapping fields.
+    rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
+      return rec.access_of(f.entity) == ast::Access::public_ &&
+             (compatibility_ == ast::Compatibility::clang || !f.no_unique_address);
+    });
+  }
   if (!user_copy_assignment || defaulted_assignment)
     declare_copy_assignment(item, cls, rec, !user_copy_assignment, deletes_implicit_copy);
   return implicit_move;

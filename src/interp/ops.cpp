@@ -208,6 +208,7 @@ struct Ops {
     const auto at = M::signed_offset(ast::wide::add(bits_of(index), bits_of(by)));
     if (!at || !std::in_range<i64>(bound)) return m.fail(Reason::pointer_bounds);
     const i64 limit = i64(bound);
+    if (p.gcc_nested_end && *at < limit) return m.fail(Reason::pointer_bounds);
     const bool displaced = *at < 0 || *at > limit;
     if (displaced && (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc))
       return m.fail(Reason::pointer_bounds);
@@ -215,6 +216,7 @@ struct Ops {
     // valid element, so store the displacement separately from the path to that array.
     const i64 anchor = single && displaced ? 0 : std::clamp(*at, i64{0}, limit);
     Value r{VKind::object, false, p.ref, 0};
+    r.gcc_nested_end = p.gcc_nested_end;
     if (single) {
       r.bits = base;
       r.past = anchor == 1;
@@ -300,6 +302,11 @@ struct Ops {
               const i64 offset = m.offset_of(p);
               if (offset >= 0 && u64(offset) < m.complete_size(object)) {
                 if (Flow fl = m.address(p.ref, to, offset, p); fl != Flow::next) return fl;
+              } else if (offset >= 0 && u64(offset) == m.complete_size(object) &&
+                         p.bits != 0 && m.paths_[u32(p.bits)].parent != 0) {
+                // The terminal position has no following row. Preserve the equal byte address
+                // and row distance, but reject going back into the preceding row.
+                p.gcc_nested_end = true;
               }
             }
           }

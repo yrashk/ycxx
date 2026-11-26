@@ -96,8 +96,20 @@ prior = "Used the modern trivial and standard-layout approximation on both targe
 spec = "Use the ABI's C++03 POD rule for supported record layouts. An all-private or all-protected data layout allows reuse of base tail padding."
 gcc = "Same as spec."
 clang = "Use the C++03 rule on x86-64 Linux and the modern rule on arm64 Darwin. The private-base probe reserves the padding on Darwin."
-limits = "The POD computation covers supported class shapes and approximates some special-member cases, including in-class defaulting."
+limits = "The layout test accounts for user-provided special members and distinguishes first-declaration defaulting or deletion from user-provided bodies. Defaulted members whose definitions ycxx cannot yet analyze and class hierarchies beyond the supported record layout remain outside this coverage. See class-tail-padding-overlapping-member for the separate attribute case."
 evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cpp"]
+
+[[divergence]]
+id = "class-tail-padding-overlapping-member"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "Itanium C++ ABI §1.1, §2.4, [intro.object]"
+prior = "Treat a record with an ordinary no_unique_address field as POD for base layout."
+spec = "Allow reuse of base tail padding when an otherwise POD base has a potentially overlapping field."
+gcc = "Same as spec."
+clang = "Reserve the base's tail padding for the ordinary field tested on both x86-64 Linux and AArch64 Darwin."
+probe = 'struct B { int n; [[no_unique_address]] char c; }; struct D : B { char more; };'
+evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "dependent-variable-template-symbol"
@@ -173,8 +185,35 @@ prior = "Clang's __invoke spelling for the static function-pointer conversion ta
 spec = "Use ycxx's established __invoke spelling."
 gcc = "Use _FUN for the static invoker."
 clang = "Same as spec."
-limits = "This controls the invoker's name. Other lambda numbering and explicit-template-head ABI details retain the existing encoding."
+limits = "This controls the invoker's name inside the closure symbol. Translation-unit-local closure numbering and generic invoker signatures have separate entries."
 evidence = ["tests/own/lambda/p2-impl-mangle.run.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "translation-unit-local-closure-symbol"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
+reference = "[basic.def.odr], Itanium C++ ABI §5.1.8–9"
+prior = "Use the structural Ul encoding and a per-signature closure ordinal, including for translation-unit-local functions."
+spec = "Use ycxx's structural encoding. The ABI leaves private closure names implementation-defined."
+gcc = "Same as prior."
+clang = "Same as prior."
+gcc_observed = "In the tested ordinary and static non-inline functions, uses Ul with a signature-specific ordinal. An unused earlier same-signature closure can increment the ordinal."
+clang_observed = "Uses a private $<underscore><ordinal> source-name in the tested ordinary and static non-inline functions. An unused closure does not consume an ordinal in the test and converting the long lambda before either int lambda gives the long lambda ordinal zero. Externally linkable inline and template scopes keep Ul and a per-signature ordinal."
+evidence = ["GCC 16.2 and Clang 23.1.6 primary ELF and Mach-O symbols for inline, templated, static and ordinary functions with mixed lambda signatures"]
+
+[[divergence]]
+id = "generic-lambda-invoker-signature"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.8"
+prior = "Emit the same generic invoker signature in every mode, with a different member name in GCC mode."
+spec = "Same as prior. The ABI specifies a closure encoding and leaves the conversion target implementation-defined."
+gcc = "Same as prior except for the _FUN member name."
+clang = "Same as prior."
+gcc_observed = "Encodes the generic invoker's return as a dependent call through a null closure pointer, retaining the explicit template head on externally linkable closures."
+clang_observed = "Uses Da for the deduced return and an ordinary mangled parameter type or substitution. Externally linkable closures encode the explicit template head and distinguish it from an invented auto parameter."
+probe = 'inline int (*provider())(int) { return []<class T>(T n) { return n; }; }'
+evidence = ["GCC 16.2 and Clang 23.1.6 static invoker symbols from generic lambdas on ELF and Mach-O"]
 
 [[divergence]]
 id = "constexpr-memory-builtin-range"
@@ -252,18 +291,42 @@ clang = "Same as spec."
 evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 probes on Linux x86-64 and Darwin arm64"]
 
 [[divergence]]
+id = "constexpr-memory-flat-record-representations"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [basic.types], [cstring.syn]"
+prior = "Reject constexpr byte reads through complete record objects."
+spec = "Keep the built-in wrappers' narrow-character byte model."
+gcc = "Reads namespace-scope constexpr flat records, including arrays of records and record fields that are scalar arrays. Reads interior and tail padding as zero. Reports a match address relative to the whole record. Rejects automatic record storage and reads starting at an interior offset returned by memchr."
+clang = "Same as spec."
+probe = 'struct S { char a; int b; }; constexpr S x{3, 5}; static_assert(__builtin_memchr(&x, 0, sizeof x) != nullptr);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constant evaluation of padded records, arrays, local storage and interior byte pointers"]
+
+[[divergence]]
+id = "constexpr-memory-null-pointer-representation"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [basic.types], [cstring.syn]"
+prior = "Reject constexpr byte reads of pointer objects."
+spec = "Keep the built-in wrappers' narrow-character byte model."
+gcc = "Reads zero bytes for namespace-scope constexpr ordinary null pointers and nullptr_t objects, including arrays. Rejects the tested automatic storage and non-null pointer representations."
+clang = "Same as spec."
+probe = 'constexpr int* a = nullptr; static_assert(__builtin_memchr(&a, 0, sizeof a) == &a);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constant evaluation of null, non-null, global and local pointer objects"]
+
+[[divergence]]
 id = "constexpr-memory-extended-representations"
 status = "recorded"
 mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
 reference = "[expr.const], [basic.types], [cstring.syn]"
-prior = "Reject constexpr byte reads through the tested x87 long double, complete class, and pointer objects."
+prior = "Reject constexpr byte reads through the tested x87 long double, nested record, and active union objects."
 spec = "Same as prior for the built-in wrappers."
 gcc = "Same as prior."
 clang = "Same as spec."
-gcc_observed = "GCC 16.2 accepts the tested x87 long double, records with and without padding, a union with a scalar active member, and two null pointer objects in memcmp and memchr."
+gcc_observed = "GCC 16.2 accepts the tested x87 long double, records containing other records, and a union with a scalar active member."
 clang_observed = "Upstream Clang rejects the corresponding typed byte reads on Linux x86-64 and Darwin arm64."
-limits = "Remaining GCC cases need representation for extended floats, object padding and active union variants, and pointer values."
-probe = 'struct S { char a; int b; }; constexpr S x{1, 2}, y{3, 2}; constexpr int n = __builtin_memcmp(&x, &y, sizeof(x));'
+limits = "Remaining GCC cases need representation for extended floats, nested record storage and active union variants. Flat record padding and null pointer representations have separate entries."
+probe = 'constexpr long double a = 1.0L, b = 2.0L; static_assert(__builtin_memcmp(&a, &b, sizeof a) > 0);'
 evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes"]
 
 [[divergence]]
@@ -387,7 +450,7 @@ prior = "Omit constraints from symbols, matching the Darwin Clang oracle recorde
 spec = "Use the current Itanium proposal for supported template-head and trailing Q constraints and the Tk prefix for a constrained parameter."
 gcc = "Use the current primary encoding. Qualified concept expressions use unqualified names and converted arguments. A bare boolean template-parameter constraint is omitted as in GCC 16.2."
 clang = "Use the Q and Tk encodings tested against upstream Clang 23.1.6, with qualified concept names and written arguments."
-limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, type-only requires-expressions, and the operator expressions recorded below. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. The GCC mode emits the primary symbols used by current GCC callers."
+limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, and the operator and requires-expression forms recorded below. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. GCC mode emits the primary symbols used by current GCC callers."
 evidence = ["docs/design/ast.md", "tests/own/templates/c6-overloads.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
@@ -404,17 +467,16 @@ evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constrained-requires-expression-local-parameter-symbol"
-status = "recorded"
-mode_status = { spec = "unverified", gcc = "pending", clang = "pending" }
-reference = "[expr.prim.req], [temp.constr.atomic], Itanium C++ ABI §5.1.5.9"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.prim.req], [temp.constr.atomic], Itanium C++ ABI §5.1.5.9 and https://github.com/itanium-cxx-abi/cxx-abi/issues/24#issuecomment-1494877324"
 prior = "Use an opaque constraint symbol for the tested simple, compound and nested requirements."
-spec = "Same as prior. The published ABI's function-parameter grammar does not assign a scope level to requires-expression local parameters."
-gcc = "Same as prior."
-clang = "Same as prior."
-gcc_observed = "Uses rQ for a nonempty parameter list and fp_ for its first local parameter in either clause placement. Uses X for simple and compound requirements, N for noexcept, R for a result constraint and Q for a nested requirement. An explicitly empty parameter list uses rq, as does an omitted list. In the tested nested requires-expression, uses fp_ for the enclosing parameter and fL18446744073709551614p_ for the innermost one."
-clang_observed = "Uses fL0p_ for the first local parameter in a template-head constraint and fp_ in a trailing constraint on both targets. Encodes an explicitly empty list with rQv_. The tested nested requires-expression encodes both its enclosing and innermost local parameter references as fL0p_. The tested X, N, R and Q requirement markers match the GCC primary symbols."
+spec = "Use the proposed rq and rQ encodings. An explicit empty list uses rQv_. A local parameter uses the nesting level of its declaration relative to the expression, including its top-level cv qualifiers. Use X, N, R, T and Q for the tested requirement kinds."
+gcc = "Use rq for omitted and explicitly empty lists. At one requires-expression depth, use fp_ for the first local parameter in either clause placement and omit top-level cv from the reference. Nested parameter references follow GCC's current unsigned depth encoding. Complete a result concept's arguments with defaults and write a qualified concept's argument list after its nested name."
+clang = "Use fL0p_ for the first local parameter in a template-head constraint and fp_ in a trailing constraint at one requires-expression depth. Use the current requires-expression nesting depth for all active local parameter references. Encode an explicitly empty list with rQv_. Keep the written result concept arguments inside its nested name."
+limits = "Covers structural constraints whose requirement operands and types ycxx can encode. Requires-expressions outside constraint clauses remain outside this case."
 probe = 'template<class T> requires requires(T t) { t + t; } int f(T n) { return n; } int use() { return f(2); }'
-evidence = ["Black-box GCC 16.2 and Clang 23.1.6 symbol probes on Linux x86-64 and Darwin arm64"]
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 primary symbols and native mixed-object calls, plus Clang Darwin arm64 symbols"]
 
 [[divergence]]
 id = "amd64-narrow-scalar-extension"
@@ -499,17 +561,16 @@ evidence = ["tests/own/consteval/erased-array-row-end.reject.cpp", "tests/daemon
 
 [[divergence]]
 id = "constexpr-void-cast-nested-provenance"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [expr.add]"
 prior = "The cast at a nested array's one-past position was rejected before pointer arithmetic."
 spec = "Reject the cast."
-gcc = "Use the following row's start when the address is inside a complete nested array. Keep the old path at the end of the complete array."
+gcc = "Use the following row's start at an internal boundary. At the complete nested array's terminal address, preserve the final row's one-past address and pointer difference. Permit advancing or returning to that address, but reject forming an address before it by subtraction."
 clang = "Preserve the original array path after accepting the cast."
-gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array. At the end of the complete nested array the pointer compares equal to the last row's one-past pointer and can be advanced by one."
+gcc_observed = "Reading end[-1] is rejected at either nested row's end, but succeeds for a flat array or when casting the one-past pointer to a row type. At the terminal scalar address, forming end - 1 is rejected as well."
 clang_observed = "Preserves the prior row. Reading end[-1] succeeds, and dereferencing end is rejected."
-limits = "The complete-array terminal address compares correctly and can advance by one in GCC mode. Dereferencing after moving back from that terminal cast still needs GCC provenance."
-evidence = ["tests/daemon/compatibility.py"]
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 terminal nested-array compare, offset, subtraction, dereference and cast probes"]
 
 [[divergence]]
 id = "constexpr-out-of-bounds-pointer-formation"
@@ -710,17 +771,16 @@ evidence = ["tests/own/layout/class-head-alignas/class-repeated.accept.cpp", "te
 
 [[divergence]]
 id = "class-head-zero-forward-weaken"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.align]/4–6, Itanium C++ ABI §2.2"
 prior = "A weaker defining alignment is rejected."
 spec = "Reject a defining alignment below the natural alignment."
 gcc = "Accept the declaration and use the natural alignment."
-clang = "Accept the declaration and use the natural alignment."
-clang_observed = "After a zero-only forward alignment, accepts the weaker defining alignment. On x86-64 Linux and AArch64 Darwin it reports both sizeof and alignof as one for the probe. Evaluating offsetof for the long long member or emitting an object or a read of that member crashes the frontend."
-limits = "Clang mode matches declaration acceptance and keeps the natural class layout. The sizeof, alignof, and native object behavior still need a compatible policy for this case."
+clang = "Report the weaker written alignment for both sizeof and alignof. Array size and pointer difference use that size. Diagnose operations that need the unavailable object layout."
+clang_observed = "On both targets, accepts the weaker class declaration, reports the requested values 1, 2, or 4 as both size and alignment, and emits code that uses only the reported size or a pointer difference. Operations that need a physical layout trigger a frontend signal, including offsetof, the tested enclosing layout, and object emission. ycxx diagnoses these cases."
 probe = "struct alignas(0) X; struct alignas(1) X { long long value; }; static_assert(sizeof(X) == 1 && alignof(X) == 1);"
-evidence = ["tests/daemon/compatibility.py"]
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 probes with -fsyntax-only and -c on Linux x86-64 and Darwin arm64"]
 
 [[divergence]]
 id = "class-head-alignment-warnings"

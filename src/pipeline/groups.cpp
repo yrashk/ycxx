@@ -395,6 +395,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       if (record.destructor_noexcept.value_or(false)) shape.nonthrowing_destructor = record.destructor;
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
+      shape.clang_weak_alignment = record.clang_weak_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
       const auto call_rule = unit_source.config.calls();
       const bool gcc_differs = classes.trivial_for_calls(c, ast::CallTriviality::gcc) &&
