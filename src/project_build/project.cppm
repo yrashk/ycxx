@@ -911,12 +911,18 @@ std::optional<Fp128> manifest_stamp(const fs::path& cwd) {
   return fingerprint128(bytes);
 }
 
+struct DeferredHostPlanning {
+  RuleObservation observation;
+  std::size_t upstream_count;
+};
+
 struct PreparedProject {
   std::optional<Fp128> manifest;
   ProjectPlan plan;
   RuleSnapshot rules;
   std::optional<Fp128> attempt_watch;
   std::string_view native_triple;
+  std::map<std::string, DeferredHostPlanning> deferred_host_planning;
 };
 
 struct ProjectedRuleArguments {
@@ -1175,6 +1181,7 @@ std::expected<void, std::string> prepare_project(
     if (next) {
       demand = std::move(*next);
       next.reset();
+      prepared.deferred_host_planning.erase(demand.target);
     } else {
       std::optional<Fp128> definition;
       ProjectWatchState observed;
@@ -1261,11 +1268,12 @@ std::expected<void, std::string> prepare_project(
     };
     std::optional<std::string> staging_error;
     const auto staging_failure = [&](std::string diagnostic) {
-      if (!staging_error) return std::unexpected(std::move(diagnostic));
+      auto error = std::exchange(staging_error, std::nullopt);
+      if (!error) return std::unexpected(std::move(diagnostic));
       // A guard rejected admission because a producer actually failed. Do not
       // run the same failed action again as if its inputs were superseded.
       superseded = false;
-      return std::unexpected(std::move(*staging_error));
+      return std::unexpected(std::move(*error));
     };
     std::optional<HostProducerStage> planning_producers;
     std::optional<StagedProducers> planning_staged;
@@ -1335,6 +1343,10 @@ std::expected<void, std::string> prepare_project(
         if (planning_plan && !current_planning()) return staging_failure(changed_rule_inputs().error());
         if (upstream->target == demand.target || std::ranges::contains(deferred, upstream->target, &RuleDemand::target))
           return std::unexpected(std::format("witness dependency cycle at target '{}'", upstream->target));
+        if (planning_producers)
+          prepared.deferred_host_planning.insert_or_assign(demand.target, DeferredHostPlanning{
+              {demand, library_key, invocation_key, arguments->profiles, std::nullopt, planning_stamp,
+               std::nullopt, planning_producers->hosts->files}, prepared.rules.expansions.size()});
         deferred.push_back(std::move(demand));
         next = std::move(*upstream);
         continue;
@@ -1354,10 +1366,21 @@ std::expected<void, std::string> prepare_project(
         superseded = true;
         return std::unexpected(std::format("witness '{}' changed during classification", label));
       };
-      const auto stage_witness = [&] {
-        return witness_producers.stage(current_witness_recipe, [&](const auto& files) {
+      const auto coherent_host_files = [&] {
+        return !planning_producers || !witness_producers.hosts ||
+               agree_on_shared_host_files(*planning_producers->hosts, *witness_producers.hosts);
+      };
+      const auto stage_witness = [&]() -> std::expected<StagedProducers, std::string> {
+        auto staged = witness_producers.stage(current_witness_recipe, [&](const auto& files) {
           watch_hosts(prepared.rules.pending_host_files, files);
         }, changed_witness);
+        if (staged || superseded || !planning_producers) return staged;
+        // A worker's earlier expansion may select a generator that fails only
+        // under obsolete planning bytes. Recheck outside the producer guard.
+        if (!current_planning()) return staging_failure(changed_witness().error());
+        if (!current_witness_recipe() || !witness_producers.current() || !coherent_host_files())
+          return changed_witness();
+        return staged;
       };
       const auto staged_inputs = [&](const StagedProducers& staged) {
         auto inputs = plan.witness.inputs;
@@ -1374,9 +1397,7 @@ std::expected<void, std::string> prepare_project(
         for (;;) {
           if (planning_producers && !current_planning()) return false;
           if (!current_witness_recipe()) return false;
-          if (witness_producers.current())
-            return !planning_producers || !witness_producers.hosts ||
-                   agree_on_shared_host_files(*planning_producers->hosts, *witness_producers.hosts);
+          if (witness_producers.current()) return coherent_host_files();
           // Restage outside either producer guard. Recheck planning after a
           // witness producer ran so the classifier sees one coherent set of reads.
           auto staged = stage_witness();
@@ -1443,9 +1464,9 @@ std::expected<void, std::string> prepare_project(
 // publication must reobserve the filesystem even if the receipt keys are unchanged.
 using ObservedPackageStamps = std::map<std::pair<RulePackageRef::Kind, std::string>, std::optional<Fp128>>;
 
-bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record,
-                  const RuleExpansion& expansion, std::span<const RuleExpansion> upstream,
-                  ObservedPackageStamps& packages, ObservedHostFiles& files, std::string_view native_triple) {
+bool current_rule_inputs(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record,
+                         std::span<const RuleExpansion> upstream, ObservedPackageStamps& packages,
+                         ObservedHostFiles& files, std::string_view native_triple) {
   const auto& ref = record.demand.package;
   const auto [cached, inserted] = packages.try_emplace({ref.kind, ref.target});
   if (inserted)
@@ -1463,6 +1484,13 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
         record.planning_host_files.has_value() != planning_uses_hosts(*planning) ||
         (record.planning_host_files && !current_host_files(*record.planning_host_files, &files))) return false;
   }
+  return true;
+}
+
+bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record,
+                  const RuleExpansion& expansion, std::span<const RuleExpansion> upstream,
+                  ObservedPackageStamps& packages, ObservedHostFiles& files, std::string_view native_triple) {
+  if (!current_rule_inputs(cwd, toolchain, record, upstream, packages, files, native_triple)) return false;
   if (!record.witness) return true;
   const auto witness = plan_rule_witness(cwd, expansion, upstream, native_triple);
   const auto* recipe = witness ? std::get_if<RuleWitnessPlan>(&*witness) : nullptr;
@@ -1480,6 +1508,17 @@ bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const Pr
                       std::span(prepared.rules.expansions).first(i), packages, files, prepared.native_triple))
       return false;
   return true;
+}
+
+bool current_deferred_host_planning(const fs::path& cwd, const RuleToolchain& toolchain,
+                                    const PreparedProject& prepared) {
+  ObservedPackageStamps packages;
+  ObservedHostFiles files;
+  return std::ranges::all_of(prepared.deferred_host_planning, [&](const auto& entry) {
+    const auto& deferred = entry.second;
+    return current_rule_inputs(cwd, toolchain, deferred.observation,
+        std::span(prepared.rules.expansions).first(deferred.upstream_count), packages, files, prepared.native_triple);
+  });
 }
 
 std::optional<ProjectPlan> observe_project(
@@ -2131,6 +2170,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                                     use_compiler, resolve_arguments, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
     if (superseded || !current_rules(cwd, toolchain, planned)) continue;
+    // An upstream failure can belong to a witness demand whose planning inputs
+    // changed while the demand was deferred. Retry before reporting that failure.
+    if (!prepared && !current_deferred_host_planning(cwd, toolchain, planned)) continue;
     write_rule_snapshot(cwd, target, planned.rules, native_triple);
     if (watch) {
       report.watch_stamp =
