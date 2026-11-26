@@ -168,10 +168,15 @@ class Session {
     });
     db_.set_provider<pp::FileText>([this](pp::FileId f) {
       std::string path;
+      const std::optional<std::string>* overlay;
       {
         std::lock_guard lock(registry_m_);
-        path = absolute(unit_at(std::to_underlying(f)));
+        const UnitSpec& u = unit_at(std::to_underlying(f));
+        overlay = pp::host_overlay_content(u.config, u.cwd, u.path);
+        if (!overlay) path = absolute(u);
       }
+      // Registry entries retain their immutable overlays after releasing the lock.
+      if (overlay) return engine::provided<std::string>{overlay->value_or(std::string{}), engine::Durability::low};
       return engine::provided<std::string>{read_(path).value_or(std::string{}), engine::Durability::low};
     });
     db_.set_provider<TuSourceIn>([this](TuId tu) {
@@ -219,12 +224,13 @@ class Session {
   // A translation unit from a source file: `path` names it (and locates its `#include "..."`),
   // `object` is the object's name; relative paths are relative to `cwd`, and `config` is its
   // preprocessing configuration. The driver's file number is the unit's. Only a disk-view
-  // unit uses `text`. The editor and build views read the main file through their path inputs.
+  // unit outside its host overlay uses `text`. The editor and build views read their path inputs.
   void set_source(TuId tu, std::string path, std::string text, std::string object, std::string cwd = {},
                   pp::Config config = {}) {
     Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
     const pp::FileId file{tu.n};
     const bool disk = config.view == pp::View::disk;
+    if (const auto* overlay = pp::host_overlay_content(config, cwd, path)) text = overlay->value_or(std::string{});
     pp::name_file(file, std::filesystem::path(path).filename().native());
     db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
     if (disk) db_.set<pp::FileText>(file, std::move(text));
@@ -237,14 +243,15 @@ class Session {
 
   // The unit `u` names (#139): the same number for the same unit, in every request, so concurrent
   // requests never set each other's inputs and naming one needs no quiescence. Its inputs are
-  // provided from this registry, its main file's text by the session's reader.
+  // provided from this registry. Its main file's text comes from its overlay or the reader.
   TuId unit(UnitSpec u) {
     Bind bind(universe_);  // a configuration may hold handles, fingerprinted by their interners
     const Fp128 key = fingerprint(std::tuple{pp::Source{u.path, u.cwd, u.config}, u.object});
     std::lock_guard lock(registry_m_);
     auto [it, fresh] = unit_numbers_.try_emplace(key, registry_base + static_cast<std::uint32_t>(named_.size()));
     if (fresh) {
-      if (u.config.view == pp::View::disk) by_path_[absolute(u)].push_back(it->second);
+      if (u.config.view == pp::View::disk && !pp::host_overlay_content(u.config, u.cwd, u.path))
+        by_path_[absolute(u)].push_back(it->second);
       pp::name_file(pp::FileId{it->second}, std::filesystem::path(u.path).filename().native());
       named_.push_back(std::move(u));
     }
@@ -284,8 +291,8 @@ class Session {
     }
     return RequestId{it->second};
   }
-  // How registered units' main files are read: from the disk unless the owner says otherwise
-  // (the daemon's file table). Set before any unit is named.
+  // How disk-backed main files are read: the disk or the owner's file table.
+  // Set before any unit is named.
   void set_reader(std::function<std::optional<std::string>(const std::string&)> read) { read_ = std::move(read); }
   // The file at `absolute` changed: the main-file text of every registered unit of it. At
   // quiescence (inside `apply`); whether any input changed.
@@ -425,7 +432,7 @@ class Session {
   std::mutex registry_m_;
   std::deque<UnitSpec> named_;  // by number - registry_base
   std::map<Fp128, std::uint32_t> unit_numbers_;
-  std::map<std::string, std::vector<std::uint32_t>> by_path_;  // disk-view units by main file
+  std::map<std::string, std::vector<std::uint32_t>> by_path_;  // disk-backed units by main file
   std::deque<ProgramInputs> programs_;
   std::map<Fp128, std::uint32_t> program_numbers_;
   std::deque<BuildKey> requests_;
