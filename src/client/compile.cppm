@@ -175,6 +175,7 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
 class WarningOptions {
  public:
   void select(WarningSelection selection) { flags_[std::to_underlying(selection.flag)] = selection.enabled; }
+  void compatibility(ast::Compatibility mode) { multichar_in_all_ = mode != ast::Compatibility::gcc; }
 
   bool emits(bool error, lex::Warning warning) const {
     if (error) return true;
@@ -183,7 +184,7 @@ class WarningOptions {
     switch (warning) {
       case lex::Warning::uncontrolled: return true;
       case lex::Warning::multichar:
-        return selected(WarningFlag::multichar).value_or(selected(WarningFlag::all).value_or(true));
+        return selected(WarningFlag::multichar).value_or(!multichar_in_all_ || selected(WarningFlag::all).value_or(true));
       case lex::Warning::attributes: return selected(WarningFlag::attributes).value_or(true);
       case lex::Warning::sized_deallocation:
         return selected(WarningFlag::sized_deallocation).value_or(selected(WarningFlag::extra).value_or(false));
@@ -193,6 +194,7 @@ class WarningOptions {
 
  private:
   std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> flags_{};
+  bool multichar_in_all_ = true;
 };
 
 // What the c++-compatible command line asks for.
@@ -323,6 +325,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (is_source(a)) add_operand(Kind::source, o.sources, a);
     else other_inputs.push_back(a);
   }
+  o.warnings.compatibility(o.pp.compatibility);
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
   if (o.query != Options::Query::none) return o;
@@ -786,7 +789,8 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     } else if (args[i] == "-o" || args[i] == "--dynamic-linker") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
-               args[i].starts_with("-fclass-call-abi=") || warning_option(args[i]) ||
+               args[i].starts_with("-fclass-call-abi=") || args[i].starts_with("-fcompat=") || args[i] == "-fcompat" ||
+               warning_option(args[i]) ||
                args[i] == "-fcheck-policies") {
       out.emplace_back(args[i]);
     }

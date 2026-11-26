@@ -1,18 +1,20 @@
 # Presumed lines and function defaults
 
 The zero-argument GNU builtin `__builtin_LINE()` returns an `unsigned int`
-constant. A direct call uses its presumed source line ([cpp.line]). An
-omitted ordinary function argument evaluates the default with the invocation's
+constant in spec and Clang modes and an `int` constant in GCC mode. A direct
+call uses its presumed source line ([cpp.line]). An omitted ordinary function
+argument evaluates the default with the invocation's
 line ([dcl.fct.default], [expr.call]). Nested omitted arguments inherit that
 line while the default is evaluated. A function body invoked from a default
 has its own lexical source context.
 
-The profile follows Clang's type and line choice. GCC 16.2 and Clang 23.1
-agree on the pinned assertion helper's ordinary default use. They differ on
-multiline calls and macros. For a written call, Clang uses the callee's
-starting line. A call through a written `.` or `->` uses the member name's
-line. For tokens expanded by a function-like macro, it uses the closing
-line of the invocation.
+GCC 16.2 and Clang 23.1 agree on the pinned assertion helper's ordinary
+default use. For multiline calls, Clang uses the callee's starting line or
+the name after a written `.` or `->`. It uses the closing line of a
+function-like macro invocation for expanded tokens. GCC uses the opening
+parenthesis for ordinary calls and the macro's opening site for expanded
+tokens. The default uses the Clang convention for this builtin and for the
+implementation-defined position of `source_location::current()`.
 [#327](https://github.com/yrashk/ycxx/issues/327)
 
 The flattened preprocessing result preserves each occurrence's `#line`
