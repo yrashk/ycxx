@@ -780,9 +780,10 @@ without demanding reflection.
 The classifier exports the declared schema and a bounded table of named rows
 with named fields. Fields are unsigned 32-bit integers or strings. The worker
 rejects duplicate names and canonicalizes row and field order. The shader
-package defines `shader.descriptors.v1` and emits one row per uniform buffer
-with its descriptor set and binding. Its bindings rule reads the typed table
-and generates C++ constants from it. The existing support-state ABI and
+package defines `shader.descriptors.v2` and emits one row per uniform buffer or
+one-dimensional literal `sampler2D` array, with its descriptor set, binding,
+kind, and element count. Its bindings rule generates `constexpr` C++ values,
+including an enum for descriptor kind. The existing support-state ABI and
 `capabilities` bindings continue to use the same export address.
 
 An implementation edit can change the SPIR-V bytes and the witness receipt

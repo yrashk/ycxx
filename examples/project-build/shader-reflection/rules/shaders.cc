@@ -2,7 +2,7 @@
 
 namespace {
 
-constexpr char schema[] = "shader.descriptors.v1";
+constexpr char schema[] = "shader.descriptors.v2";
 constexpr size_t max_rows = 16;
 constexpr size_t max_name = 63;
 
@@ -21,7 +21,7 @@ bool letter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 bool identifier(Text name) {
   if (name.size == 0 || name.size > max_name || !letter(name.data[0]) ||
       name.data[name.size - 1] == '_') return false;
-  // The generated C++ name uses an underscore before and after the block name.
+  // The generated C++ name uses an underscore before and after the descriptor name.
   for (size_t i = 1; i < name.size; ++i) {
     const char c = name.data[i];
     if (!letter(c) && !digit(c) && (c != '_' || name.data[i - 1] == '_')) return false;
@@ -29,17 +29,26 @@ bool identifier(Text name) {
   return true;
 }
 
+enum class DescriptorKind : uint32_t { uniform_buffer = 1, combined_sampler = 2 };
+
 struct Descriptor {
   Text name;
   uint32_t set;
   uint32_t binding;
+  uint32_t element_count;
+  DescriptorKind kind;
 };
 
-bool descriptor(Json& json, Descriptor& result) {
+bool descriptor(Json& json, DescriptorKind kind, Descriptor& result) {
   if (!take(json, '{')) return false;
+  result.kind = kind;
+  const bool sampler = kind == DescriptorKind::combined_sampler;
+  result.element_count = sampler ? 0u : 1u;
   bool has_name = false;
   bool has_set = false;
   bool has_binding = false;
+  bool has_type = false;
+  bool has_literal_size = false;
   do {
     Text key{};
     if (!string(json, key) || !take(json, ':')) return false;
@@ -52,29 +61,46 @@ bool descriptor(Json& json, Descriptor& result) {
     } else if (equal(key, "binding")) {
       if (has_binding || !u32(json, result.binding)) return false;
       has_binding = true;
+    } else if (sampler && equal(key, "type")) {
+      Text type{};
+      if (has_type || !string(json, type) || !equal(type, "sampler2D")) return false;
+      has_type = true;
+    } else if (sampler && equal(key, "array")) {
+      if (result.element_count != 0 || !take(json, '[') || !u32(json, result.element_count) ||
+          result.element_count == 0 || !take(json, ']')) return false;
+    } else if (sampler && equal(key, "array_size_is_literal")) {
+      if (has_literal_size || !take(json, '[')) return false;
+      space(json);
+      if (!literal(json, "true") || !take(json, ']')) return false;
+      has_literal_size = true;
     } else if (!skip(json)) {
       return false;
     }
   } while (take(json, ','));
-  return has_name && has_set && has_binding && take(json, '}');
+  return has_name && has_set && has_binding && take(json, '}') &&
+         (!sampler || (has_type && has_literal_size && result.element_count != 0));
 }
 
-bool descriptors(Json& json, Descriptor (&uniforms)[max_rows], size_t& count) {
+bool descriptors(Json& json, Descriptor (&entries)[max_rows], size_t& count) {
   if (!take(json, '{')) return false;
   if (take(json, '}')) return done(json);
   bool has_ubos = false;
+  bool has_textures = false;
   do {
     Text key{};
     if (!string(json, key) || !take(json, ':')) return false;
-    if (!equal(key, "ubos")) {
+    const bool uniform = equal(key, "ubos");
+    if (!uniform && !equal(key, "textures")) {
       if (!skip(json)) return false;
       continue;
     }
-    if (has_ubos || !take(json, '[')) return false;
-    has_ubos = true;
+    bool& seen = uniform ? has_ubos : has_textures;
+    if (seen || !take(json, '[')) return false;
+    seen = true;
+    const auto kind = uniform ? DescriptorKind::uniform_buffer : DescriptorKind::combined_sampler;
     if (take(json, ']')) continue;
     do {
-      if (count == max_rows || !descriptor(json, uniforms[count])) return false;
+      if (count == max_rows || !descriptor(json, kind, entries[count])) return false;
       ++count;
     } while (take(json, ','));
     if (!take(json, ']')) return false;
@@ -210,14 +236,24 @@ bool reflect(const ycxx_rule_host_v1* host, Writer& definition) {
   return true;
 }
 
-void constant(Writer& header, Text name, const ycxx_rule_fact_field_v1& field) {
-  append(header, "inline constexpr unsigned descriptor_");
+void constant_name(Writer& header, Text name, const char* type, const char* field) {
+  append(header, "inline constexpr ");
+  append(header, type);
+  append(header, " descriptor_");
   append(header, name);
   append(header, '_');
-  append(header, field.name);
+  append(header, field);
   append(header, " = ");
+}
+
+void constant(Writer& header, Text name, const ycxx_rule_fact_field_v1& field) {
+  constant_name(header, name, "unsigned", field.name);
   number(header, field.number);
   append(header, "u;\n");
+}
+
+bool u32_field(const ycxx_rule_fact_field_v1& field, const char* name) {
+  return field.kind == YCXX_RULE_FACT_U32_V1 && equal(text(field.name), name);
 }
 
 bool bindings(const ycxx_rule_host_v1* host, Writer& definition) {
@@ -226,19 +262,30 @@ bool bindings(const ycxx_rule_host_v1* host, Writer& definition) {
   if (!equal(text(layout.name), "layout") || !equal(text(layout.schema), schema) ||
       layout.row_count > max_rows) return false;
 
-  char header_bytes[4096];
+  // Four constants per row can exceed 8 KiB with maximum-length names and u32 values.
+  char header_bytes[12 * 1024];
   Writer header{header_bytes, sizeof(header_bytes)};
-  append(header, "#pragma once\n\nnamespace scene {\n");
+  append(header, "#pragma once\n\nnamespace scene {\n"
+                 "enum class descriptor_kind : unsigned { uniform_buffer = 1, combined_sampler = 2 };\n");
   for (size_t i = 0; i < layout.row_count; ++i) {
     const auto& row = layout.rows[i];
     const auto name = text(row.name);
-    if (!identifier(name) || row.field_count != 2) return false;
+    if (!identifier(name) || row.field_count != 4) return false;
     const auto& binding = row.fields[0];
-    const auto& set = row.fields[1];
-    if (!equal(text(binding.name), "binding") || binding.kind != YCXX_RULE_FACT_U32_V1 ||
-        !equal(text(set.name), "set") || set.kind != YCXX_RULE_FACT_U32_V1) return false;
+    const auto& count = row.fields[1];
+    const auto& kind = row.fields[2];
+    const auto& set = row.fields[3];
+    if (!u32_field(binding, "binding") || !u32_field(count, "element_count") ||
+        !u32_field(kind, "kind") || !u32_field(set, "set")) return false;
+    const auto category = static_cast<DescriptorKind>(kind.number);
+    const bool uniform = category == DescriptorKind::uniform_buffer;
+    if (!uniform && category != DescriptorKind::combined_sampler) return false;
+    if (count.number == 0 || (uniform && count.number != 1)) return false;
     constant(header, name, set);
     constant(header, name, binding);
+    constant(header, name, count);
+    constant_name(header, name, "descriptor_kind", kind.name);
+    append(header, uniform ? "descriptor_kind::uniform_buffer;\n" : "descriptor_kind::combined_sampler;\n");
   }
   append(header, "}  // namespace scene\n");
   if (!header.valid) return false;
@@ -259,7 +306,7 @@ bool bindings(const ycxx_rule_host_v1* host, Writer& definition) {
 extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
   if (!valid_host(host) || !host->rule || !host->target || !host->attribute || !host->emit) return 1;
 
-  char definition_bytes[8192];
+  char definition_bytes[16384];
   Writer definition{definition_bytes, sizeof(definition_bytes)};
   const auto rule = text(host->rule);
   if (equal(rule, "module")) {
@@ -273,7 +320,7 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
       return reject(host, "expected a module target and an absolute reflector path");
   } else if (equal(rule, "bindings")) {
     if (!bindings(host, definition))
-      return reject(host, "expected the layout fact with shader.descriptors.v1 set and binding fields");
+      return reject(host, "expected the shader.descriptors.v2 layout with set, binding, kind, and element_count");
   } else {
     return reject(host, "expected module, pack, reflect, or bindings rule");
   }
@@ -290,21 +337,24 @@ extern "C" int ycxx_rule_classify_v1(const ycxx_rule_host_v1* host) {
   if (witness.exit_status != 0) return reject(host, "spirv-cross failed to reflect the module");
 
   Json json{witness.out};
-  Descriptor uniforms[max_rows];
+  Descriptor entries[max_rows];
   size_t count = 0;
-  if (!descriptors(json, uniforms, count))
-    return reject(host, "expected spirv-cross JSON with up to 16 uniform blocks, portable names, and u32 set and binding fields");
+  if (!descriptors(json, entries, count))
+    return reject(host, "expected spirv-cross JSON with up to 16 uniform blocks or literal sampler2D arrays"
+                        " with portable names and u32 set and binding fields");
 
   char names[max_rows][max_name + 1];
-  ycxx_rule_fact_field_v1 fields[max_rows][2];
+  ycxx_rule_fact_field_v1 fields[max_rows][4];
   ycxx_rule_fact_row_v1 rows[max_rows];
   for (size_t i = 0; i < count; ++i) {
-    const auto& uniform = uniforms[i];
-    for (size_t j = 0; j < uniform.name.size; ++j) names[i][j] = uniform.name.data[j];
-    names[i][uniform.name.size] = '\0';
-    fields[i][0] = {"set", YCXX_RULE_FACT_U32_V1, uniform.set, {}};
-    fields[i][1] = {"binding", YCXX_RULE_FACT_U32_V1, uniform.binding, {}};
-    rows[i] = {names[i], fields[i], 2};
+    const auto& entry = entries[i];
+    for (size_t j = 0; j < entry.name.size; ++j) names[i][j] = entry.name.data[j];
+    names[i][entry.name.size] = '\0';
+    fields[i][0] = {"binding", YCXX_RULE_FACT_U32_V1, entry.binding, {}};
+    fields[i][1] = {"element_count", YCXX_RULE_FACT_U32_V1, entry.element_count, {}};
+    fields[i][2] = {"kind", YCXX_RULE_FACT_U32_V1, static_cast<uint32_t>(entry.kind), {}};
+    fields[i][3] = {"set", YCXX_RULE_FACT_U32_V1, entry.set, {}};
+    rows[i] = {names[i], fields[i], 4};
   }
   const ycxx_rule_fact_v1 layout{witness.name, schema, rows, count};
   return host->export_fact(host->context, &layout);
