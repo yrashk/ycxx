@@ -339,7 +339,8 @@ private:
   Flow read_byte(const Bytes& b, u64 i, u8& out);
   Value byte_pointer(const Bytes& b, u64 i);
   Flow find_byte(const Value& s, const Value& c, u64 n, Value& out);
-  Flow compare_bytes(const Value& a, const Value& b, u64 n, Value& out);
+  bool is_initialized_global_row_start(const Value& p);
+  Flow compare_bytes(const Value& a, const Value& b, u64 n, bool distinct_row_operands, Value& out);
 
   // ------------------------------------------------------------ execution
 
@@ -1501,13 +1502,35 @@ Machine::Flow Machine::find_byte(const Value& s, const Value& c, u64 n, Value& o
   return Flow::next;
 }
 
+bool Machine::is_initialized_global_row_start(const Value& p) {
+  if (p.kind != VKind::object || p.past || p.bits == 0) return false;
+  const auto& element = paths_[u32(p.bits)];
+  if (element.step != PathStep{ir::Step::elem, 0} || element.parent == 0) return false;
+  const auto& row = paths_[element.parent];
+  if (row.step.step != ir::Step::elem || row.parent != 0) return false;
+
+  const auto& object = objects_[p.ref];
+  if (object.origin != Origin::global || !object.usable) return false;
+  const auto global = global_info_.find(std::to_underlying(object.entity));
+  if (global == global_info_.end() || !global->second || !global->second->value) return false;
+  const Shape array_type = shape(object.type);
+  if (array_type.kind != Kind::array || row.step.index >= array_type.bound) return false;
+  const Shape row_type = shape(array_type.inner);
+  if (row_type.kind != Kind::array || row_type.bound == 0) return false;
+  using enum ast::Builtin;
+  const auto type = ast::builtin_of(*in_, row_type.inner);
+  return type && (*type == char_ || *type == signed_char || *type == unsigned_char || *type == char8_t_);
+}
+
 // C's memcmp: both objects must hold the n bytes, which C's memcmp may read in any order. The
 // result is the sign of the first difference.
-Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Value& out) {
+Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, bool distinct_row_operands, Value& out) {
   out = Value::integer(0);
   const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
-  // GCC folds identical addresses before requiring either range to be readable.
-  if (n == 0 || (read_full_range && (a.kind == VKind::object || a.kind == VKind::null) && a == b))
+  // GCC checks the row bounds in a direct comparison of a written array decay with a loaded
+  // pointer, even when resolving the pointers produces the same path. Identical operands still fold.
+  if (n == 0 || (read_full_range && (a.kind == VKind::object || a.kind == VKind::null) && a == b &&
+                 !(distinct_row_operands && is_initialized_global_row_start(a))))
     return Flow::next;
   Bytes left, right;
   if (Flow f = bytes_at(a, left, read_full_range); f != Flow::next) return f;

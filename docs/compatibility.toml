@@ -184,18 +184,18 @@ evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constexpr-memcmp-equal-address-distinct-paths"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
-reference = "[expr.const], [basic.compound]"
-prior = "Apply the byte-access checks to an equal address reached through different subobject paths."
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+reference = "[expr.const], [basic.compound], #1484"
+prior = "Apply byte-access checks to equal addresses with different subobject paths. A next-row cast can make the paths identical and incorrectly skip the check."
 spec = "Reject the tested invalid reads. A count of zero needs no reads."
-gcc = "Same as prior."
+gcc = "In a directly evaluated constant expression, check memcmp bounds when a named array's written row decay and a loaded pointer denote the same first element of an initialized two-dimensional global character array. This includes a pointer rebound from the previous row's one-past position."
 clang = "Same as spec."
 gcc_observed = "For the equal addresses at the end of one char row and the beginning of the next, accepts comparison counts of one and two in either argument order and rejects counts three through five. Comparing the address of a row or a flat array to its first element also folds at the larger counts. Comparing the address of the complete nested array to its first row folds only for one and two bytes in the probe."
 clang_observed = "Rejects the tested positive counts and accepts zero on Linux x86-64 and Darwin arm64."
-limits = "An equal byte offset alone is insufficient to decide which GCC fold and bounds check apply."
-probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; static_assert(__builtin_memcmp(a[0] + 2, a[1], 2) == 0);'
-evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
+limits = "Equal byte offsets alone do not decide the GCC fold. The direct-call check also recognizes transparent pointer casts and literal zero offsets. Ordinary function bodies, forwarded pointers, and comparisons without the next-row cast remain partial."
+probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; constexpr const char* row = static_cast<const char*>(static_cast<const void*>(a[0] + 2)); static_assert(__builtin_memcmp(row, a[1], 2) == 0);'
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
 
 [[divergence]]
 id = "constexpr-memory-integer-object"
