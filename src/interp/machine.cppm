@@ -346,6 +346,7 @@ private:
     return Flow::next;
   }
   Flow jump(Frame& f, NodeId n, u32 succ);
+  Flow bind_parameter(Frame& f, ir::ValueId parameter, const Value& value);
   Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args,
              std::optional<Value> adjusted_receiver = {});
 
@@ -1601,6 +1602,30 @@ Machine::Flow Machine::jump(Frame& f, NodeId n, u32 succ) {
   return Flow::jumped;
 }
 
+Machine::Flow Machine::bind_parameter(Frame& f, ir::ValueId parameter, const Value& value) {
+  const ir::Value& slot = f.fn->value(parameter);
+  if (slot.index > 0 && slot.index <= 32 && (f.fn->byval_params & (u32{1} << (slot.index - 1)))) {
+    if (slot.index == f.fn->result_param || slot.type.kind != ir::TyKind::cxx ||
+        value.kind != VKind::object || value.past || value.bits != 0 || value.ref >= objects_.size())
+      return fail(Reason::ill_formed);
+    const Shape& address = shape(slot.type.type);
+    if (address.kind != Kind::pointer || address.is_nullptr) return fail(Reason::ill_formed);
+    const QualType type = in_->canonical(address.inner);
+    Object& object = objects_[value.ref];
+    if (object.origin != Origin::automatic || object.outside || !object.record)
+      return fail(Reason::ill_formed);
+    if (!object.storage) return fail(Reason::storage_ended);
+    if (object.record_life != Life::alive) return fail(Reason::outside_lifetime);
+    if (!in_->types.is<ast::TClass>(type) || ast::without_cv(type) != ast::without_cv(object.type))
+      return fail(Reason::access_type);
+    // The caller initialized the parameter object using the function type. Its cv-qualification
+    // comes from the declared parameter of the selected definition ([dcl.fct], [expr.call]).
+    object.type = type;
+  }
+  reg(f, parameter) = value;
+  return Flow::next;
+}
+
 // Pushes the callee's frame; its entry block takes the state, then the arguments.
 Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityId callee,
                              std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver) {
@@ -1608,8 +1633,10 @@ Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityI
   if (body->blocks.empty() || body->block(ir::BlockId(0)).nparams != args.size() + 1) return fail(Reason::ill_formed);
   Frame callee_frame{body, callee, std::vector<Value>(body->values.size()), body->block(ir::BlockId(0)).node0};
   const auto parameters = body->params_of(ir::BlockId(0));
-  for (std::size_t i = 0; i < args.size(); ++i)
-    callee_frame.regs[ir::raw(parameters[i + 1])] = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const Value& value = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+    if (Flow fl = bind_parameter(callee_frame, parameters[i + 1], value); fl != Flow::next) return fl;
+  }
   frames_.push_back(std::move(callee_frame));  // `f` dangles from here
   return Flow::called;
 }
@@ -1642,8 +1669,9 @@ void Machine::start(const ir::Function& entry, EntityId name, std::span<const Va
     entry_result_ = make_object(result_address.inner, Origin::automatic, record);
   }
   for (u32 i = 1, arg = 0; i < params.size(); ++i) {
-    if (capture && i == entry.result_param) fr.regs[ir::raw(params[i])] = {VKind::object, false, *entry_result_, 0};
-    else fr.regs[ir::raw(params[i])] = args[arg++];
+    const Value value = capture && i == entry.result_param ? Value{VKind::object, false, *entry_result_, 0}
+                                                          : args[arg++];
+    if (bind_parameter(fr, params[i], value) != Flow::next) return;
   }
 }
 
