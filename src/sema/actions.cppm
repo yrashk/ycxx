@@ -1194,12 +1194,44 @@ public:
     return scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_;
   }
 
+  // Clang separates the canonical dependent type from its first written qualification.
+  TemplateArg canonical_clang_class_argument(TemplateArg arg) {
+    auto canonical_args = [&](ast::SeqId<TemplateArg> sequence) {
+      auto elements = ins().seqs.elements(sequence);
+      bool changed = false;
+      for (auto& element : elements) {
+        const auto canonical = canonical_clang_class_argument(element);
+        changed |= canonical != element;
+        element = canonical;
+      }
+      return changed ? ins().intern_seq(std::span<const TemplateArg>(elements)) : sequence;
+    };
+    if (arg.kind == TemplateArgKind::pack) arg.elems = canonical_args(arg.elems);
+    if (arg.kind != TemplateArgKind::value) return arg;
+    if (ins().values.is<ast::VDepVariable>(arg.value)) {
+      auto variable = ins().values.get<ast::VDepVariable>(arg.value);
+      variable.qualifier = {};
+      variable.global = 0;
+      variable.args = canonical_args(variable.args);
+      variable.written_args = canonical_args(variable.written_args);
+      arg.value = ins().intern_value(variable);
+    } else if (ins().values.is<ast::VDepOp>(arg.value)) {
+      auto operation = ins().values.get<ast::VDepOp>(arg.value);
+      auto operands = canonical_args(operation.operands);
+      if (operands != operation.operands) {
+        operation.operands = operands;
+        arg.value = ins().intern_value(operation);
+      }
+    }
+    return arg;
+  }
+
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
                                            bool directly_named = true, bool* alias_constraint_failed = nullptr,
-                                           bool replay_partial_alias = false) {
+                                           bool replay_partial_alias = false, bool record_spelling = true) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
@@ -1233,6 +1265,14 @@ public:
         if (!has_error_since(before)) diag(at, Diag::constraints_not_satisfied, w_->entities.rec(tmpl.entity).name);
         return std::nullopt;
       }
+    }
+    if (compatibility() == ast::Compatibility::clang) {
+      auto canonical = *full;
+      for (auto& argument : canonical) argument = canonical_clang_class_argument(argument);
+      EntityId specialization = class_specialization(tmpl.entity, canonical);
+      if (directly_named && record_spelling && canonical != *full)
+        template_type_spellings.push_back({specialization, ins().intern_seq(std::span<const TemplateArg>(*full)), loc_base_ + at});
+      return types().class_type(specialization);
     }
     return types().class_type(class_specialization(tmpl.entity, *full));
   }
@@ -1270,9 +1310,11 @@ public:
     if (compatibility() == ast::Compatibility::gcc) {
       // A dependent alias still carries the written transformations of its concrete
       // result into a template signature. An already-bound alias uses the folded type.
-      if (!types().is_dependent(tmpl.type) && std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); }))
-        return tmpl.type;
-      auto result = templates_for_use(at).substitute(tmpl.type, bindings);
+      const bool dependent_alias = std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); });
+      if (!types().is_dependent(tmpl.type) && dependent_alias) return tmpl.type;
+      auto substitution = templates_for_use(at);
+      substitution.retain_gcc_concrete_transforms = dependent_alias;
+      auto result = substitution.substitute(tmpl.type, bindings);
       if (result && ins().types.is<ast::SWrittenTransform>(*result)) return types().canonical(*result);
       return result;
     }
@@ -1344,11 +1386,14 @@ public:
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
   Ex dependent_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end,
-                                    bool qualified = false, bool global = false) {
+                                    bool qualified = false, bool global = false, std::span<const NameId> qualifier = {}) {
     auto full = template_arguments(tmpl, args, begin);
     if (!full) return {NodeId::none, begin, end};
-    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full)),
-                                                     ins().intern_seq(args), u8(qualified), u8(global)});
+    const auto converted = ins().intern_seq(std::span<const TemplateArg>(*full));
+    const bool gcc = compatibility() == ast::Compatibility::gcc;
+    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, converted,
+                                                     gcc ? converted : ins().intern_seq(args),
+                                                     u8(!gcc && qualified), u8(!gcc && global), ins().intern_seq(qualifier)});
     return literal(types().referee(tmpl.type), value, ValueCategory::lvalue, begin, end);
   }
   // The initializer is replayed with bound arguments. Check the written arguments here without
@@ -4039,7 +4084,7 @@ public:
     while (auto paren = as<ast::Paren>(init)) init.id = paren->operand.id;
     if (!(as<ast::ValueInit>(init) || as<ast::DefaultInit>(init)) || !types().is_class(init.type())) return false;
     const ClassRec* rec = class_rec(types().class_of(init.type()));
-    return rec && rec->trivial_defaulted_default_ctor;
+    return rec && rec->trivial_defaulted_default_ctor && rec->fields.empty();
   }
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
@@ -4912,6 +4957,7 @@ public:
   }
   // What the cell demands of the program (§B1.4), in program order.
   std::vector<Demand> demands;
+  std::vector<ast::TemplateTypeSpelling> template_type_spellings;
 
   Templates templates() {
     Templates t(*w_, classes());
@@ -7945,6 +7991,10 @@ public:
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
       if (!cr->trivial_defaulted_default_ctor && !cr->null_pointer_defaulted_default_ctor)
         return fail;  // diagnosed at its declaration
+      if (form == Construction::default_init && Types::is_const(types().canonical(t)) && !const_default_constructible(t)) {
+        diag(begin, Diag::defaulted_const_uninitialized, t);
+        return fail;
+      }
       if (destination == ConstructorDestination::delegation) {
         diag(begin, Diag::defaulted_default_delegation);
         return fail;
@@ -11061,6 +11111,7 @@ public:
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
+      m->potentially_overlapping = f.no_unique_address;
       m->align = std::max(m->align, u64(f.explicit_alignment));
       places.push_back(*m);
     }

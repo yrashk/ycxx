@@ -85,6 +85,7 @@ struct Config {
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
   std::function<std::optional<VirtualTarget>(EntityId, EntityId, EntityId, bool)> virtual_target{};
+  EntityId constant_destructor = EntityId::none;
 };
 
 // An interpreter-only observation of a generated call in the constant-evaluation entry.
@@ -231,6 +232,7 @@ private:
     Origin origin = Origin::automatic;
     bool storage = true;    // false once deallocated
     bool outside = false;   // its lifetime began outside the evaluation
+    bool mutable_lifetimes_outside = false;  // [expr.const.init] constant destruction
     bool usable = true;     // readable in constant mode
     bool read_only = false; // a string literal object
     EntityId entity{};
@@ -750,6 +752,8 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
   }
   const bool writing = use == Use::write || use == Use::callee_write;
+  if (ob.mutable_lifetimes_outside && pl->mutable_field)
+    return fail(writing ? Reason::modify_outside : Reason::not_usable);
   if (writing) {
     if (ob.read_only) return fail(Reason::modify_const);
     // The initializing store comes before `obj.begin`; a const object is not modified after it.
@@ -806,8 +810,13 @@ Machine::Flow Machine::read_cell(QualType type, u32 cell, Value& out) {
 
 Machine::Flow Machine::copy_record(const Place& dst, const Place& src) {
   const Object& source = objects_[src.obj];
-  if (config_.mode == Mode::constant && source.outside &&
-      std::ranges::any_of(source.record->fields, [](const auto& field) { return field.layout.mutable_; }))
+  auto contains_mutable = [&](this auto&& visit, const RecordStorage& record) -> bool {
+    return std::ranges::any_of(record.fields, [&](const auto& field) {
+      return field.layout.mutable_ || (field.nested && visit(*field.nested));
+    });
+  };
+  if (config_.mode == Mode::constant && (source.outside || source.mutable_lifetimes_outside) &&
+      src.record && contains_mutable(*src.record))
     return fail(Reason::not_usable);
   // The source and destination identify complete records. Copy the scalar values and their
   // pointer provenance. The destination's lifetime is controlled by its caller's obj.begin.
@@ -1782,6 +1791,14 @@ Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityI
   const auto parameters = body->params_of(ir::BlockId(0));
   for (std::size_t i = 0; i < args.size(); ++i)
     callee_frame.regs[ir::raw(parameters[i + 1])] = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+  // The destruction thunk materializes a folded value, then calls the destructor.
+  // The non-mutable lifetimes belong to this evaluation, while mutable ones do not.
+  if (config_.compatibility != ast::Compatibility::gcc && callee != EntityId::none &&
+      config_.constant_destructor == callee && frames_.size() == 1 && !args.empty()) {
+    const Value receiver = callee_frame.regs[ir::raw(parameters[1])];
+    if (receiver.kind == VKind::object && receiver.ref < objects_.size())
+      objects_[receiver.ref].mutable_lifetimes_outside = true;
+  }
   frames_.push_back(std::move(callee_frame));  // `f` dangles from here
   return Flow::called;
 }

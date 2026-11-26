@@ -175,6 +175,7 @@ enum class Diag : std::uint32_t {
   nonconstant_initializer [[=message{Severity::error, "dynamic initialization of a namespace-scope variable is not supported yet: {0:r}"}]],
   // [dcl.constexpr], [dcl.pre], [expr.const]
   not_constant [[=message{Severity::error, "not a constant expression: {0:r}"}]],
+  gcc_static_guard_transform [[=message{Severity::error, "cannot name a static initialization guard for a function signature containing the built-in type trait '{0:n}'"}]],
   static_assert_failed [[=message{Severity::error, "static assertion failed"}]],
   static_assert_failed_message [[=message{Severity::error, "static assertion failed: {0:c}"}]],
   constexpr_uninitialized [[=message{Severity::error, "constexpr variable '{0:n}' must be initialized"}]],
@@ -293,6 +294,7 @@ enum class Diag : std::uint32_t {
   defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
   defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
   defaulted_default_constructor [[=message{Severity::error, "an explicitly defaulted default constructor is not supported for this class"}]],
+  defaulted_const_uninitialized [[=message{Severity::error, "default initialization of const type '{0:t}' requires initialized subobjects"}]],
   defaulted_default_delegation [[=message{Severity::error, "delegation to an explicitly defaulted default constructor is not supported yet"}]],
   defaulted_destructor [[=message{Severity::error, "an explicitly defaulted destructor is not supported for this class"}]],
   defaulted_destructor_out_of_class [[=message{Severity::error, "explicitly defaulting a destructor outside its class is not supported yet"}]],
