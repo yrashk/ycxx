@@ -1876,7 +1876,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   including defaults and type packs. Reaching a class as a base or owner contributes its namespace.
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Ordinary calls also associate the declaring namespace of a namespace-scope type
-  template supplied as a template-template argument ([basic.lookup.argdep]).
+  template supplied as a template-template argument ([basic.lookup.argdep]). Clang mode
+  skips alias template arguments in this namespace walk.
 - Each associated namespace search uses preceding declarations that bind names in the scope.
   It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
@@ -2295,8 +2296,9 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   parameter-index form, and asm labels pin GCC's constant form.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. An index written as an enumerator or a
-  constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
+  signature (#209). In a body that arithmetic works. ycxx mangles an enumerator or a named
+  constant as a converted integer. Clang and GCC write the enumerator as an enum-typed literal
+  and a namespace constant as an external-name primary (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
 ## Functional conversions with pack expansions (#915)
@@ -4961,7 +4963,8 @@ the body. A non-generic lambda body uses its own evaluation context.
   makes the operator deleted ([class.spaceship]/1.2, /2.2). The body is
   `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return R(std::strong_ordering::equal); }`
   (`defaulted_three_way_body`). Completion and the body build the same initialized local and
-  lvalue `vi != 0` test. The implicit exception specification covers the comparisons, the
+  lvalue result test. Spec and Clang modes use `vi != 0`; GCC mode checks `vi == 0` and returns
+  the result when the test is false. The implicit exception specification covers the comparisons, the
   lvalue tests, and initialization of either return value (#1225).
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
 - For non-assignment binary operators without comparison rewrites, an access, deletion or

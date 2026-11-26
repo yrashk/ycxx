@@ -12561,6 +12561,7 @@ std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sem
     return sm.static_cast_to(c, r.result, 0, true);
   };
   const QualType int_type = w_->types.builtin(sema::Builtin::int_);
+  const bool compare_with_equality = sm.compatibility() == ast::Compatibility::gcc;
   for (const Ex& c : compared) {
     const std::size_t before = sm.diag_count();
     const Ex initializer = synthesized(c);
@@ -12574,13 +12575,15 @@ std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sem
       return std::nullopt;
     }
     // [class.spaceship]/3: test `vi != 0` with `vi` naming the initialized local in both
-    // completion and the generated body. The one-token `0` is a null pointer constant too.
+    // completion and the body. GCC uses the negation of the contextual bool value of `vi == 0`.
     const u32 local = sm.declare_local(sm.no_name(), r.result, 0, 0, false);
     const Ex variable = sm.node(ast::LocalVar{local, sema::Sema::at(initializer, 0), sm.destructor_of(r.result)}, 0, 0);
     sm.set_local_decl(local, variable.id);
     sm.set_initialized(local);
     const Ex zero = sm.literal(int_type, w_->values.integer(int_type, 0), ast::ValueCategory::prvalue, 0, 1);
-    const Ex unequal = sm.to_bool(sm.binary(sema::Sema::BinOp::ne, sm.local_ref(local, 0, 0), zero, 0), 0);
+    const auto op = compare_with_equality ? sema::Sema::BinOp::eq : sema::Sema::BinOp::ne;
+    Ex unequal = sm.to_bool(sm.binary(op, sm.local_ref(local, 0, 0), zero, 0), 0);
+    if (compare_with_equality && unequal.ok()) unequal = sm.unary(ast::UnaryOp::not_, unequal, 0, 0, 0);
     if (!unequal.ok()) return std::nullopt;
     r.subobjects.push_back({initializer, variable, unequal, {}, local});
   }

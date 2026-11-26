@@ -258,7 +258,8 @@ struct Ops {
   static Flow ptr_derived(M& m, Frame&, N n) { return m.unsupported(n); }
 
   // static_cast between pointers through `void*` ([expr.static.cast]/14): in constant evaluation
-  // converting from `void*` requires a pointer to a similar object or a null pointer ([expr.const]).
+  // [expr.const] requires a pointer to a similar object or a null pointer. The compiler
+  // modes also accept one-past array pointers and Clang accepts a one-past singleton.
   static Flow ptr_cast(M& m, Frame& f, N n) {
     Value p = m.operand(f, n, 0);
     if (p.kind == VKind::object && constant(m)) {
@@ -272,7 +273,10 @@ struct Ops {
         if (!pl || !m.similar(pl->type, to)) return m.fail(Reason::void_cast_type);
         if (p.past || past) {
           QualType from = m.type_of(f, f.fn->operands_of(n)[0]);
-          if (ast::is_void(*m.in_, m.shape(from).inner)) return m.fail(Reason::void_cast_type);
+          const auto mode = m.config_.compatibility;
+          if (ast::is_void(*m.in_, m.shape(from).inner) &&
+              (mode == ast::Compatibility::spec || (mode == ast::Compatibility::gcc && p.past)))
+            return m.fail(Reason::void_cast_type);
         }
       }
     }
