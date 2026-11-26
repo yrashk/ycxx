@@ -837,6 +837,8 @@ written default member initializer are value-initialized.
   `__builtin_unreachable`, used by libycxx's `std::unreachable`, ends a path in a `[[noreturn]]`
   or value-returning function; reaching it in a constant expression is an error.
   [#330](https://github.com/yrashk/ycxx/issues/330)
+  `__builtin_bit_cast` preserves the representation of `int` and `unsigned int` scalars, including
+  through libycxx's `std::bit_cast`. [#1531](https://github.com/yrashk/ycxx/issues/1531)
   `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   The checked add and multiply builtins report overflow and store the converted signed

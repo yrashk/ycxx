@@ -881,3 +881,16 @@ gcc = "Keep the tested written operators and operands in the dependent type and 
 clang = "Same as GCC."
 probe = 'template<class... Ts> int f(Ts...[0+0]) { return 1; } int call() { return f<int>(0); }'
 evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "discarded-int-bit-cast-constexpr"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[bit.cast], [expr.context], [expr.const], #1531"
+prior = "Reject the evaluated signed int operand as an unsupported object representation."
+spec = "Evaluate the operand once in a constant expression and discard the resulting unsigned int prvalue."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 diagnoses the discarded builtin call in the tested constant expression."
+clang_observed = "Clang 23.1.6 accepts the test on x86-64 Linux and arm64 Darwin."
+evidence = ["tests/own/builtins/bit-cast-int-discard-constexpr.accept.cpp"]

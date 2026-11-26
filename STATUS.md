@@ -2758,10 +2758,13 @@ global, and a rejected rvalue.
 
 `__builtin_bit_cast` reads a written destination type-id and preserves both operands through
 template substitution. The evaluated subset covers initialized unsigned scalars and gap-free
-flat records described by the target's size, byte order and member offsets. Result storage is
-independent, including when the cast is discarded. Constant evaluation uses the existing
-flat-record storage checks. Evaluated x87, padding and the remaining constant-evaluation
-layouts stay in #330. The pinned x87 template branch parses when discarded.
+flat records described by the target's size, byte order and member offsets. The corresponding
+nonvolatile `int` and `unsigned int` scalar forms preserve the four-byte representation in
+constant evaluation and native code, including libycxx's `std::bit_cast<unsigned>(17)`
+[#1531](https://github.com/yrashk/ycxx/issues/1531). Result storage is independent, and the
+source is evaluated once even if the result is discarded. Constant evaluation uses the
+existing typed reads and storage checks. Evaluated x87, padding and the remaining
+representations stay in #330. The pinned x87 template branch parses when discarded.
 
 ## String length builtin (#531)
 
