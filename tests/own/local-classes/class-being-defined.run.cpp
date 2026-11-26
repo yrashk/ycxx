@@ -1,6 +1,7 @@
 // #117: the shape of libycxx's tuple_cat plan: a local class in a lambda that initializes a static
 // constexpr data member of a class template names a nested class and a static member declared
 // before it in the class being defined ([class.local], [basic.scope.class], [expr.prim.lambda]).
+// XFAIL: gcc GCC 16 finds none of Plan's members from Pick (#117, docs/compatibility.toml)
 template <int N> struct Plan {
   static constexpr int count = N;
   struct Entry {
