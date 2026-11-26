@@ -1640,7 +1640,7 @@ public:
   // An atomic constraint ([temp.constr.atomic]): the expression at [begin, end) of this part, whose
   // parameter mapping takes the innermost head's parameters among `names` (the identifiers it
   // contains) to themselves, the others to none.
-  ConstId atom(u32 begin, u32 end, std::span<const NameId> names) {
+  ConstId atom(u32 begin, u32 end, std::span<const NameId> names, std::span<const PackRef> fold_packs = {}) {
     const bool fn_params = std::ranges::any_of(names, [&](NameId n) { return local_named(n); });
     u16 depth = 0;
     std::vector<ConstId> mapping;
@@ -1659,8 +1659,9 @@ public:
         TemplateArg a = bound                                     ? *bound
                         : p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
                                                                : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
-        if (!bound && p.pack && p.kind == TemplateArgKind::type) {
-          const std::array expansion{t.type_arg(types().pack_expansion(p.type))};
+        if (!bound && p.pack && p.kind != TemplateArgKind::template_ &&
+            !std::ranges::contains(fold_packs, PackRef{p.depth, p.index, {}})) {
+          const std::array expansion{t.expansion_of(a)};
           a = t.pack(expansion);
         }
         mapping.push_back(t.mapping_value(a));

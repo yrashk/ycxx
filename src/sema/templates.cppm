@@ -923,6 +923,50 @@ public:
   // ill-formed.
   std::optional<ConstId> substitute_constraint(ConstId c, const Bindings& b) {
     if (c == ConstId::none) return c;
+    if (ins().values.is<ast::VFoldConstraint>(c)) {
+      auto fold = ins().values.get<ast::VFoldConstraint>(c);
+      auto expression = substitute_constraint(fold.expression, b);
+      if (!expression) return std::nullopt;
+      fold.expression = *expression;
+      // Defer each pack element's substitution. Bindings for other parameters can be
+      // applied to the normalized operand once, independently of the pack length.
+      Bindings operand_bindings = b;
+      auto bound_packs = ins().seqs.elements(fold.bound);
+      std::vector<u32> packs;
+      for (u32 key : ins().seqs.elements(fold.packs)) {
+        const u16 depth = u16(key >> 16);
+        const u16 index = u16(key);
+        const auto bound = b.at(depth, index);
+        const bool already_bound = std::ranges::any_of(bound_packs, [key](const auto& entry) { return entry.pack == key; });
+        if (!bound || already_bound) {
+          packs.push_back(key);
+          continue;
+        }
+        if (bound->kind != TemplateArgKind::pack) return ins().intern_value(fold);
+        if (!w_->arg_dependent(*bound)) {
+          bound_packs.push_back({key, bound->elems});
+          operand_bindings.levels[depth][index].reset();
+          packs.push_back(key);
+          continue;
+        }
+        if (ins().seqs.size(bound->elems) != 1) return ins().intern_value(fold);
+        const TemplateArg argument = ins().seqs.at(bound->elems, 0);
+        if (!is_expansion(argument)) return ins().intern_value(fold);
+        const TemplateArg pattern = pattern_of(argument);
+        operand_bindings.levels[depth][index] = pattern;
+        const auto refs = own_packs(pattern);
+        if (refs.size() != 1) return ins().intern_value(fold);
+        const auto [d, i] = refs.front();
+        const u32 mapped = u32(d) << 16 | i;
+        if (!std::ranges::contains(packs, mapped)) packs.push_back(mapped);
+      }
+      auto operand = substitute_constraint(fold.operand, operand_bindings);
+      if (!operand) return std::nullopt;
+      fold.operand = *operand;
+      fold.packs = ins().intern_seq(std::span<const u32>(packs));
+      fold.bound = ins().intern_seq(std::span<const ast::FoldPackBinding>(bound_packs));
+      return ins().intern_value(fold);
+    }
     if (ins().values.is<ast::VConstraint>(c)) {
       auto v = ins().values.get<ast::VConstraint>(c);
       std::vector<ConstId> ops;
@@ -975,6 +1019,11 @@ public:
   // Whether an atom's mapping still names a template parameter: its satisfaction waits for them.
   bool constraint_dependent(ConstId c) {
     if (c == ConstId::none) return false;
+    if (ins().values.is<ast::VFoldConstraint>(c)) {
+      const auto fold = ins().values.get<ast::VFoldConstraint>(c);
+      if (fold.expression != ConstId::none) return constraint_dependent(fold.expression);
+      return ins().seqs.size(fold.packs) != ins().seqs.size(fold.bound);
+    }
     if (ins().values.is<ast::VConstraint>(c))
       return std::ranges::any_of(ins().seqs.elements(ins().values.get<ast::VConstraint>(c).operands),
                                  [&](ConstId o) { return constraint_dependent(o); });
@@ -994,16 +1043,30 @@ public:
     if (!dnf || !cnf) return false;
     for (const auto& pi : *dnf)
       for (const auto& qj : *cnf)
-        if (std::ranges::none_of(pi, [&](ConstId a) { return std::ranges::contains(qj, a); })) return false;
+        if (std::ranges::none_of(pi, [&](ConstId a) {
+              return std::ranges::any_of(qj, [&](ConstId b) { return constraint_element_subsumes(a, b); });
+            })) return false;
     return true;
   }
 
 private:
+  bool constraint_element_subsumes(ConstId a, ConstId b) {
+    if (a == b) return true;
+    if (!ins().values.is<ast::VFoldConstraint>(a) || !ins().values.is<ast::VFoldConstraint>(b)) return false;
+    const auto x = ins().values.get<ast::VFoldConstraint>(a);
+    const auto y = ins().values.get<ast::VFoldConstraint>(b);
+    if (x.op != y.op || x.legacy || y.legacy) return false;
+    const auto packs = ins().seqs.elements(y.packs);
+    return std::ranges::any_of(ins().seqs.elements(x.packs), [&](u32 p) { return std::ranges::contains(packs, p); }) &&
+           subsumes(x.operand, y.operand);
+  }
+
   // The clauses of `c`'s disjunctive (`outer` 1) or conjunctive (`outer` 0) normal form, each a
   // set of atoms; none past the budget.
   std::optional<std::vector<std::vector<ConstId>>> clauses(ConstId c, u8 outer) {
     constexpr std::size_t budget = 65536;
-    if (ins().values.is<ast::VAtom>(c)) return std::vector<std::vector<ConstId>>{{c}};
+    if (ins().values.is<ast::VAtom>(c) || ins().values.is<ast::VFoldConstraint>(c))
+      return std::vector<std::vector<ConstId>>{{c}};
     auto v = ins().values.get<ast::VConstraint>(c);
     // No operands (an atom whose mapping was invalid, false): no clause beside the others, or one
     // empty clause in every combination.

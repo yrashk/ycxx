@@ -823,6 +823,21 @@ class Mangler {
       if (!encoded) return encoded;
       return "L_Z" + *encoded + "E";
     }
+    if (in_.values.is<ast::VWrittenFold>(v)) {
+      const auto fold = in_.values.get<ast::VWrittenFold>(v);
+      auto op = operator_code(lex::spelling(lex::Tk(fold.token)), 2);
+      if (!op) return std::unexpected("an unsupported fold operator");
+      auto first = expression(fold.first);
+      if (!first) return first;
+      const bool binary = fold.second != ast::ConstId::none;
+      std::string result = fold.left ? (binary ? "fL" : "fl") : (binary ? "fR" : "fr");
+      result += *op;
+      result += *first;
+      if (!binary) return result;
+      auto second = expression(fold.second);
+      if (!second) return second;
+      return result + *second;
+    }
     if (in_.values.is<ast::VWrittenOperator>(v)) {
       const auto op = in_.values.get<ast::VWrittenOperator>(v);
       const auto operands = in_.seqs.elements(op.operands);
@@ -850,6 +865,7 @@ class Mangler {
       case lex::Tk::l_square: code = "ix"; break;
       case lex::Tk::question: code = "qu"; break;
       case lex::Tk::kw_sizeof: code = "sz"; break;
+      case lex::Tk::ellipsis: code = "sZ"; break;
       case lex::Tk::kw_noexcept: code = "nx"; break;
       case lex::Tk::plusplus: code = operands.size() == 1 ? "pp_" : "pp"; break;
       case lex::Tk::minusminus: code = operands.size() == 1 ? "mm_" : "mm"; break;
@@ -948,6 +964,11 @@ class Mangler {
       const auto parameter = in_.values.get<ast::VDepFnParam>(v);
       const ast::u64 level = requires_depth_ + parameter.depth + (compatibility_ == ast::Compatibility::gcc);
       return parameter_encoding(level, parameter.index, ast::Cv(parameter.cv));
+    }
+    if (in_.values.is<ast::VDepSizeofPack>(v)) {
+      const auto pack = in_.values.get<ast::VDepSizeofPack>(v);
+      if (pack.depth != own_depth) return std::unexpected("the size of an enclosing template parameter pack");
+      return pack.index == 0 ? std::string("sZT_") : std::format("sZT{}_", pack.index - 1);
     }
     if (in_.values.is<ast::VInt>(v)) {
       const auto value = in_.values.get<ast::VInt>(v);

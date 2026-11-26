@@ -2688,6 +2688,328 @@ int main() {
                 subprocess.run([scope / 'late-defaulted'], cwd=scope, check=True, timeout=20)
 
 
+def fold_constraint_symbols(world, gxx):
+    scope = world.scope
+    declarations = '''\
+template<class T> concept Sized = sizeof(T) >= 2;
+template<class... T> requires ((sizeof(T) >= 2) && ...) int right(T...) BODY(1)
+template<class... T> requires (... && (sizeof(T) >= 2)) int left(T...) BODY(2)
+template<class... T> requires ((sizeof(T) >= 2) && ... && true) int binary_right(T...) BODY(3)
+template<class... T> requires (true && ... && (sizeof(T) >= 2)) int binary_left(T...) BODY(4)
+template<class... T> requires (Sized<T> && ...) int concepts(T...) BODY(5)
+template<class... T> requires (sizeof...(T) == 2) int count_types(T...) BODY(6)
+template<class... T> int count_values(T... v) requires (sizeof...(v) == 2) BODY(7)
+template<class... T> int req(T...) requires requires { requires (Sized<T> && ...); } BODY(8)
+'''
+    exercise = '''\
+right(7, 3L) + left(7, 3L) + binary_right(7, 3L) + binary_left(7, 3L) +
+concepts(7, 3L) + count_types(7, 3L) + count_values(7, 3L) + req(7, 3L)
+'''
+    (scope / 'fold-constraints.cpp').write_text(
+        '#define BODY(N) { return N; }\n' + declarations + 'int use() { return ' + exercise + '; }\n')
+    (scope / 'fold-constraints-caller.cpp').write_text(
+        '#define BODY(N) ;\n' + declarations + 'int main() { return (' + exercise + ') != 36; }\n')
+    shared = (
+        '_Z5rightIJilEQfraagestT_Li2EEiDpS0_',
+        '_Z4leftIJilEQflaagestT_Li2EEiDpS0_',
+        '_Z12binary_rightIJilEQfRaagestT_Li2ELb1EEiDpS0_',
+        '_Z11binary_leftIJilEQfLaaLb1EgestT_Li2EEiDpS0_',
+        '_Z8conceptsIJilEQfraa5SizedIT_EEiDpS0_',
+        '_Z11count_typesIJilEQeqsZT_Li2EEiDpT_',
+        '_Z3reqIJilEEiDpT_QrqQfraa5SizedIS0_EE',
+    )
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        level = 'fL0p_' if mode == 'gcc' else 'fp_'
+        names = (*shared, f'_Z12count_valuesIJilEEiDpT_QeqsZ{level}Li2E')
+        for target in (LINUX, DARWIN):
+            command = [target, '-fcompat=' + mode, '-c', 'fold-constraints.cpp', '-o', 'fold-constraints.o']
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'fold-constraints.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            prefix = '_' if target == DARWIN else ''
+            symbols = outputs[0].split(b'\0')
+            for name in names:
+                assert (prefix + name).encode() in symbols, (mode, target, name, [s for s in symbols if b'_Z' in s])
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                peer = gxx if mode == 'gcc' else clang
+                if not peer:
+                    continue
+                args = ['-fabi-compat-version=0'] if mode == 'gcc' else []
+                subprocess.run([peer, '-std=c++26', *args, 'fold-constraints-caller.cpp', 'fold-constraints.o',
+                                '-o', 'fold-constraints'], cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'fold-constraints'], cwd=scope, check=True, timeout=20)
+
+
+def fold_constraint_ordering(world):
+    scope = world.scope
+    (scope / 'fold-ordering.cpp').write_text('''\
+template<class T> concept A = sizeof(T) >= 2;
+template<class T> concept B = A<T> && sizeof(T) >= 4;
+#if defined(NAMED)
+template<class... T> concept Weak = (A<T> && ...);
+template<class... T> concept Strong = (... && B<T>);
+template<class... T> requires Weak<T...> constexpr int choose(T...) { return 1; }
+template<class... T> requires Strong<T...> constexpr int choose(T...) { return 2; }
+#elif defined(DIFFERENT_PACK)
+template<class... T> struct Pack {};
+template<class... T, class... U> requires (A<T> && ...) constexpr int choose(Pack<T...>, Pack<U...>) { return 1; }
+template<class... T, class... U> requires (B<U> && ...) constexpr int choose(Pack<T...>, Pack<U...>) { return 2; }
+#elif defined(OR)
+template<class... T> requires (A<T> || ...) constexpr int choose(T...) { return 1; }
+template<class... T> requires (... || B<T>) constexpr int choose(T...) { return 2; }
+#elif defined(DIFFERENT_OPERATOR)
+template<class... T> requires (A<T> || ...) constexpr int choose(T...) { return 1; }
+template<class... T> requires (B<T> && ...) constexpr int choose(T...) { return 2; }
+#else
+template<class... T> requires (A<T> && ...) constexpr int choose(T...) { return 1; }
+template<class... T> requires (... && B<T>) constexpr int choose(T...) { return 2; }
+#endif
+#if defined(DIFFERENT_PACK)
+static_assert(choose(Pack<int>{}, Pack<int>{}) == 2);
+#else
+static_assert(choose(7) == 2);
+#endif
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            for case in ('', 'NAMED', 'OR', 'DIFFERENT_OPERATOR', 'DIFFERENT_PACK'):
+                flags = ['-D' + case] if case else []
+                command = [target, '-fcompat=' + mode, *flags, '-fsyntax-only', 'fold-ordering.cpp']
+                cold, warm = (world.cxx(command, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                ambiguous = mode == 'gcc' or case in ('DIFFERENT_OPERATOR', 'DIFFERENT_PACK')
+                assert cold == warm and warm[0] == int(ambiguous), (mode, target, case, cold, warm)
+                if ambiguous:
+                    assert b'ambiguous' in warm[2], (mode, target, case, warm[2])
+
+
+def fold_constraint_satisfaction(world):
+    scope = world.scope
+    (scope / 'fold-satisfaction.cpp').write_text('''\
+#if defined(INTEGER) || defined(EMPTY)
+template<int... N> requires (N && ...) constexpr int choose() { return 7; }
+#ifdef EMPTY
+static_assert(choose<>() == 7);
+#else
+static_assert(choose<1, 2>() == 7);
+#endif
+#elif defined(COMPARISON)
+template<int... N> requires ((N > 0) && ...) constexpr int choose() { return 7; }
+static_assert(choose<1, 2>() == 7);
+#else
+template<class T> constexpr bool check() {
+  static_assert(sizeof(T) != 8, "later fold element instantiated");
+  return sizeof(T) > 1;
+}
+#ifdef OR
+template<class... T> requires (check<T>() || ...) constexpr int choose(T...) { return 7; }
+static_assert(choose(2, 2LL) == 7);
+#else
+template<class... T> requires (check<T>() && ...) constexpr int choose(T...) { return 7; }
+constexpr int choose(double, double) { return 2; }
+#ifdef NEED_LATER
+static_assert(choose(2, 2LL) == 7);
+#else
+static_assert(choose('x', 2LL) == 2);
+#endif
+#endif
+#endif
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            for case in ('INTEGER', 'COMPARISON', 'EMPTY', '', 'OR', 'NEED_LATER'):
+                define = ['-D' + case] if case else []
+                args = [target, '-fcompat=' + mode, *define, '-fsyntax-only', 'fold-satisfaction.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                rejected = case == 'NEED_LATER' or (mode == 'gcc' if case in ('', 'OR') else
+                                                    mode != 'gcc' and case == 'INTEGER')
+                assert cold == warm and warm[0] == int(rejected), (mode, target, case, cold, warm)
+                if rejected:
+                    diagnostic = b'constraint' if case == 'INTEGER' else b'later fold element instantiated'
+                    assert diagnostic in warm[2], (mode, target, case, warm[2])
+
+
+def binary_fold_constraints(world):
+    scope = world.scope
+    (scope / 'binary-fold.cpp').write_text('''\
+#ifndef CASE
+#define CASE 0
+#endif
+#if CASE == 0
+template<int... N> requires (N && ... && true) constexpr int f() { return 7; }
+static_assert(f<1, 2>() == 7);
+#elif CASE == 1
+template<int... N> requires (true && ... && N) constexpr int f() { return 7; }
+static_assert(f<1, 2>() == 7);
+#elif CASE == 2
+template<int... N> requires ((N > 0) && ... && 1) constexpr int f() { return 7; }
+static_assert(f<1, 2>() == 7);
+#elif CASE == 3
+template<int... N> requires (1 && ... && (N > 0)) constexpr int f() { return 7; }
+static_assert(f<1, 2>() == 7);
+#elif CASE >= 4 && CASE <= 7
+template<class T> constexpr bool late() {
+  static_assert(sizeof(T) != 8, "late substitution");
+  return true;
+}
+template<class... T>
+#if CASE == 4
+  requires (false && ... && late<T>())
+#elif CASE == 5
+  requires (late<T>() && ... && false)
+#elif CASE == 6
+  requires (true || ... || late<T>())
+#else
+  requires (late<T>() || ... || true)
+#endif
+constexpr int f(T...) { return 7; }
+constexpr int f(double) { return 2; }
+static_assert(f(1LL) == (CASE < 6 ? 2 : 7));
+#elif CASE == 8
+template<class T> concept A = sizeof(T) > 0;
+template<class T> concept B = A<T> && (sizeof(T) > 1);
+template<class... T> requires (A<T> && ... && true)
+constexpr int f(T...) { return 2; }
+template<class... T> requires (B<T> && ... && true)
+constexpr int f(T...) { return 7; }
+static_assert(f(42) == 7);
+#elif CASE == 9
+template<class T> concept A = sizeof(T) > 0;
+template<class T> concept B = A<T> && (sizeof(T) > 1);
+template<class... T> requires (A<T> && ...)
+constexpr int f(T...) { return 2; }
+template<class... T> requires (true && ... && B<T>)
+constexpr int f(T...) { return 7; }
+static_assert(f(42) == 7);
+#elif CASE == 10
+template<class T> concept A = sizeof(T) > 0;
+template<class T> concept B = A<T> && (sizeof(T) > 1);
+template<class... T> requires (A<T> && ... && true)
+constexpr int f(T...) { return 2; }
+template<class... T> requires (B<T> && ...)
+constexpr int f(T...) { return 7; }
+static_assert(f(42) == 7);
+#elif CASE == 11
+template<class T> concept A = sizeof(T) > 0;
+template<class T> concept B = A<T> && (sizeof(T) > 1);
+template<class... T> requires (false || ... || A<T>)
+constexpr int f(T...) { return 2; }
+template<class... T> requires (B<T> || ...)
+constexpr int f(T...) { return 7; }
+static_assert(f(42) == 7);
+#elif CASE >= 12
+template<class T> constexpr bool late() {
+  static_assert(sizeof(T) != 8, "late substitution");
+  return true;
+}
+template<class... T> requires (((sizeof(T) < 4) && late<T>()) && ...)
+constexpr int f(T...) { return 7; }
+constexpr int f(double) { return 2; }
+static_assert(f(1LL) == 2);
+#endif
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            for case in range(13):
+                args = [target, '-fcompat=' + mode, f'-DCASE={case}', '-fsyntax-only', 'binary-fold.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                rejected = case >= 4 if mode == 'gcc' else case not in (4, 6, 9, 11, 12)
+                assert cold == warm and warm[0] == int(rejected), (mode, target, case, cold, warm)
+                if rejected:
+                    diagnostic = b'constraint' if case < 4 else b'late substitution' if case < 8 or case == 12 else b'ambiguous'
+                    assert diagnostic in warm[2], (mode, target, case, warm[2])
+
+
+def fold_constraint_substitution_failures(world):
+    scope = world.scope
+    (scope / 'fold-sfinae.cpp').write_text('''\
+struct Missing {};
+struct Yes { static constexpr bool value = true; };
+struct No { static constexpr bool value = false; };
+#if CASE == 0
+template<class... T> requires (T::value || ...)
+constexpr int f(T...) { return 7; }
+template<class... T> constexpr int f(T...) { return 2; }
+static_assert(f(Missing{}, Yes{}) == 7);
+#elif CASE == 1
+template<class... T> requires (T::value && ...)
+constexpr int f(T...) { return 7; }
+template<class... T> constexpr int f(T...) { return 2; }
+static_assert(f(Missing{}, Yes{}) == 2);
+#elif CASE == 2
+template<class... T> struct Pack {};
+template<class... T, class... U> requires ((sizeof(T) == sizeof(U)) && ...)
+constexpr int f(Pack<T...>, Pack<U...>) { return 7; }
+template<class... T> constexpr int f(T...) { return 2; }
+static_assert(f(Pack<int, long>{}, Pack<int, long>{}) == 7);
+static_assert(f(Pack<int, long>{}, Pack<int>{}) == 2);
+#endif
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            for case in range(3):
+                args = [target, '-fcompat=' + mode, f'-DCASE={case}', '-fsyntax-only', 'fold-sfinae.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == int(mode == 'gcc' and case == 0), (mode, target, case, cold, warm)
+                if warm[0]:
+                    assert b'static assertion' in warm[2], warm[2]
+
+
+def constrained_parameter_packs(world, gxx):
+    scope = world.scope
+    (scope / 'constrained-pack.cpp').write_text('''\
+template<class T> concept Sized = sizeof(T) >= 2;
+template<class T> concept Wide = Sized<T> && sizeof(T) >= 4;
+template<Sized... T> constexpr int choose(T...) { return 1; }
+#ifdef ORDER
+template<Wide... T> constexpr int choose(T...) { return 2; }
+static_assert(choose(7) == 2);
+#elif defined(UNSATISFIED)
+static_assert(choose('a') == 1);
+#else
+static_assert(choose(7) == 1);
+static_assert(choose<>() == 1);
+#endif
+''')
+    common = 'template<class T> concept Sized = sizeof(T) >= 2;\n'
+    (scope / 'pack-provider.cpp').write_text(common + '''
+template<Sized... T> int f(T...) { return sizeof...(T); }
+int actual() { return f(1, 2L); }
+''')
+    (scope / 'pack-caller.cpp').write_text(common + '''
+template<Sized... T> int f(T...);
+int main() { return f(1, 2L) != 2; }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            flags = [target, '-fcompat=' + mode]
+            for case in ('', 'ORDER', 'UNSATISFIED'):
+                args = [*flags, '-fsyntax-only', *(['-D' + case] if case else []), 'constrained-pack.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                rejected = case == 'UNSATISFIED' or (case == 'ORDER' and mode == 'gcc')
+                assert cold == warm and warm[0] == int(rejected), (mode, target, case, cold, warm)
+                if case == 'ORDER' and rejected:
+                    assert b'ambiguous' in warm[2], warm[2]
+            outputs = []
+            for env in (world.cold, world.daemon):
+                args = [*flags, '-c', 'pack-provider.cpp', '-o', 'pack-provider.o']
+                result = world.cxx(args, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'pack-provider.o').read_bytes())
+            symbol = (b'_' if target == DARWIN else b'') + b'_Z1fITpTk5SizedJilEEiDpT_'
+            assert outputs[0] == outputs[1] and symbol in outputs[1].split(b'\0'), (mode, target, symbol)
+            peer = gxx if mode == 'gcc' else clang
+            if peer and ((target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')):
+                abi = ['-fabi-compat-version=0'] if mode == 'gcc' else []
+                subprocess.run([peer, '-std=c++26', *abi, 'pack-caller.cpp', 'pack-provider.o', '-o', 'pack-app'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'pack-app'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -2744,6 +3066,12 @@ def main():
         bound_pack_index_symbols(world, gxx)
         operator_constraints(world, gxx)
         requires_expression_symbols(world, gxx)
+        fold_constraint_symbols(world, gxx)
+        fold_constraint_ordering(world)
+        fold_constraint_satisfaction(world)
+        binary_fold_constraints(world)
+        fold_constraint_substitution_failures(world)
+        constrained_parameter_packs(world, gxx)
         constraint_expression_symbols(world, gxx)
         template_argument_prefixes(world, gxx)
         placeholder_template_prefixes(world, gxx)

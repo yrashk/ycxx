@@ -574,6 +574,69 @@ probe = 'template<class T> int f(T x) requires (noexcept(x.member()));'
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary symbols with -fabi-compat-version=0 and Clang 23.1.6 ELF and Mach-O symbol probes"]
 
 [[divergence]]
+id = "constraint-fold-and-pack-size-symbol"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.prim.fold], [expr.sizeof], Itanium C++ ABI §5.1.6.2 and the constraint mangling proposal"
+prior = "Use an opaque token fingerprint when a constraint contains a fold or a pack size."
+spec = "Encode a fold as fl, fr, fL or fR in source-operand order. Use sZ for the size of a named template or function parameter pack."
+gcc = "Use the standard fold and pack-size encodings. A function parameter pack referenced in the tested trailing clause uses the GCC level-one function parameter encoding."
+clang = "Use the standard fold and pack-size encodings. The tested trailing clause uses the level-zero function parameter encoding."
+limits = "Covers unary and binary folds over template and function parameter packs. Satisfaction of folds over constant template parameter packs is covered separately."
+probe = 'template<class... T> requires ((sizeof(T) >= 2) && ...) int f(T...) { return 1; } int use() { return f(1, 2L); }'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary symbols with -fabi-compat-version=0 and upstream Clang 23.1.6 ELF and Mach-O symbol probes"]
+
+[[divergence]]
+id = "fold-expanded-constraint-subsumption"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.constr.fold], [temp.constr.normal], [temp.constr.order], [temp.over.link]"
+prior = "Treat fold constraints from different source expressions as unrelated atomic constraints."
+spec = "In C++26, two folds with the same operator and an equivalent unexpanded pack can subsume one another when the underlying normalized constraints subsume."
+gcc = "Both tested concept folds are satisfied, but GCC 16.2 still reports the call ambiguous for both same-operator and different-operator overloads."
+clang = "Select the overload whose same-operator fold has a strictly stronger normalized constraint. Different fold operators leave the tested overloads ambiguous. In the tested binary folds, the initial constraint contributes separately to subsumption."
+limits = "Covers unary folds and the decomposition of binary folds over template parameter packs. Concept template parameter packs have additional draft requirements. Satisfaction is tracked separately."
+probe = 'template<class T> concept A = sizeof(T) >= 2; template<class T> concept B = A<T> && sizeof(T) >= 4; template<class... T> requires (A<T> && ...) int f(T...); template<class... T> requires (B<T> && ...) int f(T...); int x = f(1);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 C++26 unary and binary overload probes on x86-64 Linux and arm64 Darwin"]
+
+[[divergence]]
+id = "fold-expanded-constraint-satisfaction"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.constr.fold], [temp.constr.atomic], [temp.constr.normal]"
+prior = "Instantiate the written fold as one atomic expression, permitting contextual conversion of its elements to bool."
+spec = "Each expanded element is itself a constraint. An atomic element must have type bool. Check elements in order and stop substitution after the first false conjunction element or true disjunction element. A binary fold checks the separate initializer in source order."
+gcc = "The tested integer pack uses contextual conversion to bool. The tested conjunctions and disjunctions instantiate a later template with a failing static assertion even when an earlier element or a binary fold initializer already decides satisfaction."
+clang = "Same as spec in the tested cases."
+limits = "Also checks normalized nested constraints and unequal pack lengths. The tested disjunction continues past an immediate substitution failure in an element in spec and Clang modes. GCC treats the written fold expression as unsatisfied."
+probe = 'template<int... N> requires (N && ...) int f(); int x = f<1, 2>();'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes on x86-64 Linux and arm64 Darwin for boolean elements, both binary fold orders, and short-circuit substitution"]
+
+[[divergence]]
+id = "constrained-type-template-parameter-pack"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.param], [temp.constr.normal], [temp.constr.order]"
+prior = "Reject the ellipsis in a constrained template type parameter."
+spec = "Normalize a type-constraint on a template type parameter pack as a conjunction fold. The tested stronger concept pack is more constrained."
+gcc = "Accept a single constrained pack. GCC 16.2 treats the tested constrained pack overloads as ambiguous."
+clang = "Same as spec for the tested constrained pack overloads."
+probe = 'template<class T> concept A = sizeof(T) > 0; template<class T> concept B = A<T> && (sizeof(T) > 1); template<A... T> int f(T...); template<B... T> int f(T...); int n = f(42);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 native and cross-target C++26 syntax and primary symbols on x86-64 Linux and arm64 Darwin"]
+
+[[divergence]]
+id = "concept-template-parameter-fold-expansion"
+status = "pending"
+mode_status = { spec = "pending", gcc = "unverified", clang = "pending" }
+reference = "[temp.param], [temp.constr.concept], [temp.constr.normal], [temp.constr.order]"
+prior = "No concept template parameter pack normalization."
+spec = "Normalize each bound concept pack argument individually. This selects the more constrained overload in the draft example. A fold cannot combine concept template parameter packs and other pack kinds."
+gcc = "GCC 16.2 rejects both the single concept template parameter and the pack spelling."
+clang = "Upstream Clang 23.1.6 accepts individual and empty concept packs in folds. It reports the draft example's overloads ambiguous and accepts the tested fold combining different pack kinds."
+probe = 'template<class T, template<class> concept... C> concept All = (C<T> && ...);'
+evidence = ["The explicit overload and mixed-pack examples at the draft pin", "GCC 16.2 and upstream Clang 23.1.6 C++26 acceptance, satisfaction and overload probes on x86-64 Linux and arm64 Darwin"]
+
+[[divergence]]
 id = "constrained-requires-expression-local-parameter-symbol"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

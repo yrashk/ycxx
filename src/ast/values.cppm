@@ -339,6 +339,14 @@ struct VWrittenOperator {
   SeqId<ConstId> operands;
 };
 
+// A fold-expression as written, whose operands are recorded in source order.
+struct VWrittenFold {
+  u8 token;
+  bool left;
+  ConstId first;
+  ConstId second;
+};
+
 struct VWrittenCallee {
   NameId name;
   EntityId resolved;
@@ -393,6 +401,17 @@ struct VConstraint {
   SeqId<ConstId> operands;
 };
 
+// [temp.constr.fold]: the normalized operand and the unexpanded template packs it
+// names. Bind each pack element when checking satisfaction, in increasing order.
+struct VFoldConstraint {
+  ConstId operand;
+  ConstId expression;  // token replay for a pack pattern with a nontrivial argument mapping
+  SeqId<u32> packs;
+  u8 op;
+  SeqId<FoldPackBinding> bound;
+  bool legacy = false;  // GCC uses atomic ordering for a constrained parameter pack
+};
+
 // The written form of a requires-expression in a constraint symbol.
 struct [[=dependent]] VRequiresExpression {
   SeqId<QualType> parameters;
@@ -409,7 +428,8 @@ struct [[=dependent]] VRequiresParameter {
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
                                VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional,
-                               VRequiresExpression, VRequiresParameter, VWrittenOperator, VWrittenCallee, VWrittenMember>;
+                               VRequiresExpression, VRequiresParameter, VWrittenOperator, VWrittenCallee, VWrittenMember,
+                               VWrittenFold, VFoldConstraint>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

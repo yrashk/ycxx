@@ -2784,21 +2784,26 @@ public:
         }
         cargs = *a;
       }
-      if (is(Tk::ellipsis)) {
-        s_->diag(pos(), Diag::not_supported, Tk::ellipsis);  // a constrained pack: a fold-expanded constraint
-        ok = false;
-        return std::nullopt;
-      }
+      p.pack = u8(accept(Tk::ellipsis));
       p.kind = ast::TemplateArgKind::type;
-      p.type = s_->types().template_param(depth, index);
+      p.type = s_->types().template_param(depth, index, p.pack != 0);
       if (is(Tk::identifier)) {
         p.name = name_of(tok());
         bump();
       }
       p.type_constraint = written_concept(*c, cargs);
       cargs.insert(cargs.begin(), s_->templates().type_arg(p.type));
-      if (auto nf = s_->concept_constraint(*c, cargs, at)) s_->head_constraints.push_back(*nf);
-      if (accept(Tk::equal) && !template_type_default(p)) {
+      if (auto normal = s_->concept_constraint(*c, cargs, at)) {
+        if (p.pack) {
+          const std::array packs{u32(depth) << 16 | index};
+          *normal = s_->ins().intern_value(ast::VFoldConstraint{
+              *normal, ConstId::none, s_->ins().intern_seq(std::span<const u32>(packs)), 0,
+              s_->ins().intern_seq(std::span<const ast::FoldPackBinding>{}),
+              s_->compatibility() == ast::Compatibility::gcc});
+        }
+        s_->head_constraints.push_back(*normal);
+      }
+      if (!p.pack && accept(Tk::equal) && !template_type_default(p)) {
         ok = false;
         return std::nullopt;
       }
@@ -3506,11 +3511,15 @@ public:
       const auto& p = params[i];
       if (p.name == s_->no_name()) continue;
       const auto local = s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-      written_function_parameters_.emplace(local, ast::VDepFnParam{0, u16(i), u8(ast::cv_of(p.type))});
+      const ast::VDepFnParam reference{0, u16(i), u8(ast::cv_of(p.type))};
+      written_function_parameters_.emplace(local, reference);
+      if (s_->types().kind(p.type) == sema::TypeKind::pack_expansion)
+        written_function_packs_.emplace(p.name, reference);
     }
     const auto result = constraint_expression(true, &written);
     s_->pop_scope();
     written_function_parameters_.clear();
+    written_function_packs_.clear();
     return result;
   }
 
@@ -3653,6 +3662,7 @@ public:
     u32 begin = pos();
     const sema::Sema::ConstraintAtomScope atom{*s_};
     const bool saved = std::exchange(writing_constraint_atom_, written != nullptr);
+    const bool saved_folds = std::exchange(normalizing_constraint_atom_, s_->compatibility() != ast::Compatibility::gcc);
     Ex e = primaries ? primary_expression() : binary_expression(3);
     if (written) {
       *written = written_atom(e);
@@ -3660,11 +3670,16 @@ public:
           !s_->ins().values.is<ast::VRequiresExpression>(*written)) *written = sema::ConstId::none;
     }
     writing_constraint_atom_ = saved;
-    // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
+    normalizing_constraint_atom_ = saved_folds;
+    if (auto fold = normalize_fold_constraint(e)) return *fold;
+    return constraint_atom(begin, pos());
+  }
+  // The names in the token range select the atom's parameter mapping.
+  ConstId constraint_atom(u32 begin, u32 end) {
     std::vector<NameId> names;
-    for (u32 j = begin_ + begin; j < i_; ++j)
+    for (u32 j = begin_ + begin; j < begin_ + end; ++j)
       if (r_->tokens[j].kind == Tk::identifier) names.push_back(name_of(r_->tokens[j]));
-    return s_->atom(begin, pos(), names);
+    return s_->atom(begin, end, names, fold_element_packs_);
   }
   // `C<args>` or `N::C<args>` naming a concept here: its normal form; none (nothing read) if it
   // is no concept-id.
@@ -3704,11 +3719,66 @@ public:
   }
 
   bool writing_constraint_atom_ = false;
+  bool normalizing_constraint_atom_ = false;
   bool writing_pack_index_ = false;
   std::map<NodeId, ConstId> written_operators_;
   std::map<u32, ast::VRequiresParameter> written_requires_parameters_;
   std::map<u32, ast::VDepFnParam> written_function_parameters_;
+  std::map<NameId, ast::VDepFnParam> written_function_packs_;
   u32 written_requires_depth_ = 0;
+
+  struct FoldConstraintPattern {
+    u32 begin = 0;
+    u32 end = 0;
+    std::vector<sema::PackRef> packs;
+    std::optional<Ex> initializer;
+    bool initializer_first = false;
+    bool disjunction = false;
+  };
+  std::map<NodeId, FoldConstraintPattern> fold_constraints_;
+  std::span<const sema::PackRef> fold_element_packs_;
+
+  std::optional<ConstId> normalize_fold_constraint(Ex expression) {
+    while (auto paren = s_->as<ast::Paren>(expression)) expression.id = paren->operand.id;
+    const auto found = fold_constraints_.find(expression.id);
+    if (found == fold_constraints_.end()) return std::nullopt;
+    const auto& pattern = found->second;
+    std::vector<u32> packs;
+    for (const auto& pack : pattern.packs) {
+      if (pack.fn != NameId{}) return std::nullopt;
+      packs.push_back(u32(pack.depth) << 16 | pack.index);
+    }
+    const auto read_constraint = [&](u32 begin, u32 end, bool expansion) {
+      const auto before = s_->diag_count();
+      Parser operand(*r_, begin_, begin_ + end, *s_);
+      operand.set_questions(questions());
+      operand.seek(begin_ + begin);
+      operand.fold_element_packs_ = expansion ? std::span<const sema::PackRef>(pattern.packs) : fold_element_packs_;
+      if (expansion) s_->begin_pattern();
+      const auto normal = operand.constraint_expression(false);
+      if (expansion) s_->end_pattern(false, begin, end, /*record=*/false);
+      if (!operand.at_end() || normal == ConstId::none || s_->diag_count() != before) {
+        s_->truncate_diags(before);
+        return ConstId::none;
+      }
+      return normal;
+    };
+    const auto operand = read_constraint(pattern.begin, pattern.end, true);
+    if (operand == ConstId::none) return std::nullopt;
+    const auto op = u8(pattern.disjunction);
+    const auto fold = s_->ins().intern_value(ast::VFoldConstraint{
+        operand, constraint_atom(pattern.begin, pattern.end),
+        s_->ins().intern_seq(std::span<const u32>(packs)), op,
+        s_->ins().intern_seq(std::span<const ast::FoldPackBinding>{})});
+    if (!pattern.initializer) return fold;
+    // [temp.constr.normal]: a binary fold is a unary fold joined with its
+    // initializer, in source order. Either side may short-circuit the other.
+    const auto initial = read_constraint(pattern.initializer->begin, pattern.initializer->end, false);
+    if (initial == ConstId::none) return std::nullopt;
+    const std::array clauses{pattern.initializer_first ? initial : fold,
+                             pattern.initializer_first ? fold : initial};
+    return s_->ins().intern_value(ast::VConstraint{op, s_->ins().intern_seq(std::span<const ConstId>(clauses))});
+  }
 
   // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
   std::optional<ast::DeclSema> concept_name() {
@@ -4081,6 +4151,18 @@ public:
     }
     return false;
   }
+  bool replayed_expression_fold = false;
+
+  Ex constraint_fold_satisfaction(bool disjunction) {
+    const u32 begin = pos();
+    ConstId written = ConstId::none;
+    FoldConstraintPattern normalized;
+    const auto elements = fold_pattern(written, normalized, disjunction);
+    if (!elements) return {NodeId::none, begin, pos()};
+    if (elements->empty()) return s_->bool_literal(!disjunction, begin, pos());
+    return elements->back();
+  }
+
   // A fold-expression ([expr.prim.fold]): in a definition one dependent operand; in an
   // instantiation the elements of its pattern nested as [temp.variadic]/11 says, an empty one as
   // /12 says.
@@ -4096,12 +4178,14 @@ public:
     Tk op{};
     std::optional<Ex> init;
     std::optional<std::vector<Ex>> elems;
+    ConstId pattern = ConstId::none;
+    FoldConstraintPattern normalized;
     if (is(Tk::ellipsis)) {  // ( ... op pattern ), a unary left fold
       bump();
       op = kind();
       bump();
       left = true;
-      elems = fold_pattern();
+      elems = fold_pattern(pattern, normalized);
     } else {
       // ( pattern op ... ), ( pattern op ... op init ), or ( init op ... op pattern ).
       // Which operand is the pattern: the one that names a pack, as the definition found.
@@ -4116,7 +4200,7 @@ public:
         i_ = begin_ + first;
       }
       if (a_is_pattern) {
-        elems = fold_pattern();
+        elems = fold_pattern(pattern, normalized);
       } else {
         init = cast_expression();
         left = true;
@@ -4130,12 +4214,27 @@ public:
           return {NodeId::none, begin, pos()};
         }
         bump();
-        if (left) elems = fold_pattern();
+        if (left) elems = fold_pattern(pattern, normalized);
         else init = cast_expression();
       }
     }
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    if (!elems) return s_->dependent_node({}, begin, pos());
+    if (!elems) {
+      const Ex result = s_->dependent_node({}, begin, pos());
+      const ConstId initial = init ? written_atom(*init) : ConstId::none;
+      if (pattern != ConstId::none && (!init || initial != ConstId::none)) {
+        const bool initial_first = left && init.has_value();
+        written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenFold{
+            u8(op), left, initial_first ? initial : pattern, initial_first ? pattern : initial}));
+      }
+      if (normalizing_constraint_atom_ && !normalized.packs.empty() && (op == Tk::ampamp || op == Tk::pipepipe)) {
+        normalized.initializer = init;
+        normalized.initializer_first = left;
+        normalized.disjunction = op == Tk::pipepipe;
+        fold_constraints_.emplace(result.id, std::move(normalized));
+      }
+      return result;
+    }
     u32 at = begin;
     auto apply = [&](Ex l, Ex r) -> Ex {
       if (op == Tk::comma) return s_->binary(sema::Sema::BinOp::comma, l, r, at);
@@ -4166,26 +4265,51 @@ public:
   }
   // A fold's pattern, a cast-expression: its elements in an instantiation; none in a definition,
   // where the expansion is recorded and the fold is dependent.
-  std::optional<std::vector<Ex>> fold_pattern() {
+  std::optional<std::vector<Ex>> fold_pattern(ConstId& written, FoldConstraintPattern& normalized,
+                                              std::optional<bool> constraint = std::nullopt) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       sema::Expansion e = *x;
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
+      if (!constraint) replayed_expression_fold = true;
       if (n)
         for (std::size_t i = 0; i < *n; ++i) {
           i_ = begin_ + begin;
           s_->push_frame(e.packs, u32(i));
-          out.push_back(cast_expression());
+          const Ex element = cast_expression();
           s_->pop_frame();
+          out.push_back(element);
+          if (!constraint) continue;
+          if (!element.ok()) break;
+          // [temp.constr.fold]: each element is itself a constraint. Its value can
+          // keep later elements from being substituted at all.
+          const Ex value = s_->rvalue(element);
+          const QualType type = ast::without_cv(s_->types().canonical(value.type()));
+          if (!s_->types().is(type, Builtin::bool_)) {
+            s_->diag(element.begin, Diag::constraint_not_bool, type);
+            break;
+          }
+          const auto evaluated = sema::Evaluator(*s_, questions()).evaluate(value);
+          if (!evaluated.value) break;
+          const bool satisfied = s_->world().values.as_signed(*evaluated.value) != 0;
+          out.back() = s_->bool_literal(satisfied, element.begin, element.end);
+          if (satisfied == *constraint) break;
         }
       i_ = begin_ + e.end;
       if (!n) return std::nullopt;
       return out;
     }
     s_->begin_pattern();
-    cast_expression();
-    if (s_->end_pattern(true, begin, pos()).empty()) s_->diag(begin, Diag::expansion_without_pack);
+    const Ex pattern = cast_expression();
+    auto packs = s_->end_pattern(true, begin, pos());
+    if (packs.empty()) s_->diag(begin, Diag::expansion_without_pack);
+    if (normalizing_constraint_atom_) {
+      normalized.begin = begin;
+      normalized.end = pos();
+      normalized.packs = std::move(packs);
+    }
+    if (writing_constraint_atom_ || writing_pack_index_) written = written_atom(pattern);
     return std::nullopt;
   }
 
@@ -4540,7 +4664,11 @@ public:
       if (kind(1) == Tk::ellipsis && kind(2) == Tk::l_paren && kind(3) == Tk::identifier && kind(4) == Tk::r_paren) {
         NameId n = name_of(tok(3));
         for (int i = 0; i < 5; ++i) bump();
-        return s_->sizeof_pack(n, begin, pos());
+        const Ex result = s_->sizeof_pack(n, begin, pos());
+        if (writing_constraint_atom_)
+          if (auto pack = written_function_packs_.find(n); pack != written_function_packs_.end())
+            record_written_operator(result, Tk::ellipsis, {s_->ins().intern_value(pack->second)});
+        return result;
       }
       [[fallthrough]];
     case Tk::kw_alignof: {

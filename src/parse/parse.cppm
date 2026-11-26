@@ -1106,6 +1106,13 @@ public:
   // still names a template parameter.
   std::optional<bool> satisfied(ConstId c, u32 point) {
     if (c == ConstId::none) return true;
+    if (w_->ins.values.is<ast::VFoldConstraint>(c)) {
+      const auto fold = w_->ins.values.get<ast::VFoldConstraint>(c);
+      if (w_->ins.seqs.size(fold.packs) == w_->ins.seqs.size(fold.bound))
+        return fold_satisfied(c, fold, point);
+      if (fold.expression == ConstId::none) return std::nullopt;
+      return w_->ins.values.is<ast::VAtom>(fold.expression) ? atom_satisfied(c, point) : satisfied(fold.expression, point);
+    }
     if (w_->ins.values.is<ast::VConstraint>(c)) {
       auto v = w_->ins.values.get<ast::VConstraint>(c);
       bool any_unknown = false;
@@ -1119,6 +1126,36 @@ public:
     }
     return atom_satisfied(c, point);
   }
+  std::optional<bool> fold_satisfied(ConstId c, const ast::VFoldConstraint& fold, u32 point) {
+    const auto key = std::to_underlying(c);
+    if (auto saved = atoms_.find(key); saved != atoms_.end()) return saved->second;
+    const auto packs = w_->ins.seqs.elements(fold.bound);
+    if (packs.empty()) return std::nullopt;
+    const auto size = w_->ins.seqs.size(packs.front().elements);
+    if (std::ranges::any_of(packs, [&](const auto& pack) { return w_->ins.seqs.size(pack.elements) != size; }))
+      return atoms_[key] = false;
+    for (std::size_t element = 0; element < size; ++element) {
+      sema::Bindings bindings;
+      for (const auto& pack : packs) {
+        const u16 depth = u16(pack.pack >> 16);
+        const u16 index = u16(pack.pack);
+        if (bindings.levels.size() <= depth) bindings.levels.resize(depth + 1);
+        auto& level = bindings.levels[depth];
+        if (level.size() <= index) level.resize(index + 1);
+        level[index] = w_->ins.seqs.at(pack.elements, element);
+      }
+      auto operand = templates().substitute_constraint(fold.operand, bindings);
+      auto value = operand ? satisfied(*operand, point) : std::optional(false);
+      if (!value) return std::nullopt;
+      if (operand && satisfaction_failed(*operand)) {
+        atom_errors_.insert(key);
+        return atoms_[key] = false;
+      }
+      if (*value == (fold.op == 1)) return atoms_[key] = *value;
+    }
+    return atoms_[key] = fold.op == 0;
+  }
+
   // An atomic constraint's satisfaction ([temp.constr.atomic]/3), memoized (`atoms_`): the first
   // evaluation is the program's (/3: a different result elsewhere is ill-formed, no diagnostic
   // required).
@@ -1128,6 +1165,10 @@ public:
   // Whether an atom of normal form `c` is among them.
   bool satisfaction_failed(ConstId c) {
     if (c == ConstId::none) return false;
+    if (w_->ins.values.is<ast::VFoldConstraint>(c)) {
+      const auto expression = w_->ins.values.get<ast::VFoldConstraint>(c).expression;
+      if (expression != ConstId::none && !w_->ins.values.is<ast::VAtom>(expression)) return satisfaction_failed(expression);
+    }
     if (w_->ins.values.is<ast::VConstraint>(c))
       return std::ranges::any_of(w_->ins.seqs.elements(w_->ins.values.get<ast::VConstraint>(c).operands),
                                  [&](ConstId o) { return satisfaction_failed(o); });
@@ -11156,9 +11197,10 @@ NodeId Program::bind_member_default(EntityId cls, EntityId function, std::size_t
 // error. What it instantiates keeps its own diagnostics in its own cell.
 class AtomAnalysis {
 public:
-  AtomAnalysis(Program& p, const ast::VAtom& a, u32 point)
+  AtomAnalysis(Program& p, const ast::VAtom& a, u32 point, std::optional<bool> fold)
       : p_(&p), k_(p.index(a.item)), it_(&p.items().items[k_]), b_(p.world().ins, &p.arena_), q_(p, k_, false),
-        s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
+        s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_),
+        atom_(a), fold_(fold) {
     ps_.set_questions(q_);
     q_.at_point = point;
     q_.satisfying_atom = true;
@@ -11194,6 +11236,13 @@ public:
     s_.template_args.levels.resize(atom_.depth + 1);
     for (ConstId e : ins.seqs.elements(atom_.mapping))
       s_.template_args.levels[atom_.depth].push_back(e == ConstId::none ? std::nullopt : std::optional(t.mapping_arg(e)));
+    // A normalized fold operand binds the element itself. Its spelling denotes
+    // that single parameter throughout the atom's replay.
+    for (auto& head : s_.template_scopes)
+      for (auto& parameter : head)
+        if (parameter.depth == atom_.depth && parameter.pack)
+          if (auto arg = s_.template_args.at(parameter.depth, parameter.index); arg && arg->kind != ast::TemplateArgKind::pack)
+            parameter.pack = false;
     // The function's parameters, of their substituted types, for an atom that names them.
     if (atom_.fn_params && ins.seqs.size(is.decls) > 0) s_.push_scope();
     if (atom_.fn_params && ins.seqs.size(is.decls) > 0)
@@ -11231,8 +11280,23 @@ public:
         }
       }
     }
-    Ex e = ps_.expression();
+    Ex e = fold_ ? ps_.constraint_fold_satisfaction(*fold_) : ps_.expression();
     bool failed = !e.ok() || !ps_.at_end();
+    if (!failed && ps_.replayed_expression_fold && s_.compatibility() == ast::Compatibility::gcc) {
+      // GCC 16.2 checks the functions used by every substituted operand of a
+      // written fold, even when evaluation later short-circuits that operand.
+      const auto first_function = p_->instance_order_.size();
+      const auto first_variable = p_->var_instances_.size();
+      const auto first_member = p_->member_initializers_.size();
+      for (const auto& demand : s_.demands) {
+        if (demand.variable_type) continue;
+        if (const auto* instance = p_->instance(demand.spec, q_.at_point.value_or(k_)); instance && instance->failed) {
+          hard.append_range(instance->body.diags);
+          failed = true;
+        }
+      }
+      p_->mark_type_only_instances(first_function, first_variable, first_member);
+    }
     for (const engine::Diagnostic& d : sink_) {
       if (sema::survives_substitution(d.id)) hard.push_back(d);
       failed = true;
@@ -11265,6 +11329,7 @@ private:
   sema::Sema s_;
   Parser ps_;
   ast::VAtom atom_;
+  std::optional<bool> fold_;
   std::vector<sema::Expansion> expansions_;
 };
 
@@ -11273,15 +11338,20 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
   if (auto it = atoms_.find(key); it != atoms_.end()) return it->second;
   sema::Templates t = templates();
   if (t.constraint_dependent(c)) return std::nullopt;
+  const auto fold = w_->ins.values.is<ast::VFoldConstraint>(c)
+                         ? std::optional(w_->ins.values.get<ast::VFoldConstraint>(c))
+                         : std::nullopt;
+  const ConstId expression = fold ? fold->expression : c;
+  const auto atom = w_->ins.values.get<ast::VAtom>(expression);
   // An atom of the item being analysed is checked once its analysis is done: its head is not
   // known before ([temp.constr.decl] constraints are checked where they are used).
-  if (std::ranges::contains(running_, index(w_->ins.values.get<ast::VAtom>(c).item))) return std::nullopt;
+  if (std::ranges::contains(running_, index(atom.item))) return std::nullopt;
   atoms_[key] = true;  // its own evaluation asks for itself only through a cycle, which [temp.constr.atomic] does not satisfy
   std::vector<engine::Diagnostic> hard;
-  auto r = AtomAnalysis(*this, w_->ins.values.get<ast::VAtom>(c), point).run(hard);
+  auto r = AtomAnalysis(*this, atom, point, fold ? std::optional(fold->op == 1) : std::nullopt).run(hard);
   if (!r || !hard.empty()) atom_errors_.insert(key);
   // A limit met in the atom's tokens may have been met already where they were first analysed.
-  const std::vector<engine::Diagnostic>& seen = item_sema(index(w_->ins.values.get<ast::VAtom>(c).item)).diags;
+  const std::vector<engine::Diagnostic>& seen = item_sema(index(atom.item)).diags;
   for (engine::Diagnostic& d : hard)
     if (!std::ranges::contains(end_diags_, d) && !std::ranges::contains(seen, d)) end_diags_.push_back(std::move(d));
   atoms_[key] = r.value_or(false);
