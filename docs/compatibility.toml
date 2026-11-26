@@ -18,11 +18,13 @@ sources = ["DECISIONS.md", "STATUS.md", "docs/LESSONS.md", "docs/design", "tests
 # recorded for differences without a mode rule, and shared for a deliberate common policy.
 # The spec/gcc/clang fields describe current ycxx behavior. The *_observed fields record
 # additional oracle observations. Mode status applies to the case described by the entry.
+# For unavailable modes, these fields state the oracle behavior to implement.
 [mode_status_values]
 supported = "ycxx follows the mode's oracle or a documented shared policy for this case."
 partial = "ycxx follows the mode's oracle for part of this case. See limits."
 pending = "A known oracle difference still needs a mode-specific implementation."
 unverified = "The available evidence does not establish whether ycxx matches this oracle."
+unavailable = "The case requires a language feature that ycxx has yet to implement. See limits."
 
 [modes]
 spec = "Pinned C++26 draft, applicable defect resolutions, and published target ABI."
@@ -876,6 +878,25 @@ clang = "Same as spec."
 evidence = ["tests/own/builtins/virtual-base-of-same-incomplete.reject.cpp", "tests/daemon/compatibility.py", "docs/EXTENSIONS.md"]
 
 [[divergence]]
+id = "virtual-base-trait-nonvirtual-ancestor"
+status = "recorded"
+mode_status = { spec = "unavailable", gcc = "unavailable", clang = "unavailable" }
+reference = "[meta.rel], [class.mi], #218, #310"
+prior = "The recorded graph query considers only edges written with a virtual base-specifier. The parser rejects virtual base-specifiers."
+spec = "In the tested graph, only Direct is a virtual base of Child."
+gcc = "Treat both Direct and Parent as virtual bases of Child."
+clang = "Same as spec."
+limits = "ycxx rejects the virtual base-specifier in every mode. Virtual inheritance support (#310) is required before the compatibility behavior can be selected."
+probe = '''
+struct Parent {};
+struct Direct : Parent {};
+struct Child : virtual Direct {};
+static_assert(__builtin_is_virtual_base_of(Direct, Child));
+static_assert(!__builtin_is_virtual_base_of(Parent, Child));
+'''
+evidence = ["docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/310", "GCC 16.2 and upstream Clang 23.1.6 syntax probes, with both result assertions and both Clang targets"]
+
+[[divergence]]
 id = "layout-compatible-member-alignment"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1579,3 +1600,16 @@ template <int N> struct Plan {
 int main() { return Plan<4>::first.index + Plan<4>::first.get() != 7; }
 '''
 evidence = ["tests/own/local-classes/class-being-defined.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]
+
+[[divergence]]
+id = "make-integer-sequence-builtin-template"
+status = "shared"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[intseq.make], Itanium C++ ABI §5.1.5, #88, #208, docs/EXTENSIONS.md"
+prior = "Implement Clang's built-in template and its written dependent type encoding for libycxx."
+spec = "Expose __make_integer_seq and its __has_builtin query. Form the sequence prescribed by [intseq.make] and preserve the written dependent type in symbols that name it."
+gcc = "Same as spec to support libycxx's integer sequence templates."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 rejects the built-in template spelling and its feature query yields zero."
+clang_observed = "Upstream Clang 23.1.6 exposes the built-in template and accepts the tested alias chain and sequence values on both targets."
+evidence = ["tests/own/templates/t8-make-integer-seq.run.cpp", "tests/own/templates/t8-mangling.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]

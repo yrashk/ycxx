@@ -4276,6 +4276,7 @@ def historical_syntax_modes(world, gxx):
         ('decls/annotations.accept.cpp', ('spec', 'gcc')),
         ('builtins/pointer_reference_related_temporary.accept.cpp', ('spec', 'gcc')),
         ('local-classes/class-being-defined.run.cpp', MODES),
+        ('templates/t8-make-integer-seq.run.cpp', MODES),
     )
     checks = []
     for path, accepted in cases:
