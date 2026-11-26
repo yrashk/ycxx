@@ -31,6 +31,9 @@ enum class Diag : std::uint32_t {
   typedef_definition [[=message{Severity::error, "a function definition cannot be declared 'typedef'"}]],
   using_namespace_name [[=message{Severity::error, "using-declaration names the namespace '{0:n}'"}]],
   using_class_member [[=message{Severity::error, "a using-declaration at namespace scope names the class member '{0:n}'"}]],
+  // [namespace.udecl]/3: a member using-declarator names a member of a base class.
+  using_not_base [[=message{Severity::error, "a member using-declaration names '{0:t}', which is not a base class of '{1:t}'"}]],
+  using_namespace_member [[=message{Severity::error, "a member using-declaration names the namespace member '{0:n}'"}]],
   attributes_not_allowed [[=message{Severity::error, "an attribute-specifier cannot appear here"}]],
   array_initializer [[=message{Severity::error, "an array is initialized by a braced list or, for characters, a string literal"}]],
   asm_label_conflict [[=message{Severity::error, "'{0:n}' is given another asm label"}]],

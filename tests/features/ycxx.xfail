@@ -190,8 +190,6 @@ draft/dcl/enum.udecl-2.accept.cpp 'enum' not supported yet
 draft/dcl/enum.udecl-3.reject.cpp errors elsewhere: 'enum' not supported yet
 draft/dcl/namespace.def.general-2.accept.cpp 'namespace' not supported yet
 draft/dcl/namespace.udecl-1.accept.cpp 'enum' not supported yet
-draft/dcl/namespace.udecl-10.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/namespace.udecl-11.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/namespace.udecl-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported yet

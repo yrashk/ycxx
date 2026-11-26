@@ -915,10 +915,14 @@ private:
           last = j;
           spelled = name(j);
         } else if (kind(j) == Tk::kw_operator) {
+          last = j;
           if (auto id = literal_operator_id(r_, j, limit)) {
-            last = j;
             spelled = lex::literal_operator_name(id->suffix);
             j = id->end - 1;
+          } else {
+            // An operator-function-id or conversion-function-id ([class.conv.fct]).
+            spelled = "operator";
+            j = operator_spelling(j + 1, limit, spelled, /*comma_ends=*/true) - 1;
           }
         } else if (kind(j) == Tk::less) {
           j = match_angle(j, limit) - 1;
@@ -1018,6 +1022,26 @@ private:
     }
   }
 
+  // The rest of an operator-function-id or conversion-function-id after `operator`, from `n`,
+  // appended to `spelled` as declarators spell it; the first token after it: a `(`, `to`, or
+  // with `comma_ends` a `,` past its first token (a using-declarator's end).
+  u32 operator_spelling(u32 n, u32 to, std::string& spelled, bool comma_ends) {
+    const u32 first = n;
+    if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
+        (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
+      spelled += kind(n) == Tk::l_paren ? "()" : "[]";
+      n += 2;
+    }
+    for (; n < to && kind(n) != Tk::l_paren && !(comma_ends && n > first && kind(n) == Tk::comma); ++n) {
+      Tk o = kind(n);
+      bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
+      if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';
+      if (word && spelled == "operator" && o != Tk::string_lit) spelled += ' ';
+      spelled += r_.spelling(r_.tokens[n]);
+    }
+    return n;
+  }
+
   void declarator(u32 k, u32 from, u32 to, Flags f, bool first) {
     u32 cand = none;
     u32 cand_end = none;
@@ -1083,20 +1107,7 @@ private:
           n = cand_end = id->end;
           continue;
         }
-        ++n;
-        if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
-            (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
-          spelled += kind(n) == Tk::l_paren ? "()" : "[]";
-          n += 2;
-        }
-        while (n < to && kind(n) != Tk::l_paren) {
-          Tk o = kind(n);
-          bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
-          if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';
-          if (word && spelled == "operator" && o != Tk::string_lit) spelled += ' ';
-          spelled += r_.spelling(r_.tokens[n]);
-          ++n;
-        }
+        n = operator_spelling(n + 1, to, spelled, /*comma_ends=*/false);
         cand_end = n;
       } else if (t == Tk::l_paren) {
         // A ptr-operator after `(` starts a grouped declarator, including `T (C::*p)(…)`.

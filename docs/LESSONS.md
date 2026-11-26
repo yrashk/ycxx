@@ -716,6 +716,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     field of that type, not only with uses after the closing brace.
   - Learned on #306.
 
+- **A query that every lookup asks must not start analyses.** On #1150 a `Questions` hook that
+  unqualified name lookup calls (`dependent_member_using`) ran `item_sema` on the class's using items
+  to be sure they were recorded. On `<iostream>` it re-entered an item whose analysis was running
+  (a contract violation in `item_sema`). The own tests all passed, and the crash was in a worker,
+  so lldb showed no stack.
+  - Do: have such a hook read only what is recorded, and rely on the order the definition
+    analyses items in (member items before bodies). Run the `<iostream>` hello program after every
+    change to lookup, not only the gate.
+  - Learned on #1150.
+
 ## Evidence and tests
 
 - **Map a header chain past its first wall with an overlay, and check both gates.** Every
