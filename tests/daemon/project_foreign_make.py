@@ -12,7 +12,10 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import check_dependency_graph, check_dependency_html, check_location, dependency_edge, fact
+from project_inspection import (
+    check_dependency_graph, check_dependency_html, check_location, check_target_dependencies_html,
+    dependency_edge, fact,
+)
 from project_shader_bundle import check_external_actions, publication
 from runtime_dir import runtime_root
 
@@ -124,6 +127,7 @@ def inspect(ycxx, scope, env, journal, tool, *, cold=False, partial=False, inven
         result = run_client(ycxx, scope, env, 'show', 'app', '--format=html')
         assert result.returncode == 0, result.stderr
         check_dependency_html(result.stdout, plan)
+        check_target_dependencies_html(result.stdout, plan)
     if not (cold or partial):
         document = html.unescape(result.stdout)
         assert all(part in document for part in (f'inputs/{MAKEFILE}', *inventory_files, ARCHIVE,

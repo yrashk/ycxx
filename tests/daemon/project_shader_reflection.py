@@ -13,7 +13,7 @@ import tempfile
 from project_build import action_keys, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
 from project_inspection import (
-    check_dependency_changes_html, check_dependency_graph, check_value_bindings_html,
+    check_dependency_changes_html, check_dependency_graph, check_target_dependencies_html, check_value_bindings_html,
     compare_value_bindings, dependency_edge, fact, scope_state,
 )
 from project_shader_bundle import check_external_actions, check_native_reused, publication
@@ -121,6 +121,7 @@ def check_value_binding_views(ycxx, scope, env, journal, initial, current):
     assert json.loads(encoded) == current and show('json') == encoded
     document = show('html')
     check_value_bindings_html(document, current)
+    check_target_dependencies_html(document, current)
     check_dependency_changes_html(document, current['definition'], None, value_bindings=True)
 
     baseline = scope.parent / 'value-baseline.json'
