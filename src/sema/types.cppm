@@ -733,6 +733,7 @@ struct FieldRec {
   bool mutable_ = false;
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
   u8 explicit_alignment = 0;
+  u8 written_alignment = 0;
 };
 
 // Classification of a defaulted copy affected by an explicit in-class definition. Deletion

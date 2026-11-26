@@ -2607,9 +2607,9 @@ public:
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
   // `__builtin_is_virtual_base_of(Base, Derived)` and `__is_pointer_interconvertible_base_of(Base,
-  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false, and the same class
-  // gives `same`, complete or not. Distinct classes need a complete Derived: their entities then,
-  // or the result after a diagnostic.
+  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false. Only pointer
+  // interconvertibility returns true for the same incomplete nonunion class. Other nonunion
+  // class queries need a complete Derived.
   std::expected<std::pair<EntityId, EntityId>, Ex> class_relation_operands(NameId name, QualType base_type,
                                                                            QualType derived_type, bool same,
                                                                            u32 begin, u32 end) {
@@ -2625,12 +2625,13 @@ public:
       return std::unexpected(Ex{NodeId::none, begin, end});
     }
     const EntityId b = ts.class_of(base), d = ts.class_of(derived);
-    if (b == d) return std::unexpected(bool_literal(same, begin, end));
+    if (b == d && same) return std::unexpected(bool_literal(true, begin, end));
     const auto complete_at_demand = q_->type_trait_at_demand(d, loc);
     if (!(complete_at_demand ? *complete_at_demand : q_->is_complete_at_source(d))) {
       if (!q_->type_trait_instantiation_failed(d)) diag_at(loc, Diag::class_relation_incomplete, derived_type, name);
       return std::unexpected(Ex{NodeId::none, begin, end});
     }
+    if (b == d) return std::unexpected(bool_literal(false, begin, end));
     return std::pair{b, d};
   }
   // A class is not its own virtual base. The graph has no virtual edges until #310.
@@ -2745,6 +2746,10 @@ public:
       if (f.bit_width != g.bit_width) return false;
       const auto same = layout_compatible(f.type, g.type);
       if (same != true) return same;
+      if (compatibility() == ast::Compatibility::clang) {
+        if (f.written_alignment != g.written_alignment) return false;
+        continue;
+      }
       const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
       if (!fa || !ga) return std::nullopt;
       if (std::max(*fa, u64(f.explicit_alignment)) != std::max(*ga, u64(g.explicit_alignment))) return false;
