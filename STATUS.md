@@ -3722,6 +3722,13 @@ drive watch. Normal builds, planning inputs, and witnesses share the
 header producer receipts.
 [Generated host header example](examples/project-build/host-generated-headers/README.md)
 
+A `cpp.host_executable` can also use a generated artifact directly in
+`sources` (#1583). The resident compiler reads the source and its quoted
+generated siblings from the same host snapshot. Real disk includes remain
+observed. Planning and witness snapshots retain a completed observation
+even when the host tool read no disk source or include files.
+[Generated host source example](examples/project-build/host-generated-sources/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
