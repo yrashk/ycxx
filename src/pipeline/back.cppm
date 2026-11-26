@@ -2279,9 +2279,93 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       errors.push_back({ast::Loc{f.item, f.body_offset},
                         "native functions with class-valued template arguments require supported default visibility and no closures or static locals"});
   if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
+  // The declarations that own closure types, by entity (docs/design/closures.md).
+  std::map<std::uint32_t, const Entity*> by_id;
+  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
+  auto spec_of = [](const Entity& e) {
+    return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
+                        e.template_head_constraint, e.template_trailing_constraint};
+  };
+  const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
+    auto found = by_id.find(ir::raw(id));
+    if (found == by_id.end()) {
+      // An immediate function can occur in a mangled expression without emitted code.
+      const sema::World* w = universe().world_for(target);
+      if (!w) return std::nullopt;
+      const sema::EntityRec& r = w->entities.rec(id);
+      if (r.kind != sema::EntityKind::function || r.templ != EntityId::none || r.linkage != ast::Linkage::external)
+        return std::nullopt;
+      return FunctionName{{std::string(w->ins.names.spelling(r.name)), r.type, r.scope, false, std::nullopt}, r.lang};
+    }
+    const Entity& fn = *found->second;
+    if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
+      return std::nullopt;
+    return FunctionName{
+        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
+        fn.lang};
+  };
+  const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
+    auto found = by_id.find(ir::raw(id));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& object = *found->second;
+    const sema::World* w = universe().world_for(target);
+    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+    const auto& r = w->entities.rec(id);
+    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
+    auto is_namespace = [&](EntityId scope) {
+      return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
+    };
+    const bool namespace_object = is_namespace(r.scope);
+    if (!namespace_object) {
+      const auto& owner = w->entities.rec(r.scope);
+      if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
+        return std::nullopt;
+    }
+    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+  };
+  ClassNames names = [&](EntityId c) {
+    const sema::World* w = universe().world_for(target);
+    if (!w) return ClassName{};
+    const sema::EntityRec& r = w->entities.rec(c);
+    ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
+                r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
+    n.unnamed_type_ordinal = r.unnamed_type_ordinal;
+    if (n.is_class && r.templ != EntityId::none) {
+      auto params = tu.class_template_parameters.find(r.templ);
+      if (params != tu.class_template_parameters.end()) n.template_params = params->second;
+    }
+    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
+      auto f = by_id.find(ir::raw(r.scope));
+      n.closure = true;
+      n.closure_type = r.type;
+      n.closure_number = r.ordinal;
+      n.closure_head = r.closure_head;
+      if (f != by_id.end()) {
+        const Entity& fe = *f->second;
+        if (fe.is_function) {
+          std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+          n.local = std::make_shared<const LocalFunction>(LocalFunction{
+              fname, fe.type, fe.scope, fe.special != Special::none,
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+        } else {
+          n.closure_variable = fe.id;
+        }
+      } else if (w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
+        n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
+      }
+    }
+    return n;
+  };
+  const auto encode_symbol = [&](const Entity& entity, std::string_view name) {
+    const TemplateSpec spec = spec_of(entity);
+    return symbol_name(in, name, entity.type, entity.is_function, entity.lang, names, entity.scope,
+                       entity.special != Special::none, entity.template_type ? &spec : nullptr,
+                       !linux, function_names, object_names, compatibility);
+  };
+
   // Checked policy records can require a definition, and raw linker names can refer to
   // another entity without an ordinary typed use of it.
-  const bool defer_private_constexpr = !k.check_policies && !tu.has_raw_linkage_names && tu.asm_hidden_symbols.empty();
+  const bool defer_private_constexpr = !k.check_policies && !tu.has_raw_linkage_names;
   std::set<std::uint32_t> deferred;
   if (defer_private_constexpr) {
     std::set<EntityId> candidates;
@@ -2294,7 +2378,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         const auto i = indexed(index.entities, entity);
         if (!i) return true;
         const Entity& symbol = tu.entities[*i];
-        return symbol.linkage != ast::Linkage::external || symbol.has_local_binding() || symbol.template_type.has_value();
+        if (symbol.linkage != ast::Linkage::external || symbol.has_local_binding() || symbol.template_type.has_value())
+          return true;
+        if (tu.asm_hidden_symbols.empty()) return false;
+        // A structured .hidden directive names one ordinary symbol. Keep a potentially named
+        // body if its emitted spelling cannot be established here.
+        if (!target.supports(ast::NativeOperation::namespace_hidden_asm) || !symbol.is_function ||
+            symbol.special != Special::none || !symbol.asm_label.empty()) return true;
+        const auto name = encode_symbol(symbol, symbol.name);
+        return !name || std::ranges::contains(tu.asm_hidden_symbols, *name, &AsmHiddenSymbol::name);
       });
       // Find resolved direct calls in checked constant-evaluated arms before requesting any L1
       // bodies. Other private helpers stay emission roots, including raw-name providers in
@@ -2486,83 +2578,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
-  // The declarations that own closure types, by entity (docs/design/closures.md).
-  std::map<std::uint32_t, const Entity*> by_id;
-  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
-  auto spec_of = [](const Entity& e) {
-    return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
-                        e.template_head_constraint, e.template_trailing_constraint};
-  };
-  const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
-    auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) {
-      // An immediate function can occur in a mangled expression without emitted code.
-      const sema::World* w = universe().world_for(target);
-      if (!w) return std::nullopt;
-      const sema::EntityRec& r = w->entities.rec(id);
-      if (r.kind != sema::EntityKind::function || r.templ != EntityId::none || r.linkage != ast::Linkage::external)
-        return std::nullopt;
-      return FunctionName{{std::string(w->ins.names.spelling(r.name)), r.type, r.scope, false, std::nullopt}, r.lang};
-    }
-    const Entity& fn = *found->second;
-    if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
-      return std::nullopt;
-    return FunctionName{
-        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
-        fn.lang};
-  };
-  const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
-    auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) return std::nullopt;
-    const Entity& object = *found->second;
-    const sema::World* w = universe().world_for(target);
-    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
-    const auto& r = w->entities.rec(id);
-    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
-    auto is_namespace = [&](EntityId scope) {
-      return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
-    };
-    const bool namespace_object = is_namespace(r.scope);
-    if (!namespace_object) {
-      const auto& owner = w->entities.rec(r.scope);
-      if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
-        return std::nullopt;
-    }
-    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
-  };
-  ClassNames names = [&](EntityId c) {
-    const sema::World* w = universe().world_for(target);
-    if (!w) return ClassName{};
-    const sema::EntityRec& r = w->entities.rec(c);
-    ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
-                r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
-    n.unnamed_type_ordinal = r.unnamed_type_ordinal;
-    if (n.is_class && r.templ != EntityId::none) {
-      auto params = tu.class_template_parameters.find(r.templ);
-      if (params != tu.class_template_parameters.end()) n.template_params = params->second;
-    }
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
-      auto f = by_id.find(ir::raw(r.scope));
-      n.closure = true;
-      n.closure_type = r.type;
-      n.closure_number = r.ordinal;
-      n.closure_head = r.closure_head;
-      if (f != by_id.end()) {
-        const Entity& fe = *f->second;
-        if (fe.is_function) {
-          std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
-          n.local = std::make_shared<const LocalFunction>(LocalFunction{
-              fname, fe.type, fe.scope, fe.special != Special::none,
-              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
-        } else {
-          n.closure_variable = fe.id;
-        }
-      } else if (w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
-        n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
-      }
-    }
-    return n;
-  };
   std::optional<VirtualTable> virtual_table;
   std::vector<KeylessTypeInfo> keyless_type_info;
   std::vector<DynamicTableOut> dynamic_tables;
@@ -2640,12 +2655,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                    e.special == Special::destructor ? "D1" :
                                    e.special == Special::base_object_destructor ? "D2" :
                                    e.special == Special::deleting_destructor ? "D0" : std::string_view(e.name);
-    const TemplateSpec spec = spec_of(e);
-    const auto encode = [&](std::string_view name) {
-      return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility);
-    };
-    auto name = encode(entry);
+    auto name = encode_symbol(e, entry);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
@@ -2668,7 +2678,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       }
     }
     if (tu.base_object_variants.contains(e.id)) {
-      auto base_name = encode(e.special == Special::constructor ? "C2" : "D2");
+      auto base_name = encode_symbol(e, e.special == Special::constructor ? "C2" : "D2");
       if (!base_name) {
         errors.push_back({e.at, std::format("the base-object name of '{}': {} is not supported yet", e.name, base_name.error())});
         continue;
