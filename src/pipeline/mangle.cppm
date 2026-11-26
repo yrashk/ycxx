@@ -916,6 +916,12 @@ class Mangler {
       const bool gcc = compatibility_ == ast::Compatibility::gcc;
       auto args = template_args(in_.seqs.elements(gcc ? d.args : d.written_args));
       if (!args) return args;
+      const auto written = in_.seqs.elements(d.qualifier);
+      if (!gcc && !written.empty()) {
+        std::string qualifier = d.global ? "gssr" : "sr";
+        for (ast::NameId component : written) qualifier += source_name(in_.names.spelling(component));
+        return qualifier + "E" + source_name(n.name) + *args;
+      }
       return unresolved_qualifier(n.scope, d.qualified, d.global) + source_name(n.name) + *args;
     }
     if (in_.values.is<ast::VDepOp>(v)) {

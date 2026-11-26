@@ -113,18 +113,30 @@ evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/
 
 [[divergence]]
 id = "dependent-variable-template-symbol"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.6.2, #773, #777"
 prior = "GCC's unqualified name and converted arguments, including defaults and packed arguments."
-spec = "Use the unresolved-name production, with qualification and the written argument list."
+spec = "Use the unresolved-name production, with the qualification written at each use and the written argument list."
 gcc = "Use the unqualified name and converted arguments, including defaults and J...E packs."
-clang = "Use the written argument list and unresolved-name qualifiers for the supported forms."
+clang = "Use the written argument list and unresolved-name qualifier of the first occurrence of the same dependent class specialization in the translation unit. A different enclosing class template or a different written argument list retains its own first spelling."
 gcc_observed = "Emits the unqualified template name with converted default arguments for bare, nested, explicitly global and alias-qualified references."
 clang_observed = "Emits the written namespace alias in an alias-only unit. When the canonical dependent type first appears with the actual namespace qualification, its spelling supplies the symbol for a later alias-qualified declaration. Both spellings still redeclare the same function template."
-limits = "ycxx resolves namespace aliases before mangling. The source spelling used for ABI identity and the canonical type used for redeclarations need to be preserved separately."
+limits = "Covers namespace variable template-ids in dependent class template arguments, including bare, global, nested and alias qualifiers, omitted defaults, and simple operations on the argument."
 probe = 'namespace Outer { namespace Inner { template<class T> constexpr bool value = true; } } namespace Alias = Outer::Inner; template<bool> struct Box {}; template<class T> void f(Box<Alias::value<T>>) {}'
-evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp", "Black-box GCC 16.2 and Clang 23.1.6 symbol and redeclaration probes with namespace aliases"]
+evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp", "Black-box GCC 16.2 and Clang 23.1.6 symbol probes with namespace aliases, earlier declarations and uninstantiated template bodies on ELF and Mach-O"]
+
+[[divergence]]
+id = "dependent-variable-template-redeclaration"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.over.link], [basic.def.odr]"
+prior = "Resolve the namespace alias and keep the written argument list and global qualification in dependent type identity."
+spec = "Compare the dependent expressions as written for redeclaration. Functionally equivalent declarations that are not equivalent can make the program ill-formed with no diagnostic required."
+gcc = "Treat the tested namespace alias, unqualified spelling, leading global qualification and explicit default argument as the same dependent class specialization. Repeating the definition diagnoses redefinition."
+clang = "Treat the tested namespace aliases and leading global qualification as the same dependent class specialization. Unqualified versus qualified spelling, or an explicit versus omitted default argument, permits separate declarations as in the probes."
+probe = 'template<class T> void f(Box<Alias::arg<T>>); template<class T> void f(Box<Ns::Inner::arg<T>>);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 two-definition probes on ELF and Mach-O"]
 
 [[divergence]]
 id = "dependent-member-template-symbol"

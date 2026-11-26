@@ -219,6 +219,7 @@ struct [[=dependent]] VDepVariable {
   SeqId<TemplateArg> written_args;
   u8 qualified;
   u8 global;
+  SeqId<NameId> qualifier{};
 };
 
 // A call to a named immediate function. The arguments are explicit types for a function

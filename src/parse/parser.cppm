@@ -663,7 +663,8 @@ public:
     bool constraint_failed = false;
     const bool replay_partial_alias = namespace_alias_type || replayed_member_alias_type || s_->replaying_alias_type_arguments;
     auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
-                                      alias_constraints_enabled_ ? &constraint_failed : nullptr, replay_partial_alias);
+                                      alias_constraints_enabled_ ? &constraint_failed : nullptr, replay_partial_alias,
+                                      /*record_spelling=*/!in_template_id_lookahead_);
     if (type && defer_alias && !in_template_id_lookahead_)
       type_alias_checks_->checks.emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
     alias_constraint_failures_ += constraint_failed;
@@ -5476,9 +5477,16 @@ public:
               return s_->dependent_variable_template_id(*known, *args, begin, pos());
             return s_->replayed_variable_template_id(*known, *args, replay.deferred, begin, pos());
           }
-          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+            std::vector<NameId> qualifier;
+            if (s_->compatibility() != ast::Compatibility::gcc)
+              for (u32 i = begin; i < name_at; ++i) {
+                const auto& token = r_->tokens[begin_ + i];
+                if (token.kind == Tk::identifier) qualifier.push_back(name_of(token));
+              }
             return s_->dependent_variable_template_id(*v, *args, begin, pos(), true,
-                                                       r_->tokens[begin_ + begin].kind == Tk::coloncolon);
+                                                       r_->tokens[begin_ + begin].kind == Tk::coloncolon, qualifier);
+          }
           return s_->variable_template_id(*v, *args, begin, pos());
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with

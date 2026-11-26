@@ -1589,24 +1589,37 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
       classes_with_unapplied_rtti_abi.insert(d.entity);
   };
+  auto record_class_template_spellings = [&](ast::SeqId<ast::TemplateTypeSpelling> spellings, std::uint32_t k) {
+    for (const auto& spelling : ins.seqs.elements(spellings)) {
+      const auto located = std::pair{ast::Loc{program.id(k), spelling.at}, spelling.arguments};
+      auto [it, added] = tu.class_template_spellings.try_emplace(spelling.specialization, located);
+      if (!added && it->second.first.item == located.first.item && located.first.offset < it->second.first.offset)
+        it->second = located;
+    }
+  };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   (program.in_global_scope(it.parent) || program.named_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
+    if (const auto* body = program.analysed_body(k)) record_class_template_spellings(body->template_type_spellings, k);
     // A class template member is not emitted from its pattern. A friend class declaration
     // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
     if (member && !program.enclosing_heads(k).empty()) {
-      if (const auto* pattern = target_is_linux ? program.analysed_item(k) : nullptr)
-        for (const auto& declaration : ins.seqs.elements(pattern->decls))
-          if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      if (const auto* pattern = target_is_linux || program.compatibility() == ast::Compatibility::clang ? program.analysed_item(k) : nullptr) {
+        record_class_template_spellings(pattern->template_type_spellings, k);
+        if (target_is_linux)
+          for (const auto& declaration : ins.seqs.elements(pattern->decls))
+            if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      }
       continue;
     }
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
+    record_class_template_spellings(is.template_type_spellings, k);
     if (!ast::is_none(is.asm_hidden_symbol))
       tu.asm_hidden_symbols.push_back({std::string(ins.names.spelling(is.asm_hidden_symbol)),
                                        {program.id(k), is.asm_directive_at}});
@@ -2192,6 +2205,10 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
+    for (const auto& [specialization, spelling] : p.tu.class_template_spellings) {
+      auto [it, added] = tu.class_template_spellings.try_emplace(specialization, spelling);
+      if (!added && label_order(spelling.first) < label_order(it->second.first)) it->second = spelling;
+    }
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));

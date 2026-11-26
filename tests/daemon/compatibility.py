@@ -1559,6 +1559,96 @@ int main() { return exercise() != 25 || invoker(8) != 8; }
                 subprocess.run([scope / 'generic-invoker'], cwd=scope, check=True, timeout=20)
 
 
+def dependent_variable_spellings(world, gxx):
+    scope = world.scope
+    declarations = '''\
+template<bool> struct Box {};
+template<bool> struct Other {};
+template<bool> struct Extra {};
+namespace Ns::Inner { template<class T, int = 5> constexpr bool arg = true; }
+namespace Alias = Ns::Inner;
+namespace OuterAlias = Ns;
+namespace Same = OuterAlias::Inner;
+using Ns::Inner::arg;
+'''
+    written = (
+        ('inside', 'Box', 'Alias::arg<T>', 'sr5AliasE', ''),
+        ('earlier', 'Box', 'Ns::Inner::arg<T>', 'sr2Ns5InnerE', ''),
+        ('other', 'Other', 'Ns::Inner::arg<T>', 'sr2Ns5InnerE', ''),
+        ('extra', 'Extra', 'Same::arg<T>', 'sr4SameE', ''),
+        ('combined', 'Box', 'Ns::Inner::arg<T, 5>', 'sr2Ns5InnerE', 'Li5E'),
+        ('global', 'Other', '::Alias::arg<T>', 'gssr5AliasE', ''),
+        ('nested', 'Extra', 'OuterAlias::Inner::arg<T>', 'sr10OuterAlias5InnerE', ''),
+        ('bare', 'Extra', 'arg<T>', '', ''),
+        ('not_outer', 'Box', '!Ns::Inner::arg<T>', 'sr2Ns5InnerE', ''),
+        ('not_alias', 'Box', '!Alias::arg<T>', 'sr5AliasE', ''),
+    )
+    functions = [f'template<class T> int {fn}({box}<{arg}>)' for fn, box, arg, _, _ in written]
+    define = '\n'.join(f'{signature} {{ return {i}; }}' for i, signature in enumerate(functions, 1))
+    call = ' + '.join(f'{fn}<int>({box}<{"false" if arg.startswith("!") else "true"}>{{}})' for fn, box, arg, *_ in written)
+    (scope / 'variable-spelling-caller.cpp').write_text(declarations + ';\n'.join(functions) +
+                                                        f';\nint main() {{ return ({call}) != 55; }}\n')
+    (scope / 'variable-redeclaration.cpp').write_text(declarations + '''\
+#ifdef BARE
+template<class T> void redeclare(Box<arg<T>>) {}
+#elif defined(EXPLICIT_DEFAULT)
+template<class T> void redeclare(Box<Alias::arg<T, 5>>) {}
+#else
+template<class T> void redeclare(Box<::Alias::arg<T>>) {}
+#endif
+template<class T> void redeclare(Box<Ns::Inner::arg<T>>) {}
+''')
+    command = ['-c', 'variable-spelling.cpp', '-o', 'variable-spelling.o']
+    unit = scope / 'variable-spelling.cpp'
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for early in ('', 'template<class T> using First = Box<Ns::Inner::arg<T>>;\n',
+                          'template<class T> void first() { using First = Box<Ns::Inner::arg<T>>; }\n',
+                          'template<class T> struct First { using Shape = Box<Ns::Inner::arg<T>>; };\n', ''):
+                first_canonical = bool(early)
+                unit.write_text(declarations + early + define + f'\nint instantiate() {{ return {call}; }}\n')
+                outputs = []
+                for env in (world.daemon, world.cold):
+                    result = world.cxx([target, *flags, *command], scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, first_canonical, result)
+                    outputs.append((scope / 'variable-spelling.o').read_bytes())
+                assert outputs[0] == outputs[1], (mode, target, first_canonical)
+                names = outputs[0].split(b'\0')
+                for fn, box, arg, scope_name, default in written:
+                    if mode == 'gcc':
+                        scope_name, default = '', 'Li5E'
+                    elif mode == 'clang':
+                        if fn in ('inside', 'earlier'):
+                            scope_name = 'sr2Ns5InnerE' if first_canonical else 'sr5AliasE'
+                        elif fn == 'global':
+                            scope_name = 'sr2Ns5InnerE'
+                        elif fn == 'nested':
+                            scope_name = 'sr4SameE'
+                        elif fn == 'not_alias':
+                            scope_name = 'sr2Ns5InnerE'
+                    negation = 'nt' if arg.startswith('!') else ''
+                    expected = f'{prefix}_Z{len(fn)}{fn}IiEi{len(box)}{box}IX{negation}{scope_name}3argIT_{default}EEE'.encode()
+                    assert expected in names, (mode, target, first_canonical, expected, [n for n in names if b'3arg' in n])
+            for case in ('GLOBAL_ALIAS', 'BARE', 'EXPLICIT_DEFAULT'):
+                status = mode == 'gcc' or (mode == 'clang' and case == 'GLOBAL_ALIAS')
+                results = [world.cxx([target, *flags, f'-D{case}', '-fsyntax-only', 'variable-redeclaration.cpp'],
+                                     scope, env, timeout=30) for env in (world.cold, world.daemon)]
+                assert results[0] == results[1] and results[0][0] == status, (mode, target, case, results)
+                if status:
+                    assert b'redefinition' in results[0][2], results
+
+        peer = gxx if mode == 'gcc' else clang if mode == 'clang' else None
+        if peer:
+            outcome = world.cxx([*flags, *command], scope, world.daemon, timeout=40)
+            assert outcome == (0, b'', b''), (mode, outcome)
+            subprocess.run([peer, '-std=c++26', 'variable-spelling-caller.cpp', 'variable-spelling.o', '-o', 'variable-spelling'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'variable-spelling'], cwd=scope, check=True, timeout=20)
+
+
 def mixed_class_calls(world, gxx):
     scope = world.scope
     (scope / 'caller.cpp').write_text(CLASS_DECLARATIONS + CLASS_CALLER)
@@ -2322,6 +2412,7 @@ def main():
         mangling(world)
         private_closure_symbols(world, gxx)
         generic_invoker_symbols(world, gxx)
+        dependent_variable_spellings(world, gxx)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)

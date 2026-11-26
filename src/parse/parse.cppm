@@ -3626,7 +3626,8 @@ public:
     }
     std::vector<sema::Expansion> none;
     ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions),
-                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)), asm_hidden_symbol_, asm_directive_at_};
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)), asm_hidden_symbol_, asm_directive_at_,
+                    b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree);
     if (!s_.closures.empty()) s_.check_labels();
@@ -11453,7 +11454,8 @@ public:
     ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keep_expansions ? s_.expansions : none),
                     b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls)),
                     deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced),
-                    b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)),
+                    b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree, root.begin);
     p_->generated_invokers(out_.value.closures, k_, begin());
