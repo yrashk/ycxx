@@ -9,6 +9,7 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
+from project_inspection import check_dependency_graph, check_value_bindings_html, dependency_edge
 from runtime_dir import runtime_root
 
 
@@ -34,7 +35,8 @@ def inspect(ycxx, scope, env, log, state=None, *, stale=False):
     result = run_client(ycxx, scope, env, 'show', 'app', '--format=json')
     assert result.returncode == 0, result.stderr
     assert (log.read_bytes() if log.exists() else None) == recorded, 'inspection ran the witness'
-    facts = json.loads(result.stdout)['facts']
+    plan = json.loads(result.stdout)
+    facts = plan['facts']
     rows = [row for row in facts if (row['kind'], row['target'], row['name']) in VALUE_FACTS]
     if state is None:
         assert not rows, rows
@@ -49,6 +51,14 @@ def inspect(ycxx, scope, env, log, state=None, *, stale=False):
     origins = {row['kind']: row['origin'] for row in rows}
     assert all(term in origins['value-export'] for term in ('rules/package', '/bin/sh')), rows
     assert EXPORT in origins['capability-input'], rows
+    definition = plan['definition']
+    header = dependency_edge(definition, 'app', 'config', 'generated_headers',
+                             'artifact("config", "header")', output='header')
+    capability = {**dependency_edge(definition, 'config', 'wire', 'capabilities',
+                                    'value("wire", "fast-mode")', binding='fast'),
+                  'export_name': 'fast-mode'}
+    check_dependency_graph(plan, [header], value_edges=[capability])
+    return plan
 
 
 def value_key(events, state, outcome):
@@ -93,7 +103,12 @@ def check_edits(ycxx, scope, env, log):
     stable_key = value_key(events, 'supported', 'executed')
     assert log.read_bytes() == b'enabled\n'
     check_program(executable, 0)
-    inspect(ycxx, scope, env, log, 'supported')
+    supported = inspect(ycxx, scope, env, log, 'supported')
+    recorded = log.read_bytes()
+    document = run_client(ycxx, scope, env, 'show', 'app', '--format=html')
+    assert document.returncode == 0, document.stderr
+    check_value_bindings_html(document.stdout, supported)
+    assert log.read_bytes() == recorded, 'HTML inspection ran the witness'
     first = executable.read_bytes()
     installed_at = executable.stat().st_mtime_ns
 
@@ -119,7 +134,8 @@ def check_edits(ycxx, scope, env, log):
     check_observation(events)
     assert value_key(events, 'unsupported', 'executed') == stable_key
     check_generation(events)
-    inspect(ycxx, scope, env, log, 'unsupported')
+    unsupported = inspect(ycxx, scope, env, log, 'unsupported')
+    assert unsupported['dependency_graph']['value_edges'] == supported['dependency_graph']['value_edges']
     check_program(executable, 10)
 
     watch = Watch(ycxx, scope, env)

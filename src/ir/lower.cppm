@@ -1343,9 +1343,9 @@ class Lowering {
     auto words = std::uint32_t((l.size + 7) / 8);
     if (config_.sysv_amd64) {
       if (l.sysv_stack_record) {
-        if (!args || words > 2) return {};
+        if (!args) return {};
         args->add(first, T::i64, 0, words, l.align > 8 ? 2 : 1);
-        return {words, T::i64, l.size, std::uint8_t((1u << words) - 1)};
+        return {words, T::i64, l.size};
       }
       std::uint8_t chunks = l.sysv_integer_eightbytes;
       if (!chunks) return {};

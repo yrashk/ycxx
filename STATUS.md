@@ -93,6 +93,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   Spec mode distinguishes C and C++ function types and encodes the C type with `FY` in a
   mangled signature. GCC and Clang modes use one type for both. C function names retain their
   C linkage and unmangled symbols in every mode.
+  Compiler modes also select the documented wide array bound conversions, constexpr byte
+  comparisons, empty union initializers, and abstract result checks.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -3370,6 +3372,13 @@ named input edges also give the consumer binding. Unresolved rules can yield
 an incomplete graph with the edges resolved so far. The HTML report shows
 these records under **Dependencies**, with links into the manifest.
 
+The `dependency_graph.value_edges` array records resolved typed export
+bindings (#1477). A value edge names the consumer, usage (`capabilities`
+or `facts`), binding, producer, and export, with the manifest location of
+the `value(...)` reference. Graph completeness applies to both edge arrays.
+HTML plans and comparisons show current edges under **Value bindings**,
+with source links.
+
 `ycxx show --against` compares occurrence counts by consumer, usage,
 producer, output, and binding when both plans have complete dependency
 graphs (#1464).
@@ -3806,6 +3815,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   declaration, including with an lvalue or rvalue ref-qualifier. Specializations preserve
   deletion and diagnose a selected deleted overload.
   [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+- Ordinary classes and class templates accept an unconstrained, nonvirtual deleted move assignment
+  on its first in-class declaration. It affects implicit special members and remains a candidate
+  after specialization. A diagnostic is required when it wins overload resolution.
+  [#244](https://github.com/yrashk/ycxx/issues/244) · [#1417](https://github.com/yrashk/ycxx/issues/1417)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 

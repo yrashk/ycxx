@@ -71,7 +71,7 @@ prior = "Clang's line and byte column for the start of the whole expression."
 spec = "The implementation-defined position uses the start of the expression and a one-based byte column."
 gcc = "Uses the opening parenthesis of the call and the opening site of a macro expansion."
 clang = "Same as spec."
-limits = "The descriptor builtin is implemented on x86-64 Linux. This entry covers line and column."
+limits = "This entry covers line and column on x86-64 Linux and AArch64 Darwin. Native Darwin runtime verification is pending."
 evidence = ["tests/own/headers/source-location-descriptor.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
@@ -82,7 +82,7 @@ reference = "[class.temporary]/3, Itanium C++ ABI §3.1.2.3, #230"
 prior = "Clang's indirect passing for all-deleted copy and move constructors, including deletion caused by a class subobject."
 spec = "Pass indirectly when every copy and move constructor is deleted."
 gcc = "On x86-64 Linux, the supported aggregate with copies implicitly deleted by a class member or array member is a by-value MEMORY argument. Its result uses a hidden pointer."
-limits = "The x86-64 parameter implementation covers known layouts up to two eightbytes. arm64 Darwin uses the published rule until a GCC transport probe is available."
+limits = "The x86-64 implementation covers known layouts aligned up to 16 bytes, including MEMORY arguments larger than two eightbytes. arm64 Darwin uses the published rule until a native GCC transport probe is available."
 clang = "Same as spec."
 override = "On arm64 Darwin, -fclass-call-abi=apple selects the Apple Clang rule. -fclass-call-abi=itanium explicitly selects the published rule."
 evidence = ["tests/own/abi/call-triviality.run.cpp", "tests/own/abi/call-triviality-apple.run.cpp", "tests/daemon/compatibility.py"]
@@ -108,8 +108,11 @@ prior = "GCC's unqualified name and converted arguments, including defaults and 
 spec = "Use the unresolved-name production, with qualification and the written argument list."
 gcc = "Use the unqualified name and converted arguments, including defaults and J...E packs."
 clang = "Use the written argument list and unresolved-name qualifiers for the supported forms."
-limits = "Namespace aliases use the resolved namespace. Clang can reuse another spelling of a canonical type within one unit."
-evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp"]
+gcc_observed = "Emits the unqualified template name with converted default arguments for bare, nested, explicitly global and alias-qualified references."
+clang_observed = "Emits the written namespace alias in an alias-only unit. When the canonical dependent type first appears with the actual namespace qualification, its spelling supplies the symbol for a later alias-qualified declaration. Both spellings still redeclare the same function template."
+limits = "ycxx resolves namespace aliases before mangling. The source spelling used for ABI identity and the canonical type used for redeclarations need to be preserved separately."
+probe = 'namespace Outer { namespace Inner { template<class T> constexpr bool value = true; } } namespace Alias = Outer::Inner; template<bool> struct Box {}; template<class T> void f(Box<Alias::value<T>>) {}'
+evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp", "Black-box GCC 16.2 and Clang 23.1.6 symbol and redeclaration probes with namespace aliases"]
 
 [[divergence]]
 id = "dependent-member-template-symbol"
@@ -131,20 +134,35 @@ prior = "GCC's converted constant index and encoding of the bound pack."
 spec = "Use the existing Dy encoding with the converted constant index and the bound argument pack."
 gcc = "Same as spec."
 clang = "Encode a written literal with its original integer type and use the bound-pack placeholder."
-limits = "Arbitrary folded index expressions still lack an as-written expression encoding."
+limits = "This entry covers literal indices and bound packs. Named and operator expressions have separate entries."
 evidence = ["tests/daemon/compatibility.py", "tests/own/abi/pack-index-constant-symbols.run.cpp"]
 
 [[divergence]]
 id = "function-template-argument-prefix"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.5.7, #208, #281"
-limits = "GCC also emits legacy ABI aliases for some unequal heads. ycxx emits the primary encoding used by GCC 16.2 callers."
+limits = "This entry covers the primary symbols for ordinary typed parameters and packs. GCC also emits legacy ABI aliases for some unequal heads. Placeholder parameter types are tracked separately."
 prior = "Clang's extra parameter-declaration prefixes on some function template specializations."
 spec = "Retain the disambiguating prefixes on the supported template heads."
-gcc = "Omit value-parameter prefixes and empty template-template pack prefixes. Use Tt for a nonempty argument whose head differs."
+gcc = "Omit prefixes for the covered value parameters and empty template-template packs. Use Tt for an unequal argument head. In a nonempty template-template pack, use the first argument's head."
 clang = "Same as spec."
 evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "function-template-placeholder-argument-prefix"
+status = "recorded"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[temp.param], [dcl.spec.auto], Itanium C++ ABI §5.1.5.7"
+prior = "Reject the tested placeholder-typed constant template parameter."
+spec = "Same as prior."
+gcc = "Same as prior."
+clang = "Same as prior."
+spec_observed = "A placeholder type can be used in a constant template parameter."
+gcc_observed = "GCC 16.2 callers use TnDa for a single auto parameter and TpTnDa for a nonempty auto pack. An empty auto pack uses J...E alone."
+clang_observed = "Uses TnDa for a single auto parameter and TpTnDa for both empty and nonempty auto packs on x86-64 Linux and AArch64 Darwin."
+probe = 'template<auto... V> int f(); int use() { return f<>() + f<4>(); }'
+evidence = ["tests/draft/temp/temp.arg.template-2.accept.cpp"]
 
 [[divergence]]
 id = "lambda-invoker-symbol"
@@ -167,8 +185,63 @@ prior = "memchr stopped at the first match as in Clang. memcmp required both obj
 spec = "Retain the C-library-based rule used for the ycxx builtins."
 gcc = "Require and read the full range for both builtins."
 clang = "Check bytes as read and stop at the first match or difference for both builtins."
-limits = "Constant evaluation uses ycxx's character-object model. Oracle behavior on other object representations and GCC's folding shortcuts are independent gaps."
+limits = "Constant evaluation uses ycxx's character-object model. See constexpr-memcmp-identical-address and constexpr-memory-integer-object for the separate identity and representation cases."
 evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/memchr-memcmp-reads-stop.accept.cpp", "tests/own/builtins/memchr-memcmp-whole-range.reject.cpp"]
+
+[[divergence]]
+id = "constexpr-memcmp-identical-address"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [cstring.syn], #1092"
+prior = "Apply the same read checks to identical addresses as distinct addresses."
+spec = "Require readable input ranges even when the pointers compare equal. A count of zero needs no reads."
+gcc = "Fold identical evaluated pointers to zero without reading either range. This also applies to null pointers, one-past pointers, and pointers to a noncharacter object."
+clang = "Read through the character representation as for distinct addresses, and reject an invalid read. A count of zero needs no reads."
+probe = 'constexpr char a[] = "a"; static_assert(__builtin_memcmp(a, a, 123) == 0);'
+evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constexpr-memcmp-equal-address-distinct-paths"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [basic.compound]"
+prior = "Apply the byte-access checks to an equal address reached through different subobject paths."
+spec = "Reject the tested invalid reads. A count of zero needs no reads."
+gcc = "Same as prior."
+clang = "Same as spec."
+gcc_observed = "For the equal addresses at the end of one char row and the beginning of the next, accepts comparison counts of one and two in either argument order and rejects counts three through five. An array of scalars and its first element compare equal even at larger counts. The complete nested array address and its first row or first byte compare equal only for one and two bytes in the probes. Equal addresses across adjacent record fields or reached by moving back from a row's start are rejected."
+clang_observed = "Rejects the tested positive counts and accepts zero on Linux x86-64 and Darwin arm64."
+limits = "An equal byte offset alone is insufficient to decide which GCC fold and bounds check apply."
+probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; static_assert(__builtin_memcmp(a[0] + 2, a[1], 2) == 0);'
+evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
+
+[[divergence]]
+id = "constexpr-memory-array-object-pointer"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [cstring.syn]"
+prior = "Require a pointer to an element (or to a scalar) for the modeled byte range."
+spec = "Reject reads through the tested pointers to whole array objects."
+gcc = "Same as prior."
+clang = "Same as spec."
+gcc_observed = "Both memcmp and memchr read the underlying bytes through pointers to whole flat int arrays, whole nested char arrays, and individual char rows. A count extending beyond the selected array is rejected."
+clang_observed = "Rejects those pointer-to-array reads on Linux x86-64 and Darwin arm64."
+probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}, b[2][2] = {{1, 2}, {3, 5}}; static_assert(__builtin_memcmp(&a, &b, sizeof(a)) < 0);'
+evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes"]
+
+[[divergence]]
+id = "constexpr-memory-integer-object"
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+reference = "[expr.const], [cstring.syn], #1092"
+prior = "Limit byte reads by these constexpr builtins to narrow character objects."
+spec = "Use the narrow-character constexpr model for these built-in extensions."
+gcc = "Compare the little-endian bytes of the supported integer scalars and array elements in memcmp. memchr still uses the narrow-character model."
+clang = "Same as spec."
+gcc_observed = "Also permits memchr to find a byte in a constexpr int object."
+limits = "memchr needs a pointer that can denote a byte inside a noncharacter scalar."
+probe = 'constexpr int a = 12, b = 13; static_assert(__builtin_memcmp(&a, &b, sizeof(a)) < 0);'
+evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/memchr-memcmp-whole-range.reject.cpp"]
 
 [[divergence]]
 id = "system-header-dialect"
@@ -291,8 +364,20 @@ prior = "Omit constraints from symbols, matching the Darwin Clang oracle recorde
 spec = "Use the current Itanium proposal for supported template-head and trailing Q constraints and the Tk prefix for a constrained parameter."
 gcc = "Use the current primary encoding. Qualified concept expressions use unqualified names and converted arguments. A bare boolean template-parameter constraint is omitted as in GCC 16.2."
 clang = "Use the Q and Tk encodings tested against upstream Clang 23.1.6, with qualified concept names and written arguments."
-limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, and type-only requires-expressions. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. The GCC mode emits the primary symbols used by current GCC callers."
+limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, type-only requires-expressions, and the operator expressions recorded below. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. The GCC mode emits the primary symbols used by current GCC callers."
 evidence = ["docs/design/ast.md", "tests/own/templates/c6-overloads.run.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constrained-operator-expression-symbol"
+status = "shared"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.over.link], Itanium C++ ABI §5.1.6.2 and the constraint mangling proposal"
+prior = "Keep a ycxx-specific token fingerprint for these constraints in function symbols."
+spec = "Encode the retained operators and operands in the proposed Q expression for template-head and trailing constraints."
+gcc = "Use the same primary symbols for the tested operators, including arithmetic, comparisons, bitwise operations, dependent sizeof and alignof, and static_cast."
+clang = "Same as GCC."
+probe = 'template<class T> requires (sizeof(T) > 0) int size(T) { return 1; } int instantiate() { return size(0); }'
+evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "amd64-narrow-scalar-extension"
@@ -377,16 +462,32 @@ evidence = ["tests/own/consteval/erased-array-row-end.reject.cpp", "tests/daemon
 
 [[divergence]]
 id = "constexpr-void-cast-nested-provenance"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "[expr.const], [expr.add]"
 prior = "The cast at a nested array's one-past position was rejected before pointer arithmetic."
 spec = "Reject the cast."
-gcc = "Preserve the original array path after accepting the cast."
+gcc = "Use the following row's start when the address is inside a complete nested array. Keep the old path at the end of the complete array."
 clang = "Preserve the original array path after accepting the cast."
-gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array."
+gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array. At the end of the complete nested array the pointer compares equal to the last row's one-past pointer and can be advanced by one."
 clang_observed = "Preserves the prior row. Reading end[-1] succeeds, and dereferencing end is rejected."
+limits = "The address at the end of the complete array compares correctly. Arithmetic and dereferencing after that terminal cast still need GCC provenance."
 evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constexpr-out-of-bounds-pointer-formation"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.add]/4, [expr.const]"
+prior = "Require constexpr pointer arithmetic to stay within the array or at its one-past position."
+spec = "Reject forming an out-of-bounds pointer in a constant expression."
+gcc = "Currently follows the draft bounds check."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts comparing pointers formed before the start or beyond the one-past position of the tested flat or nested arrays, including after casting the last row's end through void*. Dereferencing the tested out-of-bounds flat-array pointer is rejected."
+clang_observed = "Clang 23.1.6 rejects the five address formation probes and the dereference probe on Linux x86-64 and Darwin arm64."
+limits = "GCC mode needs to represent the out-of-bounds address separately from access to an array element."
+probe = 'constexpr int a[] = {1, 2}; static_assert(a + 3 == a + 3);'
+evidence = ["Black-box -std=c++2c -pedantic-errors -fsyntax-only probes on GCC 16.2 and Clang 23.1.6 (Linux x86-64 and Darwin arm64)"]
 
 [[divergence]]
 id = "structured-binding-array-cv"
@@ -511,15 +612,31 @@ evidence = ["tests/own/builtins/pack-arguments-addressof.run.cpp", "tests/daemon
 
 [[divergence]]
 id = "empty-union-list"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "unverified" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "[dcl.init.aggr], CWG2084"
 prior = "Initialize the first variant member of a nonempty union when the applicable C++26 empty-list rule selects it."
-spec = "Initialize the first variant in the tested aggregate cases."
-gcc = "Same as spec."
+spec = "Copy-list-initialize the first variant of an empty aggregate union initializer when there is no default member initializer. This includes omission inside another aggregate."
+gcc = "Use zero initialization without calling the first variant's constructor in the tested empty lists. A written default initializer on the first variant still runs."
 clang = "Same as spec."
-gcc_observed = "GCC 16.2 leaves the first variant uninitialized in the pinned fixture."
-evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp"]
+gcc_observed = "GCC 16.2 zeroes automatic union storage without calling a constructor for the first variant in direct lists, copy lists, and nested lists. A constexpr aggregate union can expose zero in the first variant even when the variant's constructor would produce a different value."
+limits = "The first-variant constructor and its implicit copy-list checks are covered for the supported directly and indirectly initialized runtime aggregates. Reading a union variant during constant evaluation still needs coverage."
+evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "empty-union-new-list"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.init.aggr], [expr.new]"
+prior = "Use the ordinary aggregate list initializer for the allocation."
+spec = "Initialize the first variant in the tested named union with a written destructor and a nontrivial first variant."
+gcc = "Diagnose the deleted union default constructor in the tested allocations with a nontrivial variant anywhere in the union and no default member initializer. A written default member initializer keeps the allocation valid."
+clang = "Same as spec."
+spec_observed = "Empty list-initialization through new copy-list-initializes the first variant under the same rules as for an automatic object."
+gcc_observed = "Rejects new U{} because the union default constructor is deleted, even though U u{} is accepted and skips the variant constructor. A default member initializer on either variant makes both forms valid in the probes."
+clang_observed = "Both targets accept new U{} and apply the same variant initialization checks as for an automatic object. The native executable runs the first variant's default constructor."
+probe = 'struct A { A() noexcept {} ~A() noexcept {} }; union U { A first; char other; ~U() {} }; U* create() { return new U{}; }'
+evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes, plus native Clang and ycxx executable checks"]
 
 [[divergence]]
 id = "class-head-alignment"
@@ -584,16 +701,14 @@ evidence = ["tests/own/three-way-comparison/defaulted-noexcept.accept.cpp", "tes
 
 [[divergence]]
 id = "abstract-prvalue-contexts"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
-reference = "[class.abstract], [expr.call], [dcl.type.decltype]"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[class.abstract], [expr.call], [dcl.type.decltype], Itanium C++ ABI §3.1.3.1"
 prior = "Apply abstractness at the point that a value needs an object and allow declarations that form no object."
 spec = "Apply the draft checks for abstract prvalues, discarded values and nondefining declarations."
 gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Rejects the tested abstract prvalues and accepts the nondefining extern declaration."
-clang_observed = "The fixtures record accepted calls and discarded abstract prvalues, and rejected nondefining declarations."
-evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own/classes/pure-abstract/call-decltype-discard-comma.reject.cpp", "tests/own/classes/pure-abstract/extern-object.accept.cpp"]
+clang = "Allow calls returning an abstract type, including the tested discard, receiver, and sizeof contexts. Diagnose nondefining extern declarations and static data member declarations of abstract type. Parameters and object definitions still require concrete types."
+evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own/classes/pure-abstract/call-decltype-discard-comma.reject.cpp", "tests/own/classes/pure-abstract/extern-object.accept.cpp", "tests/own/classes/pure-abstract/static-self.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "dependent-template-disambiguator"
@@ -610,32 +725,42 @@ evidence = ["STATUS.md", "tests/own/templates/member-alias-template-mangling.run
 
 [[divergence]]
 id = "new-array-constant-unrepresentable-bound"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
-reference = "[expr.new], #1172"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.new]/8, #1172"
 prior = "Diagnose a constant bound that cannot be represented as an allocation size."
-spec = "Reject the unrepresentable constant array allocation bound."
+spec = "Check the original integer value for the target's constant array allocation limit before unsigned conversion."
 gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Diagnoses a bound exceeding the maximum object size."
-clang_observed = "Diagnoses a constant conversion to size_t as a warning. The tested bound 2^64+1 allocates a single char and does not throw."
-evidence = ["tests/own/int128/new-bound.reject.cpp"]
+clang = "Convert a wider integer constant to the target's size_t before checking the allocation limit. For example, 2^64+1 and 1-2^64 each allocate one char. Warn under -Wconstant-conversion when the value changes."
+limits = "Native array allocation is available for supported x86-64 Linux forms. Syntax checking covers both targets."
+probe = 'char* f() { return new char[((__int128)1 << 64) + 1]; }'
+evidence = ["tests/own/int128/new-bound.reject.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "pack-index-named-expression-symbol"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
-reference = "[dcl.type.pack.index], #796"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.type.pack.index], [temp.type], Itanium C++ ABI §5.1.6.2, #796"
 prior = "Fold an enumerator or constant variable used as a pack index to its integer value before mangling."
-spec = "The mangler encodes the folded value for these expressions."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Encodes a qualified namespace constant as an external-name primary (L_ZN1N4zeroEE). An unscoped enumerator is encoded as an enum-typed literal (LN1N3PosE0E)."
-clang_observed = "Uses the same encodings as GCC for the tested namespace constant and enumerator."
+spec = "Use the converted value for dependent type identity and its mangling. Equal nondependent indices of the same pack give the same type."
+gcc = "Keep the written constant name or enum value in the dependent type and symbol. Encode a namespace or static class member constant as an external-name primary and an unscoped enumerator as an enum-typed literal."
+clang = "Same as GCC."
 probe = '''
 namespace N { inline constexpr unsigned zero = 0; enum Pos { first }; }
 template<class... Ts> int var(Ts...[N::zero]) { return 1; }
 template<class... Ts> int enu(Ts...[N::first]) { return 2; }
 int call() { return var<int>(0) + enu<int>(0); }
 '''
-evidence = ["STATUS.md"]
+evidence = ["STATUS.md", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "pack-index-written-operator-symbol"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.type.pack.index], [temp.type], Itanium C++ ABI §5.1.6.2"
+prior = "Fold an arithmetic or cast expression to a converted index for type identity and mangling."
+spec = "Use the converted index value to identify the dependent pack-index type."
+gcc = "Keep the tested written operators and operands in the dependent type and symbol. The suffixes for 0+0, -0, static_cast<unsigned>(0), and (0+1)-1 are plLi0ELi0E, ngLi0E, scjLi0E, and miplLi0ELi1ELi1E. Ts...[0] and Ts...[0+0] can distinguish overload declarations."
+clang = "Same as GCC."
+probe = 'template<class... Ts> int f(Ts...[0+0]) { return 1; } int call() { return f<int>(0); }'
+evidence = ["tests/daemon/compatibility.py"]

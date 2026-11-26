@@ -329,6 +329,13 @@ struct VType {
   u8 cv;
 };
 
+// The operands of an operator as written, for ABI encoding before conversions and folding.
+// `token` is a lex::Tk. A named cast stores its type as a VType before the operand.
+struct VWrittenOperator {
+  u8 token;
+  SeqId<ConstId> operands;
+};
+
 // A pack occupies one parameter slot in an atomic constraint's mapping.
 struct VConstraintPack {
   SeqId<ConstId> elements;
@@ -373,7 +380,8 @@ struct [[=dependent]] VRequiresTypes {
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes>;
+                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes,
+                               VWrittenOperator>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

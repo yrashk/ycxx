@@ -1698,7 +1698,7 @@ public:
   // parameter pack and `index` is an integral constant, converted to std::size_t for the choice
   // and kept in its own type in the specifier, as the index of a symbol is. The selected element
   // once the pack is bound and the index known, the dependent specifier until then.
-  std::optional<QualType> pack_index_type(NameId name, u32 at, ConstId index, u32 index_at) {
+  std::optional<QualType> pack_index_type(NameId name, u32 at, ConstId index, u32 index_at, ConstId written) {
     const ast::TemplateParamSema* p = template_param(name);
     if (!p || p->kind != ast::TemplateArgKind::type || !p->pack) {
       diag(at, Diag::not_a_pack, name);
@@ -1714,12 +1714,12 @@ public:
       }
     }
     auto a = template_args.at(p->depth, p->index);
-    if (!a) return types().pack_index(p->type, index);
+    if (!a) return types().pack_index(p->type, index, written);
     if (a->kind != ast::TemplateArgKind::pack) {
       diag(index_at, Diag::not_supported, lex::Tk::l_square);
       return std::nullopt;
     }
-    if (dependent) return types().pack_index(p->type, index, a->elems);
+    if (dependent) return types().pack_index(p->type, index, a->elems, written);
     std::vector<TemplateArg> es = ins().seqs.elements(a->elems);
     auto r = templates().select_element(es, index);
     if (!r) diag(index_at, Diag::pack_index_range, ast::int_bits(ins(), index).lo, es.size());
@@ -3509,6 +3509,11 @@ public:
     return false;
   }
 
+  // Clang permits a call's abstract result in contexts that would otherwise materialize it.
+  bool require_concrete_call_result(QualType t, u32 at) {
+    return compatibility() == ast::Compatibility::clang || require_concrete_object(t, at);
+  }
+
   bool require_concrete_parameters(const TypeRec& f, u32 at) {
     return std::ranges::all_of(f.params, [&](QualType p) { return require_concrete_object(p, at); });
   }
@@ -3537,8 +3542,9 @@ public:
                       record->peer_automatic_primary_base != EntityId::none);
   }
 
-  bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
-    return require_concrete_object(f.inner, at) && require_concrete_parameters(f, at) &&
+  bool require_supported_virtual_signature(const TypeRec& f, u32 at, bool call = false) {
+    return (call ? require_concrete_call_result(f.inner, at) : require_concrete_object(f.inner, at)) &&
+           require_concrete_parameters(f, at) &&
            require_supported_virtual_layout(f.inner, at) && require_supported_virtual_parameters(f, at);
   }
 
@@ -4164,6 +4170,16 @@ public:
     std::vector<Ex> out;
     const bool replay = can_replay_default_members(t);
     const bool union_ = is_union(t);
+    if (union_ && !elems.empty() && next == b.clauses.size() && compatibility() == ast::Compatibility::gcc) {
+      const ClassRec& record = *class_rec(types().class_of(t));
+      const QualType first = types().innermost_array_element(elems.front().type);
+      const ClassRec* variant = types().is_class(first) ? class_rec(types().class_of(first)) : nullptr;
+      // Preserve the simple zero initializer. A first class variant would otherwise run
+      // a constructor or require access to a destructor that GCC does not select.
+      if (variant && (has_member_inits(elems.front().type) || variant->destructor_declaration() != EntityId::none) &&
+          std::ranges::none_of(record.fields, [](const FieldRec& field) { return field.dmi || field.init != ConstId::none; }))
+        return value_init(t, begin, end);
+    }
     // [dcl.init.aggr]: the caller can potentially destroy each initialized class element.
     // The existing union check applies to the selected variant. Other aggregates also check
     // a written trivial destructor, whose access is independent of its runtime cleanup.
@@ -8159,7 +8175,7 @@ public:
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
   Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
-    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin) ||
+    if (!require_concrete_call_result(t, v.begin) || !require_supported_virtual_layout(t, v.begin) ||
         !check_destructor_access(t, v.begin))
       return {NodeId::none, v.begin, v.end};
     ExprInfo info{t, ValueCategory::xvalue, 0};
@@ -9965,7 +9981,7 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) {
-      if (!e.glvalue() && (!require_concrete_object(e.type(), e.begin) || !check_destructor_access(e.type(), e.begin)))
+      if (!e.glvalue() && (!require_concrete_call_result(e.type(), e.begin) || !check_destructor_access(e.type(), e.begin)))
         return {NodeId::none, e.begin, e.end};
       // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
       if (is_defaulted_tag_initializer(e)) e = discarded(e);
@@ -10311,7 +10327,26 @@ public:
   Ex new_class_initializer(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin,
                            u32 end) {
     Ex fail{NodeId::none, begin, end};
-    if (braces) return list_init(t, *braces);
+    if (braces) {
+      if (braces->clauses.empty() && compatibility() == ast::Compatibility::gcc && is_union(t) && is_aggregate(t)) {
+        const auto& fields = class_rec(types().class_of(t))->fields;
+        // GCC checks the implicit default constructor on this allocation path. A variant with
+        // a nontrivial default constructor deletes it when no member has an initializer.
+        const bool has_default = std::ranges::any_of(fields, [](const FieldRec& field) {
+          return field.dmi || field.init != ConstId::none;
+        });
+        if (!has_default && std::ranges::any_of(fields, [&](const FieldRec& field) {
+              const QualType element = types().innermost_array_element(field.type);
+              const ClassRec* variant = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+              return variant && !variant->trivial_defaulted_default_ctor &&
+                     (has_member_inits(field.type) || default_deleted(field.type));
+            })) {
+          diag(begin, Diag::deleted_constructor, t);
+          return fail;
+        }
+      }
+      return list_init(t, *braces);
+    }
     if (args && args->empty()) return value_init(t, end, end);
     if (!args) {
       if (default_deleted(t)) {
@@ -10495,7 +10530,7 @@ public:
     bool oversized = false;
     if (value.kind == ValueKind::integer) {
       negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) &&
-                 (value.wide ? ast::is_negative(ast::int_bits(ins(), known)) : i64(value.bits) < 0);
+                 ast::is_negative(ast::int_bits(ins(), known));
       oversized = !negative && (value.wide || value.bits > max_count);
     } else if (value.kind == ValueKind::floating) {
       negative = value.real < 0;
@@ -10511,13 +10546,13 @@ public:
   }
 
   // Prove that replacing the bound with its evaluated value leaves no runtime work.
-  // The interpreter returns at most 64 bits, so the proof also covers intermediate types.
-  bool arithmetic_array_bound(Ex bound) {
+  // Clang's wide-bound case first converts that constant to the target's allocation-size type.
+  bool arithmetic_array_bound(Ex bound, bool clang_wide) {
     auto integral = [&](const ExprInfo& info) {
       const auto type = types().builtin_of(info.type);
       if (info.category != ValueCategory::prvalue || !type || !ast::is_integral(*type)) return false;
       const auto width = ast::width_of(w_->target, *type);
-      return width != 0 && width <= 64;
+      return width != 0 && width <= (clang_wide ? 128 : 64);
     };
     std::vector<NodeId> pending{bound.id};
     while (!pending.empty()) {
@@ -10536,6 +10571,11 @@ public:
         if (!integral(binary->info) || (binary->op != add && binary->op != sub && binary->op != mul)) return false;
         pending.push_back(binary->rhs.id);
         pending.push_back(binary->lhs.id);
+      } else if (auto shift = as<ast::OrderedBinary>(e)) {
+        if (!clang_wide || !integral(shift->info) ||
+            (shift->op != ast::OrderedOp::shl && shift->op != ast::OrderedOp::shr)) return false;
+        pending.push_back(shift->rhs.id);
+        pending.push_back(shift->lhs.id);
       } else if (auto conversion = as<ast::ImplicitConversion>(e)) {
         if (!integral(conversion->info) || conversion->conversion != ast::ConversionKind::integral ||
             conversion->function != EntityId::none) return false;
@@ -10565,7 +10605,8 @@ public:
       diag(begin, Diag::new_const_uninitialized, t);
       return fail;
     }
-    Ex count = convert(bound, builtin(w_->target.size_type), bound.begin);
+    const QualType size_type = builtin(w_->target.size_type);
+    Ex count = convert(bound, size_type, bound.begin);
     if (!count.ok() || ambiguous_allocation(begin, true)) return fail;
     QualType pointer = types().pointer(t);
     if (dependent(count)) return dependent_node({count}, begin, end, pointer);
@@ -10575,21 +10616,29 @@ public:
       return fail;
     }
     const auto known = !unevaluated && constant_of ? constant_of(bound) : std::nullopt;
-    if (known && !valid_new_bound(bound, *size, *known)) return fail;
+    const auto bound_builtin = types().builtin_of(bound.type());
+    const bool clang_wide = compatibility() == ast::Compatibility::clang && known && bound_builtin &&
+        ast::is_integral(*bound_builtin) && ast::width_of(w_->target, *bound_builtin) >
+        ast::width_of(w_->target, w_->target.size_type);
+    auto checked = known;
+    if (clang_wide) checked = ast::convert_integral(ins(), w_->target, *known, size_type);
+    if (checked && !valid_new_bound(bound, *size, *checked)) return fail;
+    if (clang_wide && ast::int_bits(ins(), *known) != ast::int_bits(ins(), *checked))
+      diag(bound.begin, Diag::new_bound_conversion, *known, *checked);
 
     Ex init = braces ? list_init(t, *braces) : args ? value_init(t, end, end) : default_init(t, end, end);
     if (!init.ok()) return fail;
     Child allocation;
     if (!unevaluated && !args && !braces && literal_arithmetic_bound &&
-        w_->target.triple == ast::x86_64_linux.triple && arithmetic_array_bound(bound)) {
+        w_->target.triple == ast::x86_64_linux.triple && arithmetic_array_bound(bound, clang_wide)) {
       const auto written = as<ast::Literal>(bound);
-      const ConstId value = written ? written->value : known.value_or(ConstId::none);
+      const ConstId value = written && !clang_wide ? written->value : checked.value_or(ConstId::none);
       if (value != ConstId::none && ins().values.is<ast::VInt>(value)) {
-        // Check the full value before multiplying or converting it to size_t.
+        // Multiply only after checking the constant size selected by this mode.
         const auto integer = ins().values.get<ast::VInt>(value);
         const auto n = integer.bits;
-        if (same_unqualified(integer.type, bound.type()) && n.hi == 0 && n.lo <= max_new_array_count(*size)) {
-          QualType size_type = builtin(w_->target.size_type);
+        if (same_unqualified(integer.type, clang_wide ? size_type : bound.type()) &&
+            n.hi == 0 && n.lo <= max_new_array_count(*size)) {
           Ex bytes = literal(size_type, w_->values.integer(size_type, n.lo * *size),
                              ValueCategory::prvalue, bound.begin, bound.end);
           allocation = at(usual_allocation_call(bytes, begin, /*array=*/true), begin);
@@ -10638,12 +10687,14 @@ public:
     ~ClassAlignmentOperand() { checking = saved; }
   };
 
-  // A dependent layout query whose enclosing construct reparses the written operand.
-  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
+  ConstId layout_query_value(QualType operand, bool align) {
     const std::array args{templates().type_arg(operand)};
     const auto op = align ? ast::DepOp::alignof_type : ast::DepOp::sizeof_type;
-    const auto value = ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
-    return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
+    return ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
+  }
+  // A dependent layout query whose enclosing construct reparses the written operand.
+  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
+    return literal(builtin(w_->target.size_type), layout_query_value(operand, align), ValueCategory::prvalue, begin, end);
   }
 
   // [expr.sizeof], [expr.alignof]: a `size_t` prvalue.
@@ -11998,7 +12049,7 @@ public:
     }
     case comma:
       // [expr.comma]: the left operand is discarded. Only the right produces the result.
-      if (!l.glvalue() && (!require_concrete_object(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
+      if (!l.glvalue() && (!require_concrete_call_result(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
         return {NodeId::none, begin, end};
       return ordered(ast::OrderedOp::comma, l, r, r.info);
     case shl:
@@ -13340,9 +13391,9 @@ public:
     // dispense with the result object. Subexpressions requiring materialization check it separately.
     const bool decltype_operand = decltype_unevaluated != 0 && unevaluated == decltype_unevaluated;
     if (unevaluated == 0) {
-      if (!require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
+      if (!require_supported_virtual_signature(fr, paren_at, /*call=*/true)) return std::nullopt;
     } else if (!require_concrete_parameters(fr, paren_at) ||
-               (!decltype_operand && !require_concrete_object(fr.inner, paren_at))) {
+               (!decltype_operand && !require_concrete_call_result(fr.inner, paren_at))) {
       return std::nullopt;
     }
     if (!decltype_operand && !check_destructor_access(fr.inner, paren_at)) return std::nullopt;

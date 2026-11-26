@@ -81,6 +81,8 @@ Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
+The plan's **Value bindings** section links each resolved binding to its
+use in `build.ycxx`.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
 owned names. The shader bundle plans its modules from a generated inventory
@@ -595,6 +597,9 @@ written default member initializer are value-initialized.
   with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
 - first-declaration in-class defaulted copy assignment for ordinary classes without bases.
   The written operator keeps its access and assigns supported members in declaration order.
+  [#244](https://github.com/yrashk/ycxx/issues/244)
+- first-declaration in-class deleted move assignment for unconstrained, nonvirtual members of
+  ordinary classes and class templates. Assignment diagnoses use of the selected deleted overload.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)

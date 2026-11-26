@@ -106,6 +106,156 @@ static_assert(__is_same(decltype(N::declare_in_namespace), CFunction));
 int consume(CFunction* function) { return function(31); }
 #endif
 '''
+WIDE_ARRAY = '''\
+using Count = decltype(sizeof(0));
+extern "C" Count observed();
+char* allocate() {
+#if defined(TOO_LARGE)
+  return new char[((unsigned __int128)1 << 64) + (1ul << 63)];
+#elif defined(NEGATIVE)
+  return new char[1 - ((__int128)1 << 64)];
+#elif defined(UNSIGNED_WIDE)
+  return new char[((unsigned __int128)1 << 64) + 2];
+#elif defined(ZERO)
+  return new char[((__int128)1 << 64)];
+#elif defined(CONTROL)
+  return new char[1];
+#else
+  return new char[((__int128)1 << 64) + 1];
+#endif
+}
+int main() {
+  return allocate() == nullptr || observed() != EXPECTED;
+}
+'''
+ABSTRACT_RESULTS = '''\
+struct Abstract {
+  virtual int score(int) = 0;
+#if defined(STATIC_SELF)
+  static Abstract object;
+#endif
+};
+Abstract make();
+using Result = decltype(make());
+static_assert(__is_same(Result, Abstract));
+#if defined(CALL)
+void discard() { make(); }
+#elif defined(COMMA)
+using Comma = decltype((make(), 0));
+static_assert(__is_same(Comma, int));
+#elif defined(VOID_CAST)
+using Discarded = decltype(static_cast<void>(make()));
+static_assert(__is_same(Discarded, void));
+#elif defined(RECEIVER)
+using MemberCall = decltype(make().score(1));
+static_assert(__is_same(MemberCall, int));
+#elif defined(SIZEOF)
+static_assert(sizeof(make()) > 0);
+#elif defined(EXTERN_OBJECT)
+extern Abstract object;
+#elif defined(PARAMETER)
+Abstract& source();
+void consume(Abstract);
+using Argument = decltype(consume(source()));
+#endif
+'''
+EMPTY_UNION = '''\
+int constructions;
+struct Resource {
+  int value;
+#if defined(EXPLICIT)
+  explicit Resource() noexcept : value(7) { ++constructions; }
+#else
+  Resource() noexcept : value(7) { ++constructions; }
+#endif
+  Resource(const Resource&) = delete;
+  ~Resource() noexcept {}
+};
+union Storage {
+  Resource first;
+  int fallback;
+  ~Storage() noexcept {}
+};
+struct Holder { Storage storage; };
+union WithDefault { int first = 19; char fallback; };
+#if defined(ALLOCATE)
+union ScalarFirst { int first; Resource next; ~ScalarFirst() noexcept {} };
+int main() {
+  Storage* allocated = new Storage{};
+  ScalarFirst* scalar = new ScalarFirst{};
+  int result = constructions != 1 || allocated->first.value != 7 || scalar->first != 0;
+  delete allocated;
+  delete scalar;
+  return result;
+}
+#elif defined(ALLOCATE_CONTROL)
+union WithResourceDefault { int first = 17; Resource next; ~WithResourceDefault() noexcept {} };
+int main() {
+  WithResourceDefault* allocated = new WithResourceDefault{};
+  int result = constructions != 0 || allocated->first != 17;
+  delete allocated;
+  return result;
+}
+#else
+int main() {
+  Storage direct{};
+  Holder omitted{};
+  Holder explicit_list{{}};
+  WithDefault with_default{};
+  if (with_default.first != 19) return 1;
+#if defined(GCC_MODE)
+  return constructions != 0;
+#else
+  return constructions != 3 || direct.first.value != 7 || omitted.storage.first.value != 7 ||
+         explicit_list.storage.first.value != 7;
+#endif
+}
+#endif
+'''
+PACK_INDEX_NAMES = '''\
+namespace N {
+inline constexpr unsigned zero = 0;
+static constexpr int hidden = 0;
+enum Pos { first };
+}
+struct S { static constexpr unsigned int zero = 0; };
+'''
+PACK_INDEX_FUNCTIONS = (
+    ('var', 'N::zero', 'L_ZN1N4zeroEE'),
+    ('hidden', 'N::hidden', 'L_ZN1NL6hiddenEE'),
+    ('member', 'S::zero', 'L_ZN1S4zeroEE'),
+    ('enu', 'N::first', 'LN1N3PosE0E'),
+    ('sum', '0 + 0', 'plLi0ELi0E'),
+    ('neg', '-0', 'ngLi0E'),
+    ('cast', 'static_cast<unsigned>(0)', 'scjLi0E'),
+    ('nested', '(0 + 1) - 1', 'miplLi0ELi1ELi1E'),
+    ('enum_sum', 'N::first + 0', 'plLN1N3PosE0ELi0E'),
+)
+OPERATOR_CONSTRAINTS = (
+    ('template<class T> requires (sizeof(T) > 0) int size(T)', 'size(0)', '_Z4sizeIiQgtstT_Li0EEiS0_'),
+    ('template<class T> requires (alignof(T) == 4) int alignment(T)', 'alignment(0)', '_Z9alignmentIiQeqatT_Li4EEiS0_'),
+    ('template<unsigned N> requires (N + 1 > 2) int numeric()', 'numeric<3>()', '_Z7numericILj3EQgtplT_Li1ELi2EEiv'),
+    ('template<class T> int trailing(T) requires (sizeof(T) != 3)', 'trailing(0)', '_Z8trailingIiEiT_QnestS0_Li3E'),
+    ('template<class T> requires (static_cast<bool>(sizeof(T))) int cast(T)', 'cast(0)', '_Z4castIiQscbstT_EiS0_'),
+    ('template<class T> requires ((sizeof(T) & 1u) == 0) int bits(T)', 'bits(0)', '_Z4bitsIiQeqanstT_Lj1ELi0EEiS0_'),
+)
+PREFIX_TEMPLATES = '''\
+template<class> struct One {};
+template<class, class = int> struct Two {};
+template<class...> struct Pack {};
+'''
+PREFIX_FUNCTIONS = (
+    ('template<template<class> class... TT> int multi()', 'multi<>()', '_Z5multiIJEEiv', '_Z5multiITpTtTyEJEEiv'),
+    ('', 'multi<One>()', '_Z5multiIJ3OneEEiv', '_Z5multiIJ3OneEEiv'),
+    ('', 'multi<One, Two>()', '_Z5multiIJ3One3TwoEEiv', '_Z5multiIJ3One3TwoEEiv'),
+    ('', 'multi<Two, One>()', '_Z5multiITpTtTyEJ3Two3OneEEiv', '_Z5multiITpTtTyEJ3Two3OneEEiv'),
+    ('', 'multi<One, Pack>()', '_Z5multiIJ3One4PackEEiv', '_Z5multiIJ3One4PackEEiv'),
+    ('template<template<class> class TT> int one()', 'one<Pack>()', '_Z3oneITtTyE4PackEiv', '_Z3oneITtTyE4PackEiv'),
+    ('template<class T, T... Ns> int val()', 'val<int>()', '_Z3valIiJEEiv', '_Z3valIiTpTnT_JEEiv'),
+    ('', 'val<int, 4>()', '_Z3valIiJLi4EEEiv', '_Z3valIiTpTnT_JLi4EEEiv'),
+    ('template<int... Ns> int integral()', 'integral<>()', '_Z8integralIJEEiv', '_Z8integralITpTniJEEiv'),
+    ('', 'integral<4>()', '_Z8integralIJLi4EEEiv', '_Z8integralIJLi4EEEiv'),
+)
 LINE = '''\
 constexpr unsigned reported(unsigned value = __builtin_LINE()) { return value; }
 #define INVOKE() reported()
@@ -143,6 +293,7 @@ static_assert(location.line() == 101 && location.column() == 3);
 #else
 static_assert(location.line() == 100 && location.column() == 27);
 #endif
+extern "C" constexpr auto recorded_location = location;
 '''
 MANGLE = '''\
 template<bool> struct Box { int n; };
@@ -216,6 +367,31 @@ int check_peer() {
   return 0;
 }
 '''
+LARGE_CLASS_DECLARATIONS = CLASS_DECLARATIONS + '''\
+struct Large { Immovable first; int words[16]; int tail; };
+int ycxx_large(int, Large, int, int, int, int, int, int);
+int peer_large(int, Large, int, int, int, int, int, int);
+Large ycxx_large_result(int);
+Large peer_large_result(int);
+int test_large_peer();
+'''
+LARGE_CLASS_CALLER = '''\
+int ycxx_large(int a, Large value, int b, int c, int d, int e, int f, int g) {
+  return a + b + c + d + e + f + g + value.first.n + value.words[0] + value.words[1] + value.words[15] + value.tail;
+}
+Large ycxx_large_result(int tail) { return Large{Immovable(7), {3, 11}, tail}; }
+int main() {
+  if (peer_large(1, peer_large_result(9), 2, 3, 4, 5, 6, 7) != 58) return 1;
+  return test_large_peer() != 58;
+}
+'''
+LARGE_CLASS_PEER = '''\
+int peer_large(int a, Large value, int b, int c, int d, int e, int f, int g) {
+  return a + b + c + d + e + f + g + value.first.n + value.words[0] + value.words[1] + value.words[15] + value.tail;
+}
+Large peer_large_result(int tail) { return Large{Immovable(7), {3, 11}, tail}; }
+int test_large_peer() { return ycxx_large(1, ycxx_large_result(9), 2, 3, 4, 5, 6, 7); }
+'''
 CONCEPTS = '''\
 template<class T> concept Always = true;
 template<class T> concept Never = false;
@@ -243,6 +419,8 @@ def preprocess_and_syntax(world):
 
     (world.scope / 'version.cpp').write_text('__cplusplus\n')
     (world.scope / 'class-head-alignment.cpp').write_text(CLASS_HEAD_ALIGNMENT)
+    (world.scope / 'wide-array.cpp').write_text(WIDE_ARRAY)
+    (world.scope / 'abstract-results.cpp').write_text(ABSTRACT_RESULTS)
     (world.scope / 'line.cpp').write_text(LINE)
     (world.scope / 'descriptor.cpp').write_text(DESCRIPTOR)
     (world.scope / 'immediate-escape.cpp').write_text('''\
@@ -313,6 +491,58 @@ static_assert(!__is_same(Identity<Original>, Selected<Owner>));
 ''')
     (world.scope / 'memchr.cpp').write_text('static_assert(__builtin_memchr("abc", \'a\', 10) != nullptr);\n')
     (world.scope / 'memcmp.cpp').write_text('static_assert(__builtin_memcmp("abc", "bbc", 10) < 0);\n')
+    (world.scope / 'memcmp-identity.cpp').write_text('''\
+#if defined(NULL_ZERO)
+static_assert(__builtin_memcmp(nullptr, nullptr, 0) == 0);
+#elif defined(NULL_RANGE)
+static_assert(__builtin_memcmp(nullptr, nullptr, 8) == 0);
+#elif defined(INT_RANGE)
+constexpr int object = 12;
+static_assert(__builtin_memcmp(&object, &object, sizeof(object)) == 0);
+#elif defined(PAST_END)
+constexpr char object[] = "a";
+static_assert(__builtin_memcmp(object + 2, object + 2, 8) == 0);
+#elif defined(LOCAL)
+constexpr int compare() {
+  char object[] = {1, 2};
+  return __builtin_memcmp(object, object, 8);
+}
+static_assert(compare() == 0);
+#else
+constexpr char object[] = "a";
+static_assert(__builtin_memcmp(object, object, 123) == 0);
+#endif
+''')
+    (world.scope / 'memcmp-integer.cpp').write_text('''\
+#if defined(INT_ARRAY)
+constexpr int left[] = {7, 256}, right[] = {7, 1};
+static_assert(__builtin_memcmp(left, right, sizeof(left)) < 0);
+#elif defined(INT128)
+constexpr unsigned __int128 left = (unsigned __int128)1 << 64, right = (unsigned __int128)2 << 64;
+static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
+#else
+constexpr unsigned left = 256, right = 1;
+static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
+#endif
+''')
+    (world.scope / 'void-cast-nested.cpp').write_text('''\
+constexpr int table[2][2] = {{17, 23}, {83, 97}};
+#ifdef LAST
+constexpr const void* erased = table[1] + 2;
+#else
+constexpr const void* erased = table[0] + 2;
+#endif
+constexpr const int* end = static_cast<const int*>(erased);
+#ifdef READ_NEXT
+static_assert(*end == 83);
+#elif defined(READ_PREVIOUS)
+static_assert(end[-1] == 23);
+#elif defined(LAST)
+static_assert(end == table[1] + 2);
+#else
+static_assert(end == table[1]);
+#endif
+''')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
     (world.scope / 'void-cast.cpp').write_text('''\
 #ifdef SINGLETON
@@ -535,8 +765,32 @@ int use() { return transform(7); }
             flags.append('-DGCC_MODE')
         if mode == 'clang':
             flags.append('-DCLANG_MODE')
+        for target in (LINUX, DARWIN):
+            for case in ('', 'NEGATIVE', 'UNSIGNED_WIDE', 'ZERO', 'CONTROL', 'TOO_LARGE'):
+                case_flags = ['-D' + case] if case else []
+                rejected = case == 'TOO_LARGE' or (mode != 'clang' and case != 'CONTROL')
+                _, _, diagnostic = invoke(target, *flags, *case_flags, '-DEXPECTED=1', '-fsyntax-only',
+                                          'wide-array.cpp', status=rejected)
+                assert (b'changes its value' in diagnostic) == (not rejected and case != 'CONTROL'), (
+                    target, mode, case, diagnostic)
+            _, _, diagnostic = invoke(target, *flags, '-Wno-constant-conversion', '-DEXPECTED=1', '-fsyntax-only',
+                                      'wide-array.cpp', status=mode != 'clang')
+            assert b'changes its value' not in diagnostic, (target, mode, diagnostic)
+            invoke(target, *flags, '-fsyntax-only', 'abstract-results.cpp')
+            for case in ('CALL', 'COMMA', 'VOID_CAST', 'RECEIVER', 'SIZEOF'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'abstract-results.cpp', status=mode != 'clang')
+            for case in ('STATIC_SELF', 'EXTERN_OBJECT'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'abstract-results.cpp', status=mode == 'clang')
+            invoke(target, *flags, '-DPARAMETER', '-fsyntax-only', 'abstract-results.cpp', status=1)
+            if mode == 'clang':
+                # Materializing the call's result is observable when emitting the function body.
+                invoke(target, *flags, '-DCALL', '-c', 'abstract-results.cpp', '-o', 'abstract-results.o')
         invoke(*flags, '-fsyntax-only', 'line.cpp')
         invoke(*flags, '-fsyntax-only', 'descriptor.cpp')
+        for target in (LINUX, DARWIN):
+            invoke(target, *flags, '-c', 'descriptor.cpp', '-o', 'descriptor.o')
+            symbol = b'_recorded_location' if target == DARWIN else b'recorded_location'
+            assert symbol in (world.scope / 'descriptor.o').read_bytes().split(b'\0'), (target, mode)
         invoke(*flags, '-fsyntax-only', 'immediate-escape.cpp')
         for case in ('GLOBAL_POINTER', 'GLOBAL_REFERENCE', 'LOCAL_POINTER', 'LOCAL_REFERENCE'):
             invoke(*flags, f'-D{case}', '-fsyntax-only', 'immediate-escape.cpp', status=mode != 'spec')
@@ -546,6 +800,18 @@ int use() { return transform(7); }
         invoke(*flags, '-fsyntax-only', 'alias-identity.cpp')
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
+        for target in (LINUX, DARWIN):
+            invoke(target, *flags, '-DNULL_ZERO', '-fsyntax-only', 'memcmp-identity.cpp')
+            for case in ('', 'NULL_RANGE', 'INT_RANGE', 'PAST_END', 'LOCAL'):
+                case_flags = ['-D' + case] if case else []
+                invoke(target, *flags, *case_flags, '-fsyntax-only', 'memcmp-identity.cpp', status=mode != 'gcc')
+            for case in ('', 'INT_ARRAY', 'INT128'):
+                case_flags = ['-D' + case] if case else []
+                invoke(target, *flags, *case_flags, '-fsyntax-only', 'memcmp-integer.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-fsyntax-only', 'void-cast-nested.cpp', status=mode == 'spec')
+            invoke(target, *flags, '-DREAD_PREVIOUS', '-fsyntax-only', 'void-cast-nested.cpp', status=mode != 'clang')
+            invoke(target, *flags, '-DREAD_NEXT', '-fsyntax-only', 'void-cast-nested.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-DLAST', '-fsyntax-only', 'void-cast-nested.cpp', status=mode == 'spec')
         invoke(*flags, '-fsyntax-only', 'nan.cpp', status=mode != 'gcc')
         invoke(*flags, '-fsyntax-only', 'void-cast.cpp', status=mode == 'spec')
         invoke(*flags, '-DSINGLETON', '-fsyntax-only', 'void-cast.cpp', status=mode != 'clang')
@@ -690,6 +956,26 @@ def mixed_class_calls(world, gxx):
     assert result == (0, b'', b'') and (scope / 'calls.o').read_bytes() == objects['-fcompat=spec'], result
 
 
+def mixed_large_class_calls(world, gxx):
+    scope = world.scope
+    (scope / 'large-caller.cpp').write_text(LARGE_CLASS_DECLARATIONS + LARGE_CLASS_CALLER)
+    (scope / 'large-peer.cpp').write_text(LARGE_CLASS_DECLARATIONS + LARGE_CLASS_PEER)
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        peer = gxx if mode == 'gcc' else clang
+        if not peer:
+            continue
+        subprocess.run([peer, '-std=c++26', '-c', 'large-peer.cpp', '-o', 'large-peer.o'],
+                       cwd=scope, check=True, capture_output=True, timeout=40)
+        command = ['-fcompat=' + mode, '-c', 'large-caller.cpp', '-o', 'large-caller.o']
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([gxx, 'large-caller.o', 'large-peer.o', '-o', 'large-calls'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'large-calls'], cwd=scope, check=True, timeout=20)
+
+
 def mixed_class_alignment(world, gxx):
     scope = world.scope
     header = CLASS_HEAD_ALIGNMENT + 'int read_payload(Payload*);\n'
@@ -805,6 +1091,233 @@ int main() {
             subprocess.run([scope / 'language-calls'], cwd=scope, check=True, timeout=20)
 
 
+def mixed_abstract_result(world, gxx):
+    scope = world.scope
+    # The ABI symbol for an ordinary function does not encode its result type. A concrete
+    # provider with the same result layout can exercise the hidden pointer at this boundary.
+    (scope / 'abstract-result-peer.cpp').write_text('''\
+int calls;
+struct Concrete {
+  Concrete() { ++calls; }
+  virtual int score(int n) { return n; }
+};
+Concrete make() { return Concrete{}; }
+void discard();
+int main() { discard(); return calls != 1; }
+''')
+    subprocess.run([gxx, '-std=c++26', '-c', 'abstract-result-peer.cpp', '-o', 'abstract-result-peer.o'],
+                   cwd=scope, check=True, capture_output=True, timeout=40)
+    args = ['-fcompat=clang', '-DCALL', '-c', 'abstract-results.cpp', '-o', 'abstract-result.o']
+    for env in (world.cold, world.daemon):
+        result = world.cxx(args, scope, env, timeout=40)
+        assert result == (0, b'', b''), result
+        subprocess.run([gxx, 'abstract-result.o', 'abstract-result-peer.o', '-o', 'abstract-result'],
+                       cwd=scope, check=True, capture_output=True, timeout=40)
+        subprocess.run([scope / 'abstract-result'], cwd=scope, check=True, timeout=20)
+
+
+def wide_array_allocations(world, gxx):
+    scope = world.scope
+    (scope / 'wide-array-peer.cpp').write_text('''\
+using Count = decltype(sizeof(0));
+static Count seen;
+alignas(long double) static char storage[8];
+void* operator new[](Count count) { seen = count; return storage; }
+extern "C" Count observed() { return seen; }
+''')
+    subprocess.run([gxx, '-std=c++26', '-c', 'wide-array-peer.cpp', '-o', 'wide-array-peer.o'],
+                   cwd=scope, check=True, capture_output=True, timeout=40)
+    for option, count in (('', 1), ('NEGATIVE', 1), ('UNSIGNED_WIDE', 2), ('ZERO', 0)):
+        definitions = ['-D' + option] if option else []
+        command = ['-fcompat=clang', '-Wno-constant-conversion', *definitions, f'-DEXPECTED={count}', '-c',
+                   'wide-array.cpp', '-o', 'wide-array.o']
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (option, result)
+            subprocess.run([gxx, 'wide-array.o', 'wide-array-peer.o', '-o', 'wide-array'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'wide-array'], cwd=scope, check=True, timeout=20)
+
+
+def empty_union(world, gxx):
+    scope = world.scope
+    (scope / 'empty-union.cpp').write_text(EMPTY_UNION)
+    for mode in MODES:
+        flags = ['-fcompat=' + mode] + (['-DGCC_MODE'] if mode == 'gcc' else [])
+        for target in (LINUX, DARWIN):
+            compile_args = [target, *flags, '-c', 'empty-union.cpp', '-o', 'empty-union.o']
+            reject_args = [target, *flags, '-DEXPLICIT', '-fsyntax-only', 'empty-union.cpp']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(compile_args, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+            cold = world.cxx(reject_args, scope, world.cold, timeout=30)
+            warm = world.cxx(reject_args, scope, world.daemon, timeout=30)
+            assert cold == warm and warm[0] == (mode != 'gcc'), (mode, target, cold, warm)
+            for kind in ('ALLOCATE', 'ALLOCATE_CONTROL'):
+                args = [target, *flags, '-D' + kind, '-c', 'empty-union.cpp', '-o', 'empty-union-allocation.o']
+                cold = world.cxx(args, scope, world.cold, timeout=40)
+                warm = world.cxx(args, scope, world.daemon, timeout=40)
+                rejected = kind == 'ALLOCATE' and mode == 'gcc'
+                assert cold == warm and warm[0] == rejected, (mode, target, kind, cold, warm)
+                if rejected:
+                    assert warm[2].count(b'deleted') == 2, (mode, target, warm)
+        native_cases = [[], ['-DALLOCATE_CONTROL']]
+        if mode != 'gcc':
+            native_cases.append(['-DALLOCATE'])
+        for extra in native_cases:
+            command = [*flags, *extra, '-c', 'empty-union.cpp', '-o', 'empty-union-native.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, extra, result)
+                subprocess.run([gxx, 'empty-union-native.o', '-o', 'empty-union'],
+                               cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'empty-union'], cwd=scope, check=True, timeout=20)
+
+
+def pack_index_symbols(world, gxx):
+    scope = world.scope
+    signatures = [(f'template<class... Ts> int {name}(Ts...[{expr}])', index)
+                  for index, (name, expr, _) in enumerate(PACK_INDEX_FUNCTIONS, 1)]
+    calls = ' + '.join(f'{name}<int>(0)' for name, _, _ in PACK_INDEX_FUNCTIONS)
+    definitions = '\n'.join(f'{signature} {{ return {index}; }}' for signature, index in signatures)
+    declarations = '\n'.join(signature + ';' for signature, _ in signatures)
+    (scope / 'pack-index-provider.cpp').write_text(
+        PACK_INDEX_NAMES + definitions + f'\nint instantiate() {{ return {calls}; }}\n')
+    (scope / 'pack-index-consumer.cpp').write_text(
+        PACK_INDEX_NAMES + declarations + f'\nint main() {{ return {calls} - {sum(index for _, index in signatures)}; }}\n')
+    (scope / 'pack-index-overloads.cpp').write_text(PACK_INDEX_NAMES + '''\
+template<class... Ts> int alternate(Ts...[N::zero]) { return 1; }
+template<class... Ts> int alternate(Ts...[N::first]) { return 2; }
+template<class... Ts> int arithmetic_alternate(Ts...[0]) { return 1; }
+template<class... Ts> int arithmetic_alternate(Ts...[0 + 0]) { return 2; }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        for target in (LINUX, DARWIN):
+            args = [target, *flags, '-fsyntax-only', 'pack-index-overloads.cpp']
+            cold = world.cxx(args, scope, world.cold, timeout=30)
+            warm = world.cxx(args, scope, world.daemon, timeout=30)
+            assert cold == warm and warm[0] == (mode == 'spec'), (mode, target, cold, warm)
+            command = [target, *flags, '-c', 'pack-index-provider.cpp', '-o', 'pack-index-names.o']
+            for env in (world.cold, world.daemon):
+                result = world.cxx(command, scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                prefix = '_' if target == DARWIN else ''
+                symbols = (scope / 'pack-index-names.o').read_bytes().split(b'\0')
+                for name, _, written in PACK_INDEX_FUNCTIONS:
+                    encoding = 'Lm0E' if mode == 'spec' else written
+                    expected = f'{prefix}_Z{len(name)}{name}IJiEEiDyT_{encoding}'.encode()
+                    assert expected in symbols, (mode, target, expected, [s for s in symbols if b'Dy' in s])
+        peer = gxx if mode == 'gcc' else clang if mode == 'clang' else None
+        if peer:
+            subprocess.run([peer, '-std=c++26', '-c', 'pack-index-consumer.cpp', '-o', 'pack-index-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            command = [*flags, '-c', 'pack-index-provider.cpp', '-o', 'pack-index-native.o']
+            result = world.cxx(command, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([gxx, 'pack-index-native.o', 'pack-index-consumer.o', '-o', 'pack-index-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'pack-index-link'], cwd=scope, check=True, timeout=20)
+
+
+def operator_constraints(world, gxx):
+    scope = world.scope
+    declarations = '\n'.join(fn + ';' for fn, _, _ in OPERATOR_CONSTRAINTS)
+    definitions = '\n'.join(fn + ' { return 1; }' for fn, _, _ in OPERATOR_CONSTRAINTS)
+    calls = ' + '.join(call for _, call, _ in OPERATOR_CONSTRAINTS)
+    symbols = [symbol.encode() for _, _, symbol in OPERATOR_CONSTRAINTS]
+    (scope / 'operator-constraints.cpp').write_text(definitions + f'\nint instantiate() {{ return {calls}; }}\n')
+    (scope / 'operator-consumer.cpp').write_text(
+        declarations + f'\nint main() {{ return {calls} - {len(OPERATOR_CONSTRAINTS)}; }}\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        args = ['-fcompat=' + mode, '-c', 'operator-constraints.cpp', '-o', 'operator-constraints.o']
+        for target in (LINUX, DARWIN):
+            prefix = b'_' if target == DARWIN else b''
+            for env in (world.cold, world.daemon):
+                result = world.cxx([target, *args], scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                names = (scope / 'operator-constraints.o').read_bytes().split(b'\0')
+                for symbol in symbols:
+                    assert prefix + symbol in names, (mode, target, symbol, [n for n in names if b'_Z' in n][-40:])
+        peer = gxx if mode == 'gcc' else clang
+        if peer:
+            result = world.cxx(args, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([peer, '-std=c++26', '-c', 'operator-consumer.cpp', '-o', 'operator-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([gxx, 'operator-constraints.o', 'operator-consumer.o', '-o', 'operator-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'operator-link'], cwd=scope, check=True, timeout=20)
+
+
+def template_argument_prefixes(world, gxx):
+    scope = world.scope
+    functions = [fn for fn, _, _, _ in PREFIX_FUNCTIONS if fn]
+    calls = ' + '.join(call for _, call, _, _ in PREFIX_FUNCTIONS)
+    definitions = '\n'.join(fn + ' { return 1; }' for fn in functions)
+    declarations = '\n'.join(fn + ';' for fn in functions)
+    (scope / 'prefix-provider.cpp').write_text(PREFIX_TEMPLATES + definitions + f'\nint instantiate() {{ return {calls}; }}\n')
+    (scope / 'prefix-consumer.cpp').write_text(
+        PREFIX_TEMPLATES + declarations + f'\nint main() {{ return {calls} - {len(PREFIX_FUNCTIONS)}; }}\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        symbols = [row[2 if mode == 'gcc' else 3].encode() for row in PREFIX_FUNCTIONS]
+        command = ['-fcompat=' + mode, '-c', 'prefix-provider.cpp', '-o', 'prefix-provider.o']
+        for target in (LINUX, DARWIN):
+            prefix = b'_' if target == DARWIN else b''
+            for env in (world.cold, world.daemon):
+                result = world.cxx([target, *command], scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                names = (scope / 'prefix-provider.o').read_bytes().split(b'\0')
+                assert all(prefix + symbol in names for symbol in symbols), (mode, target, symbols)
+        peer = gxx if mode == 'gcc' else clang
+        if peer:
+            result = world.cxx(command, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([peer, '-std=c++26', '-c', 'prefix-consumer.cpp', '-o', 'prefix-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([gxx, 'prefix-provider.o', 'prefix-consumer.o', '-o', 'prefix-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'prefix-link'], cwd=scope, check=True, timeout=20)
+
+
+def mixed_source_location(world, gxx):
+    scope = world.scope
+    (scope / 'descriptor-peer.cpp').write_text('''\
+#include <source_location>
+extern "C" const std::source_location recorded_location;
+int main() {
+#ifdef GCC_MODE
+  return recorded_location.line() != 101 || recorded_location.column() != 3;
+#else
+  return recorded_location.line() != 100 || recorded_location.column() != 27;
+#endif
+}
+''')
+    libycxx = Path(__file__).resolve().parents[2] / 'deps' / 'libycxx'
+    includes = libycxx / 'include'
+    marker = libycxx / 'src' / 'runtime' / 'linkage' / 'static.cpp'
+    subprocess.run([gxx, '-std=c++26', '-isystem', str(includes), '-c', str(marker), '-o', 'descriptor-runtime.o'],
+                   cwd=scope, check=True, capture_output=True, timeout=40)
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        peer = gxx if mode == 'gcc' else clang or gxx
+        definitions = ['-DGCC_MODE'] if mode == 'gcc' else []
+        subprocess.run([peer, '-std=c++26', '-isystem', str(includes), *definitions, '-c',
+                        'descriptor-peer.cpp', '-o', 'descriptor-peer.o'],
+                       cwd=scope, check=True, capture_output=True, timeout=40)
+        command = ['-fcompat=' + mode, *definitions, '-c', 'descriptor.cpp', '-o', 'descriptor-native.o']
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            linked = subprocess.run([gxx, 'descriptor-native.o', 'descriptor-peer.o', 'descriptor-runtime.o',
+                                     '-o', 'source-location'], cwd=scope, capture_output=True, timeout=40)
+            assert linked.returncode == 0, (mode, linked.stderr)
+            subprocess.run([scope / 'source-location'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -841,9 +1354,18 @@ def main():
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)
+            mixed_large_class_calls(world, gxx)
+            # PARITY: by design: native array new is currently available on Linux x86-64.
+            wide_array_allocations(world, gxx)
         mixed_class_alignment(world, gxx)
         mixed_constraints(world, gxx)
         function_language_linkage(world, gxx)
+        mixed_abstract_result(world, gxx)
+        empty_union(world, gxx)
+        pack_index_symbols(world, gxx)
+        operator_constraints(world, gxx)
+        template_argument_prefixes(world, gxx)
+        mixed_source_location(world, gxx)
         compile_database(world)
         world.same_daemon('compatibility modes', pid)
     finally:

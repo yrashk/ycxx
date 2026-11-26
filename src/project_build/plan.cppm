@@ -861,20 +861,26 @@ class Planner {
       const auto* value = field(decl, name);
       return value ? std::get_if<Record>(&value->data) : nullptr;
     };
-    const auto require_binding = [&](const RuleValueReference& ref, SourceLocation location, bool structured) {
+    const auto require_binding = [&](const RuleValueReference& ref, std::string_view binding,
+                                     SourceLocation location, bool structured) {
       const auto [provider, kind] = find(ref.target, location, ref.field);
       require_value_export(provider, kind, ref.field, location);
       if (observation_schema(provider).has_value() != structured)
         fail(location, std::format("value export '{}.{}' requires a {} binding", ref.target, ref.field,
                                   structured ? "capability" : "fact"));
+      if (inspection_)
+        inspection_->dependency_graph->value_edges->push_back({
+            decl.name, provider.name, structured ? "facts" : "capabilities", std::string(binding), ref.field,
+            {.line = location.line, .column = location.column}});
     };
     const auto* capabilities = find_bindings("capabilities");
     const auto* facts = find_bindings("facts");
     for (const auto& binding : demand.capabilities) {
-      if (binding.value) require_binding(*binding.value, field(*capabilities, binding.name)->location, false);
+      if (binding.value)
+        require_binding(*binding.value, binding.name, field(*capabilities, binding.name)->location, false);
     }
     for (const auto& binding : demand.facts)
-      require_binding(binding.value, field(*facts, binding.name)->location, true);
+      require_binding(binding.value, binding.name, field(*facts, binding.name)->location, true);
     (void)resolve_rule_inputs(decl, demand.plan_inputs);
     const auto expansion = std::ranges::find(expansions_, demand, &RuleExpansion::demand);
     if (expansion == expansions_.end()) {
@@ -1358,7 +1364,8 @@ std::expected<PlanInspection, std::string> inspect_project(
     const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
     std::string_view native_triple, ProjectPlan& resolved) {
   PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {},
-                            .dependency_graph = DependencyGraphInspection{}};
+                            .dependency_graph = DependencyGraphInspection{
+                                .value_edges = std::vector<PlanValueDependencyEdge>{}}};
   auto& graph = *inspection.dependency_graph;
   try {
     auto plan = read_project(cwd, target, nullptr, &inspection, expansions, nullptr, native_triple);
@@ -1373,6 +1380,11 @@ std::expected<PlanInspection, std::string> inspect_project(
                     edge.producer, edge.output, edge.binding);
   };
   std::ranges::sort(graph.edges, {}, edge_order);
+  const auto value_edge_order = [](const auto& edge) {
+    return std::tie(edge.consumer, edge.location.line, edge.location.column, edge.usage,
+                    edge.producer, edge.export_name, edge.binding);
+  };
+  std::ranges::sort(*graph.value_edges, {}, value_edge_order);
   return inspection;
 }
 

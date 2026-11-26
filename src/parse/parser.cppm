@@ -32,6 +32,8 @@ using sema::u16;
 using sema::u32;
 using sema::u64;
 using sema::u8;
+using ast::ConstId;
+using ast::EntityId;
 using ast::NameId;
 using ast::NodeId;
 
@@ -3357,6 +3359,7 @@ public:
                        ast::ValueCategory::prvalue, begin, pos());
   }
   sema::ConstId written_atom(Ex e) {
+    if (const auto operand = written_operators_.find(e.id); operand != written_operators_.end()) return operand->second;
     if (auto p = s_->as<ast::Paren>(e)) {
       e.id = p->operand.id;
       return written_atom(e);
@@ -3369,8 +3372,27 @@ public:
       return s_->ins().intern_value(ast::VDepOp{ast::DepOp::logical_not,
                                                   s_->ins().intern_seq(std::span<const ast::TemplateArg>(args))});
     }
-    if (auto literal = s_->as<ast::Literal>(e)) return literal->value;
+    if (auto literal = s_->as<ast::Literal>(e)) {
+      if (writing_pack_index_ && s_->types().is_enum(e.type()) && s_->ins().values.is<ast::VInt>(literal->value)) {
+        const QualType type = ast::without_cv(s_->types().canonical(e.type()));
+        return s_->ins().intern_value(ast::VInt{type, ast::int_bits(s_->ins(), literal->value)});
+      }
+      return literal->value;
+    }
+    if (writing_pack_index_) {
+      if (auto declaration = s_->as<ast::DeclRef>(e); declaration && !declaration->reference) {
+        const auto& entity = s_->world().entities.rec(declaration->entity);
+        if (entity.kind == sema::EntityKind::variable && entity.templ == EntityId::none &&
+            entity.linkage != ast::Linkage::none)
+          return s_->ins().intern_value(ast::VEntity{declaration->entity});
+      }
+    }
     return sema::ConstId::none;
+  }
+  void record_written_operator(Ex result, Tk token, std::initializer_list<ConstId> operands) {
+    if (!result.ok() || std::ranges::contains(operands, ConstId::none)) return;
+    written_operators_.insert_or_assign(result.id, s_->ins().intern_value(
+        ast::VWrittenOperator{u8(token), s_->ins().intern_seq(operands)}));
   }
   // Whether an operand of `&&` or `||` ends here.
   bool operand_ends(bool primaries, u32 ahead = 0) const {
@@ -3452,6 +3474,8 @@ public:
   }
 
   bool writing_constraint_atom_ = false;
+  bool writing_pack_index_ = false;
+  std::map<NodeId, ConstId> written_operators_;
 
   // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
   std::optional<ast::DeclSema> concept_name() {
@@ -4023,7 +4047,8 @@ public:
   Ex binary_expression(int min_prec, NestedConstraintSpans* spans = nullptr) {
     Ex l = cast_expression();
     for (;;) {
-      auto info = binary_operator(kind());
+      const Tk token = kind();
+      auto info = binary_operator(token);
       if (!info || info->prec < min_prec) return l;
       // [temp.names]/4: in a template argument list the first `>` outside parentheses ends it.
       if (angle_ > 0 && (is(Tk::greater) || is(Tk::greatergreater))) return l;
@@ -4043,7 +4068,10 @@ public:
           }
         }
       }
-      l = s_->binary(info->op, l, r, at);
+      Ex result = s_->binary(info->op, l, r, at);
+      if (writing_constraint_atom_ || writing_pack_index_)
+        record_written_operator(result, token, {written_atom(l), written_atom(r)});
+      l = result;
     }
   }
 
@@ -4079,6 +4107,7 @@ public:
 
   // Keep the written provenance even when semantic analysis has folded an expression.
   bool literal_arithmetic_tokens(u32 first, u32 last) const {
+    const bool clang = s_->compatibility() == ast::Compatibility::clang;
     return std::ranges::all_of(std::span(r_->tokens).subspan(first, last - first), [&](Tok token) {
       switch (token.kind) {
       case Tk::int_lit: {
@@ -4087,6 +4116,9 @@ public:
       }
       case Tk::l_paren: case Tk::r_paren: case Tk::plus: case Tk::minus: case Tk::star:
         return true;
+      case Tk::kw___int128: case Tk::kw_signed: case Tk::kw_unsigned:
+      case Tk::lessless: case Tk::greatergreater:
+        return clang;
       default:
         return false;
       }
@@ -4256,6 +4288,8 @@ public:
               if (layout_argument_at_ == begin) return s_->dependent_layout_query(*t, align, begin, pos());
             }
             Ex r = s_->size_of(*t, align, begin, pos());
+            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok())
+              written_operators_.insert_or_assign(r.id, s_->layout_query_value(*t, align));
             return {r.id, begin, pos(), r.info};
           }
           s_->truncate_diags(n);
@@ -4275,7 +4309,7 @@ public:
         return {NodeId::none, begin, pos()};
       }
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
-      if (!e.glvalue() && !s_->require_concrete_object(e.type(), e.begin)) return {NodeId::none, begin, pos()};
+      if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
     }
@@ -4305,6 +4339,7 @@ public:
     }
     default: return postfix_expression();
     }
+    const Tk token = kind();
     bump();
     bool is_incdec = *op == ast::UnaryOp::pre_inc || *op == ast::UnaryOp::pre_dec;
     auto saved_address = address_op_;
@@ -4312,7 +4347,10 @@ public:
     Ex e = is_incdec ? unary_expression() : cast_expression();
     address_op_ = saved_address;
     if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
-    return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
+    Ex result = s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
+    if (writing_pack_index_ && (token == Tk::plus || token == Tk::minus || token == Tk::exclaim || token == Tk::tilde))
+      record_written_operator(result, token, {written_atom(e)});
+    return result;
   }
 
   // This builtin takes a type-id and one assignment-expression (docs/EXTENSIONS.md).
@@ -4848,6 +4886,11 @@ public:
       if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to(e, *t, begin, pos());
       else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
       else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
+      if ((writing_constraint_atom_ || writing_pack_index_) && cast == Tk::kw_static_cast && r.ok()) {
+        const QualType target = s_->types().canonical(*t);
+        const ConstId type = s_->ins().intern_value(ast::VType{ast::without_cv(target), u8(ast::cv_of(target))});
+        record_written_operator(r, cast, {type, written_atom(e)});
+      }
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {
@@ -4930,28 +4973,38 @@ public:
     for (u32 k = 1; alone && k <= open; ++k) alone = kind(open + k) == Tk::r_paren;
     alone = alone && kind(2 * open + 1) == Tk::r_square;
     const ast::TemplateParamSema* named = alone ? s_->template_param(name_of(tok(open))) : nullptr;
+    // The parameter's own type, before the promotion the expression went through.
+    const bool own_type = named && named->kind == ast::TemplateArgKind::value && s_->types().is_integral(named->type);
+    const auto mode = s_->compatibility();
+    const bool saved = std::exchange(writing_pack_index_, mode != ast::Compatibility::spec && !own_type);
     Ex written = constant_expression();
+    const ConstId captured = writing_pack_index_ ? written_atom(written) : ConstId::none;
+    writing_pack_index_ = saved;
     Ex ie = s_->promote(written);
     const QualType it = ie.type();
     if (ie.ok() && !s_->types().is_dependent(it) && !s_->types().is_integral(it) && !s_->is_unscoped_enum(it)) {
       s_->diag(index_at, Diag::pack_index_not_constant);
       ie = Ex{};
     }
-    // The parameter's own type, before the promotion the expression went through.
-    const bool own_type = named && named->kind == ast::TemplateArgKind::value && s_->types().is_integral(named->type);
     auto index = template_value(ie, own_type ? named->type : s_->types().builtin(Builtin::unsigned_long));
     if (!expect(Tk::r_square) || !index) return std::nullopt;
-    if (s_->compatibility() == ast::Compatibility::clang && !own_type) {
-      while (auto paren = s_->as<ast::Paren>(written)) {
-        written.begin += paren->operand.at;
-        written.id = paren->operand.id;
+    ConstId spelling = ConstId::none;
+    if (s_->ins().values.is<ast::VEntity>(captured) || s_->ins().values.is<ast::VWrittenOperator>(captured)) {
+      spelling = captured;
+    } else if (s_->ins().values.is<ast::VInt>(captured)) {
+      if (s_->types().is_enum(written.type())) {
+        spelling = captured;
+      } else if (mode == ast::Compatibility::clang) {
+        while (auto paren = s_->as<ast::Paren>(written)) {
+          written.begin += paren->operand.at;
+          written.id = paren->operand.id;
+        }
+        const auto kind = r_->tokens[begin_ + written.begin].kind;
+        if (kind == Tk::int_lit || kind == Tk::char_lit || kind == Tk::kw_true || kind == Tk::kw_false)
+          spelling = captured;
       }
-      const auto kind = r_->tokens[begin_ + written.begin].kind;
-      if (kind == Tk::int_lit || kind == Tk::char_lit || kind == Tk::kw_true || kind == Tk::kw_false)
-        if (auto literal = s_->as<ast::Literal>(written); literal && s_->ins().values.is<ast::VInt>(literal->value))
-          index = literal->value;
     }
-    return s_->pack_index_type(name, at, *index, index_at);
+    return s_->pack_index_type(name, at, *index, index_at, spelling);
   }
   // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
   Ex type_conversion(QualType t, u32 begin) {

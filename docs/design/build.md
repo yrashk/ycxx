@@ -360,6 +360,33 @@ semantic facts. The `link-input` facts describe the executable's effective
 archive order. The read-only report can identify an artifact before its
 bytes exist.
 
+### Typed value bindings (#1477)
+
+In `examples/project-build/package-probe`, the `config` header binds `fast`
+to the `fast-mode` export of the `wire` target.
+
+```text
+capabilities.header "config" {
+    namespace = "example::codec"
+    filename = "codec_config.hh"
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+```
+
+From that example directory, run `ycxx build app` and then
+`ycxx show app --format=html > plan.html`. **Value bindings** shows `config`
+as the consumer, `capabilities` as the usage, `fast` as the binding, and
+`wire` as the producer with export `fast-mode`. The declaration link opens
+the `value(...)` reference in `build.ycxx`. Structured `facts` bindings use
+the same report section.
+
+Schema-1 JSON reports these references in `dependency_graph.value_edges`
+with `consumer`, `usage`, `binding`, `producer`, `export_name`, and
+`location`. A complete plan with no value bindings has an empty array.
+An incomplete plan reports the bindings resolved so far with
+`dependency_graph.complete: false`. The HTML comparison shows the current
+plan's **Value bindings** alongside **Dependency changes**.
+
 ### Dependency comparisons (#1464)
 
 `ycxx show app --against before.json --format=json` includes
