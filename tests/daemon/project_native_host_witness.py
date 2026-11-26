@@ -142,7 +142,8 @@ def check_watch(ycxx, scope, env, host, other):
 
         replace_source(scope, PREFERRED, '#include "repair_score.hh"\n')
         summary, events, watched = watch.build('native scanner sees a new missing include', succeeds=False)
-        assert any('repair_score.hh' in item for item in summary['diagnostics']), summary
+        assert any("host executable 'scanner'" in item and 'file not found' in item
+                   for item in summary['diagnostics']), summary
         assert str(scope / REPAIR) in watched, watched
         check_external_actions(events)
         check_observation_reuse(events)
