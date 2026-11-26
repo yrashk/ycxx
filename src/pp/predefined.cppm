@@ -153,7 +153,7 @@ void float_family(std::string& out, std::string_view prefix, FloatFormat f, std:
   def("NORM_MAX", max);
 }
 
-std::string target_macros(const ast::Target& t) {
+std::string target_macros(const ast::Target& t, ast::Compatibility compatibility) {
   std::string out;
   auto def = [&](std::string_view name, auto value) { out += std::format("#define {} {}\n", name, value); };
   auto bits = [&](Builtin b) { return 8u * t[b].size; };
@@ -264,6 +264,8 @@ std::string target_macros(const ast::Target& t) {
   formats("UINTMAX", unsigned_of(t.intmax_type));
   formats("INTPTR", t.intptr_type);
   formats("UINTPTR", unsigned_of(t.intptr_type));
+  // glibc uses the spaced form. Clang mode uses Clang's compact replacement list.
+  const std::string_view paste = compatibility == ast::Compatibility::clang ? "##" : " ## ";
   for (Builtin b : t.exact_width_int_types) {
     auto n = bits(b);
     for (Builtin x : {b, unsigned_of(b)}) {
@@ -278,16 +280,13 @@ std::string target_macros(const ast::Target& t) {
       std::string c = std::format("{}INT{}", u, n);
       def(std::format("__{}_C_SUFFIX__", c), suffix(x));
       std::string_view s = suffix(x);
-      // `c ## L` as GCC and glibc spell it: glibc's <stdint.h> redefines __INT64_C and
-      // __UINT64_C, and a redefinition must match in white-space separation too (#657). The
-      // others follow GCC's spelling for uniformity.
       if (s.empty()) out += std::format("#define __{}_C(c) c\n", c);
-      else out += std::format("#define __{}_C(c) c ## {}\n", c, s);
+      else out += std::format("#define __{}_C(c) c{}{}\n", c, paste, s);
     }
   }
   for (auto [name, b] : {std::pair{"INTMAX", t.intmax_type}, {"UINTMAX", unsigned_of(t.intmax_type)}}) {
     def(std::format("__{}_C_SUFFIX__", name), suffix(b));
-    out += std::format("#define __{}_C(c) c ## {}\n", name, suffix(b));
+    out += std::format("#define __{}_C(c) c{}{}\n", name, paste, suffix(b));
   }
   // The standard floating types and the _Float16 extension.
   def("__FLT_RADIX__", 2);
@@ -306,7 +305,7 @@ std::string target_macros(const ast::Target& t) {
 export namespace ycxx::pp {
 
 // The text of `<built-in>` for a language mode and target.
-std::string predefined_text(const ast::Target& t, bool freestanding = false, u8 pic = 0) {
+std::string predefined_text(const ast::Target& t, bool freestanding, u8 pic, ast::Compatibility compatibility) {
   std::string s;
   auto def = [&](std::string_view name, auto value) { s += std::format("#define {} {}\n", name, value); };
   def("__ycxx__", 1);
@@ -319,8 +318,8 @@ std::string predefined_text(const ast::Target& t, bool freestanding = false, u8 
   def("__GNUC__", 4);
   def("__GNUC_MINOR__", 2);
   def("__GNUC_PATCHLEVEL__", 1);
-  // [cpp.predefined]/1.
-  def("__cplusplus", "202400L");
+  // [cpp.predefined]/1 and config.tex at tests/draft/PINS. GCC 16 and Clang 23 use 202400L.
+  def("__cplusplus", compatibility == ast::Compatibility::spec ? "202603L" : "202400L");
   def("__STDC_EMBED_NOT_FOUND__", 0);
   def("__STDC_EMBED_FOUND__", 1);
   def("__STDC_EMBED_EMPTY__", 2);
@@ -341,7 +340,7 @@ std::string predefined_text(const ast::Target& t, bool freestanding = false, u8 
   if (floating_values && t.has(Builtin::float128)) def("__STDCPP_FLOAT128_T__", 1);
   if (floating_values && t.has(Builtin::bfloat16)) def("__STDCPP_BFLOAT16_T__", 1);
   for (const FeatureMacro& m : feature_macros) def(m.name, m.value);
-  return s + target_macros(t);
+  return s + target_macros(t, compatibility);
 }
 
 }  // namespace ycxx::pp

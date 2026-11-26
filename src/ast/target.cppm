@@ -45,12 +45,10 @@ struct BuiltinLayout {
 // V x86-64 ABI's `__va_list_tag[1]`.
 enum class VaList : u8 { char_pointer, sysv_x86_64 };
 
-// When a class is trivially copyable for the purposes of calls, so that it passes in registers
-// (DECISIONS §1.6). `itanium`: [class.temporary]/3 and the Itanium C++ ABI, as GCC and upstream
-// Clang have it, the default everywhere. `apple`: as Apple Clang has it on arm64 Darwin, a trivial
-// destructor and a copy constructor trivial or deleted, whatever the move constructors; selected
-// by `-fclass-call-abi=apple` on a target that offers it.
-enum class CallTriviality : u8 { itanium, apple };
+// The rules for which classes pass indirectly (docs/compatibility.toml).
+enum class CallTriviality : u8 { itanium, apple, gcc };
+
+enum class Compatibility : u8 { spec, gcc, clang };
 
 enum class Architecture : u8 { aarch64, x86_64 };
 enum class OperatingSystem : u8 { darwin, linux_ };
@@ -134,8 +132,7 @@ constexpr BuiltinLayout member_pointer_layout(const Target& t, bool function) {
 //   type at one offset ([intro.object]/9);
 // - in a union, every member at offset 0 ([class.union]/2);
 // - the size rounded up to a non-zero multiple of the alignment.
-// "POD for layout" is Clang's: trivial and standard-layout ([class.prop]); GCC uses C++03's,
-// and differs for a class whose data members are all private.
+// "POD for layout" is determined by the unit's ABI rule (docs/compatibility.toml).
 struct Placed {
   std::uint64_t size = 0;   // sizeof
   std::uint64_t align = 1;  // alignof

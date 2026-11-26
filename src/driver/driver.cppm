@@ -40,6 +40,7 @@ void usage(std::ostream& out) {
     std::print(out, " {}", std::meta::identifier_of(e));
   }
   std::println(out);
+  std::println(out, "C++ compatibility: -fcompat=spec|gcc|clang (default: spec)");
 }
 
 export int run(std::span<const std::string_view> argv)
