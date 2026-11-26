@@ -327,7 +327,6 @@ __WINT_WIDTH__
 __aarch64__
 __arm64
 __arm64__
-__cplusplus
 __amd64
 __amd64__
 __gnu_linux__

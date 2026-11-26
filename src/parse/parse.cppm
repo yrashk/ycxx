@@ -158,7 +158,7 @@ public:
   Program(sema::World& w, const pp::Region& r, const items::Items& its, const pp::Config& config = {},
           std::shared_ptr<const Index> index = nullptr)
       : instantiation_limit(config.template_depth), exceptions_enabled_(config.exceptions_enabled),
-        rtti_enabled_(config.rtti_enabled), w_(&w), r_(&r),
+        rtti_enabled_(config.rtti_enabled), compatibility_(config.compatibility), w_(&w), r_(&r),
         view_(its), items_(&view_), ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
     may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
@@ -377,6 +377,7 @@ public:
   const pp::Region& region() const { return *r_; }
   bool exceptions_enabled() const { return exceptions_enabled_; }
   bool rtti_enabled() const { return rtti_enabled_; }
+  ast::Compatibility compatibility() const { return compatibility_; }
   const ItemsView& items() const { return *items_; }
   // Records the items this Program reads into `reads` (#947).
   void record_reads(std::vector<std::uint8_t>* reads) {
@@ -482,7 +483,12 @@ public:
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
-    return it == asm_labels_.end() ? std::string() : it->second;
+    return it == asm_labels_.end() ? std::string() : it->second.spelling;
+  }
+  std::optional<ast::Loc> asm_label_site(EntityId e) const {
+    auto it = asm_labels_.find(std::to_underlying(e));
+    if (it == asm_labels_.end()) return std::nullopt;
+    return ast::Loc{id(it->second.item), it->second.offset};
   }
   // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
   // item that does not enclose `item`.
@@ -1421,12 +1427,19 @@ public:
     }
     return false;
   }
-  std::optional<ConstId> constant_value(EntityId e, u32 item) {
+  struct MemberDemand {
+    u32 item;
+    bool body = true;
+    bool own = true;
+    EntityId completing = EntityId::none;
+    auto operator<=>(const MemberDemand&) const = default;
+  };
+  std::optional<ConstId> constant_value(EntityId e, u32 item, std::optional<MemberDemand> member_demand = {}) {
     if (const auto* r = w_->entities.find(e); r && r->kind == sema::EntityKind::template_parameter_object)
       return r->args.front().value;
     ensure_declared(e, item);
     variable_instance(e, item);
-    member_value(e);
+    if (!member_value(e, member_demand.value_or(MemberDemand{item}))) return std::nullopt;
     auto it = constants_.find(std::to_underlying(e));
     if (it == constants_.end() || it->second.first > item) return std::nullopt;
     return it->second.second;
@@ -1485,7 +1498,7 @@ public:
   std::optional<QualType> deduced_type(EntityId f, u32 item);
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
-  std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
+  std::optional<interp::GlobalVar> global(EntityId v, u32 item, std::optional<MemberDemand> member_demand = {}) {
     if (const auto* entity = w_->entities.find(v)) {
       if (entity->kind == sema::EntityKind::template_parameter_object)
         return interp::GlobalVar{entity->type, entity->args.front().value, true};
@@ -1500,7 +1513,7 @@ public:
     variable_instance(v, item);
     auto d = declaration(v, item);
     if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
-    auto c = constant_value(v, item);
+    auto c = constant_value(v, item, member_demand);
     QualType type = d->type;
     if (w_->types.is_reference(type) && !w_->types.is_function(w_->types.referee(type))) {
       const sema::EntityRec& entity = w_->entities.rec(v);
@@ -1619,29 +1632,40 @@ public:
   // each in-class initializer ends; a specialization declares the member and skips it
   // (`lazy_member`); its value is instantiated on first use (`member_value`). A native use
   // retains the storage and the initializer's native dependencies.
-  void set_static_init_end(u32 item, u32 ordinal, u32 end) { static_init_ends_[{item, ordinal}] = end; }
-  std::optional<u32> static_init_end(u32 item, u32 ordinal) {
+  struct StaticInitializer {
+    u32 end;
+    bool dependent_layout;
+  };
+  void set_static_initializer(u32 item, u32 ordinal, StaticInitializer initializer) {
+    static_initializers_[{item, ordinal}] = initializer;
+  }
+  std::optional<StaticInitializer> static_initializer(u32 item, u32 ordinal) {
     item_sema(item);  // the template's analysis records it
-    auto it = static_init_ends_.find({item, ordinal});
-    if (it == static_init_ends_.end()) return std::nullopt;
+    auto it = static_initializers_.find({item, ordinal});
+    if (it == static_initializers_.end()) return std::nullopt;
     return it->second;
   }
   struct LazyMember {
     u32 item;
     u32 ordinal;
     ClassInstantiation inst;
+    bool dependent_layout;
     enum class State : u8 { pending, running, done } state = State::pending;
     std::optional<std::size_t> initializer = std::nullopt;
   };
-  void lazy_member(EntityId e, u32 item, u32 ordinal, const ClassInstantiation& inst) {
-    lazy_members_.try_emplace(std::to_underlying(e), LazyMember{item, ordinal, inst});
+  void lazy_member(EntityId e, u32 item, u32 ordinal, const ClassInstantiation& inst, bool dependent_layout) {
+    lazy_members_.try_emplace(std::to_underlying(e), LazyMember{item, ordinal, inst, dependent_layout});
   }
   bool is_lazy_member(EntityId e) const { return lazy_members_.contains(std::to_underlying(e)); }
-  void member_value(EntityId e);
-  void use_member(EntityId e) {
-    if (!is_lazy_member(e) || used_member(e)) return;
-    used_members_.push_back(e);
-    member_value(e);
+  bool member_value(EntityId e, MemberDemand demand);
+  bool use_member(EntityId e, MemberDemand demand, bool unevaluated) {
+    auto it = lazy_members_.find(std::to_underlying(e));
+    if (it == lazy_members_.end() || (unevaluated && it->second.dependent_layout)) return true;
+    retain_member(e);
+    return member_value(e, demand);
+  }
+  void retain_member(EntityId e) {
+    if (!used_member(e)) used_members_.push_back(e);
   }
   bool used_member(EntityId e) const { return std::ranges::contains(used_members_, e); }
   std::optional<std::size_t> member_initializer_index(EntityId e) const {
@@ -2023,6 +2047,7 @@ private:
 
   const bool exceptions_enabled_;
   const bool rtti_enabled_;
+  const ast::Compatibility compatibility_;
   sema::World* w_;
   const pp::Region* r_;
   ItemsView view_;
@@ -2078,7 +2103,11 @@ private:
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
-  std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
+  struct AsmLabel {
+    u32 item = 0, offset = 0;
+    std::string spelling;
+  };
+  std::map<u32, AsmLabel> asm_labels_;  // the last written label per entity
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, lex::Tk> class_definition_keys_;  // by defining item: the parsed class-key
   std::map<u32, u32> class_templates_;        // by class template entity: its defining item
@@ -2316,7 +2345,8 @@ private:
   void check_default_member_initializers(const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   void prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& rec);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
-  std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
+  std::map<std::pair<u32, u32>, StaticInitializer> static_initializers_;  // by (member item, ordinal)
+  std::map<std::pair<EntityId, MemberDemand>, bool> member_layout_demands_;
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
   std::vector<EntityId> used_members_;                     // in order of first use
   std::set<u32> value_dependent_members_;
@@ -2404,6 +2434,7 @@ public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
   bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
+  ast::Compatibility compatibility() const override { return p_->compatibility(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
@@ -2546,13 +2577,19 @@ public:
     return p_->generic_instance(spec, known, point());
   }
   void generic_defined(const sema::GenericClosure& g) override { p_->generic_defs_[std::to_underlying(g.call)] = g; }
-  std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, value_point(v)); }
+  std::optional<interp::GlobalVar> global(EntityId v) override {
+    const auto item = value_point(v);
+    return p_->global(v, item, member_demand(item));
+  }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
   bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, point()); }
   bool is_complete(EntityId c) override {
     // An enumerator initializer is read at its original class-member declaration, where the
     // enclosing class is incomplete ([class.mem.general]).
     if (replaying_scoped_enum != EntityId::none && c == instantiating) return false;
+    if (layout_member_demand)
+      return c == layout_member_demand->completing ||
+             p_->is_complete(c, layout_member_demand->item, layout_member_demand->body, layout_member_demand->own);
     // A declaration replay uses the enclosing class's prefix at the written point.
     const u32 parent = p_->items().items[item_].parent;
     if (instantiating != EntityId::none &&
@@ -2634,7 +2671,10 @@ public:
     observed_variable_instantiation_failure |= failed;
     return failed;
   }
-  std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
+  std::optional<ConstId> constant_value(EntityId v) override {
+    const auto item = value_point(v);
+    return p_->constant_value(v, item, member_demand(item));
+  }
   sema::ConstantCallEvaluation constant_call(sema::Sema& s, const sema::Ex& call) override {
     auto result = sema::Evaluator(s, *this).evaluate(call);
     return {result.value, result.reason, result.diagnosed_failure()};
@@ -2662,9 +2702,8 @@ public:
   std::optional<ast::DeclSema> replay_function_decl(EntityId function) override {
     return p_->replay_function_decl(function);
   }
-  bool use_static_member(EntityId v) override {
-    p_->use_member(v);
-    return !p_->member_failed(v);
+  bool use_static_member(EntityId v, bool unevaluated) override {
+    return p_->use_member(v, member_demand(value_point(v)), unevaluated);
   }
   std::vector<EntityId> defining_bases(EntityId c) override {
     std::vector<EntityId> r;
@@ -2790,6 +2829,12 @@ public:
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
+  std::optional<Program::MemberDemand> layout_member_demand;
+  struct RestoreLayoutMemberDemand {
+    AtItem& q;
+    std::optional<Program::MemberDemand> saved = q.layout_member_demand;
+    ~RestoreLayoutMemberDemand() { q.layout_member_demand = saved; }
+  };
   EntityId instantiating = EntityId::none;  // the class specialization whose member this is
   EntityId replaying_scoped_enum = EntityId::none;
   // In a re-analysed operand: the offsets of calls that were dependent where it appears,
@@ -2831,7 +2876,12 @@ private:
     // the specialization's demand point, while a written class sees its complete member list.
     return definition == p_->class_items_.end() ? point() : p_->last_member(definition->second);
   }
-  u32 point() const { return at_point ? *at_point : item_; }
+  Program::MemberDemand member_demand(u32 item) const {
+    if (layout_member_demand) return *layout_member_demand;
+    if (at_point) return {item};
+    return {item, self_, own_class_complete, completing_class};
+  }
+  u32 point() const { return layout_member_demand ? layout_member_demand->item : at_point.value_or(item_); }
   Program* p_;
   u32 item_;
   bool self_;
@@ -3365,6 +3415,7 @@ public:
   }
   bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
+  ast::Compatibility compatibility() const override { return p_->compatibility(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
@@ -3484,9 +3535,8 @@ public:
   std::optional<ast::DeclSema> replay_function_decl(EntityId function) override {
     return at_.replay_function_decl(function);
   }
-  bool use_static_member(EntityId v) override {
-    p_->use_member(v);
-    return !p_->member_failed(v);
+  bool use_static_member(EntityId v, bool unevaluated) override {
+    return p_->use_member(v, {p_->end()}, unevaluated);
   }
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override { p_->static_locals_[std::to_underlying(v)] = {t, value}; }
   bool dependent_call(sema::u32 offset) override {
@@ -3597,8 +3647,10 @@ public:
 
   // Analyses a member item of a class template specialization again, instantiating the
   // initializer of its static data member with declarator `ordinal` ([temp.inst]/3).
-  ItemAnalysis(Program& p, u32 item, Program::ClassInstantiation inst, u32 ordinal) : ItemAnalysis(p, item, std::move(inst)) {
+  ItemAnalysis(Program& p, u32 item, Program::ClassInstantiation inst, u32 ordinal,
+               std::optional<Program::MemberDemand> layout_demand) : ItemAnalysis(p, item, std::move(inst)) {
     member_value_ = ordinal;
+    member_layout_demand_ = layout_demand;
   }
 
   // `var` analyses a variable template's definition for the specialization it names, with the
@@ -3609,6 +3661,7 @@ public:
     q_.type_trait_demand = var_->point;
     s_.template_args = var_->args;
   }
+  bool has_member_initial_value() const { return member_initial_value_; }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
   bool class_assertion_failure() const { return q_.observed_class_assertion_failure; }
   bool variable_instantiation_failure() const { return q_.observed_variable_instantiation_failure; }
@@ -4712,8 +4765,9 @@ private:
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    head_requires_ = ps_.constraint_expression(true);
-    constraints_fp_ = ast::mix(constraints_fp_, clause_fp(begin, ps_.pos()));
+    head_requires_ = ps_.constraint_expression(true, &head_constraint_.expression);
+    head_constraint_.tokens = clause_fp(begin, ps_.pos());
+    constraints_fp_ = ast::mix(constraints_fp_, head_constraint_.tokens);
   }
   // A declarator's trailing requires-clause ([dcl.decl]/4).
   void trailing_requires_clause() {
@@ -4721,8 +4775,9 @@ private:
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    trailing_requires_ = ps_.constraint_expression(true);
-    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), clause_fp(begin, ps_.pos()));
+    trailing_requires_ = ps_.constraint_expression(true, &trailing_constraint_.expression);
+    trailing_constraint_.tokens = clause_fp(begin, ps_.pos());
+    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
   }
   // The fingerprint of a clause's tokens with each template parameter as its position: equal for
   // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
@@ -6187,8 +6242,11 @@ private:
       auto exception = class_member;
       if (p_->defaulted_body(k_)) exception = defaulted_assignment;
       else if (member_template_) exception = member_template;
+      const bool replay_array_bounds = !spec.is_static && !member_template_ && !conversion &&
+                                       s_.templated() && p_->named_nested_class(it_->parent);
       parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                                          /*defer_ref_check=*/true);
+                                          /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false,
+                                          replay_array_bounds);
       if (!d.ok || !d.named) return bad();
       if (conversion && !d.function) {
         s_.diag(d.name_at, Diag::conversion_parameters);
@@ -6337,6 +6395,7 @@ private:
       if (!s_.require_complete(d.type, d.name_at)) return bad();
       if (!s_.require_concrete_object(d.type, d.name_at)) return bad();
       u8 field_alignment = 0;
+      u8 written_field_alignment = 0;
       if (alignment && alignment->value && !alignment->dependent && !types.is_dependent(d.type)) {
         const auto natural = s_.layout_of(d.type, /*align=*/true);
         if (!natural) {
@@ -6347,7 +6406,8 @@ private:
           s_.diag(alignment->at, Diag::field_alignment_weak);
           return bad();
         }
-        if (alignment->value > *natural) field_alignment = alignment->value;
+        written_field_alignment = alignment->value;
+        if (written_field_alignment > *natural) field_alignment = written_field_alignment;
       }
       if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
@@ -6359,6 +6419,7 @@ private:
       sem.type = d.type;
       sem.bit_width = bit_width;
       sem.field_alignment = field_alignment;
+      sem.written_field_alignment = written_field_alignment;
       sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
@@ -6920,6 +6981,7 @@ private:
       sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, sem.linkage, {}, ns_entity()};
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
+      sem.head_constraint = head_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
@@ -7814,6 +7876,7 @@ private:
       sema::EntityRec e{sema::EntityKind::function_template, name, type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
+      sem.head_constraint = head_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
@@ -8245,6 +8308,7 @@ private:
         sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
         e.head = head_fp(s_.template_scopes.back());
         sem.constraints = associated_constraints();
+        sem.head_constraint = head_constraint_;
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       } else {
@@ -8327,22 +8391,29 @@ private:
       // initializer of one defined in the class (inline or constexpr) is instantiated when the
       // member is used (`Program::member_value`), from the extent the template's analysis recorded.
       if (inst_ && !early && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
-        if (auto end = p_->static_init_end(k_, ordinal)) {
-          ps_.seek(*end);
-          p_->lazy_member(sem.entity, k_, ordinal, *inst_);
+        if (auto initializer = p_->static_initializer(k_, ordinal)) {
+          ps_.seek(initializer->end);
+          p_->lazy_member(sem.entity, k_, ordinal, *inst_, initializer->dependent_layout);
           declare_member(ConstId::none, {});
           return true;
         }
       }
       if (list_initialization || early || ps_.accept(Tk::equal)) {
+        const AtItem::RestoreLayoutMemberDemand restore{q_};
+        if (member_value_ == ordinal) q_.layout_member_demand = member_layout_demand_;
         u32 at;
         if (list_initialization) {
           const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
           at = ps_.pos();
           init = ps_.member_initializer(d.type, true, form);
         } else {
+          using Replay = Parser::TemplateArgumentReplay;
+          const Parser::TemplateArgumentReplayScope replay(ps_, s_.templated() && !early &&
+              (spec.is_inline || spec.is_constexpr) ? Replay::static_initializer : Replay::none);
+          const auto layout_arguments = ps_.dependent_layout_arguments();
           Ex e = early ? *early : ps_.assignment_expression();
-          if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
+          if (!inst_)
+            p_->set_static_initializer(k_, ordinal, {ps_.index(), ps_.dependent_layout_arguments() != layout_arguments});
           at = e.begin;
           init = s_.convert(e, d.type, at);
         }
@@ -8380,7 +8451,10 @@ private:
         }
         value = *v.value;
         if (usable) p_->set_constant(sem.entity, value, k_);
-        if (member_value_) p_->set_member_init(sem.entity, value);
+        if (member_value_ == ordinal) {
+          member_initial_value_ = true;
+          p_->set_member_init(sem.entity, value);
+        }
       } else if (spec.is_constexpr) {
         s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
         declare_member(ConstId::none, {});
@@ -8463,10 +8537,12 @@ private:
               !same_function_parameters(d.type, *function, false, compare_object))
             return false;
         }
-        // An unqualified implicit object corresponds to either ref-qualified form.
-        if (previous.fn_ref != current.fn_ref && previous.fn_ref != ast::RefQual::none &&
-            current.fn_ref != ast::RefQual::none)
-          return false;
+        if (previous.fn_ref != current.fn_ref) {
+          if (previous.fn_ref != ast::RefQual::none && current.fn_ref != ast::RefQual::none) return false;
+          // GCC distinguishes the unqualified and ref-qualified implicit objects too.
+          if (s_.compatibility() == ast::Compatibility::gcc && !is_static && !(d.flags & sema::decl_flag::static_))
+            return false;
+        }
       }
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;
@@ -8650,7 +8726,8 @@ private:
       const bool replay = template_ && !var_ && !explicit_ && !d.qualified && !d.template_args &&
                           types.is_scalar(d.type) && !types.is_dependent(d.type) && !types.has_placeholder(d.type) &&
                           fixed_scalar_array_initializer(name);
-      const parse::Parser::VariableTemplateInitializerScope initializer(ps_, replay);
+      using Replay = Parser::TemplateArgumentReplay;
+      const Parser::TemplateArgumentReplayScope initializer(ps_, replay ? Replay::variable_initializer : Replay::none);
       const sema::Sema::ClosureOwnerScope closures(s_, initializer_owner());
       early = ps_.braced_init_list();
       u64 n = s_.deduce_bound(d.type, *early);
@@ -8672,7 +8749,9 @@ private:
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
     const bool pattern = template_ && !var_ && !fn;
-    const parse::Parser::VariableTemplateInitializerScope initializer(ps_, pattern && !(d.qualified && d.scope.type));
+    using Replay = Parser::TemplateArgumentReplay;
+    const Parser::TemplateArgumentReplayScope initializer(ps_, (pattern || var_) && !(d.qualified && d.scope.type)
+        ? Replay::variable_initializer : Replay::none);
     AtItem::RestoreTypeTraitPattern restore{q_};
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
@@ -8880,6 +8959,8 @@ private:
           s_.pop_scope();
         }
         sem.constraints = associated_constraints();
+        sem.head_constraint = head_constraint_;
+        sem.trailing_constraint = trailing_constraint_;
         // [temp.param]: a variable template's pack is last; a function template's is followed only
         // by parameters with a default or deduced from its parameter-type-list.
         const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
@@ -8896,7 +8977,7 @@ private:
               return false;
             }
         }
-        if (fn) {
+        if (fn && s_.compatibility() == ast::Compatibility::spec) {
           std::vector<std::pair<u16, u16>> deduced;
           for (QualType p : types.rec(sem.type).params) s_.templates().params_in(p, deduced);
           bool after_pack = false;
@@ -9251,13 +9332,15 @@ private:
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
     if (!d.asm_label.empty()) {
-      // Every labelled declaration of an entity gives it one label (docs/EXTENSIONS.md).
+      // GCC uses the last label. The other modes diagnose a conflicting redeclaration.
       std::string earlier = p_->asm_label(sem.entity);
-      if (!earlier.empty() && earlier != d.asm_label) {
+      if (p_->compatibility() != ast::Compatibility::gcc && !earlier.empty() && earlier != d.asm_label) {
         s_.diag(d.name_at, Diag::asm_label_conflict, d.name);
         return false;
       }
-      p_->asm_labels_[std::to_underlying(sem.entity)] = d.asm_label;
+      auto& label = p_->asm_labels_[std::to_underlying(sem.entity)];
+      if (label.spelling.empty() || std::pair{k_, d.name_at} > std::pair{label.item, label.offset})
+        label = {k_, d.name_at, d.asm_label};
     }
     return true;
   }
@@ -9425,6 +9508,8 @@ private:
   // Analysing a member item again for one static data member's value (`Program::member_value`):
   // the ordinal of the declarator whose initializer is instantiated.
   std::optional<u32> member_value_;
+  std::optional<Program::MemberDemand> member_layout_demand_;
+  bool member_initial_value_ = false;
   // The member declaration being analysed is a member template's ([temp.mem]).
   bool member_template_ = false;
   // The declaration has two template-heads: a member template of a class template's definition.
@@ -9435,6 +9520,7 @@ private:
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
   ConstId head_requires_ = ConstId::none;      // the template-head's requires-clause, in normal form
   ConstId trailing_requires_ = ConstId::none;  // the declarator's
+  ast::WrittenConstraint head_constraint_{}, trailing_constraint_{};
   sema::Fp128 constraints_fp_{};               // their tokens' fingerprint, for identity
   ConstId partial_constraints_ = ConstId::none;  // a partial specialization's, from `partial_arguments`
   sema::Fp128 partial_constraints_fp_{};
@@ -9624,7 +9710,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address,
-                        d.field_alignment});
+                        d.field_alignment, d.written_field_alignment});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
@@ -11242,9 +11328,18 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
   return atoms_[key];
 }
 
-void Program::member_value(EntityId e) {
-  auto it = lazy_members_.find(std::to_underlying(e));
-  if (it == lazy_members_.end() || it->second.state != LazyMember::State::pending) return;
+bool Program::member_value(EntityId e, MemberDemand demand) {
+  const u32 key = std::to_underlying(e);
+  auto it = lazy_members_.find(key);
+  if (it == lazy_members_.end() || it->second.state == LazyMember::State::running) return true;
+  const auto demand_key = std::pair(e, demand);
+  if (it->second.dependent_layout) {
+    // Each demand has its own completeness context, even if another query in the group already
+    // reached this member. One successful definition supplies its ordinary specialization identity.
+    if (auto checked = member_layout_demands_.find(demand_key); checked != member_layout_demands_.end()) return checked->second;
+  } else if (it->second.state == LazyMember::State::done) {
+    return !member_failed(e);
+  }
   it->second.state = LazyMember::State::running;  // a use in its own initializer finds no value
   LazyMember m = it->second;
   // [temp.inst]/16: initializers instantiated through each other are limited as classes are; past
@@ -11254,15 +11349,19 @@ void Program::member_value(EntityId e) {
       end_diags_.push_back({engine::Loc{std::to_underlying(id(m.item)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
                             {engine::diag_arg(instantiation_limit)}});
     depth_reported_ = true;
-    lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
-    return;
+    lazy_members_.at(key).state = LazyMember::State::done;
+    return false;
   }
   ++members_running_;
-  Result<ast::ItemSema> r = ItemAnalysis(*this, m.item, m.inst, m.ordinal).run();
+  const auto layout_demand = m.dependent_layout ? std::optional(demand) : std::nullopt;
+  ItemAnalysis analysis(*this, m.item, m.inst, m.ordinal, layout_demand);
+  Result<ast::ItemSema> r = analysis.run();
   --members_running_;
   if (r.diags.empty()) {
-    lazy_members_.at(std::to_underlying(e)).initializer = member_initializers_.size();
-    member_initializers_.push_back({e, m.item, r.value.closures, std::move(r.demands)});
+    if (!lazy_members_.at(key).initializer) {
+      lazy_members_.at(key).initializer = member_initializers_.size();
+      member_initializers_.push_back({e, m.item, r.value.closures, std::move(r.demands)});
+    }
     for (const auto& closure : w_->ins.seqs.elements(r.value.closures))
       for (EntityId f : {closure.call, closure.invoker})
         if (f != EntityId::none) declaration_closures_.at(std::to_underlying(f)).lazy_member = e;
@@ -11271,7 +11370,10 @@ void Program::member_value(EntityId e) {
   if (item_sema(m.item).diags.empty())
     for (engine::Diagnostic& d : r.diags)
       if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
-  lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
+  lazy_members_.at(key).state = LazyMember::State::done;
+  const bool ready = m.dependent_layout ? analysis.has_member_initial_value() : !member_failed(e);
+  if (m.dependent_layout) member_layout_demands_.emplace(demand_key, ready);
+  return ready;
 }
 
 bool Program::require_enum_definition(EntityId e, u32 point) {
@@ -12324,6 +12426,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       }
       auto [n, del] = classes_.copy_of(t);
       rec.copy_deleted = rec.copy_deleted || del;
+      rec.copy_deleted_by_class_subobject |= del;
       nontrivial = nontrivial || n;
     }
     if (!rec.copy_deleted && nontrivial && !rec.layout_requires_virtual_support) rec.copy_ctor = synthesize(true);
@@ -12338,7 +12441,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       return !types.is_reference(t) && classes_.move_nontrivial(t);
     });
   }
-  // POD for layout, as Clang has it (`ast::record_layout`): a trivial class ([class.prop]/2: its
+  // The Darwin Clang layout rule uses a trivial class ([class.prop]/2: its
   // default constructor, copy and move operations and destructor trivial), and standard-layout
   // (/3: one access for all its data members, no reference members, and its data members all
   // in one class of the hierarchy), whose members and bases are too.
@@ -12368,6 +12471,11 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
             (rec.fields.empty() || !data_in_bases);
+  // The Itanium default uses the C++03 aggregate rule for this layout decision.
+  if (compatibility_ != ast::Compatibility::clang || w_->target.operating_system != ast::OperatingSystem::darwin)
+    rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
+      return rec.access_of(f.entity) == ast::Access::public_;
+    });
   if (!user_copy_assignment || defaulted_assignment)
     declare_copy_assignment(item, cls, rec, !user_copy_assignment, deletes_implicit_copy);
   return implicit_move;
@@ -13565,7 +13673,8 @@ void Program::instantiate_all() {
       }
       if (const auto i = member_initializer_index(e); i && member_initializers_[*i].type_only) {
         member_initializers_[*i].type_only = false;
-        use_member(e);
+        // This initializer was already evaluated. Emitting its storage has no new semantic point.
+        retain_member(e);
         promoted_initializers.push_back(*i);
       }
       // A closure's callable address can survive folding even when its owner's storage does not.

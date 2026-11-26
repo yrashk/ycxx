@@ -564,6 +564,7 @@ public:
     case ast::DepOp::has_virtual_destructor:
     case ast::DepOp::is_standard_layout:
     case ast::DepOp::alignof_type:
+    case ast::DepOp::sizeof_type:
     case ast::DepOp::array_rank:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
@@ -759,7 +760,8 @@ public:
         if (!operand) return std::nullopt;
         return array_rank_value(operand->type);
       }
-      case ast::DepOp::alignof_type: {
+      case ast::DepOp::alignof_type:
+      case ast::DepOp::sizeof_type: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand || !types().is_dependent(operand->type)) return std::nullopt;
         const std::array operands{*operand};
@@ -2352,9 +2354,15 @@ private:
     auto ref = ins().values.get<ast::VDepVariable>(v);
     auto args = substitute_args(ins().seqs.elements(ref.args), b);
     if (!args) return std::nullopt;
-    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+    auto keep_reference = [&] -> std::optional<ConstId> {
+      auto written = substitute_args(ins().seqs.elements(ref.written_args), b);
+      if (!written) return std::nullopt;
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      ref.written_args = ins().intern_seq(std::span<const TemplateArg>(*written));
       return ins().intern_value(ref);
+    };
+    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+      return keep_reference();
     }
     const EntityId spec = specialize_variable(ref.templ, *args);
     if (mode != BooleanSubstitution::evaluate) {
@@ -2365,8 +2373,7 @@ private:
         if (!global && demand_variable) demand_variable(spec, *type);
         return w_->values.integer(types().builtin(Builtin::bool_), false);
       }
-      ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
-      return ins().intern_value(ref);
+      return keep_reference();
     }
     return read ? read(spec) : std::nullopt;
   }

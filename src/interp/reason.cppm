@@ -72,6 +72,7 @@ enum class Reason : std::uint8_t {
   unknown_dynamic_type [[=says{"a virtual call on an object whose dynamic type is constexpr-unknown"}]],
   immediate_dispatch_phase [[=says{"an immediate virtual call during construction or destruction is not supported yet"}]],
   virtual_dispatch_phase [[=says{"a virtual call during construction or destruction is not supported yet"}]],
+  float_overflow [[=says{"floating-point arithmetic overflows"}]],
 };
 
 consteval auto reason_enumerators() { return std::define_static_array(std::meta::enumerators_of(^^Reason)); }

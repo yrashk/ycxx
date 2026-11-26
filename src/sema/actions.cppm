@@ -145,6 +145,7 @@ class Questions {
 public:
   virtual bool exceptions_enabled() const { return true; }
   virtual bool rtti_enabled() const { return true; }
+  virtual ast::Compatibility compatibility() const { return ast::Compatibility::spec; }
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
@@ -307,7 +308,7 @@ public:
   virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
-  virtual bool use_static_member(EntityId /*v*/) { return true; }
+  virtual bool use_static_member(EntityId /*v*/, bool /*unevaluated*/ = false) { return true; }
   // A static local declared ([stmt.dcl]/3), for constant evaluation's questions about it
   // (`global`): its type, and its constant if constant-initialized.
   virtual void static_local(EntityId /*v*/, QualType /*type*/, std::optional<ConstId> /*value*/) {}
@@ -1361,10 +1362,12 @@ public:
     ExprInfo info{types().referee(*t), ValueCategory::lvalue, 0};
     return node(ast::DeclRef{info, spec}, begin, end, info);
   }
-  Ex dependent_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end) {
+  Ex dependent_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end,
+                                    bool qualified = false, bool global = false) {
     auto full = template_arguments(tmpl, args, begin);
     if (!full) return {NodeId::none, begin, end};
-    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full))});
+    auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full)),
+                                                     ins().intern_seq(args), u8(qualified), u8(global)});
     return literal(types().referee(tmpl.type), value, ValueCategory::lvalue, begin, end);
   }
   // The initializer is replayed with bound arguments. Check the written arguments here without
@@ -1466,6 +1469,7 @@ public:
     return q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at);
   }
   u32 source_line_at(u32 at) { return q_->presumed_line(source_position(at)); }
+  ast::Compatibility compatibility() const { return q_->compatibility(); }
   std::optional<Diag> unresolved_default_source(const Ex& expression) {
     if (!default_source_observer_ || (!default_source_observer_->line &&
         default_source_observer_->descriptor_type == EntityId::none)) return std::nullopt;
@@ -2632,9 +2636,9 @@ public:
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
   // `__builtin_is_virtual_base_of(Base, Derived)` and `__is_pointer_interconvertible_base_of(Base,
-  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false, and the same class
-  // gives `same`, complete or not. Distinct classes need a complete Derived: their entities then,
-  // or the result after a diagnostic.
+  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false. Only pointer
+  // interconvertibility returns true for the same incomplete nonunion class. Other nonunion
+  // class queries need a complete Derived.
   std::expected<std::pair<EntityId, EntityId>, Ex> class_relation_operands(NameId name, QualType base_type,
                                                                            QualType derived_type, bool same,
                                                                            u32 begin, u32 end) {
@@ -2650,12 +2654,13 @@ public:
       return std::unexpected(Ex{NodeId::none, begin, end});
     }
     const EntityId b = ts.class_of(base), d = ts.class_of(derived);
-    if (b == d) return std::unexpected(bool_literal(same, begin, end));
+    if (b == d && same) return std::unexpected(bool_literal(true, begin, end));
     const auto complete_at_demand = q_->type_trait_at_demand(d, loc);
     if (!(complete_at_demand ? *complete_at_demand : q_->is_complete_at_source(d))) {
       if (!q_->type_trait_instantiation_failed(d)) diag_at(loc, Diag::class_relation_incomplete, derived_type, name);
       return std::unexpected(Ex{NodeId::none, begin, end});
     }
+    if (b == d) return std::unexpected(bool_literal(false, begin, end));
     return std::pair{b, d};
   }
   // A class is not its own virtual base. The graph has no virtual edges until #310.
@@ -2770,6 +2775,10 @@ public:
       if (f.bit_width != g.bit_width) return false;
       const auto same = layout_compatible(f.type, g.type);
       if (same != true) return same;
+      if (compatibility() == ast::Compatibility::clang) {
+        if (f.written_alignment != g.written_alignment) return false;
+        continue;
+      }
       const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
       if (!fa || !ga) return std::nullopt;
       if (std::max(*fa, u64(f.explicit_alignment)) != std::max(*ga, u64(g.explicit_alignment))) return false;
@@ -7008,7 +7017,8 @@ public:
   // specialization, naming it instantiates its initializer ([temp.inst]/3).
   Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
     bool dep = types().is_dependent(types().class_type(c)) && q_->value_dependent_member(v);
-    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v)) return {NodeId::none, begin, end};
+    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v, unevaluated != 0))
+      return {NodeId::none, begin, end};
     ExprInfo info{t, ValueCategory::lvalue, dep ? expr_flag::dependent : u8(0)};
     return node(ast::DeclRef{info, v}, begin, end, info);
   }
@@ -8861,7 +8871,7 @@ public:
     return w_->values.address(types().pointer(type), w_->values.entity(entity), 0);
   }
 
-  Ex builtin_source_location(u32 begin, u32 end) {
+  Ex builtin_source_location(u32 begin, u32 end, u32 site) {
     const Ex fail{NodeId::none, begin, end};
     if (!w_->target.supports(ast::NativeOperation::source_location_descriptor)) {
       diag(begin, Diag::source_location_target);
@@ -8883,20 +8893,21 @@ public:
       diag(begin, Diag::source_location_default_member);
       return fail;
     }
-    return literal(type, source_location_address(descriptor, begin), ValueCategory::prvalue, begin, end);
+    return literal(type, source_location_address(descriptor, site), ValueCategory::prvalue, begin, end);
   }
 
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
-  Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
+  Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end, u32 paren_at) {
     using enum lex::BuiltinFunction;
     if (b.function == source_location) {
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
-      return builtin_source_location(begin, end);
+      return builtin_source_location(begin, end, q_->compatibility() == ast::Compatibility::gcc ? paren_at : begin);
     }
     if (b.function == source_line) {
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
-      const QualType type = builtin(Builtin::unsigned_int);
-      const u32 line = source_line_at(begin);
+      const bool gcc = q_->compatibility() == ast::Compatibility::gcc;
+      const QualType type = builtin(gcc ? Builtin::int_ : Builtin::unsigned_int);
+      const u32 line = source_line_at(gcc ? paren_at : begin);
       if (default_source_observer_) {
         // Constant probes retain unevaluated operands for proof, but the default's invocation
         // line is still unknown. Only an evaluated use binds the enclosing default to a line.
@@ -10805,14 +10816,15 @@ public:
     ~ClassAlignmentOperand() { checking = saved; }
   };
 
-  // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
-  // after a diagnostic.
-  Ex dependent_base_alignment(QualType operand, u32 begin, u32 end) {
+  // A dependent layout query whose enclosing construct reparses the written operand.
+  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
     const std::array args{templates().type_arg(operand)};
-    const auto value = ins().intern_value(ast::VDepOp{ast::DepOp::alignof_type, ins().intern_seq(std::span<const TemplateArg>(args))});
+    const auto op = align ? ast::DepOp::alignof_type : ast::DepOp::sizeof_type;
+    const auto value = ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
     return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
   }
 
+  // [expr.sizeof], [expr.alignof]: a `size_t` prvalue.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
@@ -13512,9 +13524,11 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      // The descriptor uses the call's beginning, including a written member receiver.
-      // __builtin_LINE keeps its separate member-name anchor.
-      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at, begin);
+      // GCC uses the opening parenthesis for both builtins. Otherwise the descriptor uses the
+      // call's beginning and __builtin_LINE uses a written member name when present.
+      const bool gcc = q_->compatibility() == ast::Compatibility::gcc;
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i],
+                                gcc ? paren_at : invocation_at, gcc ? paren_at : begin);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
