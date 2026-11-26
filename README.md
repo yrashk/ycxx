@@ -32,6 +32,14 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 
 ### What you can do today
 
+**Select a compatibility mode.** Pass `ycxx cxx -fcompat=spec|gcc|clang` when compiling a
+translation unit, or put the flag in its `compile_commands.json` entry for editor checks.
+The default `spec` mode follows the pinned C++26 draft and published ABI. Documented extensions
+remain available in each mode for system and libycxx headers. The `gcc` and `clang` modes
+select the implemented GCC 16 and upstream Clang 23 behaviors. Use consistent modes
+when exchanging objects that depend on these ABI differences. The
+[compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
+
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
@@ -82,8 +90,10 @@ Member function template specializations preserve bare `noexcept` in their funct
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Function templates, member function templates and members of class templates substitute a
-dependent exception specification when it is needed.
-[#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828)
+dependent exception specification when it is needed. A function template's condition can use the
+nonthrowing construction and assignment traits for arithmetic types and supported written class
+move operations.
+[#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828) [#218](https://github.com/yrashk/ycxx/issues/218)
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 

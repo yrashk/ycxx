@@ -31,6 +31,16 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
 (LESSONS: #198, #233).
 - Every PR targets `main`. Stack at most one step on an unmerged PR. When its base merges,
   retarget yours to `main` (`gh pr edit N --base main`) before anything else.
+- Agent display names identify sessions in coordination comments. For commits agents create,
+  including merge and rebase commits, use the name and email the intended GitHub account holder
+  has authorized. Use the exact address associated with that account. Never construct a
+  `@users.noreply.github.com` address from an agent display name. GitHub uses commit email
+  addresses to assign attribution.
+- Before committing, check `git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT`. Before
+  pushing or merging, inspect the raw author and committer of every new agent-created commit,
+  including commits brought in by a merge. For a checked-out branch, run
+  `git log origin/main..HEAD --format='%h %an <%ae> | %cn <%ce>'`. Correct any mismatch on the
+  unmerged branch before proceeding. Preserve the identities of existing human contributions.
 - Before pushing to a PR's branch, check that the PR is still open (`gh pr view N --json state`).
   Once it has merged, anything new, even a follow-up to the same issue, goes on a fresh branch
   from `main` with a new PR.
@@ -43,6 +53,16 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
 
 ## While working
 
+- For changes to accepted syntax, semantics, preprocessing values or the ABI, check the pinned
+  draft or published ABI and run the relevant GCC and upstream Clang black-box probes. When the
+  answers differ, update [docs/compatibility.toml](docs/compatibility.toml) with the reference,
+  observed behavior, support status for each mode, and regression coverage. Apply oracle-specific
+  choices through the translation unit's `-fcompat=spec|gcc|clang` setting. Keep the draft
+  expectation in `spec` mode and check every affected mode, including both cold and resident
+  compilation when the choice changes a cached result.
+- Keep the extensions in [docs/EXTENSIONS.md](docs/EXTENSIONS.md) available in every mode.
+  System and libycxx headers rely on these extensions and their feature probes. Record any
+  mode-dependent behavior of an extension in the compatibility table.
 - Write C++ the way fully implemented C++26 would have it (DECISIONS §3.2): concepts,
   modules, reflection instead of generators and boilerplate, contracts, coroutines and
   `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,

@@ -158,7 +158,7 @@ public:
   Program(sema::World& w, const pp::Region& r, const items::Items& its, const pp::Config& config = {},
           std::shared_ptr<const Index> index = nullptr)
       : instantiation_limit(config.template_depth), exceptions_enabled_(config.exceptions_enabled),
-        rtti_enabled_(config.rtti_enabled), w_(&w), r_(&r),
+        rtti_enabled_(config.rtti_enabled), compatibility_(config.compatibility), w_(&w), r_(&r),
         view_(its), items_(&view_), ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
     may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
@@ -368,6 +368,7 @@ public:
   const pp::Region& region() const { return *r_; }
   bool exceptions_enabled() const { return exceptions_enabled_; }
   bool rtti_enabled() const { return rtti_enabled_; }
+  ast::Compatibility compatibility() const { return compatibility_; }
   const ItemsView& items() const { return *items_; }
   // Records the items this Program reads into `reads` (#947).
   void record_reads(std::vector<std::uint8_t>* reads) {
@@ -381,6 +382,11 @@ public:
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   std::optional<ast::DeclSema> friend_decl(const ast::MemberRec& f);
   std::optional<ast::DeclSema> class_friend(EntityId f);
+  bool unresolved_special_member_exception(EntityId entity) const {
+    const auto resolved = special_member_exception_types_.find(entity);
+    return (resolved != special_member_exception_types_.end() && !resolved->second) ||
+           special_member_exception_tokens_.contains(entity);
+  }
   ast::DeclSema completed_declaration(ast::DeclSema decl) const {
     if (auto found = special_member_exception_types_.find(decl.entity);
         found != special_member_exception_types_.end() && found->second)
@@ -468,7 +474,12 @@ public:
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
-    return it == asm_labels_.end() ? std::string() : it->second;
+    return it == asm_labels_.end() ? std::string() : it->second.spelling;
+  }
+  std::optional<ast::Loc> asm_label_site(EntityId e) const {
+    auto it = asm_labels_.find(std::to_underlying(e));
+    if (it == asm_labels_.end()) return std::nullopt;
+    return ast::Loc{id(it->second.item), it->second.offset};
   }
   // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
   // item that does not enclose `item`.
@@ -1896,6 +1907,7 @@ private:
 
   const bool exceptions_enabled_;
   const bool rtti_enabled_;
+  const ast::Compatibility compatibility_;
   sema::World* w_;
   const pp::Region* r_;
   ItemsView view_;
@@ -1951,7 +1963,11 @@ private:
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
-  std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
+  struct AsmLabel {
+    u32 item = 0, offset = 0;
+    std::string spelling;
+  };
+  std::map<u32, AsmLabel> asm_labels_;  // the last written label per entity
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
   std::map<u32, lex::Tk> class_definition_keys_;  // by defining item: the parsed class-key
   std::map<u32, u32> class_templates_;        // by class template entity: its defining item
@@ -1978,6 +1994,7 @@ private:
   std::map<EntityId, AliasCallPattern> alias_call_patterns_;
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
   std::set<EntityId> failed_type_trait_instantiations_;
+  std::map<u32, u32> nested_constraint_operand_ends_;  // offsets in this program's token region
   const std::vector<std::string>& ns_of_ = ix_->ns_of;
   const std::vector<std::string>& eff_ns_ = ix_->eff_ns;
   const std::map<u32, std::vector<std::pair<std::string, std::string>>>& name_scopes_ = ix_->name_scopes;
@@ -2176,6 +2193,7 @@ private:
   struct MemberExceptionPattern {
     std::vector<u32> calls;
     std::vector<sema::Expansion> expansions;
+    bool dependent_type_traits = false;
   };
   std::map<EntityId, MemberException> member_exceptions_;
   std::map<u32, std::optional<MemberExceptionPattern>> member_exception_patterns_;
@@ -2275,6 +2293,7 @@ public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
   bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
+  ast::Compatibility compatibility() const override { return p_->compatibility(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
@@ -2443,6 +2462,9 @@ public:
     const auto slot = p_->member_exceptions_.find(f);
     return slot != p_->member_exceptions_.end() && slot->second.condition_tokens.has_value();
   }
+  bool unresolved_special_member_exception(EntityId f) override {
+    return p_->unresolved_special_member_exception(f);
+  }
   std::optional<u32> default_instantiation_point;
   bool is_complete_at_source(EntityId c) override {
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
@@ -2514,6 +2536,13 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
+  void record_nested_constraint_operand(u32 begin, u32 end) override {
+    p_->nested_constraint_operand_ends_.try_emplace(begin, end);
+  }
+  std::optional<u32> nested_constraint_operand_end(u32 begin) override {
+    const auto end = p_->nested_constraint_operand_ends_.find(begin);
+    return end == p_->nested_constraint_operand_ends_.end() ? std::nullopt : std::optional(end->second);
+  }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
   std::optional<ast::DeclSema> template_decl(EntityId t) override;
@@ -2963,6 +2992,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
     const auto f = types.rec(type);
     return types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, true);
   }
+  if (caller.in_discarded_constraint_operand) return type;  // [temp.constr.op]
   // An explicit specialization has its own declaration's ([temp.expl.spec]).
   if (p_->explicitly_specialized(function, p_->end())) return type;
   if (const auto cached = p_->resolved_member_exceptions_.find(function); cached != p_->resolved_member_exceptions_.end())
@@ -3001,9 +3031,25 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
   if (cls != EntityId::none) source.completing_class = cls;
-  sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
-  if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
+  const auto pattern = p_->member_exception_patterns_.find(item);
+  if (pattern != p_->member_exception_patterns_.end()) {
     if (!pattern->second) return std::nullopt;
+    if (pattern->second->dependent_type_traits) source.type_trait_demand = source.at_point;
+  }
+  // Errors in this instantiation are outside the immediate context of substitution
+  // ([temp.deduct.general]). Preserve their original locations even inside a requirement.
+  std::vector<engine::Diagnostic> instantiation_diags;
+  struct PublishInstantiationDiagnostics {
+    std::vector<engine::Diagnostic>& diagnostics;
+    std::vector<engine::Diagnostic>& destination;
+    ~PublishInstantiationDiagnostics() {
+      for (engine::Diagnostic& diagnostic : diagnostics)
+        if (!std::ranges::contains(destination, diagnostic)) destination.push_back(std::move(diagnostic));
+    }
+  } publish{instantiation_diags, p_->end_diags_};
+  auto& diagnostics = source.type_trait_demand ? instantiation_diags : caller.diagnostics();
+  sema::Sema replay(p_->world(), caller.builder(), source, diagnostics, p_->id(item), 0);
+  if (pattern != p_->member_exception_patterns_.end()) {
     source.instantiation_calls = pattern->second->calls;
     replay.expansions_override = &pattern->second->expansions;
   }
@@ -3206,6 +3252,7 @@ public:
   }
   bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
+  ast::Compatibility compatibility() const override { return p_->compatibility(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
@@ -3227,6 +3274,7 @@ public:
     return at_.replay_member_exception(caller, decl, function, type);
   }
   bool deferred_exception(EntityId f) override { return at_.deferred_exception(f); }
+  bool unresolved_special_member_exception(EntityId f) override { return at_.unresolved_special_member_exception(f); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
@@ -3311,6 +3359,12 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
+  void record_nested_constraint_operand(u32 begin, u32 end) override {
+    at_.record_nested_constraint_operand(begin, end);
+  }
+  std::optional<u32> nested_constraint_operand_end(u32 begin) override {
+    return at_.nested_constraint_operand_end(begin);
+  }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
   std::optional<ast::DeclSema> template_decl(EntityId t) override { return at_.template_decl(t); }
@@ -4507,8 +4561,9 @@ private:
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    head_requires_ = ps_.constraint_expression(true);
-    constraints_fp_ = ast::mix(constraints_fp_, clause_fp(begin, ps_.pos()));
+    head_requires_ = ps_.constraint_expression(true, &head_constraint_.expression);
+    head_constraint_.tokens = clause_fp(begin, ps_.pos());
+    constraints_fp_ = ast::mix(constraints_fp_, head_constraint_.tokens);
   }
   // A declarator's trailing requires-clause ([dcl.decl]/4).
   void trailing_requires_clause() {
@@ -4516,8 +4571,9 @@ private:
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    trailing_requires_ = ps_.constraint_expression(true);
-    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), clause_fp(begin, ps_.pos()));
+    trailing_requires_ = ps_.constraint_expression(true, &trailing_constraint_.expression);
+    trailing_constraint_.tokens = clause_fp(begin, ps_.pos());
+    constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
   }
   // The fingerprint of a clause's tokens with each template parameter as its position: equal for
   // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
@@ -6699,6 +6755,7 @@ private:
       sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, sem.linkage, {}, ns_entity()};
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
+      sem.head_constraint = head_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
@@ -6977,9 +7034,7 @@ private:
       s_.diag(name_at, Diag::consteval_redeclared, m->name);
       return bad();
     }
-    const auto resolved = p_->special_member_exception_types_.find(m->entity);
-    if (ctor && ((resolved != p_->special_member_exception_types_.end() && !resolved->second) ||
-                 p_->special_member_exception_tokens_.contains(m->entity)))
+    if (ctor && p_->unresolved_special_member_exception(m->entity))
       return bad();  // class completion reports an invalid specification
     const QualType declared_type = mem->type;
     if (ctor && s_.types().rec(declared_type).fn_noexcept != nonthrowing) {
@@ -7595,6 +7650,7 @@ private:
       sema::EntityRec e{sema::EntityKind::function_template, name, type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
+      sem.head_constraint = head_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
@@ -8026,6 +8082,7 @@ private:
         sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
         e.head = head_fp(s_.template_scopes.back());
         sem.constraints = associated_constraints();
+        sem.head_constraint = head_constraint_;
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       } else {
@@ -8661,6 +8718,8 @@ private:
           s_.pop_scope();
         }
         sem.constraints = associated_constraints();
+        sem.head_constraint = head_constraint_;
+        sem.trailing_constraint = trailing_constraint_;
         // [temp.param]: a variable template's pack is last; a function template's is followed only
         // by parameters with a default or deduced from its parameter-type-list.
         const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
@@ -9032,13 +9091,15 @@ private:
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
     if (!d.asm_label.empty()) {
-      // Every labelled declaration of an entity gives it one label (docs/EXTENSIONS.md).
+      // GCC uses the last label. The other modes diagnose a conflicting redeclaration.
       std::string earlier = p_->asm_label(sem.entity);
-      if (!earlier.empty() && earlier != d.asm_label) {
+      if (p_->compatibility() != ast::Compatibility::gcc && !earlier.empty() && earlier != d.asm_label) {
         s_.diag(d.name_at, Diag::asm_label_conflict, d.name);
         return false;
       }
-      p_->asm_labels_[std::to_underlying(sem.entity)] = d.asm_label;
+      auto& label = p_->asm_labels_[std::to_underlying(sem.entity)];
+      if (label.spelling.empty() || std::pair{k_, d.name_at} > std::pair{label.item, label.offset})
+        label = {k_, d.name_at, d.asm_label};
     }
     return true;
   }
@@ -9216,6 +9277,7 @@ private:
   bool explicit_ = false;             // an explicit specialization ([temp.expl.spec])
   ConstId head_requires_ = ConstId::none;      // the template-head's requires-clause, in normal form
   ConstId trailing_requires_ = ConstId::none;  // the declarator's
+  ast::WrittenConstraint head_constraint_{}, trailing_constraint_{};
   sema::Fp128 constraints_fp_{};               // their tokens' fingerprint, for identity
   ConstId partial_constraints_ = ConstId::none;  // a partial specialization's, from `partial_arguments`
   sema::Fp128 partial_constraints_fp_{};
@@ -10631,6 +10693,7 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
     AtItem source(*this, item, false);
     source.completing_class = cls;
     sema::Sema replay(*w_, b, source, out.diags, id(item), 0);
+    replay.exception_type_traits = sema::Sema::ExceptionTypeTraits::checking_pattern;
     replay.current_class = cls;
     replay.current_function = member.entity;
     replay.this_type = this_type(*decl);
@@ -10657,7 +10720,9 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
       member_exception_patterns_.emplace(item, std::nullopt);
       continue;
     }
-    member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
+    member_exception_patterns_.emplace(item, MemberExceptionPattern{
+        std::move(replay.dependent_calls), std::move(replay.expansions),
+        replay.exception_type_traits == sema::Sema::ExceptionTypeTraits::dependent});
     out.demands.insert(out.demands.end(), replay.demands.begin(), replay.demands.end());
   }
 }
@@ -10675,6 +10740,7 @@ void Program::check_function_exception_pattern(EntityId entity, std::vector<ast:
   const u32 item_begin = items_->items[item].begin;
   AtItem source(*this, item, false);
   sema::Sema replay(*w_, caller.builder(), source, caller.diagnostics(), id(item), 0);
+  replay.exception_type_traits = sema::Sema::ExceptionTypeTraits::checking_pattern;
   replay.current_function = entity;
   replay.template_scopes = enclosing_heads(item);
   replay.template_scopes.push_back(std::move(head));
@@ -10699,7 +10765,9 @@ void Program::check_function_exception_pattern(EntityId entity, std::vector<ast:
     member_exception_patterns_.emplace(item, std::nullopt);
     return;
   }
-  member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
+  member_exception_patterns_.emplace(item, MemberExceptionPattern{
+      std::move(replay.dependent_calls), std::move(replay.expansions),
+      replay.exception_type_traits == sema::Sema::ExceptionTypeTraits::dependent});
   caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
 }
 
@@ -12018,6 +12086,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       }
       auto [n, del] = classes_.copy_of(t);
       rec.copy_deleted = rec.copy_deleted || del;
+      rec.copy_deleted_by_class_subobject |= del;
       nontrivial = nontrivial || n;
     }
     if (!rec.copy_deleted && nontrivial && !rec.layout_requires_virtual_support) rec.copy_ctor = synthesize(true);
@@ -12032,7 +12101,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       return !types.is_reference(t) && classes_.move_nontrivial(t);
     });
   }
-  // POD for layout, as Clang has it (`ast::record_layout`): a trivial class ([class.prop]/2: its
+  // The Darwin Clang layout rule uses a trivial class ([class.prop]/2: its
   // default constructor, copy and move operations and destructor trivial), and standard-layout
   // (/3: one access for all its data members, no reference members, and its data members all
   // in one class of the hierarchy), whose members and bases are too.
@@ -12062,6 +12131,11 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
             std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return pod_type(f.type); }) &&
             std::ranges::all_of(rec.bases, [&](const sema::BaseRec& b) { return pod_type(types.class_type(b.cls)); }) &&
             (rec.fields.empty() || !data_in_bases);
+  // The Itanium default uses the C++03 aggregate rule for this layout decision.
+  if (compatibility_ != ast::Compatibility::clang || w_->target.operating_system != ast::OperatingSystem::darwin)
+    rec.pod = rec.pod && rec.bases.empty() && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) {
+      return rec.access_of(f.entity) == ast::Access::public_;
+    });
   if (!user_copy_assignment || defaulted_assignment)
     declare_copy_assignment(item, cls, rec, !user_copy_assignment, deletes_implicit_copy);
   return implicit_move;

@@ -77,7 +77,7 @@ public:
 
   // The predefined macros and the command line's, as the text of `<built-in>` ([cpp.predefined]).
   std::string builtin_text() const {
-    std::string s = predefined_text(*config.target, config.freestanding, config.pic);
+    std::string s = predefined_text(*config.target, config.freestanding, config.pic, config.compatibility);
     for (const auto& [name, value] : config.macros) {
       if (value) s += std::format("#define {} {}\n", name, *value);
       else s += std::format("#undef {}\n", name);
@@ -1077,10 +1077,8 @@ private:
     std::string text;
     switch (def.dynamic) {
     case line: {
-      // The presumed line where the name's replacement ends: its own line, or that of the `)` of
-      // the outermost invocation that produced it, as Clang has it.
-      // Walking out: a token written in an argument is on its own line; one a function-like
-      // macro's replacement produced, on the line of that invocation's `)`.
+      // A token written in an argument is on its own line. A token from a function-like macro's
+      // replacement uses its invocation's closing line, or the opening site in GCC mode.
       u32 at = site(f, name);
       for (TokLoc l = name.loc; l.expansion != 0;) {
         const Expansion& x = f.out.expansions[l.expansion];
@@ -1088,7 +1086,8 @@ private:
           at = l.offset;
           break;
         }
-        if (x.kind == ExpansionKind::function && x.operand_a != 0) {
+        if (s_->config.compatibility != ast::Compatibility::gcc &&
+            x.kind == ExpansionKind::function && x.operand_a != 0) {
           at = x.operand_a - 1;
           break;
         }
@@ -1886,7 +1885,9 @@ private:
     }
     def->fp = fingerprint(*def);
     std::shared_ptr<const MacroDef> old = lookup(def->name);
-    if (old && !old->same_as(*def)) report(f, *name, lex::LexDiag::macro_redefined);
+    // Clang treats redefinitions in system headers as warnings and hides them there.
+    const bool clang_system = f.system && s_->config.compatibility == ast::Compatibility::clang;
+    if (old && !old->same_as(*def) && !clang_system) report(f, *name, lex::LexDiag::macro_redefined);
     macros_.insert_or_assign(def->name, std::move(def));
     touch(name->tok.payload);
   }

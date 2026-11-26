@@ -60,6 +60,12 @@ What is true of the code today. Work in progress and its owners are tracked in
     subclause.
   - The CWG issues list is imported as `tests/draft/cwg-issues.tsv`: 3,240 issues with subclause,
     status and resolution.
+- Compiler compatibility modes select behaviors from the pinned draft and ABI (default), GCC
+  16.2, or upstream Clang 23.1 with `-fcompat=spec|gcc|clang`. The flag is part of the
+  translation-unit configuration and is read from editor compilation commands. The
+  [compatibility table](docs/compatibility.toml) records prior choices, mode behavior and probes. Constrained function
+  templates use the current `Q` and `Tk` forms for supported requires-clauses and type constraints.
+  [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
   chapters, each with its standard, its uses in a 1.9-million-line corpus (libycxx's 19 real-world
@@ -2081,9 +2087,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
   rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
-  calls follows upstream Clang and GCC by default (Itanium, `ClassRec::move_usable`,
-  `move_nontrivial`). `-fclass-call-abi=apple` selects Apple Clang's rule on arm64 Darwin
-  (`ast::Target::call_triviality`, `pp::Config::call_triviality`, DECISIONS §1.6).
+  calls follows the published Itanium rule by default. On x86-64 Linux, GCC mode passes
+  supported classes whose copy is implicitly deleted by a class subobject in stack slots.
+  The explicit
+  `-fclass-call-abi=itanium` and `-fclass-call-abi=apple` flags override that choice (DECISIONS §1.6).
 - **Mixed-object tests:** `PEER:` in a run test names a file the oracle Clang compiles and links
   with it, or Apple Clang with `PEER-WITH: apple-clang` (docs/TESTING.md). `tests/own/abi`
   checks 3- to 24-byte classes, member functions returning classes, exhausted registers, empty
@@ -2244,10 +2251,8 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   `X <expression> E`, with a dependent variable-template-id as its `<source-name>` and
   `<template-args>` and `!e` as `nt e` (Itanium C++ ABI §5.1.6). `std::move_if_noexcept`'s
   return type needs it for any libycxx header in an object.
-- The arguments are the converted ones and the name is unqualified, as GCC writes them. Clang
-  writes them as spelled: qualified outside the global namespace and `std`, without defaulted
-  arguments, without `J…E` around a pack. The two agree on the tested forms; DECISIONS §1.7 (#777)
-  chose GCC's.
+- The default and Clang modes use the written arguments and unresolved-name qualifiers for the
+  supported forms. GCC mode uses the converted arguments and unqualified name (DECISIONS §1.7).
 - Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
@@ -2279,10 +2284,9 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   ([temp.deduct.type]/5), and partial ordering indexes a pack's unique stand-in.
 - An index out of range, a negative or non-integral index and a name that is not a pack are
   diagnosed.
-- In symbols, `Dy <type> <expression>` is a substitution candidate, a bound pack `J <args> E`. A
-  written constant index is the converted std::size_t (`Lm0E`) and a substituted one keeps its
-  parameter's type (`Li1E`), as GCC writes them; Clang writes the index as spelled and a bound
-  pack as a placeholder (DECISIONS §1.7).
+- In symbols, `Dy <type> <expression>` is a substitution candidate. Spec and GCC modes use the
+  converted constant index and the bound pack as `J <args> E`. Clang mode preserves a written
+  literal's type and uses a placeholder for a bound pack (DECISIONS §1.7).
 - Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
   parameter-index form, and asm labels pin GCC's constant form.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
@@ -2558,9 +2562,11 @@ session's.*
   diagnostics. The supported class-template base and variable-template initializer replay paths
   accept dependent operands. Replay expands packs in place among the arguments, checks newly
   concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
-  pack contributes zero arguments. The target must be a separately written type-id. General
-  dependent queries, including function-template uses, and class construction remain in
-  [#218](https://github.com/yrashk/ycxx/issues/218).
+  pack contributes zero arguments. The target must be a separately written type-id.
+  `__is_nothrow_constructible(C, C&&)` can use a written exact move constructor and the
+  effective destructor facts of a complete ordinary class without bases. A query during class
+  completion gets an unsupported-operand diagnostic if the constructor's specification is pending.
+  General dependent queries and broader class construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
@@ -2568,9 +2574,10 @@ session's.*
   fold to the same Boolean when both underlying types are supported arithmetic types. A non-const
   lvalue reference destination is assignable, including a volatile referent. The source may be
   cv-qualified or a reference. Supported class-template base and variable-template initializer
-  replay paths evaluate dependent operands at instantiation. Other operand types and dependent
-  queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
-  predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
+  replay paths evaluate dependent operands at instantiation. `__is_nothrow_assignable(C&, C&&)` can
+  use a written exact move assignment returning `C&` in a complete ordinary class without bases.
+  `__has_builtin` answers 0 for the three predicates while support is partial
+  ([meta.unary.prop], [expr.assign], #218).
 - `__is_convertible(From, To)` and `__is_nothrow_convertible(From, To)` share a Boolean result
   for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
   give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
@@ -2740,10 +2747,10 @@ branches on `consteval_br`: the runtime edge is the library call, which `lower` 
 consteval edge is the `builtin` op (`ir::BuiltinFn`), which the interpreter evaluates. It reads
 objects of narrow character type, and elements of arrays of them, as `unsigned char` with the
 interpreter's access, lifetime and initialization checks (`Machine::bytes_at`, `read_byte`); any
-other object is `Reason::byte_type`, as Clang rejects it. `memchr` reads in order up to the match;
-`memcmp` checks first that both objects hold all `n` bytes, as GCC does, then reads up to the
-first difference. The `memchr-*` fixtures cover results, bounds, object types and values, and the
-oracles' disagreements, each marked `XFAIL` for that oracle with its reason.
+other object is `Reason::byte_type`. In spec mode, `memchr` reads in order up to the match and
+`memcmp` checks that both objects hold all `n` bytes before reading up to the first difference.
+GCC mode reads the full range for both, and Clang mode checks bytes as read. The `memchr-*`
+fixtures mark the oracle disagreements, and the compatibility test exercises the selected modes.
 
 ## Pack expansions in builtin arguments (#1099)
 
@@ -3081,8 +3088,8 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 ## Warning controls for freestanding builds
 
 - The driver and editor checks accept `-Wall`, `-Wextra` and their negative forms. The
-  multicharacter-literal warning remains on by default and responds to `-Wno-all` and `-Wall`,
-  as in Clang 23. GCC 16 leaves this warning outside `-Wall`. The individual `-Wmultichar`
+  multicharacter-literal warning is on by default. It responds to `-Wno-all` and `-Wall` in
+  spec and Clang modes. GCC mode leaves this warning outside `-Wall`. The individual `-Wmultichar`
   and `-Wno-multichar` controls take precedence over the group. The last equally specific
   occurrence wins.
 - `-Wextra` selects sized-deallocation warnings as in GCC 16, subject to
@@ -3138,10 +3145,10 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 
 ## glibc `<stdint.h>` (#657)
 
-- The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
-  glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
-  ([cpp.replace.general]/2). The expansions are Clang's. Tests cover both targets in
-  `own/pp/predefined-int-c-redefine` and Linux in `own/headers/glibc-stdint`.
+- In spec and GCC modes, the integer-constant macros use glibc's spaced spelling, such as
+  `c ## L`, so the redefinitions in `<stdint.h>` are identical ([cpp.replace.general]/2).
+  Clang mode uses the compact spelling and permits the redefinitions in system headers.
+  Tests cover both targets in `own/pp/predefined-int-c-redefine` and Linux in `own/headers/glibc-stdint`.
 - The pinned libycxx lets the target's `<stdint.h>` supply integer limits before libycxx supplies
   fallback macros. `<cstdint>` uses compiler predefines when a target C header is unavailable or
   the translation unit is freestanding. Linux integration tests cover `<cstdint>` before
@@ -3639,8 +3646,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
     type is there;
   - a component placed at the data size so far, so a class that is not POD for layout leaves its
     tail padding to the derived class's members.
-  - "POD for layout" is Clang's (trivial and standard-layout, `ClassRec::pod`). GCC's is C++03's
-    and differs for a class whose data members are all private.
+  - "POD for layout" uses the Itanium C++03 rule in spec and GCC modes and in Linux Clang
+    mode. Darwin Clang mode uses the trivial and standard-layout rule. An all-private class
+    demonstrates the tail padding difference (docs/compatibility.toml).
   - Sema (`Sema::class_layout`) and the back end (`ClassShape::bases`, `pod`) read the same rule.
   - `ir::Step::base` names a direct base by its class entity; `QueryLayout::step` gives its
     offset.
@@ -4062,7 +4070,7 @@ static argument tracked in #1301 and #209.
   member alias template once Q is a class (`Templates::member_template_of`); a template template
   parameter bound to `Q::template M` gives `typename Q::template M<args>`.
 - **Mangling:** `N <qualifier> <name> I…E E`, the template prefix a candidate, as Clang and GCC;
-  `Q::template M` as a template argument as GCC writes it (DECISIONS §1.7).
+  `Q::template M` as a template argument follows the selected compatibility mode (DECISIONS §1.7).
 - Access is checked where one is named; it hides a base's member of its name, and an earlier
   member hides a base's. A member defined outside its class template may name one through the
   current instantiation (`Y<T>::apply<int> Y<T>::f()`), the definition matching by
@@ -4188,7 +4196,19 @@ member templates already had (#713, `replay_member_exception`); an explicit spec
 its own specification. An invalid condition of a specialization that is never needed is no error.
 In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
 In a template's definition, `noexcept` on a call of such a function is value-dependent.
-- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- A function template's exception specification can combine dependent `__is_nothrow_constructible`
+  and `__is_nothrow_assignable` with `&&`, as in libycxx's move-swap overload in
+  `include/ycxx/core/concepts.hpp`. After overload selection, replay forms both written type-ids
+  with the selected arguments and checks class completeness at the demand. A failing substitution
+  in that specification is a hard error. A nested requirement's replay skips semantic analysis of
+  discarded operands that were parsed successfully in the template definition, including logical
+  expressions in complete parenthesized groups. An enclosing equality, negation, call, cast,
+  conditional, assignment or comma keeps its expression atomic
+  ([#1314](https://github.com/yrashk/ycxx/issues/1314)). The trait evaluators cover the arithmetic
+  cases and the written exact move operations above. Broader class queries remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
+  [#1303](https://github.com/yrashk/ycxx/issues/1303).
+- Tests: `tests/own/template-noexcept/`.
 - Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
   in the address of a class template member (#838).
 
@@ -4257,8 +4277,9 @@ values, end to end; results match Clang's bit for bit.
   ([expr.arith.conv]/1); `%`, shifts, `~` and subscripts reject floating operands.
 - **Constant evaluation:** the interpreter computes in binary32 and binary64 (`float_arith`,
   `float_compare`, `float_convert`). In constant mode a division by zero, a NaN result and a
-  conversion to an integer that cannot hold the value are not constant (as Clang; GCC accepts a
-  NaN operand); an overflow to infinity is (as Clang; GCC rejects it).
+  conversion to an integer that cannot hold the value are not constant in spec and Clang modes.
+  Overflow to infinity from finite operands is constant in these modes. GCC mode permits an
+  existing NaN operand to propagate and rejects overflow from finite operands.
 - **L1/L2:** L1's `fadd`…`fcmp`, `fconv`, `f2i`, `i2f` and the new `fabs`; L2 gains `f32`, `f64`,
   `fadd`, `fsub`, `fmul`, `fdiv`, `fneg`, `fabs`, `fcmp` (plain predicates: ordered but `ne`),
   `fpext`, `fptrunc`, `fptosi`, `fptoui`, `sitofp`, `uitofp`. `lower` extends a narrow integer to

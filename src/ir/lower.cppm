@@ -56,6 +56,7 @@ export struct TypeLayout {
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
+  bool sysv_stack_record = false;  // by-value MEMORY argument and hidden-pointer result
   bool sysv_empty_record = false;  // a call-trivial empty record classified as NO_CLASS
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
   bool calls_abi_uncertain = false;  // records whose non-triviality for calls is not established
@@ -142,6 +143,7 @@ export struct Amd64ArgumentLocation {
 
 // AMD64 psABI §3.2.3. Register classes advance independently. A group of INTEGER
 // eightbytes that does not fit uses consecutive stack slots and leaves the GPRs available.
+// A MEMORY argument requests zero register words.
 export class Amd64ArgumentPlan {
  public:
   static constexpr std::uint32_t integer_registers = 6;
@@ -152,7 +154,7 @@ export class Amd64ArgumentPlan {
     const bool sse = l2::is_float(type);
     auto& used = sse ? sse_used_ : integer_used_;
     const auto limit = sse ? sse_registers : integer_registers;
-    if (used + register_words <= limit) {
+    if (register_words != 0 && used + register_words <= limit) {
       const auto first = used;
       used += register_words;
       return {sse ? Amd64ArgumentKind::sse : Amd64ArgumentKind::integer, first};
@@ -1340,6 +1342,11 @@ class Lowering {
     if (l.kind != TypeKind::record || !l.trivial_calls) return {};
     auto words = std::uint32_t((l.size + 7) / 8);
     if (config_.sysv_amd64) {
+      if (l.sysv_stack_record) {
+        if (!args || words > 2) return {};
+        args->add(first, T::i64, 0, words, l.align > 8 ? 2 : 1);
+        return {words, T::i64, l.size, std::uint8_t((1u << words) - 1)};
+      }
       std::uint8_t chunks = l.sysv_integer_eightbytes;
       if (!chunks) return {};
       auto registers = std::uint32_t(std::popcount(chunks));
@@ -1359,7 +1366,7 @@ class Lowering {
   bool sysv_memory_result(QualType c) const {
     TypeLayout l = layout(c);
     return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
-           ((!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
+           (l.sysv_stack_record || (!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
   // Darwin omits empty call-trivial arguments and results (#116). System V transports no
   // value for a NO_CLASS record in a fixed direct call or its definition (#641).
