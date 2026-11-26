@@ -294,6 +294,7 @@ enum class Diag : std::uint32_t {
   defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
   defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
   defaulted_default_constructor [[=message{Severity::error, "an explicitly defaulted default constructor is not supported for this class"}]],
+  defaulted_const_uninitialized [[=message{Severity::error, "default initialization of const type '{0:t}' requires initialized subobjects"}]],
   defaulted_default_delegation [[=message{Severity::error, "delegation to an explicitly defaulted default constructor is not supported yet"}]],
   defaulted_destructor [[=message{Severity::error, "an explicitly defaulted destructor is not supported for this class"}]],
   defaulted_destructor_out_of_class [[=message{Severity::error, "explicitly defaulting a destructor outside its class is not supported yet"}]],

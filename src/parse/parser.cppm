@@ -3043,7 +3043,7 @@ public:
   }
 
   std::optional<lex::TypeTrait> gcc_signature_transform(QualType type) {
-    if (!type) return std::nullopt;
+    if (type == QualType{}) return std::nullopt;
     const auto rec = s_->types().rec(type);
     if (rec.kind == sema::TypeKind::transform) return lex::TypeTrait(rec.trait);
     if (auto trait = gcc_signature_transform(rec.inner)) return trait;
@@ -3603,12 +3603,17 @@ public:
   void record_written_callee(Ex result, NameId name, u32 qualifier_end, bool template_id,
                              std::span<const ast::TemplateArg> args = {}) {
     if (!writing_constraint_atom_ || !result.ok()) return;
-    auto declaration = s_->address_set(result);
-    if (!template_id && !declaration) return;
     EntityId resolved = EntityId::none;
-    if (!template_id && declaration->decls->size() == 1 &&
-        !(declaration->decls->front().flags & sema::decl_flag::template_))
-      resolved = declaration->decls->front().entity;
+    if (!template_id) {
+      if (const auto direct = s_->as<ast::DeclRef>(result); direct && s_->types().is_function(result.type())) {
+        resolved = direct->entity;
+      } else if (const auto overload = s_->address_set(result)) {
+        if (overload->decls->size() == 1 && !(overload->decls->front().flags & sema::decl_flag::template_))
+          resolved = overload->decls->front().entity;
+      } else {
+        return;
+      }
+    }
     std::vector<NameId> qualifier;
     for (u32 i = result.begin; i < qualifier_end; ++i) {
       const auto& token = r_->tokens[begin_ + i];
@@ -4733,7 +4738,7 @@ public:
           // A second, empty operand marks postfix rather than prefix in the ABI.
           const std::array operands{written_atom(operand), ConstId::none};
           written_operators_.insert_or_assign(e.id, s_->ins().intern_value(
-              ast::VWrittenOperator{u8(token), s_->ins().intern_seq(std::span(operands))}));
+              ast::VWrittenOperator{u8(token), s_->ins().intern_seq(std::span<const ConstId>(operands))}));
         }
         break;
       }
@@ -6733,8 +6738,8 @@ public:
     if (!init.ok() || !(is_constexpr || usable_kind)) return;
     sema::Evaluator evaluator(*s_, questions());
     const bool scalar_record = memberwise && s_->as<ast::InitList>(init).has_value();
-    sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
-                                     : evaluator.evaluate(init);
+    const bool aggregate = scalar_record || (s_->is_union(t) && (s_->as<ast::InitList>(init) || s_->as<ast::ValueInit>(init)));
+    sema::Evaluated v = aggregate ? evaluator.evaluate_initializer(init, /*zero_default=*/false) : evaluator.evaluate(init);
     if (v.value) {
       if (is_constexpr && !evaluator.check_constant_destruction(t, *v.value, init.begin)) return;
       if (is_constexpr && (s_->folded_immediate_result != ast::EntityId::none ||

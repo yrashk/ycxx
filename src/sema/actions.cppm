@@ -7991,6 +7991,10 @@ public:
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
       if (!cr->trivial_defaulted_default_ctor && !cr->null_pointer_defaulted_default_ctor)
         return fail;  // diagnosed at its declaration
+      if (form == Construction::default_init && Types::is_const(types().canonical(t)) && !const_default_constructible(t)) {
+        diag(begin, Diag::defaulted_const_uninitialized, t);
+        return fail;
+      }
       if (destination == ConstructorDestination::delegation) {
         diag(begin, Diag::defaulted_default_delegation);
         return fail;

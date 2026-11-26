@@ -826,8 +826,8 @@ evidence = ["docs/EXTENSIONS.md", "tests/own/builtins/dependent-transform-overlo
 
 [[divergence]]
 id = "builtin-concrete-type-transform-in-template-symbol"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.5 and §5.1.5.8"
 prior = "Fold a nondependent builtin transform to its result type."
 spec = "Use the concrete result of the transform in the signature."
@@ -835,14 +835,14 @@ gcc = "Retain the builtin transform in the tested function template parameter an
 clang = "Same as spec."
 gcc_observed = "The current GCC rejection also applies to chained aliases, partially bound aliases, pointer results, direct class-template arguments, and class-template arguments inherited through an alias. A non-template alias, a fully bound alias, a dependent qualified member alias of a class template, a function body, and the tested ordinary member of a class template retain their folded behavior."
 clang_observed = "Emits the same symbol as spelling the resulting int directly."
-limits = "Header-required builtin spellings remain available in every mode. The supported slice covers directly written transforms, concrete alias results, and the tested member template. Additional dependent alias cases are recorded above and still need verification in ycxx."
+limits = "Header-required builtin spellings remain available in every mode. Coverage includes direct signatures, the tested member template, and chained, partially bound, pointer and class-argument aliases. The folded cases are tested separately."
 probe = 'template<class T> __remove_cv(const int) f(T n) { return n; } int use() { return f(7); }'
 evidence = ["docs/EXTENSIONS.md", "tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 syntax and primary-emission probes for concrete builtin transforms in direct and alias signatures"]
 
 [[divergence]]
 id = "builtin-type-transform-in-static-initialization-guard"
-status = "pending"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[stmt.dcl]/3, [basic.start.static], Itanium C++ ABI §5.1.4.4"
 prior = "Syntax-only compilation accepts a specialization with a dynamic local static and a builtin transform in its signature."
 spec = "The valid local static declaration is accepted. The ABI rule for a guard uses the guarded object's name."

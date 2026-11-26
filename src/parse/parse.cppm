@@ -38,7 +38,7 @@ enum class LayoutAttributes { affecting_layout, leading_affecting_layout, traili
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
                       std::span<const std::pair<u32, u32>> applied = {},
-                      std::string_view standard_attribute = {}) {
+                      std::string_view standard_attribute = {}, bool applied_overlap = false) {
   using enum lex::Tk;
   for (std::uint32_t i = begin; i < end; ++i) {
     while (!applied.empty() && applied.front().second <= i) applied = applied.subspan(1);
@@ -59,7 +59,7 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
     // An annotation payload does not participate in layout, even if it names packed or aligned.
     const bool annotation = bracket && i + 2 < end && region.tokens[i + 2].kind == equal;
     if (mode == LayoutAttributes::any && !annotation) return true;
-    const bool unscoped = !standard_attribute.empty() && bracket && i + 2 < end &&
+    const bool unscoped = (!standard_attribute.empty() || applied_overlap) && bracket && i + 2 < end &&
                           region.tokens[i + 2].kind != kw_using;
     if (gnu) ++i;
     const auto open = bracket ? l_square : l_paren;
@@ -74,14 +74,17 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       else if (unscoped && part.kind == r_paren && parentheses) --parentheses;
       else if (part.kind == identifier && !annotation) {
         auto name = region.name(part);
-        if (!standard_attribute.empty()) {
+        if (unscoped) {
           const auto previous = region.tokens[i - 1].kind;
           const auto following = i + 1 < end ? region.tokens[i + 1].kind : eof;
-          if (unscoped && depth == 2 && parentheses == 0 &&
+          if (depth == 2 && parentheses == 0 &&
               (previous == l_square || previous == comma) &&
-              (following == r_square || following == comma) && name == standard_attribute) return true;
-          continue;
+              (following == r_square || following == comma)) {
+            if (name == standard_attribute) return true;
+            if (applied_overlap && name == "no_unique_address") continue;
+          }
         }
+        if (!standard_attribute.empty()) continue;
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
         if (mode == LayoutAttributes::trailing_definition && gnu && depth == 2 &&
@@ -101,13 +104,21 @@ bool layout_may_be_packed(const pp::Region& region, u32 begin, u32 end) {
   return pack != ranges.end() && pack->first < end;
 }
 
-bool record_layout_attribute(const pp::Region& region, const items::Item& item, std::span<const std::pair<u32, u32>> applied) {
+bool record_layout_attribute(const pp::Region& region, const items::Item& item, std::span<const std::pair<u32, u32>> applied,
+                             bool applied_overlap = false) {
   using enum LayoutAttributes;
   // An enum-head's attributes and those right after its closing brace apply to the enumeration.
   if (item.kind != ItemKind::class_def && item.kind != ItemKind::enum_def)
-    return layout_attribute(region, item.begin, item.end, affecting_layout, applied);
+    return layout_attribute(region, item.begin, item.end, affecting_layout, applied, {}, applied_overlap);
   return layout_attribute(region, item.begin, item.brace_begin, affecting_layout, applied) ||
          layout_attribute(region, item.brace_end, item.end, leading_affecting_layout);
+}
+
+bool member_has_overlap(const ast::Interners& in, const ast::DeclSema& declaration) {
+  return declaration.kind == ast::DeclKind::data_member &&
+         std::ranges::any_of(in.seqs.elements(declaration.attributes), [&](NodeId attribute) {
+           return in.names.spelling(in.ast.get<ast::Attribute>(attribute).name) == "no_unique_address";
+         });
 }
 
 // The record of a declaration that failed to be declared; its diagnostic says why.
@@ -2278,13 +2289,21 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
     // The attributes immediately after the type's closing brace can still apply to
     // the type. Those within a following declarator apply to the declared name.
     // An alias can also carry such an attribute, into a declaration or an enum-base.
-    bool type_annotated = record_layout_attribute(region, item, applied_alignment_specifiers(k)) ||
-                          (!definition && uncertain_alias(item, enum_definition ? item.brace_begin : item.end));
-    bool annotated = type_annotated ||
-        ((definition || enum_definition) && layout_attribute(region, item.brace_end, item.end));
+    const bool alias_annotated = !definition && uncertain_alias(item, enum_definition ? item.brace_begin : item.end);
+    bool type_annotated = alias_annotated || record_layout_attribute(region, item, applied_alignment_specifiers(k));
+    const bool trailing = (definition || enum_definition) && layout_attribute(region, item.brace_end, item.end);
+    bool annotated = type_annotated || trailing;
     if (!packed && !annotated) continue;
+    const auto declarations = w_->ins.seqs.elements(analysed->decls);
+    if (type_annotated && !alias_annotated && std::ranges::any_of(declarations, [&](const ast::DeclSema& declaration) {
+          return member_has_overlap(w_->ins, declaration);
+        })) {
+      type_annotated = record_layout_attribute(region, item, applied_alignment_specifiers(k), /*applied_overlap=*/true);
+      annotated = type_annotated || trailing;
+      if (!packed && !annotated) continue;
+    }
     if (definition && (packed || type_annotated)) uncertain_definitions.insert(k);
-    for (auto d : w_->ins.seqs.elements(analysed->decls)) {
+    for (const auto& d : declarations) {
       if (d.entity == EntityId::none) continue;
       if (d.kind == ast::DeclKind::class_ && (packed || type_annotated)) {
         uncertain.insert(d.entity);
@@ -9600,15 +9619,15 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member) {
         if (inspect_field_layout) {
+          const bool applied_overlap = std::ranges::any_of(w_->ins.seqs.elements(ms.decls), [&](const ast::DeclSema& declaration) {
+            return member_has_overlap(w_->ins, declaration);
+          });
           out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end, LayoutAttributes::affecting_layout,
-                                                        applied_alignment_specifiers(m));
+                                                        applied_alignment_specifiers(m), {}, applied_overlap);
           inspect_field_layout = false;
         }
-        const bool no_unique_address = std::ranges::any_of(w_->ins.seqs.elements(d.attributes), [&](NodeId attr) {
-          return w_->ins.names.spelling(w_->ins.ast.get<ast::Attribute>(attr).name) == "no_unique_address";
-        });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address,
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, member_has_overlap(w_->ins, d),
                         d.field_alignment, d.written_field_alignment});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});

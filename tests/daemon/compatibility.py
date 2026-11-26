@@ -2453,8 +2453,15 @@ template<class T> Result<__remove_cv(const int)> f(T n) {
 template<class X, class Y> struct Result { Y value; };
 template<class X> using Alias = Result<X, __remove_cv(const int)>;
 template<class T> Alias<T> f(T n) { return {n}; }
-#elif defined(GUARD_DYNAMIC)
+#elif defined(GUARD_DYNAMIC) || defined(GUARD_UNINSTANTIATED)
 template<class T> __remove_cv(const int) f(T n) { static int value = n; return value; }
+#elif defined(GUARD_UNUSED)
+template<class T> __remove_cv(const int) f(T n) { static int value = n; return n; }
+#elif defined(GUARD_DISCARDED)
+template<class T> __remove_cv(const int) f(T n) {
+  if constexpr (sizeof(T) == 1) { static int value = n; return value; }
+  return n;
+}
 #elif defined(GUARD_DEPENDENT)
 template<class T> __remove_cv(T) f(T n) { static T value = n; return value; }
 #elif defined(GUARD_CONSTANT)
@@ -2475,22 +2482,32 @@ template<class T> int f(T n) { return n; }
 #else
 template<class T> __remove_cv(const int) f(T n) { return n; }
 #endif
+#if defined(GUARD_UNINSTANTIATED)
+int use() { return 7; }
+#elif defined(POINTER_ALIAS)
+int use() { return *f(7); }
+#elif defined(CLASS_ARGUMENT) || defined(CLASS_ALIAS) || defined(GUARD_CLASS_ARGUMENT)
+int use() { return f(7).value; }
+#else
 int use() { return f(7); }
+#endif
 ''')
     for mode in MODES:
         flags = ['-fcompat=' + mode]
         for target in (LINUX, DARWIN):
             emitted_cases = ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ALIAS_TEMPLATE', 'MEMBER_TEMPLATE',
                              'CHAINED_ALIAS', 'PARTIAL_ALIAS', 'POINTER_ALIAS', 'CLASS_ARGUMENT', 'CLASS_ALIAS',
-                             'GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT', 'GUARD_CONSTANT')
-            folded = ('ORDINARY_ALIAS', 'BOUND_ALIAS', 'MEMBER_ALIAS', 'ORDINARY_MEMBER', 'BODY', 'HEADER_EXTENSION')
+                             'GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT', 'GUARD_CONSTANT',
+                             'GUARD_UNUSED', 'GUARD_DISCARDED')
+            folded = ('ORDINARY_ALIAS', 'BOUND_ALIAS', 'MEMBER_ALIAS', 'ORDINARY_MEMBER', 'BODY', 'HEADER_EXTENSION',
+                      'GUARD_UNINSTANTIATED')
             for case in (*emitted_cases, *folded, 'OVERLOAD'):
                 opts = [target, *flags, *(['-D' + case] if case else [])]
                 syntax = [*opts, '-fsyntax-only', 'concrete-transform.cpp']
                 native = [*opts, '-c', 'concrete-transform.cpp', '-o', 'concrete-transform.o']
                 ambiguous = mode == 'gcc' and case == 'OVERLOAD'
                 emitted = mode == 'gcc' and case in emitted_cases
-                guard = mode == 'gcc' and case in ('GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT')
+                guard = mode == 'gcc' and case in ('GUARD_DYNAMIC', 'GUARD_DEPENDENT', 'GUARD_CLASS_ARGUMENT', 'GUARD_UNUSED')
                 for command, reject in ((syntax, ambiguous or guard), (native, ambiguous or emitted)):
                     cold = world.cxx(command, scope, world.cold, timeout=40)
                     resident = world.cxx(command, scope, world.daemon, timeout=40)
@@ -2616,6 +2633,14 @@ int main() { return read_overlapping({{17, 19}, 23}) != 59; }
 
 def late_defaulted_special_members(world, gxx):
     scope = world.scope
+    (scope / 'const-defaulted.cpp').write_text('''\
+struct First { int value; char byte; First() = default; };
+#ifdef CHECK_CONST
+const First plain;
+#else
+int first() { First value{}; return value.value; }
+#endif
+''')
     (scope / 'late-defaulted.cpp').write_text('''\
 struct Ctor { int value = 17; char byte = 19; Ctor() noexcept; };
 struct Assign { int value; char byte; Assign& operator=(const Assign&) noexcept; };
@@ -2643,6 +2668,10 @@ int main() {
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
         for target in (LINUX, DARWIN):
+            for options, rejected in (([], False), (['-DCHECK_CONST'], True)):
+                args = [target, '-fcompat=' + mode, *options, '-fsyntax-only', 'const-defaulted.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == int(rejected), (mode, target, cold, warm)
             command = [target, '-fcompat=' + mode, '-DPROVIDER', '-c', 'late-defaulted.cpp', '-o', 'late-defaulted.o']
             outputs = []
             for env in (world.cold, world.daemon):
