@@ -12,7 +12,7 @@ import tempfile
 
 from project_build import action_keys, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import fact
+from project_inspection import check_dependency_graph, dependency_edge, fact
 from project_shader_bundle import check_external_actions, check_native_reused, publication
 from runtime_dir import runtime_root
 from shader_reflection_fixture import REJECT, digest, spirv
@@ -78,6 +78,19 @@ def inspect(ycxx, scope, env, journal, binding=None):
     assert Path(reflected['value']).name == Path(packed['value']).name, edges
     assert edges['scene', 'vertex']['origin'] == 'artifact("vertex", "spirv")', edges
     fact(plan, 'runtime-asset', 'app', BUNDLE)
+    definition = plan['definition']
+    check_dependency_graph(plan, [
+        dependency_edge(definition, 'app', 'scene_bindings', 'generated_headers',
+                        'artifact("scene_bindings", "header")', output='header'),
+        dependency_edge(definition, 'app', 'scene', 'runtime_assets', 'artifact("scene", "bundle")',
+                        output='bundle'),
+        dependency_edge(definition, 'scene', 'vertex', 'inputs', 'shaders.pack "scene"',
+                        output='spirv', binding='vertex'),
+        dependency_edge(definition, 'scene', 'fragment', 'inputs', 'shaders.pack "scene"',
+                        output='spirv', binding='fragment'),
+        dependency_edge(definition, 'fragment_reflection', 'fragment', 'inputs',
+                        'shaders.reflect "fragment_reflection"', output='spirv', binding='module'),
+    ])
     return export['origin']
 
 
