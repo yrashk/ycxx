@@ -760,7 +760,7 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   const std::string text = got;
   if (update) {
     std::ofstream(golden_path, std::ios::binary) << text;
-    std::println("updated {}", golden_path.display_string());
+    std::println("updated {}", golden_path.native());
     return;
   }
   std::ifstream in(golden_path, std::ios::binary);
@@ -1023,7 +1023,7 @@ void spans() {
   pl::Session hs;
   constexpr pl::TuId htu{1};
   got.clear();
-  hs.set_source(htu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
+  hs.set_source(htu, "m.cpp", main_text, "m.o", dir.native());
   (void)hs.get<pl::Tu>(pl::Tu::Key{htu}, &c);
   c.finish();
   const SourceSpan cube = at("FunctionIr(cube)");
@@ -1032,9 +1032,9 @@ void spans() {
   const pl::TuId editor{1u << 31};
   ycxx::pp::Config editor_config;
   editor_config.view = ycxx::pp::View::editor;
-  hs.db().set<ycxx::pp::Buffer>(ycxx::pp::path_id((dir / "h.h").lexically_normal().generic_native_encoded_string()), "// a\n// b\n" + header);
+  hs.db().set<ycxx::pp::Buffer>(ycxx::pp::path_id((dir / "h.h").lexically_normal().generic_string<char>()), "// a\n// b\n" + header);
   got.clear();
-  hs.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
+  hs.set_source(editor, "m.cpp", "", "m.o", dir.native(), editor_config);
   (void)hs.get<pl::Tu>(pl::Tu::Key{editor}, &c);
   c.finish();
   const SourceSpan open = at("FunctionIr(cube)");
@@ -1309,7 +1309,7 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
 
   if (update) {
     std::ofstream(golden_path, std::ios::binary) << got;
-    std::println("updated {}", golden_path.display_string());
+    std::println("updated {}", golden_path.native());
     return;
   }
   std::ifstream in(golden_path, std::ios::binary);

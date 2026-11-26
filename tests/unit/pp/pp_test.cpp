@@ -578,7 +578,7 @@ void pool() {
   auto preprocess_all = [&](engine::Db& db) {
     db.set_provider<pp::FileContent>(pp::read_disk);
     for (u32 i = 0; i < n; ++i) {
-      db.set<pp::SourceOf>(pp::FileId{i}, {std::format("u{}.cpp", i), dir.native_encoded_string(), {}});
+      db.set<pp::SourceOf>(pp::FileId{i}, {std::format("u{}.cpp", i), dir.native(), {}});
       db.set<pp::FileText>(pp::FileId{i}, std::format("#include \"own{0}.h\"\n#include \"shared.h\"\nint f{1}() {{ return SHARED + OWN{0} + {1}; }}\n", i % 3, i));
     }
     return db.get<AllPp>(n);

@@ -154,7 +154,7 @@ constexpr EmbeddedInput capabilities_inputs[] = {
 };
 
 std::string path_text(const fs::path& path) {
-  return path.generic_native_encoded_string();
+  return path.generic_string<char>();
 }
 
 struct PlanningError {

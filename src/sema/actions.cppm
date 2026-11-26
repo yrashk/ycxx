@@ -4965,7 +4965,7 @@ public:
     ExprInfo info{t ? *t : builtin(Builtin::dependent), cat, u8(expr_flag::dependent | flags)};
     return node(ast::Dependent{info, b_->list(cs)}, begin, end, info);
   }
-  Ex dependent_node(std::initializer_list<Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
+  inline Ex dependent_node(std::initializer_list<Ex> ops, u32 begin, u32 end, std::optional<QualType> t = std::nullopt,
                     ValueCategory cat = ValueCategory::prvalue, u8 flags = 0) {
     return dependent_node(std::span<const Ex>(ops.begin(), ops.size()), begin, end, t, cat, flags);
   }

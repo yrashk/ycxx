@@ -80,7 +80,7 @@ std::expected<PlanComparison, std::string> compare(const PlanInspection& before,
 }
 
 std::expected<std::string, std::string> read_text(const std::filesystem::path& path, std::string_view kind) {
-  const auto name = path.generic_native_encoded_string();
+  const auto name = path.generic_string<char>();
   std::error_code error;
   std::ifstream file;
   if (!std::filesystem::is_directory(path, error)) file.open(path, std::ios::binary);
@@ -150,7 +150,7 @@ std::optional<SourceLocation> invalid_utf8_location(std::string_view text) {
 std::expected<PlanInspection, std::string> read_snapshot(const std::filesystem::path& path) {
   const auto text = read_text(path, "build snapshot");
   if (!text) return std::unexpected(text.error());
-  const auto name = path.generic_native_encoded_string();
+  const auto name = path.generic_string<char>();
   auto json = lsp::parse(*text);
   if (!json) return std::unexpected(std::format("{}: {}", name, json.error()));
   auto plan = lsp::from_json<PlanInspection>(*json);

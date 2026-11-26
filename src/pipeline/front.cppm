@@ -393,7 +393,7 @@ void init_function(sema::World& world, TranslationUnit& tu, std::span<const Dyna
   EntityId atexit = runtime.atexit();
   EntityId dso = runtime.dso();
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
-  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
+  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native();
   // One function per declaration, so that what fails points at it; startup runs them in order.
   for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
     std::size_t last = first;
@@ -2376,7 +2376,7 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
   auto absolute = [&](const std::string& name) {
     std::filesystem::path p(name);
     if (p.is_relative() && !source.cwd.empty()) p = std::filesystem::path(source.cwd) / p;
-    return p.lexically_normal().generic_native_encoded_string();
+    return p.lexically_normal().generic_string<char>();
   };
   // The region's number for the file, and the token at the offset: the last whose site in that
   // file starts at or before it (a macro's tokens all sit at its name).

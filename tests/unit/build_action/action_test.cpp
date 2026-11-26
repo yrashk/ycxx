@@ -2,6 +2,7 @@
 #include <unistd.h>
 
 import std;
+import ycxx.execution;
 import ycxx.build.action;
 import ycxx.hash;
 import ycxx.unit;
@@ -105,8 +106,8 @@ void rejects_bad_declarations(const fs::path& root) {
 void cancels_foreground_process(const fs::path& root) {
   const auto started = root / "started";
   Action action = shell("printf started > \"$1\"; while :; do :; done");
-  action.args.push_back({.value = started.native_encoded_string()});
-  std::inplace_stop_source stop;
+  action.args.push_back({.value = started.native()});
+  ycxx::exec::inplace_stop_source stop;
   std::thread stopper([&] {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!fs::exists(started) && std::chrono::steady_clock::now() < deadline)
@@ -124,7 +125,7 @@ void cancels_foreground_process(const fs::path& root) {
 }  // namespace
 
 int main() {
-  auto directory = (fs::temp_directory_path() / "ycxx-action-test-XXXXXX").native_encoded_string();
+  auto directory = (fs::temp_directory_path() / "ycxx-action-test-XXXXXX").native();
   if (!::mkdtemp(directory.data())) {
     check(false, "could not create test scratch root");
     return result("build action");

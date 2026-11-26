@@ -351,7 +351,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       return std::unexpected("'-shared' source compilation requires '-fPIC' or '-fpic'");
     if (o.check_policies) return std::unexpected("'-shared' does not support '-fcheck-policies'");
     if (!o.soname)
-      o.soname = std::filesystem::path(o.output.value_or("a.out")).filename().native_encoded_string();
+      o.soname = std::filesystem::path(o.output.value_or("a.out")).filename().native();
     if (o.soname->empty() || o.soname->contains('/') || o.soname->contains('\0'))
       return std::unexpected("invalid ELF shared object SONAME");
   }
@@ -401,7 +401,7 @@ std::vector<std::string_view> views(std::span<const std::string> argv) {
 // A path of the request, as the daemon or this process opens it: relative to the request's `cwd`.
 std::string in_cwd(const Request& r, const std::string& path) {
   if (path.starts_with('/') || r.cwd.empty()) return path;
-  return (std::filesystem::path(r.cwd) / path).native_encoded_string();
+  return (std::filesystem::path(r.cwd) / path).native();
 }
 
 pp::Config preprocessing_config(pp::Config config, const Request& r) {
@@ -566,7 +566,7 @@ namespace {
 std::string absolute_in(const Request& r, std::string_view path) {
   std::filesystem::path p(path);
   if (p.is_relative() && !r.cwd.empty()) p = std::filesystem::path(r.cwd) / p;
-  return p.lexically_normal().generic_native_encoded_string();
+  return p.lexically_normal().generic_string<char>();
 }
 
 // Quote a file name in a make rule. A semicolon is read during both recipe splitting and
@@ -592,7 +592,7 @@ std::expected<DependencyFile, std::string> make_dependencies(
   DependencyFile out;
   out.path = opts.dependency_path
                  ? *opts.dependency_path
-                 : std::filesystem::path(object).replace_extension(".d").native_encoded_string();
+                 : std::filesystem::path(object).replace_extension(".d").native();
   const auto bad_path = std::unexpected("a dependency path cannot contain a newline");
   if (opts.dependency_targets.empty()) {
     const auto trailing = append_make_path(out.rule, object, true);
@@ -650,7 +650,7 @@ std::expected<std::filesystem::path, std::string> stage_dependencies(
   const auto type = std::filesystem::symlink_status(path, ec).type();
   if (type != file_type::regular && type != file_type::symlink && type != file_type::not_found)
     return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
-  auto staging = (path.parent_path() / ".ycxx-dep-XXXXXX").native_encoded_string();
+  auto staging = (path.parent_path() / ".ycxx-dep-XXXXXX").native();
   const int fd = ::mkstemp(staging.data());
   if (fd < 0) return std::unexpected(std::format("cannot open dependency file '{}' for writing", dep.path));
   if (std::FILE* stream = ::fdopen(fd, "wb")) {
@@ -673,7 +673,7 @@ std::expected<std::optional<struct stat>, std::string> write_paired_object(
     return std::nullopt;
   }
 
-  auto name = (path.parent_path() / ".ycxx-obj-XXXXXX").native_encoded_string();
+  auto name = (path.parent_path() / ".ycxx-obj-XXXXXX").native();
   if (!::mkdtemp(name.data())) return std::unexpected(std::format("cannot stage object file '{}'", output.path));
   const std::filesystem::path directory(name);
   const auto staged = directory / "object";
@@ -876,7 +876,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
                                                     : pipeline::Until::link;
   key.want_dependencies = opts->dependencies;
   for (const std::string& s : opts->sources)
-    key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native_encoded_string()}));
+    key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native()}));
   std::filesystem::path out = opts->output.value_or("a.out");
   // An unusable link input is reported after the units' diagnostics, and only when they compiled.
   std::optional<std::string> bad_input;
@@ -941,7 +941,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
           std::move(archives), std::move(opts->undefined)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
-        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic),
+        {key.units, std::move(objects), out.filename().native(), std::move(dynamic),
          std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
@@ -978,7 +978,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     }
     if (until == pipeline::Until::object) {
       Output output;
-      output.path = opts->output ? *opts->output : object_name(path).native_encoded_string();
+      output.path = opts->output ? *opts->output : object_name(path).native();
       if (opts->dependencies) {
         auto dep = make_dependencies(r, *opts, output.path, u.dependencies);
         if (!dep) {
@@ -1014,7 +1014,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     d.exit_status = 1;
     return d;
   }
-  d.outputs.push_back({out.native_encoded_string(), image.image, !opts->shared});
+  d.outputs.push_back({out.native(), image.image, !opts->shared});
   return d;
 }
 
@@ -1026,7 +1026,7 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
   config.view = units.view;
   pp::configure(config, host);
   const std::string& s = opts->sources.front();
-  const pipeline::TuId tu = session.unit({s, r.cwd, config, object_name(s).native_encoded_string()});
+  const pipeline::TuId tu = session.unit({s, r.cwd, config, object_name(s).native()});
   auto found = session.run<pipeline::DefinitionAt>({tu, pp::path_id(file), offset});
   return found ? *found : std::nullopt;
 }

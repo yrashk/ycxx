@@ -2,6 +2,7 @@
 # executable. src/driver picks the front from the command line; src/daemon and src/client hold
 # the fronts themselves.
 # Libraries, lowest first.
+add_subdirectory(execution)
 add_subdirectory(memory)
 add_subdirectory(hash)
 add_subdirectory(cm)
@@ -27,9 +28,27 @@ add_subdirectory(lsp)
 add_subdirectory(client)
 add_subdirectory(daemon)
 
+
+add_library(ycxx::engine ALIAS ycxxc_engine)
+set_target_properties(ycxxc_engine PROPERTIES EXPORT_NAME engine)
+add_library(ycxx::preprocessor ALIAS ycxxc_pp)
+set_target_properties(ycxxc_pp PROPERTIES EXPORT_NAME preprocessor)
+add_library(ycxx::frontend ALIAS ycxxc_parse)
+set_target_properties(ycxxc_parse PROPERTIES EXPORT_NAME frontend)
+add_library(ycxx::ir ALIAS ycxxc_ir)
+set_target_properties(ycxxc_ir PROPERTIES EXPORT_NAME ir)
+add_library(ycxx::object ALIAS ycxxc_obj)
+set_target_properties(ycxxc_obj PROPERTIES EXPORT_NAME object)
+add_library(ycxx::linker ALIAS ycxxc_link)
+set_target_properties(ycxxc_link PROPERTIES EXPORT_NAME linker)
+add_library(ycxx::compiler ALIAS ycxxc_pipeline)
+set_target_properties(ycxxc_pipeline PROPERTIES EXPORT_NAME compiler)
+add_library(ycxx::project_build ALIAS ycxxc_project_build)
+set_target_properties(ycxxc_project_build PROPERTIES EXPORT_NAME project_build)
+
 configure_file(version.cppm.in ${CMAKE_CURRENT_BINARY_DIR}/version.cppm @ONLY)
 
-add_library(ycxxc_lib STATIC)
+add_library(ycxxc_lib ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_lib PUBLIC FILE_SET CXX_MODULES
   BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
   FILES

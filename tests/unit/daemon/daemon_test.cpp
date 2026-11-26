@@ -19,7 +19,7 @@ fs::path temp_dir(std::string_view name) {
   fs::path base = fs::temp_directory_path() / std::format("ycxx-daemon-test-{}-{}", my_pid(), name);
   fs::remove_all(base);
   fs::create_directories(base);
-  return fs::path(*real_path(base.native_encoded_string()));
+  return fs::path(*real_path(base.native()));
 }
 
 void write(const fs::path& p, std::string_view text) {
@@ -27,7 +27,7 @@ void write(const fs::path& p, std::string_view text) {
   std::ofstream(p, std::ios::binary | std::ios::trunc) << text;
 }
 
-std::string s(const fs::path& p) { return p.native_encoded_string(); }
+std::string s(const fs::path& p) { return p.native(); }
 
 // --- framing ---------------------------------------------------------------------------------
 
