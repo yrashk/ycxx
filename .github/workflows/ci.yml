@@ -68,9 +68,11 @@ jobs:
         run: tools/check-policy
 
       - name: Build and bootstrap smoke test (tools/build)
+        shell: bash
         run: |
           source deps/libycxx/tools/toolchain/activate.sh
           test -x "$YCXX_CLANGXX"
+          "$YCXX_CLANGXX" --version
           tools/build -j ${{ matrix.host.jobs }}
 
       - name: Standalone YCXX Bench install and external consumer
