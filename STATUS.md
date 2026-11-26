@@ -4847,6 +4847,10 @@ Each is removed once ycxx compiles itself.
   - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
     its importers cannot read ("failed to read compiled module cluster: Bad file data").
   - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
+- **The interpreter's byte comparison is defined in its implementation unit** (`src/interp/ops.cpp`).
+  - Cause: with stock libstdc++, GCC 16.2 cannot read the `ycxx.interp:machine` partition when
+    it contains the body of `Machine::compare_bytes`.
+  - Fix: belongs in GCC. The definition can return to the partition when ycxx compiles itself.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`, `src/ir`, `ycxx.hash`'s `Fp128`).
   - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
     struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by

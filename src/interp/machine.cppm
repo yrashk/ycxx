@@ -1564,57 +1564,6 @@ Machine::Flow Machine::find_byte(const Value& s, const Value& c, u64 n, Value& o
   return Flow::next;
 }
 
-// C's memcmp: both objects must hold the n bytes, which C's memcmp may read in any order. The
-// result is the sign of the first difference.
-Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Value& out) {
-  out = Value::integer(0);
-  const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
-  // GCC folds identical addresses before requiring either range to be readable.
-  if (n == 0 || (read_full_range && (a.kind == VKind::object || a.kind == VKind::null) && a == b))
-    return Flow::next;
-  Bytes left, right;
-  if (Flow f = bytes_at(a, left, read_full_range); f != Flow::next) return f;
-  if (Flow f = bytes_at(b, right, read_full_range); f != Flow::next) return f;
-  if (read_full_range && a.ref == b.ref) {
-    // A scalar array and its first element have the same GCC fold as two equal pointers.
-    const auto array_and_first = [](const Bytes& array, const Bytes& first) {
-      return array.strides.size() == 1 && first.strides.empty() && array.base == first.base &&
-             first.index == 0 && first.start == 0;
-    };
-    if (array_and_first(left, right) || array_and_first(right, left)) return Flow::next;
-
-    // A row's one-past position and the following row's first element compare through
-    // the latter's readable range. A preceding element reached by going back from a row
-    // start retains its out-of-bounds path and cannot use this rule.
-    const auto next_row = [&](const Bytes& end, const Bytes& first) {
-      if (end.single || first.single || !end.strides.empty() || !first.strides.empty() ||
-          end.index != end.bound || first.index != 0 || first.start != 0 || !similar(end.type, first.type))
-        return false;
-      const u32 last = u32(end.base.bits), next = u32(first.base.bits);
-      if (last == 0 || next == 0) return false;
-      const auto& l = paths_[last];
-      const auto& r = paths_[next];
-      return l.parent == r.parent && l.step.step == ir::Step::elem && r.step.step == ir::Step::elem &&
-             u64(l.step.index) + 1 == r.step.index;
-    };
-    if (next_row(left, right)) left = right;
-    else if (next_row(right, left)) right = left;
-  }
-  if (config_.compatibility != ast::Compatibility::clang &&
-      (n > left.remaining() || n > right.remaining()))
-    return fail(Reason::past_end_access);
-  for (u64 i = 0; i < n; ++i) {
-    u8 x = 0, y = 0;
-    if (Flow f = read_byte(left, i, x); f != Flow::next) return f;
-    if (Flow f = read_byte(right, i, y); f != Flow::next) return f;
-    if (out.bits == 0 && x != y) {
-      out = Value::integer(x < y ? u64(-1) : 1);
-      if (!read_full_range) return Flow::next;
-    }
-  }
-  return Flow::next;
-}
-
 u64 Machine::complete_size(const Object& object) {
   return object.record ? object.record->size : storage_extent(object.type, object.array_record).bytes;
 }
