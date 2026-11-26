@@ -292,6 +292,15 @@ bytes preserve consuming generator receipts. The coordinator shares staged
 producer outputs across ordinary builds, planning inputs, and witnesses.
 [Generated host header example](../../examples/project-build/host-generated-headers/README.md)
 
+The same producer restriction applies to artifacts in a host executable's
+`sources` list. Such a translation unit reads its main file from the host
+snapshot, and quoted includes can find declared siblings in its logical
+directory. Disk sources and generated artifacts can be mixed in authored
+order. Diagnostics refer to the logical source path and use the snapshot
+bytes. Planning and witness receipts observe real disk includes, including
+misses, and can persist an empty disk observation when the tool is generated.
+[Generated host source example](../../examples/project-build/host-generated-sources/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and

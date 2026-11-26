@@ -99,7 +99,7 @@ private:
 // build's generated files under a reserved virtual directory for its output scope.
 enum class View : u8 { disk, editor, build, explicit_target_build };
 
-// An immutable set of generated host headers, shared by the translation units of a host build.
+// Immutable generated host files, shared by the translation units of a host build.
 // Keys are absolute, lexically normal paths. An empty file still has a value.
 class HostOverlay {
 public:
