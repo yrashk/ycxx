@@ -2252,6 +2252,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     const bool has_host_headers = std::ranges::any_of(plan.host_executables, [](const auto& executable) {
       return !executable.generated_headers.empty();
     });
+    std::vector<std::optional<Fp128>> host_header_keys;
     if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id) {
       std::vector<std::size_t> needed;
       needed.append_range(std::views::iota(std::size_t{0}, plan.host_executables.size()));
@@ -2281,16 +2282,16 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         return fail(std::move(headers.error()));
       }
       std::vector<pipeline::RequestId> host_requests;
-      std::vector<std::optional<Fp128>> header_keys;
       for (const auto& [executable, overlay] : std::views::zip(plan.host_executables, *headers)) {
         host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target, overlay));
-        header_keys.push_back(overlay ? std::optional{overlay->fingerprint()} : std::nullopt);
+        host_header_keys.push_back(overlay ? std::optional{overlay->fingerprint()} : std::nullopt);
       }
       apply([&](engine::Db& db) {
-        db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests), std::move(header_keys)});
+        db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests), host_header_keys});
       });
+    } else {
+      host_header_keys = prior->host_header_keys;
     }
-    const auto host_header_keys = session_.db().peek<WorkspacePlan>(key)->host_header_keys;
 
     for (;;) {
       const auto before = session_.db().revision();
