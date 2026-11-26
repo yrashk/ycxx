@@ -456,6 +456,7 @@ enum class Diag : std::uint32_t {
   unique_object_representations_unsupported [[=message{Severity::error, "'__has_unique_object_representations' for '{0:t}' is not supported yet"}]],
   trivial_or_pod_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
   trivial_or_pod_unsupported [[=message{Severity::error, "'{1:n}' for '{0:t}' is not supported yet"}]],
+  builtin_nansl_string [[=message{Severity::error, "the supported form of '__builtin_nansl' requires an empty ordinary string literal"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -472,7 +473,7 @@ constexpr bool has_runtime_code(std::uint64_t raw) {
   if (raw == reason_unsupported) return false;
   using enum interp::Reason;
   interp::Reason r = interp::Reason(std::uint8_t((raw & 0xff) - 1));
-  return r != ill_formed && r != step_limit && r != depth_limit;
+  return r != ill_formed && r != step_limit && r != depth_limit && r != nansl_unsupported && r != nansl_x87_unsupported;
 }
 
 inline std::string spell_reason(std::uint64_t raw) {

@@ -1891,6 +1891,11 @@ class Gen {
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
         case ast::BuiltinOp::ctz: return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::nansl: {
+          const ir::Ty result[] = {vty(t)};
+          const std::uint64_t fn[] = {word(ir::BuiltinFn::nansl)};
+          return b_.result(stateful(ir::Op::builtin, result, {}, fn), 1);
+        }
         case ast::BuiltinOp::strlen: {
           const At arg = child(a, args[0]);
           return string_length(t, info(arg).type, rvalue(arg));

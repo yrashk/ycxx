@@ -8661,6 +8661,22 @@ public:
       const auto op = b.function == add_overflow ? ast::BuiltinOp::add_overflow : ast::BuiltinOp::mul_overflow;
       return builtin_overflow_call(op, args, begin, end);
     }
+    if (b.function == nansl) {
+      const Ex invalid{NodeId::none, begin, end};
+      if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return invalid;
+      Ex arg = args.front();
+      while (auto paren = as<ast::Paren>(arg)) arg.id = paren->operand.id;
+      const auto lit = as<ast::Literal>(arg);
+      if (!lit || !types().is_array(arg.type()) || !types().is(types().rec(arg.type()).inner, Builtin::char_) ||
+          !ins().values.is<ast::VString>(lit->value) ||
+          ins().seqs.size(ins().values.get<ast::VString>(lit->value).units) != 1) {
+        diag(arg.begin, Diag::builtin_nansl_string);
+        return invalid;
+      }
+      // The call's type is available independently of the target's signaling NaN value.
+      const ExprInfo info{builtin(Builtin::long_double), ValueCategory::prvalue, 0};
+      return node(ast::BuiltinCall{info, ast::BuiltinOp::nansl, b_->list({at(args.front(), begin)})}, begin, end, info);
+    }
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -8690,7 +8706,8 @@ public:
       case library:
       case constant_p:
       case add_overflow:
-      case mul_overflow: std::unreachable();  // Handled before floating type selection.
+      case mul_overflow:
+      case nansl: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
