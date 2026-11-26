@@ -45,14 +45,16 @@ struct SourcePlan {
   std::vector<std::string> includes;
 };
 
-struct HostExecutablePlan {
-  std::string name;
-  std::vector<SourcePlan> sources;
-};
-
 struct ArtifactOutputPlan {
   std::size_t producer;
   std::size_t output;
+};
+
+struct HostExecutablePlan {
+  std::string name;
+  std::vector<SourcePlan> sources;
+  std::vector<ArtifactOutputPlan> generated_headers = {};
+  std::size_t first_own_source = 0;
 };
 
 using LinkInputPlan = ArtifactOutputPlan;
@@ -105,6 +107,8 @@ struct RulePackagePlan {
 
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
                            std::string_view filename, std::string_view native_triple = {});
+std::string host_generated_path(const std::filesystem::path& cwd, std::string_view generator,
+                                std::string_view filename);
 // Reobserve planning inputs without launching any actions. Native source contents and include
 // probes are tracked separately by the daemon's file table.
 ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target,
@@ -330,6 +334,7 @@ struct CxxTargetPlan {
 struct CxxTraversal {
   std::vector<SourcePlan>& sources;
   bool generated;
+  HostExecutablePlan* host = nullptr;
   std::set<std::string> active = {};
   std::map<std::string, CxxTargetPlan> finished = {};
   std::size_t next_order = 0;
@@ -515,6 +520,8 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
 
 enum class Primitive { unknown, executable, library, generator, observer, host_action, host_executable };
 constexpr std::string_view host_executable_output = "executable";
+constexpr auto host_header_dependency_error =
+    "generated headers for host executables require a producer chain without host executable inputs";
 
 struct LoweredTarget {
   TargetDecl declaration;
@@ -740,6 +747,12 @@ class Planner {
   }
 
  private:
+  struct RestoreHostHeaderOwner {
+    const TargetDecl*& current;
+    const TargetDecl* previous;
+    ~RestoreHostHeaderOwner() { current = previous; }
+  };
+
   std::string display_path(const fs::path& path) const {
     const auto relative = path.lexically_relative(cwd_);
     return relative.empty() || *relative.begin() == ".." ? path_text(path) : path_text(relative);
@@ -765,6 +778,16 @@ class Planner {
     if (!inspection_) return;
     const auto& generator = plan_.generators[artifact.producer];
     dependency(consumer, generator.name, usage, at, generator.action.outputs[artifact.output].name, binding);
+  }
+
+  [[noreturn]] void host_header_cycle(SourceLocation at) const {
+    fail(at, std::format("host executable generated header dependency cycle at target '{}'", host_header_owner_->name));
+  }
+
+  void reject_host_header_dependency(const TargetDecl& executable, SourceLocation at) const {
+    if (!host_header_owner_) return;
+    if (executable.name == host_header_owner_->name) host_header_cycle(at);
+    fail(at, host_header_dependency_error);
   }
 
   void observe(const fs::path& path) const {
@@ -891,6 +914,8 @@ class Planner {
         if (!binding.value && binding.package != builtin_cpp)
           observe(cwd_ / fs::path(binding.package).parent_path() / "build.ycxx");
     }
+    // Rule prerequisites resolve separately from the emitted action's input graph.
+    const RestoreHostHeaderOwner prerequisites{host_header_owner_, std::exchange(host_header_owner_, nullptr)};
     const auto find_bindings = [&](std::string_view name) {
       const auto* value = field(decl, name);
       return value ? std::get_if<Record>(&value->data) : nullptr;
@@ -1076,6 +1101,7 @@ class Planner {
         };
         const auto target = artifact_target(ref->target, value.location, decl.name);
         if (target.kind == Primitive::host_executable) {
+          reject_host_header_dependency(target.declaration, value.location);
           if (observer && (!staged_tool || staged_tool->name != name))
             fail(value.location, std::format("host executable witness input {:?} must be selected with tool = input({:?})",
                                              name, name));
@@ -1177,6 +1203,7 @@ class Planner {
     if (!inserted) {
       if (active->second != planning_edges_)
         fail(decl.location, std::format("planning input dependency cycle at target '{}'", decl.name));
+      if (host_header_owner_) host_header_cycle(decl.location);
       fail(decl.location, std::format("artifact dependency cycle at '{}'", decl.name));
     }
     auto gen = generator(decl);
@@ -1198,11 +1225,15 @@ class Planner {
 
   ArtifactOutputPlan generator_artifact(ResolvedTarget target, std::string_view name, SourceLocation at) {
     const auto [decl, kind] = target;
-    if (kind == Primitive::host_executable)
+    if (kind == Primitive::host_executable) {
+      reject_host_header_dependency(decl, at);
       fail(at, "host executable artifacts require a generator input or a directly selected witness tool");
+    }
     if (kind != Primitive::generator) fail(at, "artifact references require a generate target");
     const auto producer = resolve_generator(decl);
-    const auto& outputs = plan_.generators[producer].action.outputs;
+    const auto& generator = plan_.generators[producer];
+    if (host_header_owner_ && generator.host_dependent) fail(at, host_header_dependency_error);
+    const auto& outputs = generator.action.outputs;
     const auto output = std::ranges::find(outputs, name, &ActionOutput::name);
     if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, name));
     return {producer, static_cast<std::size_t>(output - outputs.begin())};
@@ -1220,6 +1251,15 @@ class Planner {
     auto& gen = plan_.generators[producer];
     gen.native_outputs = true;
     return generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_);
+  }
+
+  std::string host_header(const ArtifactRef& ref, const TargetDecl& consumer, HostExecutablePlan& host, SourceLocation at) {
+    const RestoreHostHeaderOwner restore{host_header_owner_, std::exchange(host_header_owner_, &consumer)};
+    const auto requested = artifact(ref, at);
+    artifact_dependency(consumer, requested, "generated_headers", at);
+    host.generated_headers.push_back(requested);
+    const auto& generator = plan_.generators[requested.producer];
+    return host_generated_path(cwd_, generator.name, generator.action.outputs[requested.output].filename);
   }
 
   void for_each_include_dir(const TargetDecl& decl, const auto& include) {
@@ -1285,7 +1325,7 @@ class Planner {
     const auto existing = std::ranges::find(plan_.host_executables, decl.name, &HostExecutablePlan::name);
     if (existing != plan_.host_executables.end())
       return static_cast<std::size_t>(existing - plan_.host_executables.begin());
-    check_fields(decl, {"sources", "public_include_dirs", "deps"});
+    check_fields(decl, {"sources", "public_include_dirs", "deps", "generated_headers"});
     const auto* host = pp::native_target;
     if (!host) fail(decl.location, "no default native target for this host");
     if (inspection_) {
@@ -1294,7 +1334,7 @@ class Planner {
       fact("output", decl, host_executable_output, host_executable_output, "linked host executable", decl.location);
     }
     HostExecutablePlan tool{decl.name, {}};
-    CxxTraversal traversal{tool.sources, false};
+    CxxTraversal traversal{tool.sources, false, &tool};
     cxx_target(decl, Primitive::host_executable, traversal);
     if (tool.sources.empty()) fail(decl.location, "host executable has no C++ source files");
     const auto index = plan_.host_executables.size();
@@ -1380,10 +1420,11 @@ class Planner {
     for_each_include_dir(decl, include);
     if (const auto* headers = field(decl, "generated_headers")) {
       for (const auto& value : as<List>(*headers, "a list of generated headers")) {
-        if (!traversal.generated)
+        if (!traversal.generated && kind != Primitive::host_executable)
           fail(value.location, "generated_headers is not supported in host executable dependencies");
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto path = native_artifact(ref, decl, "generated_headers", value.location);
+        const auto path = kind == Primitive::host_executable ? host_header(ref, decl, *traversal.host, value.location)
+            : native_artifact(ref, decl, "generated_headers", value.location);
         include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref) : std::string{}, value.location);
       }
     }
@@ -1410,6 +1451,7 @@ class Planner {
       }
     }
 
+    if (kind == Primitive::host_executable) traversal.host->first_own_source = traversal.sources.size();
     append_sources(decl, target.paths, traversal.sources, traversal.generated, emit_facts);
     if (assets) {
       std::set<std::string> filenames;
@@ -1444,6 +1486,7 @@ class Planner {
   // The edge count at each active frame distinguishes mixed cycles from value or artifact cycles.
   std::map<std::string, std::size_t, std::less<>> resolving_rules_;
   std::map<std::string, std::size_t, std::less<>> active_generators_;
+  const TargetDecl* host_header_owner_ = nullptr;
   std::size_t planning_edges_ = 0;
   std::set<std::string> inspected_cxx_;
   ProjectPlan plan_;
@@ -1487,6 +1530,10 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
 std::string generated_path(const fs::path& cwd, std::string_view generator, std::string_view filename,
                            std::string_view native_triple) {
   return path_text(project_state_path(cwd, native_triple) / "virtual" / generator / filename);
+}
+
+std::string host_generated_path(const fs::path& cwd, std::string_view generator, std::string_view filename) {
+  return path_text(cwd / ".ycxx" / "host" / "virtual" / generator / filename);
 }
 
 ProjectWatchState watch_project(const fs::path& cwd, std::string_view target,
