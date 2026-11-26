@@ -834,7 +834,6 @@ class Planner {
       --planning_edges_;
       const auto [producer, output] = requested;
       const auto& gen = plan_.generators[producer];
-      if (gen.host_dependent) fail(binding.location, host_error);
       artifact_dependency(decl, requested, "plan_inputs", binding.location, input.name);
       auto path = display_path(generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_));
       result.push_back({input.name, std::move(path), producer, output});
