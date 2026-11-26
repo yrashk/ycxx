@@ -473,8 +473,12 @@ class Mangler {
     return r;
   }
   // Global names and direct members of ::std are <unscoped-name>s (§5.1.5).
+  // Whether a name in `scope` is a <nested-name>, not an <unscoped-name> (global or `St`).
+  bool nested_name(ast::EntityId scope) const {
+    return scope != ast::EntityId::none && !(classes_ && is_global_std(classes_(scope)));
+  }
   std::string delimit_name(std::string components, ast::EntityId scope) const {
-    if (scope == ast::EntityId::none || (classes_ && is_global_std(classes_(scope)))) return components;
+    if (!nested_name(scope)) return components;
     return "N" + components + "E";
   }
   // The <data name> part of an <encoding> (§5.1.2), sharing substitutions with its use.
@@ -590,7 +594,7 @@ class Mangler {
         unqualified = *code;
       }
       candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());  // the <template-prefix>
-      auto args = specialization_args(spec);
+      auto args = specialization_args(spec, /*nested=*/true);
       if (!args) return args;
       auto sig = signature(f, true);
       if (!sig) return sig;
@@ -600,7 +604,7 @@ class Mangler {
     }
     auto n = template_name(name, scope, special);
     if (!n) return n;
-    auto args = specialization_args(spec);
+    auto args = specialization_args(spec, nested_name(scope));
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
@@ -1015,10 +1019,12 @@ class Mangler {
   }
   // A function template specialization's own <template-args>, with Clang's prefixes: `Tn <type>`
   // before a value whose parameter's type is dependent, `Tt <decl>* E` before a template whose head
-  // is not the parameter's ([temp.arg.template]).
+  // is not the parameter's ([temp.arg.template]). GCC writes its prefixes only after an
+  // <unscoped-name>: a template in a namespace other than `std`, or a member, has none (`nested`).
   std::expected<std::string, std::string> own_template_args(std::span<const ast::TemplateArg> args,
                                                             std::span<const ast::TemplateParamSema> params,
-                                                            const std::vector<std::uint8_t>& same_heads) {
+                                                            const std::vector<std::uint8_t>& same_heads,
+                                                            bool nested) {
     std::string out = "I";
     for (std::size_t i = 0; i < args.size(); ++i) {
       const ast::TemplateArg& a = args[i];
@@ -1034,9 +1040,9 @@ class Mangler {
         const bool placeholder = p.placeholder != ast::Placeholder::none;
         const bool decl = p.kind == ast::TemplateArgKind::value    ? (placeholder ? !(gcc && empty)
                                                                                   : !gcc && (dependent(p.type) || empty))
-                          : p.kind == ast::TemplateArgKind::template_ ? (empty ? !gcc : !same)
+                          : p.kind == ast::TemplateArgKind::template_ ? (empty ? !gcc : !same || (gcc && placeholder_head(p)))
                                                                       : p.type_constraint != ast::ConstId::none;
-        if (decl) {
+        if (decl && !(gcc && nested)) {
           auto d = param_decl(p);
           if (!d) return d;
           out += *d;
@@ -1049,8 +1055,15 @@ class Mangler {
     return out + "E";
   }
 
-  std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec) {
-    auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
+  // Whether a template template parameter's own head declares a placeholder parameter: GCC then
+  // writes its `Tt` prefix even for an argument whose head is the same.
+  bool placeholder_head(const ast::TemplateParamSema& p) const {
+    return std::ranges::any_of(in_.seqs.elements(p.params),
+                               [](const ast::TemplateParamSema& q) { return q.placeholder != ast::Placeholder::none; });
+  }
+  std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec, bool nested) {
+    auto args = spec.params.empty() ? template_args(spec.args)
+                                    : own_template_args(spec.args, spec.params, spec.same_heads, nested);
     if (!args || spec.head.tokens == Fp128{}) return args;
     args->pop_back();
     *args += constraint_suffix(spec.head) + "E";

@@ -1833,8 +1833,9 @@ public:
     if (ps.empty()) return true;
     Bindings b = Bindings::of(as[0].depth, own_args(ps));
     for (std::size_t i = 0; i < ps.size(); ++i) {
-      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack) return false;
-      if (ps[i].kind == TemplateArgKind::value) {
+      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack || ps[i].placeholder != as[i].placeholder) return false;
+      // Two placeholder parameters are equivalent; their types are their own positions.
+      if (ps[i].kind == TemplateArgKind::value && ps[i].placeholder == ast::Placeholder::none) {
         auto t = substitute(as[i].type, b);
         if (!t || types().canonical(*t) != types().canonical(ps[i].type)) return false;
       }

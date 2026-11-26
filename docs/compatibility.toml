@@ -142,7 +142,7 @@ reference = "Itanium C++ ABI §5.1.5.7, #208, #281"
 limits = "GCC also emits legacy ABI aliases for some unequal heads. ycxx emits the primary encoding used by GCC 16.2 callers."
 prior = "Clang's extra parameter-declaration prefixes on some function template specializations."
 spec = "Retain the disambiguating prefixes on the supported template heads."
-gcc = "Omit value-parameter prefixes and empty template-template pack prefixes, except TnDa/TnDc before a placeholder parameter's argument, which GCC also writes, but not for an empty pack. Use Tt for a nonempty argument whose head differs."
+gcc = "Write prefixes only after an unscoped name (global or St), none in a nested name. There, omit value-parameter prefixes and empty template-template pack prefixes, except TnDa/TnDc before a placeholder parameter's argument, but not for an empty pack. Use Tt for a nonempty argument whose head differs, or whose parameter's head declares a placeholder parameter."
 clang = "Same as spec."
 evidence = ["tests/daemon/compatibility.py"]
 

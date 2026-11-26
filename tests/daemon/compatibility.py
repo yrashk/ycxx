@@ -60,6 +60,12 @@ template<class T, T V> int typed() { return V; }
 template<class T, T... V> int empty_values() { return sizeof...(V); }
 template<auto V> int placeholder() { return V; }
 template<auto... V> int empty_placeholders() { return sizeof...(V); }
+template<auto V> struct pw {};
+template<auto... V> struct pp {};
+namespace pn { template<auto V> int scoped() { return V; } }
+template<template<auto> class TT> int auto_head() { return 6; }
+template<template<int> class TT> int int_head() { return 7; }
+template<template<auto...> class TT> int pack_head() { return 8; }
 template<class, class = int> struct Two {};
 template<template<class> class T> int different_head() { return 5; }
 template<class T> struct Y { template<class> using apply = T; };
@@ -68,7 +74,8 @@ template<class T> int member(Use<Y<T>::template apply>) { return 3; }
 int use() {
   return variable<int>(Box<true>{0}) + index<int>(0) + typed<int, 4>()
        + member<int>(Use<Y<int>::apply>{}) + empty_values<int>() + different_head<Two>()
-       + placeholder<4>() + empty_placeholders<>();
+       + placeholder<4>() + empty_placeholders<>() + pn::scoped<4>() + auto_head<pw>() + int_head<pw>()
+       + pack_head<pp>();
 }
 int target() noexcept { return 4; }
 using Signature = int (*)();
@@ -87,6 +94,11 @@ SYMBOLS = {
     'typed': ('_Z5typedIiTnT_Li4EEiv', '_Z5typedIiLi4EEiv'),
     'empty-values': ('_Z12empty_valuesIiTpTnT_JEEiv', '_Z12empty_valuesIiJEEiv'),
     'empty-placeholders': ('_Z18empty_placeholdersITpTnDaJEEiv', '_Z18empty_placeholdersIJEEiv'),
+    # GCC writes no <template-param-decl> after a <nested-name>, and Tt before a template whose
+    # head has a placeholder parameter even when the heads are the same.
+    'scoped-placeholder': ('_ZN2pn6scopedITnDaLi4EEEiv', '_ZN2pn6scopedILi4EEEiv'),
+    'auto-head': ('_Z9auto_headI2pwEiv', '_Z9auto_headITtTnDaE2pwEiv'),
+    'pack-head': ('_Z9pack_headI2ppEiv', '_Z9pack_headITtTpTnDaE2ppEiv'),
     'member': ('_Z6memberIiEi3UseIN1YIT_E5applyEE', '_Z6memberIiEi3UseIsr1YIT_EE5applyE'),
     'closure': ('_ZZ7closureiENUliE_8__invokeEi', '_ZZ7closureiENUliE_4_FUNEi'),
     'closure-prefix': ('_ZNK2ltIiEMUliE_clEi', '_ZNK2ltIiEUliE_clEi'),
@@ -281,6 +293,7 @@ def mangling(world):
             assert alternatives[not use_second].encode() not in names, (mode, key)
         assert b'_Z14different_headITtTyE3TwoEiv' in names, (mode, sorted(names)[-45:])
         assert b'_Z11placeholderITnDaLi4EEiv' in names, (mode, sorted(names)[-45:])
+        assert b'_Z8int_headITtTniE2pwEiv' in names, (mode, sorted(names)[-45:])
 
     source = '''\
 int labelled(int) __asm("_first");
