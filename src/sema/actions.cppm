@@ -8763,6 +8763,11 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
+    if (b.function == ctz) {
+      if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return {NodeId::none, begin, end};
+      return builtin_value_call(ast::BuiltinOp::ctz_gcc_zero, builtin(Builtin::int_),
+                                builtin(Builtin::unsigned_int), args.front(), begin, end);
+    }
     if (b.function == ctzg) {
       const Ex invalid{NodeId::none, begin, end};
       const QualType result = builtin(Builtin::int_);
@@ -8823,6 +8828,7 @@ public:
       case trap:
       case unreachable:
       case strlen:
+      case ctz:
       case ctzg:
       case library:
       case constant_p:
