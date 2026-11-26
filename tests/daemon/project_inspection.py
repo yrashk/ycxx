@@ -107,14 +107,15 @@ def dependency_edge(definition, consumer, producer, usage, spelling, *, start=0,
     return edge
 
 
-def check_dependency_graph(plan, edges, *, complete=True):
+def check_dependency_graph(plan, edges, *, complete=True, value_edges=()):
     def order(edge):
         location = edge['location']
         return (edge['consumer'], location['line'], location['column'], edge['usage'], edge['producer'],
-                edge.get('output', ''), edge.get('binding', ''))
+                edge.get('output', edge.get('export_name', '')), edge.get('binding', ''))
 
     assert 'dependency_graph' in plan, 'selected plan omitted the dependency graph'
-    expected = {'complete': complete, 'edges': sorted(edges, key=order)}
+    expected = {'complete': complete, 'edges': sorted(edges, key=order),
+                'value_edges': sorted(value_edges, key=order)}
     assert plan['dependency_graph'] == expected, (plan['dependency_graph'], expected)
     assert plan['dependency_graph']['complete'] is complete, plan['dependency_graph']
 
@@ -165,6 +166,48 @@ def check_dependency_html(document, plan):
         assert link.attrs['href'] == f'#{identifier}' and link.visible() == f'build.ycxx:{line}:{column}', edge
         assert anchors[identifier].visible() == lines[line - 1], edge
     assert not any(node.attrs.get('data-dependency-probe') == '1' for node in parsed.elements)
+
+
+def check_value_bindings_html(document, plan):
+    from project_module_graph import PlanHTML
+
+    parsed = PlanHTML(document)
+    dependencies = parsed.section('dependencies', 'Dependencies')
+    section = parsed.section('value-bindings', 'Value bindings')
+    facts = parsed.section('facts', 'Plan facts')
+    assert parsed.elements.index(dependencies) < parsed.elements.index(section) < parsed.elements.index(facts)
+    graph = plan['dependency_graph']
+    incomplete = 'Incomplete plan. Showing resolved value bindings so far.'
+    assert (incomplete in section.visible()) == (not graph['complete']), section.visible()
+    edges = graph['value_edges']
+    if not edges:
+        message = 'No value bindings.' if graph['complete'] else 'No resolved value bindings yet.'
+        assert message in section.visible(), section.visible()
+        return
+
+    table, = (node for node in section.descendants if node.tag == 'table')
+    assert [node.visible().strip() for node in table.descendants if node.tag == 'th'] == [
+        'Consumer', 'Usage', 'Producer', 'Declared at',
+    ]
+    rows = [[node for node in row.descendants if node.tag == 'td']
+            for row in table.descendants if row.tag == 'tr']
+    rows = [row for row in rows if row]
+    assert len(rows) == len(edges), rows
+    manifest = parsed.section('manifest', 'build.ycxx')
+    anchors = {node.attrs.get('id'): node for node in manifest.descendants}
+    lines = plan['definition'].splitlines()
+    for edge, (consumer, usage, producer, declared) in zip(edges, rows):
+        for cell, expected in ((consumer, [edge['consumer']]), (usage, [edge['usage'], edge['binding']]),
+                               (producer, [edge['producer'], edge['export_name']])):
+            assert [node.visible() for node in cell.descendants if node.tag == 'code'] == expected, edge
+        assert 'Binding' in usage.visible() and 'Export' in producer.visible(), edge
+        site = edge['location']
+        line, column = site['line'], site['column']
+        link, = (node for node in declared.descendants if node.tag == 'a')
+        identifier = f'manifest-line-{line}'
+        assert link.attrs['href'] == f'#{identifier}' and link.visible() == f'build.ycxx:{line}:{column}', edge
+        assert anchors[identifier].visible() == lines[line - 1], edge
+    assert not any(node.attrs.get('data-value-probe') == '1' for node in parsed.elements)
 
 
 def check_dependency_changes_html(document, definition, changes):
@@ -439,7 +482,9 @@ def check_unresolved(ycxx, scope, definition):
     check_location(unresolved, definition, 'cpp.executable "app"')
     assert not any(item['kind'] == 'source' for item in plan['facts']), plan
     check_dependency_graph(plan, [], complete=False)
-    check_dependency_html(show(ycxx, scope, '--format=html').decode('utf-8'), plan)
+    document = show(ycxx, scope, '--format=html').decode('utf-8')
+    check_dependency_html(document, plan)
+    check_value_bindings_html(document, plan)
     assert not (scope / '.ycxx').exists(), 'cold inspection created build state'
     assert not (scope / 'generator-ran').exists(), 'cold inspection ran the generator'
 
@@ -484,6 +529,7 @@ def check_views(ycxx, scope, definition):
     assert MARKUP not in document and UNSAFE_SOURCE not in document, 'inspection HTML contains unescaped user text'
     assert '&lt;script&gt;' in document and '&lt;b&gt;&amp;' in document, 'inspection HTML did not escape markup'
     check_dependency_html(document, snapshot)
+    check_value_bindings_html(document, snapshot)
     assert scope_state(scope) == before, 'inspection changed files or build state'
 
     assert not (scope / 'generator-ran').exists(), 'inspection ran the generator'
