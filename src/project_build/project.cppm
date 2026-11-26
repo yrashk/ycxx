@@ -1447,7 +1447,9 @@ std::expected<void, std::string> prepare_project(
         // A worker's earlier expansion may select a generator that fails only
         // under obsolete planning bytes. Recheck outside the producer guard.
         if (!current_planning()) return staging_failure(changed_witness().error());
-        if (!current_witness_recipe() || !witness_producers.current() || !coherent_host_files())
+        // A prerequisite can fail before there is any host image to recheck.
+        if (!current_witness_recipe() || (witness_producers.hosts && !witness_producers.current()) ||
+            !coherent_host_files())
           return changed_witness();
         return staged;
       };
