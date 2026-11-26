@@ -65,7 +65,8 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
 namespace ycxx::build {
 namespace {
 
-constexpr int snapshot_version = 1;
+constexpr int snapshot_version = 2;
+constexpr int first_snapshot_version = 1;
 constexpr std::size_t max_snapshot_size = 8 * 1024 * 1024;
 constexpr int directory_flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
 
@@ -237,8 +238,9 @@ StoredProbe store_probe(const RuleProbeSnapshot& probe) {
           probe.inputs, hex(probe.stamp), probe.facts, store_kind(probe.package.kind)};
 }
 
-std::optional<std::vector<HostFileObservation>> restore_host_files(std::vector<StoredHostFile> saved) {
-  if (saved.empty()) return std::nullopt;
+std::optional<std::vector<HostFileObservation>> restore_host_files(std::vector<StoredHostFile> saved,
+                                                                   bool allows_empty) {
+  if (saved.empty() && !allows_empty) return std::nullopt;
   std::vector<HostFileObservation> files;
   files.reserve(saved.size());
   for (auto& file : saved) {
@@ -270,7 +272,10 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
   const auto json = lsp::parse(*text);
   if (!json) return std::nullopt;
   auto saved = lsp::from_json<SnapshotFile>(*json);
-  if (!saved || saved->version != snapshot_version || saved->target != target) return std::nullopt;
+  if (!saved || saved->version < first_snapshot_version || saved->version > snapshot_version ||
+      saved->target != target) return std::nullopt;
+  // A tool built entirely from generated sources can have no disk observations.
+  const bool allows_empty_host_files = saved->version >= 2;
 
   RuleSnapshot result;
   for (auto& item : saved->rules) {
@@ -312,9 +317,10 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     if ((compiler_bindings && projections.empty()) ||
         (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
       return std::nullopt;
-    auto host_files = item.host_files ? restore_host_files(std::move(*item.host_files)) : std::nullopt;
+    auto host_files = item.host_files
+        ? restore_host_files(std::move(*item.host_files), allows_empty_host_files) : std::nullopt;
     auto planning_host_files = item.planning_host_files
-        ? restore_host_files(std::move(*item.planning_host_files)) : std::nullopt;
+        ? restore_host_files(std::move(*item.planning_host_files), allows_empty_host_files) : std::nullopt;
     if ((item.host_files && (!witness || !host_files)) ||
         (item.planning_host_files && (!planning || !planning_host_files))) return std::nullopt;
     result.observations.push_back({demand, *package, *invocation, std::move(projections), witness, planning,
@@ -339,7 +345,7 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     const bool has_plan_inputs = !demand.plan_inputs.empty();
     if (demand != observed.demand || expansion.definition.empty() ||
         has_plan_inputs != observed.planning.has_value() ||
-        (observed.planning_host_files && (!observed.planning || observed.planning_host_files->empty()))) return;
+        (observed.planning_host_files && !observed.planning)) return;
     StoredRule rule{
         demand.target, demand.rule, demand.package.target, demand.package.kind == RulePackageRef::Kind::standard,
         demand.definition, demand.attributes, demand.reads, expansion.definition,

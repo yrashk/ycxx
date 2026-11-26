@@ -67,7 +67,10 @@ another platform. [Native host tool example](examples/project-build/native-host-
 Host tools and target apps can share disk-backed C++ libraries through `deps`.
 [Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
 Host executables can declare `generated_headers` from ordinary generators
-that run before the host compile. [Generated host header example](examples/project-build/host-generated-headers/README.md)
+that run before the host compile. They can also put an artifact from such a
+generator in `sources`, alongside disk paths and globs.
+[Generated host header example](examples/project-build/host-generated-headers/README.md) ·
+[Generated host source example](examples/project-build/host-generated-sources/README.md)
 A typed witness can select the native artifact directly with
 `tool = input("name")` or use an executable generated from it.
 [Native host witness](examples/project-build/native-host-witness/README.md) ·

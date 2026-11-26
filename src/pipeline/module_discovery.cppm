@@ -117,7 +117,11 @@ engine::query_task<ModuleScan> ModuleDirectives::run(engine::Ctx& cx, Key file) 
   ModuleScan scan;
   const auto& source = cx.fetch<pp::SourceOf>(file);
   const bool disk = source.config.view == pp::View::disk;
-  if (!disk && !pp::source_content(cx, source, source.path)) co_return scan;
+  if (const auto* overlay = pp::host_overlay_content(source.config, source.cwd, source.path)) {
+    if (!*overlay) co_return scan;
+  } else if (!disk && !pp::source_content(cx, source, source.path)) {
+    co_return scan;
+  }
   const auto& region = co_await cx.fetch<pp::Pp>(file);
   const auto& diagnostics = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<pp::Pp>(file));
   scan.complete = std::ranges::none_of(diagnostics, [](const engine::Diagnostic& d) {
