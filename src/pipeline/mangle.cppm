@@ -900,7 +900,7 @@ class Mangler {
       }
       // Any other value-dependent argument: `X <expression> E` (§5.1.5.7, §5.1.6).
       if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value) ||
-          in_.values.is<ast::VDepCall>(a.value)) {
+          in_.values.is<ast::VDepConcept>(a.value) || in_.values.is<ast::VDepCall>(a.value)) {
         auto e = expression(a.value);
         if (!e) return e;
         return "X" + *e + "E";

@@ -594,10 +594,12 @@ public:
     return w_->values.integer(types().builtin(Builtin::bool_), result);
   }
 
+  // `!…!v` over a dependent variable-template-id or concept-id ([temp.dep.constexpr]/2).
   std::optional<ConstId> negated_variable_value(ConstId v, std::size_t negations)
     pre(negations != 0)
   {
-    if (!ins().values.is<ast::VDepVariable>(v) || !structural_value(v)) return std::nullopt;
+    if (!(ins().values.is<ast::VDepVariable>(v) || ins().values.is<ast::VDepConcept>(v)) || !structural_value(v))
+      return std::nullopt;
     for (std::size_t i = 0; i < negations; ++i) v = logical_not_value(v);
     return v;
   }

@@ -3363,10 +3363,13 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
-      // Class bases and type requirements replay with their arguments bound. A dependent
-      // value whose expression has no representation can wait until replay, provided it
-      // contains no pack that an expansion needs to retain.
-      if ((class_template_base || in_type_requirement_) && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+      // Class bases, type requirements, namespace alias templates and the ordinary member
+      // aliases of a class template replay with their arguments bound ([temp.alias]/2). A
+      // dependent value whose expression has no representation can wait until replay,
+      // provided it contains no pack that an expansion needs to retain.
+      const bool replayed = class_template_base || in_type_requirement_ || namespace_alias_type ||
+                            replayed_member_alias_type;
+      if (replayed && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       }
@@ -4747,6 +4750,10 @@ public:
     return l;
   }
 
+  // A concept-id read as an evaluated template argument keeps a `VDepConcept` value while its
+  // arguments are dependent ([temp.arg.nontype], [temp.dep.constexpr]/2).
+  bool preserve_concept_value() const { return in_template_value_argument_ && !s_->unevaluated; }
+
   bool structural_member_argument() const {
     return member_alias_type && in_template_value_argument_ && !s_->unevaluated;
   }
@@ -5697,6 +5704,9 @@ public:
             if (auto v = s_->variable_template(n, begin))
               return s_->dependent_variable_template_id(*v, *args, begin, pos());
             if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+            // A value-dependent concept-id ([temp.dep.constexpr]/2) keeps its value as the
+            // argument, substituted when the template-id's own arguments are.
+            if (auto c = s_->concept_named(n)) return s_->concept_id_expr(*c, *args, begin, pos(), preserve_concept_value());
             if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
               Ex callee = s_->name_expr(n, begin, pos(), true);
               if (!callee.ok()) return callee;
@@ -6130,8 +6140,7 @@ public:
             const bool global = r_->tokens[begin_ + begin].kind == Tk::coloncolon;
             return written_concept_expression(*c, *args, begin, true, global);
           }
-          return s_->concept_id_expr(*c, *args, begin, pos(),
-                                     class_template_base && in_template_value_argument_ && !s_->unevaluated);
+          return s_->concept_id_expr(*c, *args, begin, pos(), preserve_concept_value());
         }
       }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
