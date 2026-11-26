@@ -106,6 +106,9 @@ add_test(NAME daemon.project_native_host_witness
 add_test(NAME daemon.project_host_producer_witness
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_producer_witness.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_host_planning_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_planning_inputs.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_staged_witness
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_witness.py $<TARGET_FILE:ycxxc>)
 
