@@ -6216,6 +6216,8 @@ private:
           s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
           return bad();
         }
+        if (spec.explicit_at && it_->kind == ItemKind::function &&
+            !finish_member_definition_declarator()) return bad();
         if (!member_function_or_static(spec, d, c, is_virtual, final_at.has_value(), overridden)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;
@@ -7111,7 +7113,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, m->name);
       return bad();
     }
-    if ((flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && !finish_constructor_declarator()) return bad();
+    if ((flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && !finish_member_definition_declarator()) return bad();
     if (specialized_destructor && !m->is_virtual) {
       if (!check_destructor_specialization(*cr, *m, fs, name_at, definition)) return bad();
     } else if (mem->flags & sema::decl_flag::definition) {
@@ -7224,7 +7226,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, member.name);
       return false;
     }
-    if (definition) return finish_constructor_declarator();
+    if (definition) return finish_member_definition_declarator();
     ps_.skip_attributes();
     return ps_.expect(Tk::semi);
   }
@@ -7445,7 +7447,7 @@ private:
   }
 
   // The declarator's tokens end at the body.
-  bool finish_constructor_declarator() {
+  bool finish_member_definition_declarator() {
     ps_.skip_attributes();
     if (ps_.at_end()) return true;
     s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -7654,7 +7656,7 @@ private:
     }
     if (ordinary_defaulting) {
       // [dcl.fct.def.default]: a first in-class defaulted special member.
-      if (!finish_constructor_declarator()) return bad();
+      if (!finish_member_definition_declarator()) return bad();
       auto copy_reference = [&] {
         if (fs.params.size() != 1 || fs.variadic) return false;
         const parse::Param& p = fs.params.front();
@@ -7677,7 +7679,7 @@ private:
       // implicitly constexpr ([dcl.fct.def.default]).
       flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
     } else if (ctor && (flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && it_->has_body() &&
-               !finish_constructor_declarator()) {
+               !finish_member_definition_declarator()) {
       return bad();
     }
     if (ctor && !member_virt_specifiers(false)) return bad();
