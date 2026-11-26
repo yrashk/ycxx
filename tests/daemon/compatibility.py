@@ -128,6 +128,18 @@ int main() {
   return allocate() == nullptr || observed() != EXPECTED;
 }
 '''
+ABSTRACT_STATIC_TEMPLATE_CASES = {
+    'abstract-primary.cpp': True,
+    'abstract-specialization.cpp': True,
+    'abstract-primary-pointer.cpp': False,
+    'abstract-specialization-pointer.cpp': False,
+    'abstract-specialization-concrete.cpp': False,
+    'inherited-demand.cpp': True,
+    'inherited-nondemand.cpp': False,
+    'inline-pattern.cpp': False,
+    'explicit-template-id.cpp': False,
+}
+
 ABSTRACT_RESULTS = '''\
 struct Abstract {
   virtual int score(int) = 0;
@@ -331,6 +343,9 @@ def preprocess_and_syntax(world):
     (world.scope / 'class-head-alignment.cpp').write_text(CLASS_HEAD_ALIGNMENT)
     (world.scope / 'wide-array.cpp').write_text(WIDE_ARRAY)
     (world.scope / 'abstract-results.cpp').write_text(ABSTRACT_RESULTS)
+    static_templates = Path(__file__).with_name('abstract_static_templates')
+    for name in ABSTRACT_STATIC_TEMPLATE_CASES:
+        shutil.copyfile(static_templates / name, world.scope / name)
     (world.scope / 'line.cpp').write_text(LINE)
     (world.scope / 'descriptor.cpp').write_text(DESCRIPTOR)
     (world.scope / 'immediate-escape.cpp').write_text('''\
@@ -687,6 +702,11 @@ int use() { return transform(7); }
                                       'wide-array.cpp', status=mode != 'clang')
             assert b'changes its value' not in diagnostic, (target, mode, diagnostic)
             invoke(target, *flags, '-fsyntax-only', 'abstract-results.cpp')
+            for name, clang_rejects in ABSTRACT_STATIC_TEMPLATE_CASES.items():
+                rejected = mode == 'clang' and clang_rejects
+                _, _, diagnostic = invoke(target, *flags, '-fsyntax-only', name, status=rejected)
+                assert (b'cannot form an object of abstract type' in diagnostic) == rejected, (
+                    target, mode, name, diagnostic)
             for case in ('CALL', 'COMMA', 'VOID_CAST', 'RECEIVER', 'SIZEOF'):
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'abstract-results.cpp', status=mode != 'clang')
             for case in ('STATIC_SELF', 'EXTERN_OBJECT'):

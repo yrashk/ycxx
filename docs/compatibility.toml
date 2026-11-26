@@ -665,7 +665,7 @@ prior = "Apply abstractness at the point that a value needs an object and allow 
 spec = "Apply the draft checks for abstract prvalues, discarded values and nondefining declarations."
 gcc = "Same as spec."
 clang = "Allow calls returning an abstract type, including the tested discard, receiver, and sizeof contexts. Diagnose nondefining extern declarations and static data member declarations of abstract type. Check a nondefining self-typed static member at the template definition when it directly declares a pure virtual function. The check also runs when an instantiated specialization is abstract. Clang accepts the tested directly written template-id forms. Parameters and object definitions still require concrete types."
-evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own/classes/pure-abstract/call-decltype-discard-comma.reject.cpp", "tests/own/classes/pure-abstract/extern-object.accept.cpp", "tests/own/classes/pure-abstract/static-self.accept.cpp", "tests/daemon/compatibility.py"]
+evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own/classes/pure-abstract/call-decltype-discard-comma.reject.cpp", "tests/own/classes/pure-abstract/extern-object.accept.cpp", "tests/own/classes/pure-abstract/static-self.accept.cpp", "tests/daemon/compatibility.py", "tests/daemon/abstract_static_templates/abstract-primary.cpp", "tests/daemon/abstract_static_templates/abstract-specialization.cpp", "tests/daemon/abstract_static_templates/inline-pattern.cpp", "tests/daemon/abstract_static_templates/explicit-template-id.cpp"]
 
 [[divergence]]
 id = "dependent-template-disambiguator"
