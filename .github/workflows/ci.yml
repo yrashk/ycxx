@@ -73,6 +73,7 @@ jobs:
           source deps/libycxx/tools/toolchain/activate.sh
           test -x "$YCXX_CLANGXX"
           "$YCXX_CLANGXX" --version
+          cmake --version
           tools/build -j ${{ matrix.host.jobs }}
 
       - name: Standalone YCXX Bench install and external consumer
