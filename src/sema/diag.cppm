@@ -473,7 +473,7 @@ constexpr bool has_runtime_code(std::uint64_t raw) {
   if (raw == reason_unsupported) return false;
   using enum interp::Reason;
   interp::Reason r = interp::Reason(std::uint8_t((raw & 0xff) - 1));
-  return r != ill_formed && r != step_limit && r != depth_limit && r != nansl_unsupported && r != nansl_x87_unsupported;
+  return r != ill_formed && r != step_limit && r != depth_limit;
 }
 
 inline std::string spell_reason(std::uint64_t raw) {
