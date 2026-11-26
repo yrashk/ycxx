@@ -151,6 +151,72 @@ def preprocess_and_syntax(world):
     (world.scope / 'version.cpp').write_text('__cplusplus\n')
     (world.scope / 'line.cpp').write_text(LINE)
     (world.scope / 'descriptor.cpp').write_text(DESCRIPTOR)
+    (world.scope / 'immediate-escape.cpp').write_text('''\
+consteval int value(int n) { return n; }
+#ifdef GLOBAL_POINTER
+constexpr auto escaped = value;
+#elif defined(GLOBAL_REFERENCE)
+int (&escaped)(int) = (0, value);
+#elif defined(LOCAL_POINTER)
+consteval int call() { constexpr auto p = &value; return p(42); }
+static_assert(call() == 42);
+#elif defined(LOCAL_REFERENCE)
+void call() { constexpr int (&p)(int) = value; }
+#else
+consteval int consume(int (*p)(int)) { return p(42); }
+static_assert(consume(&value) == 42);
+constexpr int ordinary = (&value)(42);
+static_assert(ordinary == 42);
+#endif
+''')
+    (world.scope / 'dependent-template.cpp').write_text('''\
+struct Owner { template<class T> using Alias = T; };
+template<template<class> class> struct Carrier {};
+#ifdef TEMPLATE_ARGUMENT
+template<class Q> using Result = Carrier<Q::Alias>;
+static_assert(__is_same(Result<Owner>, Carrier<Owner::Alias>));
+#elif defined(EXPLICIT_TEMPLATE)
+template<class Q> using Result = typename Q::template Alias<int>;
+#else
+template<class Q> using Result = typename Q::Alias<int>;
+#endif
+#ifndef TEMPLATE_ARGUMENT
+static_assert(__is_same(Result<Owner>, int));
+#endif
+''')
+    (world.scope / 'alias-identity.cpp').write_text('''\
+template<template<class...> class> struct Identity {};
+template<class T> struct Original {};
+template<class T> using Forward = Original<T>;
+template<class T> using Nested = Forward<T>;
+template<class T> using Transform = Original<T*>;
+template<class T> requires true using Constrained = Original<T>;
+template<class... T> struct Variadic {};
+template<class... T> using ForwardPack = Variadic<T...>;
+template<class T = int> struct Defaulted {};
+template<class T = int> using SameDefault = Defaulted<T>;
+template<class T = long> using DifferentDefault = Defaulted<T>;
+struct Owner { template<class T> using Member = Original<T>; };
+template<class Q> using Selected = Identity<Q::template Member>;
+static_assert(!__is_same(Identity<Original>, Identity<Transform>));
+static_assert(!__is_same(Identity<Original>, Identity<Constrained>));
+static_assert(!__is_same(Identity<Defaulted>, Identity<DifferentDefault>));
+#ifdef GCC_MODE
+static_assert(__is_same(Identity<Original>, Identity<Forward>));
+static_assert(__is_same(Identity<Original>, Identity<Nested>));
+static_assert(__is_same(Identity<Variadic>, Identity<ForwardPack>));
+static_assert(__is_same(Identity<Defaulted>, Identity<SameDefault>));
+static_assert(__is_same(Identity<Original>, Identity<Owner::Member>));
+static_assert(__is_same(Identity<Original>, Selected<Owner>));
+#else
+static_assert(!__is_same(Identity<Original>, Identity<Forward>));
+static_assert(!__is_same(Identity<Original>, Identity<Nested>));
+static_assert(!__is_same(Identity<Variadic>, Identity<ForwardPack>));
+static_assert(!__is_same(Identity<Defaulted>, Identity<SameDefault>));
+static_assert(!__is_same(Identity<Original>, Identity<Owner::Member>));
+static_assert(!__is_same(Identity<Original>, Selected<Owner>));
+#endif
+''')
     (world.scope / 'memchr.cpp').write_text('static_assert(__builtin_memchr("abc", \'a\', 10) != nullptr);\n')
     (world.scope / 'memcmp.cpp').write_text('static_assert(__builtin_memcmp("abc", "bbc", 10) < 0);\n')
     (world.scope / 'nan.cpp').write_text('constexpr float value = __builtin_nanf("") + 1.0f;\n')
@@ -377,6 +443,13 @@ int use() { return transform(7); }
             flags.append('-DCLANG_MODE')
         invoke(*flags, '-fsyntax-only', 'line.cpp')
         invoke(*flags, '-fsyntax-only', 'descriptor.cpp')
+        invoke(*flags, '-fsyntax-only', 'immediate-escape.cpp')
+        for case in ('GLOBAL_POINTER', 'GLOBAL_REFERENCE', 'LOCAL_POINTER', 'LOCAL_REFERENCE'):
+            invoke(*flags, f'-D{case}', '-fsyntax-only', 'immediate-escape.cpp', status=mode != 'spec')
+        invoke(*flags, '-DEXPLICIT_TEMPLATE', '-fsyntax-only', 'dependent-template.cpp')
+        invoke(*flags, '-fsyntax-only', 'dependent-template.cpp', status=mode != 'gcc')
+        invoke(*flags, '-DTEMPLATE_ARGUMENT', '-fsyntax-only', 'dependent-template.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'alias-identity.cpp')
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
         invoke(*flags, '-fsyntax-only', 'nan.cpp', status=mode != 'gcc')
@@ -421,11 +494,10 @@ int use() { return transform(7); }
         invoke(*flags, '-fsyntax-only', 'spaceship.cpp')
         invoke(*flags, '-DONLY_UNEQUAL', '-fsyntax-only', 'spaceship.cpp', status=mode == 'gcc')
         invoke(*flags, '-DCONTROL_ONLY', '-fsyntax-only', 'alias-adl.cpp')
-        if mode != 'gcc':
-            invoke(*flags, '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode == 'clang')
+        invoke(*flags, '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode != 'spec')
         invoke(*flags, '-fsyntax-only', 'alias-adl.cpp', status=mode == 'clang')
-        if mode == 'clang':
-            invoke(*flags, '-DORIGINAL', '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=1)
+        invoke(*flags, '-DORIGINAL', '-DFORWARD', '-fsyntax-only', 'alias-adl.cpp', status=mode != 'gcc')
+        if mode != 'spec':
             invoke(*flags, '-DORIGINAL', '-fsyntax-only', 'alias-adl.cpp', status=1)
         invoke(*flags, '-fsyntax-only', 'array-cv.cpp')
         invoke(*flags, '-DMUTATE', '-fsyntax-only', 'array-cv.cpp', status=mode != 'spec')

@@ -4616,13 +4616,17 @@ public:
   // `C::M` or `Q::template M` as a template template argument ([temp.arg.template]/1,
   // [temp.names]/4): C's member alias template; with Q dependent, Q's member template once Q is
   // known, which needs the keyword.
-  std::optional<TemplateArg> member_template_name_arg(const Scope& s, NameId name, bool keyword) {
+  std::optional<TemplateArg> member_template_name_arg(const Scope& s, NameId name, bool keyword,
+                                                      std::optional<u32> access_at) {
     if (!s.type) return std::nullopt;
     const QualType q = *s.type;
     const bool dependent = types().is_dependent(q);
     if (types().is_class(q) && (!dependent || types().class_of(q) == current_class))
-      if (auto d = member_alias_template(types().class_of(q), name))
-        return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, d->entity};
+      if (auto d = member_alias_template(types().class_of(q), name)) {
+        if (access_at) member_template_access(q, d->entity, name, *access_at);
+        return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {},
+                           templates().template_argument_entity(*d)};
+      }
     if (!dependent || !keyword) return std::nullopt;
     return TemplateArg{ast::TemplateArgKind::template_, types().dep_template(q, name, ast::DepNameForm::template_name),
                        ConstId::none};
@@ -4688,7 +4692,8 @@ public:
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
     if (!ns && at) unqualified_type_template_access(*t, name, *at);
-    return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
+    return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {},
+                       templates().template_argument_entity(*t)};
   }
   // The argument a template parameter named here stands for: its argument, or for a pack the
   // element of the innermost expansion naming it ([temp.variadic]/5). A pack outside every
@@ -4881,6 +4886,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
+    t.compatibility = compatibility();
     t.class_definition = [this](EntityId c) { return class_rec(c); };
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
@@ -6285,7 +6291,8 @@ public:
   // ([expr.const.const]); a reference variable is not itself such an object.
   void permit_constant_initializer(u32 declaration, QualType target, ConstId value) {
     if (!has_immediate_addresses_ || value == ConstId::none) return;
-    if (types().is_reference(target) || !immediate_result_entity(value)) constant_immediate_initializers_.insert(declaration);
+    if ((compatibility() == ast::Compatibility::spec && types().is_reference(target)) || !immediate_result_entity(value))
+      constant_immediate_initializers_.insert(declaration);
   }
 
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
@@ -6340,6 +6347,14 @@ public:
         if (auto entity = immediate_result_entity(element)) return entity;
     }
     return std::nullopt;
+  }
+
+  bool check_immediate_initializer(ConstId value, u32 at) {
+    if (auto entity = immediate_result_entity(value)) {
+      diag(at, Diag::immediate_address, w_->entities.rec(*entity).name);
+      return false;
+    }
+    return true;
   }
 
   // An immediate function may be named within an immediate invocation ([expr.const]). Wait

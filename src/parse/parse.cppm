@@ -9145,9 +9145,10 @@ private:
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
     if (!fn && definition && !pattern) s_.check_destructor_access(d.type, d.name_at);
-    if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))
-      if (auto entity = s_.immediate_result_entity(value))
-        s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
+    if (value != ConstId::none &&
+        (requires_constinit || s_.folded_immediate_result != EntityId::none ||
+         (spec.is_constexpr && s_.compatibility() != ast::Compatibility::spec)))
+      s_.check_immediate_initializer(value, init.begin);
     s_.permit_constant_initializer(d.begin, d.type, value);
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);

@@ -1882,7 +1882,7 @@ public:
                                                      bool checked = false, bool* failed_qualifier = nullptr,
                                                      std::optional<u32>* committed_failure = nullptr,
                                                      bool conversion = false, bool committed_type = false,
-                                                     bool classify_only = false) {
+                                                     bool classify_only = false, bool implicit_template = false) {
     // `Q::template M<args>` ([temp.names]/4): the keyword says M names a template.
     const bool keyword = in && kind(j) == Tk::kw_template;
     const u32 k = keyword ? j + 1 : j;
@@ -1896,7 +1896,7 @@ public:
                         : s_->namespace_type_template(*in->ns, n);
     } else if (in) {
       // A class's member alias template ([temp.mem]); a dependent class's, once it is known.
-      tmpl = s_->member_template_scope(*in, n, keyword, dependent_member);
+      tmpl = s_->member_template_scope(*in, n, keyword || implicit_template, dependent_member);
     } else if (!tt) {
       tmpl = s_->type_template(n);
     }
@@ -2010,8 +2010,11 @@ public:
     if ((s->type || kind(next) == Tk::kw_template) && (kind(next) == Tk::identifier || kind(next) == Tk::kw_template)) {
       u32 j = next;
       qualified_half_ = false;
+      const u32 first = index() + start;
+      const bool implicit_template = s_->compatibility() == ast::Compatibility::gcc && first != 0 &&
+                                     r_->tokens[first - 1].kind == Tk::kw_typename;
       if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr,
-                                     /*conversion=*/false, /*committed_type=*/false, classify_only)) {
+                                     /*conversion=*/false, /*committed_type=*/false, classify_only, implicit_template)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
@@ -2851,9 +2854,7 @@ public:
       if (kind(at) != Tk::identifier) return std::nullopt;
       NameId n = name_of(tok(at));
       if (sc->ns) return s_->template_name_arg(sc->ns, n);
-      auto a = s_->member_template_name_arg(*sc, n, keyword);
-      if (a && checked && a->templ != ast::EntityId::none) s_->member_template_access(*sc->type, a->templ, n, pos() + at);
-      return a;
+      return s_->member_template_name_arg(*sc, n, keyword, checked ? std::optional{pos() + at} : std::nullopt);
     }
     if (is(Tk::identifier))
       return s_->template_name_arg(std::nullopt, name_of(tok()), checked ? std::optional{pos()} : std::nullopt);
@@ -6199,7 +6200,7 @@ public:
     }
     if (!placeholder && !s_->types().is_reference(d.type)) constant_local(local, d.type, spec.is_constexpr, init);
     ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
-    record_local_constant_initializer(local, begin, init);
+    record_local_constant_initializer(local, begin, init, spec.is_constexpr);
     Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, begin), dtor}, begin, pos());
     s_->set_local_decl(local, var.id);
     if (init.ok() || dtor != ast::EntityId::none) s_->set_initialized(local);
@@ -6296,12 +6297,14 @@ public:
     return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
   }
 
-  void record_local_constant_initializer(u32 local, u32 declaration, Ex init) {
-    if (!s_->needs_immediate_reference_check() || !init.ok()) return;
+  void record_local_constant_initializer(u32 local, u32 declaration, Ex init, bool is_constexpr) {
+    const bool reject_escape = is_constexpr && s_->compatibility() != ast::Compatibility::spec;
+    if ((!s_->needs_immediate_reference_check() && !reject_escape) || !init.ok()) return;
     QualType target = s_->local(local).type;
     if (s_->types().is_reference(target) && s_->types().is_function(s_->types().referee(target))) {
       auto v = sema::Evaluator(*s_, questions()).evaluate_reference_initializer(init);
-      if (v.value) s_->permit_constant_initializer(declaration, target, *v.value);
+      if (v.value && (!reject_escape || s_->check_immediate_initializer(*v.value, init.begin)))
+        s_->permit_constant_initializer(declaration, target, *v.value);
     } else if (auto value = s_->local_values()[local]) {
       s_->permit_constant_initializer(declaration, target, *value);
     } else if (sema::Types::is_const(target) && !sema::Types::is_volatile(target) &&
@@ -6321,11 +6324,9 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
-      if (is_constexpr && s_->folded_immediate_result != ast::EntityId::none)
-        if (auto entity = s_->immediate_result_entity(*v.value)) {
-          s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
-          return;
-        }
+      if (is_constexpr && (s_->folded_immediate_result != ast::EntityId::none ||
+                          s_->compatibility() != ast::Compatibility::spec) &&
+          !s_->check_immediate_initializer(*v.value, init.begin)) return;
       s_->set_local_value(local, *v.value);
       if (scalar_record) {
         // The initialization was manifestly constant-evaluated ([expr.const]). Materialize that
@@ -6656,7 +6657,7 @@ public:
   // constant it is initialized with when its initializer is a constant expression
   // ([basic.start.static]).
   Ex variable_node(const DeclSpec& spec, u32 local, Ex init, ast::EntityId dtor, u32 dbegin) {
-    record_local_constant_initializer(local, dbegin, init);
+    record_local_constant_initializer(local, dbegin, init, spec.is_constexpr);
     if (!spec.is_static) return s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
     if (s_->types().is_reference(s_->local(local).type)) {
       s_->diag(dbegin, Diag::not_supported, Tk::kw_static);  // a static reference (#367)
