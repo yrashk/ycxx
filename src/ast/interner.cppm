@@ -547,6 +547,8 @@ struct Interners {
     contract_assert(no_qualifier.index == 0);
     [[maybe_unused]] const auto no_spellings = intern_seq(std::span<const TemplateTypeSpelling>{});
     contract_assert(no_spellings.index == 0);
+    [[maybe_unused]] const auto no_lambda_scope = intern_seq(std::span<const AtomLambdaScope>{});
+    contract_assert(no_lambda_scope.index == 0);
   }
   Names names;
   FpTable tokens;    // placeholder until #18

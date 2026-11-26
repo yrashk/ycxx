@@ -15,7 +15,7 @@ from project_inspection import (
     check_dependency_graph, check_dependency_html, check_location, check_target_dependencies_html,
     check_value_bindings_html, dependency_edge, fact, scope_state,
 )
-from project_native_host_tool import PLANNING_UNSUPPORTED, REFERENCE, SCANNER, SCORE_HEADER, check_rejection, header
+from project_native_host_tool import REFERENCE, SCANNER, SCORE_HEADER, header
 from project_native_host_witness import NOTE
 from project_shader_bundle import check_external_actions
 from project_staged_witness import (
@@ -337,17 +337,6 @@ fi
     assert journal_contents(generator_runs) == '17\n18\n' and journal_contents(witness_runs) == 'ran\n'
 
 
-def check_planning_rejection(ycxx, scope, env, journal):
-    prepare(scope, journal)
-    manifest = scope / 'build.ycxx'
-    definition = manifest.read_text(encoding='utf-8')
-    sources = 'sources = ["main.cc"]'
-    assert definition.count(sources) == 1, definition
-    definition = definition.replace(sources, f'{sources}\n    plan_inputs = {{ script = {COPY} }}')
-    manifest.write_text(definition, encoding='utf-8')
-    check_rejection(ycxx, scope, env, journal, PLANNING_UNSUPPORTED)
-
-
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     host, other = {'linux': (LINUX, DARWIN), 'darwin': (DARWIN, LINUX)}[sys.platform]
@@ -368,11 +357,6 @@ def main():
                 check_edit_during_witness(ycxx, in_flight, env, host, other, fails=fails)
             finally:
                 run_client(ycxx, in_flight, env, 'ctl', 'shutdown')
-        planning = root / 'planning'
-        try:
-            check_planning_rejection(ycxx, planning, env, root / 'planning-runs')
-        finally:
-            run_client(ycxx, planning, env, 'ctl', 'shutdown')
 
 
 if __name__ == '__main__':

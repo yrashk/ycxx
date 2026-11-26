@@ -245,10 +245,52 @@ The coordinator verifies the engine revision before launching an action
 that depends on a host build and again before admitting its receipt. Watch
 observes the source and include reads through the same file table as native
 compilation. Host executables are available to ordinary generator recipes
-and staged witness tools, including generator chains that use a host
-executable upstream. Host executable support for rule planning inputs
-remains in #1259.
+and staged witness tools. Ordinary generator chains can also run them
+upstream of a generated planning input.
 [Native host tool example](../../examples/project-build/native-host-tool/README.md)
+
+### Libraries for native host tools (#1576)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["shared"]
+}
+```
+
+Host executable dependencies are disk-backed `cpp.library` declarations.
+Each executable collects its own reachable sources and public include
+directories. In a diamond, both dependency paths remain visible in the
+plan and the shared library contributes its sources once per executable.
+The same library declaration can supply both the host scanner and a
+foreign-target app. The scanner's source and include observations cover its
+library translation units, so edits can wake watch and refresh the staged
+host image.
+[Shared library diamond example](../../examples/project-build/host-cxx-libraries/README.md)
+
+### Generated headers on a native host executable (#1579)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    generated_headers = [artifact("scanner_config", "header")]
+}
+```
+
+The declared producer and its ordinary predecessors run before the host
+compile. That action chain must be independent of project-built native host
+tools. Generators keep the requesting plan's argument selectors. C++ still
+compiles the executable for the host.
+
+Each admitted producer directory exposes the declared output names and
+their exact bytes through the executable's own include configuration.
+The immutable snapshot uses stable logical paths under `.ycxx/host/virtual`.
+Host sources, inherited library includes, and other real paths keep the
+ordinary disk view. The selected app has its own generated include view.
+Equal visible files preserve the host compile, and equal linked executable
+bytes preserve consuming generator receipts. The coordinator shares staged
+producer outputs across ordinary builds, planning inputs, and witnesses.
+[Generated host header example](../../examples/project-build/host-generated-headers/README.md)
 
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
@@ -732,8 +774,7 @@ An input has a single logical name and cannot share a name with an ordinary
 the selected receipt's bytes. The artifact is available to planning before
 the rule emits its declarations. The same generator and receipt serve any
 ordinary artifact consumers. The planner rejects cycles across planning,
-artifact and value edges. Planning input producer chains must be independent
-of host executable artifacts (#1259).
+artifact and value edges.
 
 The worker's request depends on the named input bytes. When a generator
 runs and produces equal bytes, the existing worker result stays reusable.
@@ -744,6 +785,24 @@ expansion. A stale graph becomes unresolved until a build supplies a current
 receipt. Watch follows the generator graph even if it fails or returns an
 invalid inventory. Publication keeps the previous assets until planning,
 the ordinary actions and the native build succeed.
+
+### Host tools upstream of planning inputs (#1574)
+
+The native inventory example builds `scanner` for the host and runs it
+in a generator. A copy action exposes the selected output to the `config`
+rule through `plan_inputs = { inventory = artifact("inventory", "list") }`.
+The worker reads those bytes and emits a generator for a `constexpr` header.
+The app can target a different platform from the scanner.
+
+The coordinator observes the reachable host tools together and records
+source and include lookups, including misses. It revalidates the worker's
+selected bytes before admitting the expansion. Equal bytes preserve the
+worker receipt and update the producer provenance. The coordinator keeps
+planning and witness file evidence separately. When the same rule also
+classifies a witness, both phases must agree on the inputs they share.
+Read-only inspection validates saved evidence, and watch retains failed
+lookups so creating a missing include can wake the build.
+[Host planning input example](../../examples/project-build/host-planning-inputs/README.md)
 
 ## Compiler capability observations
 

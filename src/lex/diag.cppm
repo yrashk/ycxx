@@ -18,7 +18,10 @@ export namespace ycxx::lex {
 enum class Severity : u8 { error, warning };
 
 // Diagnostic categories the driver can select. A diagnostic without a category is always shown.
-enum class Warning : u8 { uncontrolled, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large };
+enum class Warning : u8 {
+  uncontrolled, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large, bit_field_width,
+  overflow, literal_range
+};
 
 struct message {
   Severity severity;
@@ -36,6 +39,8 @@ enum class LexDiag : u32 {
   stray_basic_character [[=message{Severity::error, "stray '{0:c}' in program"}]],
   unterminated_char [[=message{Severity::error, "missing terminating ' character"}]],
   unterminated_string [[=message{Severity::error, "missing terminating \" character"}]],
+  skipped_unterminated_char [[=message{Severity::warning, "missing terminating ' character"}]],
+  skipped_unterminated_string [[=message{Severity::warning, "missing terminating \" character"}]],
   empty_char [[=message{Severity::error, "empty character literal"}]],
   // [lex.universal.char]
   ucn_not_scalar [[=message{Severity::error, "universal-character-name U+{0:x} is not a Unicode scalar value"}]],

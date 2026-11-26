@@ -258,7 +258,7 @@ def check_rejections(ycxx, workspace, env):
     for name, original, changed, expected in (
         ('cycle', f'sources = ["{SCANNER}"]', f'sources = [{GENERATED_HEADER}]',
          'host executable sources require disk paths or globs'),
-        ('planning', 'sources = ["main.cc"]', f'sources = ["main.cc"]\n    plan_inputs = {{ score = {GENERATED_HEADER} }}',
+        ('planning', 'sources = ["main.cc"]', f'sources = ["main.cc"]\n    plan_inputs = {{ scanner = {REFERENCE} }}',
          PLANNING_UNSUPPORTED),
     ):
         scope, journal = workspace / name, workspace / f'{name}-runs'

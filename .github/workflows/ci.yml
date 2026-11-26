@@ -38,7 +38,8 @@ jobs:
       contents: read
       actions: read
       issues: write
-    timeout-minutes: ${{ matrix.host.name == 'macos-arm64' && 40 || 30 }}
+    # Native compatibility and project-build fixtures share the arm64 test budget.
+    timeout-minutes: ${{ matrix.host.name == 'macos-arm64' && 65 || 30 }}
     env:
       TIER: ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
     steps:
@@ -55,8 +56,10 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
 
-      - name: Toolchain (GCC 16)
+      - name: Toolchain (GCC 16 and Clang 23 oracle)
         uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
 
       - name: Test driver self-test
         if: env.TIER == 'main'

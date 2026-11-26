@@ -533,6 +533,7 @@ public:
 
   // `decltype(e)` [dcl.type.decltype], with `decltype` and `(` at the cursor.
   std::optional<QualType> decltype_expression_type() {
+    const u32 at = pos();
     bump();
     bump();
     int saved = std::exchange(angle_, 0);
@@ -543,8 +544,18 @@ public:
     angle_ = saved;
     bool closed = expect(Tk::r_paren);
     if (!e.ok() || !closed) return std::nullopt;
+    const bool parenthesized = s_->as<ast::Paren>(e).has_value();
+    if (!written_function_parameters_.empty()) {
+      const auto reference = written_atom(e);
+      if (s_->ins().values.is<ast::VDepFnParam>(reference)) {
+        const std::array operands{reference, ConstId::none};
+        const auto spelling = s_->ins().intern_value(ast::VWrittenOperator{
+            u8(Tk::kw_decltype), s_->ins().intern_seq(std::span<const ConstId>(operands).first(parenthesized ? 2 : 1))});
+        written_decltypes_.insert_or_assign(at, spelling);
+      }
+    }
     if (s_->dependent(e)) ++deferred_argument_checks_;
-    return s_->decltype_of(e, s_->as<ast::Paren>(e).has_value());
+    return s_->decltype_of(e, parenthesized);
   }
 
   // In an argument, a nested `<` can be an operator. Type-template names reached through
@@ -976,7 +987,7 @@ public:
             const NameId name = name_of(tok());
             bump();
             bump();
-            if (!allow_constrained_auto || s_->templated()) {
+            if (!allow_constrained_auto || (s_->templated() && !placeholder_params)) {
               s_->diag(at, Diag::constrained_auto_context);
               d.ok = false;
               goto done;
@@ -1274,6 +1285,8 @@ public:
       if (!(forms & form)) return any;
       any |= form;
       if (std_attr && kind(2) == Tk::equal) {
+        if (s_->compatibility() == ast::Compatibility::clang)
+          s_->diag(pos() + 2, Diag::attributes_not_allowed);
         if (annotations) {
           annotation_list(*annotations);
           continue;
@@ -2303,6 +2316,14 @@ public:
           d.ok = false;
           return t;
         }
+        if (!fn && s_->compatibility() == ast::Compatibility::gcc && s_->types().is_function(t)) {
+          // GCC drops ref qualification when the function type is supplied by an alias.
+          auto function = s_->ins().types.get<ast::TFunction>(s_->types().canonical(t));
+          if (function.ref != ast::RefQual::none) {
+            function.ref = ast::RefQual::none;
+            t = s_->ins().intern_type(function);
+          }
+        }
         t = s_->types().add_cv(s_->types().member_pointer(*p.owner, t), p.cv);
         continue;
       }
@@ -2571,7 +2592,7 @@ public:
         break;
       }
       u32 at = pos();
-      DeclSpec spec = decl_specifiers();
+      DeclSpec spec = decl_specifiers(false, nullptr, false, false, placeholder_params && in_params_ == 1);
       if (spec.is_static || spec.is_extern || spec.is_inline || spec.is_constexpr) {
         s_->diag(at, Diag::not_supported, Tk::kw_static);
         ok = false;
@@ -2841,7 +2862,7 @@ public:
   // declaration ([basic.scope.pdecl]), so later ones and their defaults may name it. Not yet:
   // template template parameters, packs and type-constraints.
   // `keyword` false: a lambda's template-parameter-list, without `template` ([expr.prim.lambda.general]).
-  bool template_head(u16 depth, bool keyword = true) {
+  bool template_head(u16 depth, bool keyword = true, bool template_parameter_head = false) {
     s_->template_scopes.emplace_back();
     s_->head_constraints.clear();
     if ((keyword && !expect(Tk::kw_template)) || !expect(Tk::less)) return false;
@@ -2849,7 +2870,7 @@ public:
     ++angle_;
     if (!is(Tk::greater)) {
       do {
-        auto p = template_parameter(depth, u16(s_->template_scopes.back().size()), ok);
+        auto p = template_parameter(depth, u16(s_->template_scopes.back().size()), ok, template_parameter_head);
         if (!p) break;
         // [temp.param]: the names of a head's parameters are distinct.
         for (const ast::TemplateParamSema& q : s_->template_scopes.back())
@@ -2874,7 +2895,7 @@ public:
     return true;
   }
 
-  std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok) {
+  std::optional<ast::TemplateParamSema> template_parameter(u16 depth, u16 index, bool& ok, bool template_parameter_head) {
     ast::TemplateParamSema p{};
     p.depth = depth;
     p.index = index;
@@ -2887,8 +2908,16 @@ public:
     // A type-constraint ([temp.param]/2): `C T`, `C<args> T`, `N::C T`: a type parameter whose
     // constraint is `C<T, args…>` ([temp.constr.decl]/3).
     u32 concept_name = 0;
-    if (std::optional<ast::DeclSema> c = type_constraint_ahead(concept_name)) {
+    std::optional<ast::TemplateParamSema> dependent_concept;
+    if (template_parameter_head && is(Tk::identifier) && kind(1) != Tk::coloncolon)
+      if (const auto* named = s_->template_param(name_of(tok())); named && named->concept_template) dependent_concept = *named;
+    const auto c = type_constraint_ahead(concept_name);
+    if (c || dependent_concept) {
       u32 at = pos();
+      if (dependent_concept && s_->compatibility() != ast::Compatibility::clang) {
+        s_->diag(at, Diag::concept_dependent_template_head);
+        ok = false;
+      }
       for (u32 j = 0; j <= concept_name; ++j) bump();  // its nested-name-specifier and name
       std::vector<ast::TemplateArg> cargs;
       if (is(Tk::less)) {
@@ -2899,21 +2928,28 @@ public:
         }
         cargs = *a;
       }
-      if (is(Tk::ellipsis)) {
-        s_->diag(pos(), Diag::not_supported, Tk::ellipsis);  // a constrained pack: a fold-expanded constraint
-        ok = false;
-        return std::nullopt;
-      }
+      p.pack = u8(accept(Tk::ellipsis));
       p.kind = ast::TemplateArgKind::type;
-      p.type = s_->types().template_param(depth, index);
+      p.type = s_->types().template_param(depth, index, p.pack != 0);
       if (is(Tk::identifier)) {
         p.name = name_of(tok());
         bump();
       }
-      p.type_constraint = written_concept(*c, cargs);
+      p.type_constraint = dependent_concept ? s_->concept_parameter_id(*dependent_concept, cargs) : written_concept(*c, cargs);
       cargs.insert(cargs.begin(), s_->templates().type_arg(p.type));
-      if (auto nf = s_->concept_constraint(*c, cargs, at)) s_->head_constraints.push_back(*nf);
-      if (accept(Tk::equal) && !template_type_default(p)) {
+      auto normal = dependent_concept ? s_->templates().substitute_constraint(s_->concept_parameter_id(*dependent_concept, cargs), {})
+                                      : s_->concept_constraint(*c, cargs, at);
+      if (normal) {
+        if (p.pack) {
+          const std::array packs{u32(depth) << 16 | index};
+          *normal = s_->ins().intern_value(ast::VFoldConstraint{
+              *normal, ConstId::none, s_->ins().intern_seq(std::span<const u32>(packs)), 0,
+              s_->ins().intern_seq(std::span<const ast::FoldPackBinding>{}),
+              s_->compatibility() == ast::Compatibility::gcc});
+        }
+        s_->head_constraints.push_back(*normal);
+      }
+      if (!p.pack && accept(Tk::equal) && !template_type_default(p)) {
         ok = false;
         return std::nullopt;
       }
@@ -3017,22 +3053,35 @@ public:
   // A template template parameter ([temp.param]/1): `template<…> class TT = X`, `template<…>
   // class... TTs`. Its own head is at the next depth, in scope only in that head.
   std::optional<ast::TemplateParamSema> template_template_parameter(ast::TemplateParamSema p, bool& ok) {
-    std::vector<sema::ConstId> constraints = s_->head_constraints;
-    bool head = template_head(u16(p.depth + 1));
+    auto outer_constraints = std::move(s_->head_constraints);
+    bool head = template_head(u16(p.depth + 1), true, true);
+    const u32 clause_at = pos();
+    const bool clause = head && accept(Tk::kw_requires);
+    if (clause) {
+      const auto before = s_->diag_count();
+      const auto constraint = constraint_expression(true, &p.type_constraint);
+      head = !s_->has_error_since(before);
+      if (constraint != ConstId::none) s_->head_constraints.push_back(constraint);
+    }
+    auto constraints = std::exchange(s_->head_constraints, std::move(outer_constraints));
     std::vector<ast::TemplateParamSema> inner = std::move(s_->template_scopes.back());
     s_->template_scopes.pop_back();
     if (!head) {
       ok = false;
       return std::nullopt;
     }
-    // A constrained head needs [temp.arg.template]/3's constraint check (#271).
-    if (!s_->head_constraints.empty() || is(Tk::kw_requires)) {
-      s_->diag(pos(), Diag::not_supported, Tk::kw_requires);
+    // A replay can bind the concept before reading this head. Its written clause still names
+    // the concept parameter even when the normalized constraint already names its argument.
+    const bool dependent = concept_dependent_constraint(p.type_constraint) ||
+                           std::ranges::any_of(constraints, [&](ConstId value) { return concept_dependent_constraint(value); });
+    if ((clause || !constraints.empty()) && (!dependent || s_->compatibility() != ast::Compatibility::clang)) {
+      if (dependent) s_->diag(clause_at, Diag::concept_dependent_template_head);
+      else s_->diag(clause_at, Diag::not_supported, Tk::kw_requires);  // [temp.arg.template]/3 (#271)
       ok = false;
       return std::nullopt;
     }
-    s_->head_constraints = std::move(constraints);
-    if (!accept(Tk::kw_class) && !accept(Tk::kw_typename)) {
+    p.concept_template = s_->compatibility() != ast::Compatibility::gcc && accept(Tk::kw_concept);
+    if (!p.concept_template && !accept(Tk::kw_class) && !accept(Tk::kw_typename)) {
       expect(Tk::kw_class);
       ok = false;
       return std::nullopt;
@@ -3046,8 +3095,10 @@ public:
       bump();
     }
     if (!p.pack && accept(Tk::equal)) {
+      const auto at = pos();
       auto a = template_name_argument();
-      if (!a) {
+      if (!a || p.concept_template != a->concept_template) {
+        s_->diag(at, Diag::template_args_mismatch, p.name);
         ok = false;
         return std::nullopt;
       }
@@ -3055,6 +3106,17 @@ public:
       p.default_ = *a;
     }
     return p;
+  }
+
+  bool concept_dependent_constraint(ConstId value) {
+    const auto& values = s_->ins().values;
+    if (values.is<ast::VConceptParameter>(value)) return true;
+    if (values.is<ast::VFoldConstraint>(value))
+      return concept_dependent_constraint(values.get<ast::VFoldConstraint>(value).operand);
+    if (values.is<ast::VConstraint>(value))
+      return std::ranges::any_of(s_->ins().seqs.elements(values.get<ast::VConstraint>(value).operands),
+                                 [&](ConstId operand) { return concept_dependent_constraint(operand); });
+    return false;
   }
   // The last token of a template-name alone ([temp.arg.template]/1): a class or alias template
   // or a template template parameter, followed by the argument's end.
@@ -3336,6 +3398,11 @@ public:
       if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
+    // Clang rejects direct immediate-function arguments. GCC permits those, but
+    // rejects an aggregate argument whose constant value contains such an address.
+    if ((s_->compatibility() == ast::Compatibility::clang ||
+         (class_argument && s_->compatibility() == ast::Compatibility::gcc)) &&
+        !s_->check_immediate_initializer(*v.value, e.begin)) return std::nullopt;
     if (class_argument) {
       const auto a = s_->templates().converted_value({ast::TemplateArgKind::value, t, *v.value}, t);
       if (!a) {
@@ -3381,7 +3448,8 @@ public:
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
                                                                      bool* took_closer = nullptr, bool expand_empty = false,
-                                                                     VariableArgumentReplay* replay = nullptr) {
+                                                                     VariableArgumentReplay* replay = nullptr,
+                                                                     bool retain_decltype = false) {
     // Any nested template-id must supply canonical arguments to its enclosing argument.
     const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     if (took_closer) *took_closer = false;
@@ -3449,7 +3517,9 @@ public:
           if (!t) ok = false;
           else {
             const auto type = writing_gcc_template_signature_ ? retain_gcc_signature_transforms(*t) : *t;
-            args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type), sema::ConstId::none});
+            const auto spelling = retain_decltype ? written_decltypes_.find(arg_at) : written_decltypes_.end();
+            args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type),
+                            spelling == written_decltypes_.end() ? ConstId::none : spelling->second});
           }
         } else {
           const std::size_t expression_diags = s_->diag_count();
@@ -3711,21 +3781,49 @@ public:
 
   // ------------------------------------------------------------ constraints ([temp.constr])
 
+  // The fingerprint of a clause's tokens with each template parameter as its position: equal for
+  // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
+  sema::Fp128 clause_fp(u32 begin, u32 end) {
+    sema::Fp128 f = ast::seed("ycxx.parse.clause");
+    for (u32 j = begin_ + begin; j < begin_ + end; ++j) {
+      const lex::Tok& t = r_->tokens[j];
+      if (t.kind == Tk::identifier) {
+        NameId n = name_of(t);
+        if (const ast::TemplateParamSema* p = s_->template_param(n)) {
+          f = ast::mix(ast::mix(ast::mix(f, u64(0xA11)), u64(p->depth)), u64(p->index));
+          continue;
+        }
+      }
+      f = ast::mix(f, std::to_underlying(t.kind));
+      std::string_view sp = r_->spelling(t);
+      f = ast::mix(f, s_->ins().names.fp(s_->ins().names.intern(sp)));
+    }
+    return f;
+  }
+
   // A constraint-expression read into its normal form ([temp.constr.normal]): `||`, `&&`,
   // parentheses and concept-ids decompose; any other operand is an atomic constraint. With
   // `primaries` (a requires-clause, [temp.pre]/9) operands are primary-expressions; otherwise (a
   // concept's definition) they are what binds tighter than `&&`.
   sema::ConstId trailing_function_constraint(std::span<const Param> params, sema::ConstId& written) {
+    auto saved = std::exchange(written_function_parameters_, {});
+    auto saved_packs = std::exchange(written_function_packs_, {});
+    auto saved_decltypes = std::exchange(written_decltypes_, {});
     s_->push_scope();
     for (std::size_t i = 0; i < params.size(); ++i) {
       const auto& p = params[i];
       if (p.name == s_->no_name()) continue;
       const auto local = s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-      written_function_parameters_.emplace(local, ast::VDepFnParam{0, u16(i), u8(ast::cv_of(p.type))});
+      const ast::VDepFnParam reference{0, u16(i), u8(ast::cv_of(p.type))};
+      written_function_parameters_.emplace(local, reference);
+      if (s_->types().kind(p.type) == sema::TypeKind::pack_expansion)
+        written_function_packs_.emplace(p.name, reference);
     }
     const auto result = constraint_expression(true, &written);
     s_->pop_scope();
-    written_function_parameters_.clear();
+    written_function_parameters_ = std::move(saved);
+    written_function_packs_ = std::move(saved_packs);
+    written_decltypes_ = std::move(saved_decltypes);
     return result;
   }
 
@@ -3768,6 +3866,10 @@ public:
   }
   sema::ConstId written_atom(Ex e) {
     if (const auto operand = written_operators_.find(e.id); operand != written_operators_.end()) return operand->second;
+    if (writing_constraint_atom_) {
+      if (auto closure = s_->as<ast::Lambda>(e)) return s_->ins().intern_value(ast::VWrittenLambda{closure->closure});
+      if (s_->as<ast::This>(e)) return s_->ins().intern_value(ast::VWrittenThis{});
+    }
     if (auto local = s_->as<ast::LocalRef>(e)) {
       const auto parameter = written_requires_parameters_.find(local->local);
       if (parameter != written_requires_parameters_.end()) return s_->ins().intern_value(parameter->second);
@@ -3803,6 +3905,15 @@ public:
     }
     return sema::ConstId::none;
   }
+  void record_written_trait(Ex result, lex::TypeTrait trait, NameId name, std::span<const QualType> types) {
+    if (!result.ok() || !writing_constraint_atom_) return;
+    using enum lex::TypeTrait;
+    const bool primary_gcc = trait == is_same || trait == is_class || trait == is_convertible ||
+                             trait == is_constructible || trait == is_trivially_copyable;
+    written_operators_.insert_or_assign(result.id, s_->ins().intern_value(
+        ast::VWrittenTrait{name, s_->ins().intern_seq(types), primary_gcc}));
+  }
+
   void record_written_operator(Ex result, Tk token, std::span<const ConstId> operands) {
     if (!result.ok() || std::ranges::contains(operands, ConstId::none)) return;
     written_operators_.insert_or_assign(result.id, s_->ins().intern_value(
@@ -3868,6 +3979,7 @@ public:
     u32 begin = pos();
     const sema::Sema::ConstraintAtomScope atom{*s_};
     const bool saved = std::exchange(writing_constraint_atom_, written != nullptr);
+    const bool saved_folds = std::exchange(normalizing_constraint_atom_, s_->compatibility() != ast::Compatibility::gcc);
     Ex e = primaries ? primary_expression() : binary_expression(3);
     if (written) {
       *written = written_atom(e);
@@ -3875,11 +3987,16 @@ public:
           !s_->ins().values.is<ast::VRequiresExpression>(*written)) *written = sema::ConstId::none;
     }
     writing_constraint_atom_ = saved;
-    // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
+    normalizing_constraint_atom_ = saved_folds;
+    if (auto fold = normalize_fold_constraint(e)) return *fold;
+    return constraint_atom(begin, pos());
+  }
+  // The names in the token range select the atom's parameter mapping.
+  ConstId constraint_atom(u32 begin, u32 end) {
     std::vector<NameId> names;
-    for (u32 j = begin_ + begin; j < i_; ++j)
+    for (u32 j = begin_ + begin; j < begin_ + end; ++j)
       if (r_->tokens[j].kind == Tk::identifier) names.push_back(name_of(r_->tokens[j]));
-    return s_->atom(begin, pos(), names);
+    return s_->atom(begin, end, names, fold_element_packs_);
   }
   // `C<args>` or `N::C<args>` naming a concept here: its normal form; none (nothing read) if it
   // is no concept-id.
@@ -3890,6 +4007,19 @@ public:
     u32 at = pos();
     const bool qualified = qualified_ahead();
     const bool global = is(Tk::coloncolon);
+    if (!qualified && is(Tk::identifier) && kind(1) == Tk::less)
+      if (const auto* parameter = s_->template_param(name_of(tok())); parameter && parameter->concept_template) {
+        const auto head = *parameter;
+        bump();
+        if (auto args = template_argument_list()) {
+          const auto ref = s_->concept_parameter_id(head, *args);
+          if (written) *written = ref;
+          return s_->templates().substitute_constraint(ref, {}).value_or(ConstId::none);
+        }
+        i_ = back;
+        s_->truncate_diags(n);
+        return std::nullopt;
+      }
     if (qualified) {
       u32 next = 0;
       auto sc = nested_name(0, next);
@@ -3903,27 +4033,102 @@ public:
       if (!c) return std::nullopt;
       bump();
     }
-    auto args = template_argument_list();
+    auto args = template_argument_list(nullptr, nullptr, false, nullptr, /*retain_decltype=*/written != nullptr);
     if (!args) {  // read again as an expression, which diagnoses it
       i_ = back;
       s_->truncate_diags(n);
       return std::nullopt;
     }
-    auto normal = s_->concept_constraint(*c, *args, at);
+    auto canonical = *args;
+    for (auto& argument : canonical)
+      if (argument.kind == ast::TemplateArgKind::type) argument.value = ConstId::none;
+    auto normal = s_->concept_constraint(*c, canonical, at);
     if (normal && written) {
       if (s_->compatibility() == ast::Compatibility::gcc)
-        if (auto full = s_->template_arguments(*c, *args, at)) *args = std::move(*full);
+        if (auto full = s_->template_arguments(*c, canonical, at)) {
+          for (std::size_t i = 0; i < std::min(full->size(), args->size()); ++i)
+            if ((*full)[i].kind == ast::TemplateArgKind::type && (*args)[i].kind == ast::TemplateArgKind::type)
+              (*full)[i].value = (*args)[i].value;
+          *args = std::move(*full);
+        }
       *written = written_concept(*c, *args, qualified, global);
     }
     return normal.value_or(sema::ConstId::none);
   }
 
   bool writing_constraint_atom_ = false;
+  bool defer_member_constraint_layout = false;
+  bool normalizing_constraint_atom_ = false;
   bool writing_pack_index_ = false;
   std::map<NodeId, ConstId> written_operators_;
   std::map<u32, ast::VRequiresParameter> written_requires_parameters_;
   std::map<u32, ast::VDepFnParam> written_function_parameters_;
+  std::map<NameId, ast::VDepFnParam> written_function_packs_;
+  std::map<u32, ConstId> written_decltypes_;
   u32 written_requires_depth_ = 0;
+
+  struct FoldConstraintPattern {
+    u32 begin = 0;
+    u32 end = 0;
+    std::vector<sema::PackRef> packs;
+    std::optional<Ex> initializer;
+    bool initializer_first = false;
+    bool disjunction = false;
+  };
+  std::map<NodeId, FoldConstraintPattern> fold_constraints_;
+  std::span<const sema::PackRef> fold_element_packs_;
+
+  std::optional<ConstId> normalize_fold_constraint(Ex expression) {
+    while (auto paren = s_->as<ast::Paren>(expression)) expression.id = paren->operand.id;
+    const auto found = fold_constraints_.find(expression.id);
+    if (found == fold_constraints_.end()) return std::nullopt;
+    const auto& pattern = found->second;
+    std::vector<u32> packs;
+    std::size_t concepts = 0;
+    for (const auto& pack : pattern.packs) {
+      if (pack.fn != NameId{}) return std::nullopt;
+      packs.push_back(u32(pack.depth) << 16 | pack.index);
+      for (const auto& head : s_->template_scopes)
+        if (pack.index < head.size() && head[pack.index].depth == pack.depth && head[pack.index].concept_template)
+          ++concepts;
+    }
+    const bool concept_pack = concepts != 0;
+    const bool spec = s_->compatibility() == ast::Compatibility::spec;
+    if (spec && concept_pack && concepts != packs.size()) {
+      s_->diag(pattern.begin, Diag::mixed_concept_fold_packs);
+      return std::nullopt;
+    }
+    const auto read_constraint = [&](u32 begin, u32 end, bool expansion) {
+      const auto before = s_->diag_count();
+      Parser operand(*r_, begin_, begin_ + end, *s_);
+      operand.set_questions(questions());
+      operand.seek(begin_ + begin);
+      operand.fold_element_packs_ = expansion ? std::span<const sema::PackRef>(pattern.packs) : fold_element_packs_;
+      if (expansion) s_->begin_pattern();
+      const auto normal = operand.constraint_expression(false);
+      if (expansion) s_->end_pattern(false, begin, end, /*record=*/false);
+      if (!operand.at_end() || normal == ConstId::none || s_->diag_count() != before) {
+        s_->truncate_diags(before);
+        return ConstId::none;
+      }
+      return normal;
+    };
+    const auto operand = read_constraint(pattern.begin, pattern.end, true);
+    if (operand == ConstId::none) return std::nullopt;
+    const auto op = u8(pattern.disjunction);
+    const auto fold = s_->ins().intern_value(ast::VFoldConstraint{
+        operand, concept_pack ? ConstId::none : constraint_atom(pattern.begin, pattern.end),
+        s_->ins().intern_seq(std::span<const u32>(packs)), op,
+        s_->ins().intern_seq(std::span<const ast::FoldPackBinding>{}), concept_pack && !spec, concept_pack && spec});
+    if (!pattern.initializer) return fold;
+    // [temp.constr.normal]: a binary fold is a unary fold joined with its
+    // initializer, in source order. Either side may short-circuit the other.
+    const auto initial = read_constraint(pattern.initializer->begin, pattern.initializer->end, false);
+    if (initial == ConstId::none) return std::nullopt;
+    const std::array clauses{pattern.initializer_first ? initial : fold,
+                             pattern.initializer_first ? fold : initial};
+    return s_->ins().intern_value(ast::VConstraint{op, s_->ins().intern_seq(std::span<const ConstId>(clauses))});
+  }
 
   // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
   std::optional<ast::DeclSema> concept_name() {
@@ -4296,6 +4501,18 @@ public:
     }
     return false;
   }
+  bool replayed_expression_fold = false;
+
+  Ex constraint_fold_satisfaction(bool disjunction) {
+    const u32 begin = pos();
+    ConstId written = ConstId::none;
+    FoldConstraintPattern normalized;
+    const auto elements = fold_pattern(written, normalized, disjunction);
+    if (!elements) return {NodeId::none, begin, pos()};
+    if (elements->empty()) return s_->bool_literal(!disjunction, begin, pos());
+    return elements->back();
+  }
+
   // A fold-expression ([expr.prim.fold]): in a definition one dependent operand; in an
   // instantiation the elements of its pattern nested as [temp.variadic]/11 says, an empty one as
   // /12 says.
@@ -4311,12 +4528,14 @@ public:
     Tk op{};
     std::optional<Ex> init;
     std::optional<std::vector<Ex>> elems;
+    ConstId pattern = ConstId::none;
+    FoldConstraintPattern normalized;
     if (is(Tk::ellipsis)) {  // ( ... op pattern ), a unary left fold
       bump();
       op = kind();
       bump();
       left = true;
-      elems = fold_pattern();
+      elems = fold_pattern(pattern, normalized);
     } else {
       // ( pattern op ... ), ( pattern op ... op init ), or ( init op ... op pattern ).
       // Which operand is the pattern: the one that names a pack, as the definition found.
@@ -4331,7 +4550,7 @@ public:
         i_ = begin_ + first;
       }
       if (a_is_pattern) {
-        elems = fold_pattern();
+        elems = fold_pattern(pattern, normalized);
       } else {
         init = cast_expression();
         left = true;
@@ -4345,12 +4564,27 @@ public:
           return {NodeId::none, begin, pos()};
         }
         bump();
-        if (left) elems = fold_pattern();
+        if (left) elems = fold_pattern(pattern, normalized);
         else init = cast_expression();
       }
     }
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    if (!elems) return s_->dependent_node({}, begin, pos());
+    if (!elems) {
+      const Ex result = s_->dependent_node({}, begin, pos());
+      const ConstId initial = init ? written_atom(*init) : ConstId::none;
+      if (pattern != ConstId::none && (!init || initial != ConstId::none)) {
+        const bool initial_first = left && init.has_value();
+        written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenFold{
+            u8(op), left, initial_first ? initial : pattern, initial_first ? pattern : initial}));
+      }
+      if (normalizing_constraint_atom_ && !normalized.packs.empty() && (op == Tk::ampamp || op == Tk::pipepipe)) {
+        normalized.initializer = init;
+        normalized.initializer_first = left;
+        normalized.disjunction = op == Tk::pipepipe;
+        fold_constraints_.emplace(result.id, std::move(normalized));
+      }
+      return result;
+    }
     u32 at = begin;
     auto apply = [&](Ex l, Ex r) -> Ex {
       if (op == Tk::comma) return s_->binary(sema::Sema::BinOp::comma, l, r, at);
@@ -4381,26 +4615,51 @@ public:
   }
   // A fold's pattern, a cast-expression: its elements in an instantiation; none in a definition,
   // where the expansion is recorded and the fold is dependent.
-  std::optional<std::vector<Ex>> fold_pattern() {
+  std::optional<std::vector<Ex>> fold_pattern(ConstId& written, FoldConstraintPattern& normalized,
+                                              std::optional<bool> constraint = std::nullopt) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       sema::Expansion e = *x;
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
+      if (!constraint) replayed_expression_fold = true;
       if (n)
         for (std::size_t i = 0; i < *n; ++i) {
           i_ = begin_ + begin;
           s_->push_frame(e.packs, u32(i));
-          out.push_back(cast_expression());
+          const Ex element = cast_expression();
           s_->pop_frame();
+          out.push_back(element);
+          if (!constraint) continue;
+          if (!element.ok()) break;
+          // [temp.constr.fold]: each element is itself a constraint. Its value can
+          // keep later elements from being substituted at all.
+          const Ex value = s_->rvalue(element);
+          const QualType type = ast::without_cv(s_->types().canonical(value.type()));
+          if (!s_->types().is(type, Builtin::bool_)) {
+            s_->diag(element.begin, Diag::constraint_not_bool, type);
+            break;
+          }
+          const auto evaluated = sema::Evaluator(*s_, questions()).evaluate(value);
+          if (!evaluated.value) break;
+          const bool satisfied = s_->world().values.as_signed(*evaluated.value) != 0;
+          out.back() = s_->bool_literal(satisfied, element.begin, element.end);
+          if (satisfied == *constraint) break;
         }
       i_ = begin_ + e.end;
       if (!n) return std::nullopt;
       return out;
     }
     s_->begin_pattern();
-    cast_expression();
-    if (s_->end_pattern(true, begin, pos()).empty()) s_->diag(begin, Diag::expansion_without_pack);
+    const Ex pattern = cast_expression();
+    auto packs = s_->end_pattern(true, begin, pos());
+    if (packs.empty()) s_->diag(begin, Diag::expansion_without_pack);
+    if (normalizing_constraint_atom_) {
+      normalized.begin = begin;
+      normalized.end = pos();
+      normalized.packs = std::move(packs);
+    }
+    if (writing_constraint_atom_ || writing_pack_index_) written = written_atom(pattern);
     return std::nullopt;
   }
 
@@ -4413,7 +4672,9 @@ public:
       u32 at = pos();
       bump();
       Ex r = assignment_expression();
-      e = s_->binary(sema::Sema::BinOp::comma, e, r, at);
+      Ex result = s_->binary(sema::Sema::BinOp::comma, e, r, at);
+      if (writing_constraint_atom_) record_written_operator(result, Tk::comma, {written_atom(e), written_atom(r)});
+      e = result;
     }
     return e;
   }
@@ -4452,6 +4713,7 @@ public:
     }
     if (auto op = assignment_operator(kind())) {
       if (spans) spans->decomposable = false;
+      const Tk token = kind();
       u32 at = pos();
       bump();
       if (is(Tk::l_brace)) {
@@ -4464,7 +4726,9 @@ public:
         return s_->assign_list(l, *b, at);
       }
       Ex r = assignment_expression();
-      return s_->assign(*op, l, r, at);
+      Ex result = s_->assign(*op, l, r, at);
+      if (writing_constraint_atom_) record_written_operator(result, token, {written_atom(l), written_atom(r)});
+      return result;
     }
     return l;
   }
@@ -4479,7 +4743,12 @@ public:
         !(angle_ && (is(Tk::greater) || is(Tk::greatergreater)))) {
       operand = assignment_expression();
     }
-    return s_->throw_expression(operand, begin, pos());
+    Ex result = s_->throw_expression(operand, begin, pos());
+    if (writing_constraint_atom_) {
+      if (operand) record_written_operator(result, Tk::kw_throw, {written_atom(*operand)});
+      else record_written_operator(result, Tk::kw_throw, {});
+    }
+    return result;
   }
 
   Ex conditional_expression() {
@@ -4591,6 +4860,7 @@ public:
         if (t && accept(Tk::r_paren) && !is(Tk::l_brace) && !is(Tk::period) && !is(Tk::arrow)) {
           Ex e = cast_expression();
           Ex r = s_->static_cast_to(e, *t, begin);
+          if (writing_constraint_atom_) record_written_operator(r, Tk::l_paren, {written_type(*t), written_atom(e)});
           return {r.id, begin, pos(), r.info};
         }
         s_->truncate_diags(n);
@@ -4721,8 +4991,29 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
-    if (bound) return s_->new_array(*type, *bound, literal_arithmetic_bound, args, braces.get(), begin, pos());
-    return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
+    Ex result = bound ? s_->new_array(*type, *bound, literal_arithmetic_bound, args, braces.get(), begin, pos())
+                      : s_->new_object(*type, args, braces.get(), begin, pos(), placement);
+    if (writing_constraint_atom_ && result.ok()) record_written_new(result, *type, bound, placement, args, braces.get());
+    return result;
+  }
+
+  void record_written_new(Ex result, QualType type, const std::optional<Ex>& bound,
+                          const std::optional<Ex>& placement, const std::optional<std::vector<Ex>>& args,
+                          const sema::Braced* braces) {
+    const auto count = bound ? written_atom(*bound) : ConstId::none;
+    const auto place = placement ? written_atom(*placement) : ConstId::none;
+    if ((bound && count == ConstId::none) || (placement && place == ConstId::none)) return;
+    std::vector<ConstId> initializers;
+    if (args)
+      for (const auto& argument : *args) initializers.push_back(written_atom(argument));
+    if (braces)
+      for (const auto& argument : braces->clauses)
+        initializers.push_back(argument.list || argument.designated ? ConstId::none : written_atom(argument.expr));
+    if (std::ranges::contains(initializers, ConstId::none)) return;
+    const bool global = r_->tokens[begin_ + result.begin].kind == Tk::coloncolon;
+    written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenNew{
+        type, count, place, s_->ins().intern_seq(std::span<const ConstId>(initializers)),
+        u8(braces ? 2 : args ? 1 : 0), global}));
   }
 
   Ex delete_expression(u32 begin) {
@@ -4733,7 +5024,21 @@ public:
       bump();
     }
     Ex operand = cast_expression();
-    return array ? s_->delete_array(operand, begin, pos()) : s_->delete_object(operand, begin, pos());
+    Ex result = array ? s_->delete_array(operand, begin, pos()) : s_->delete_object(operand, begin, pos());
+    if (writing_constraint_atom_ && result.ok()) {
+      const auto written = written_atom(operand);
+      if (written != ConstId::none) {
+        const bool global = r_->tokens[begin_ + begin].kind == Tk::coloncolon;
+        written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenDelete{written, array, global}));
+      }
+    }
+    return result;
+  }
+
+  bool fold_written_layout(Ex result, bool align) {
+    if (!align && s_->compatibility() == ast::Compatibility::gcc) return false;
+    const auto literal = s_->as<ast::Literal>(result);
+    return literal && s_->ins().values.is<ast::VInt>(literal->value);
   }
 
   // unary-expression ([expr.unary]).
@@ -4755,7 +5060,11 @@ public:
       if (kind(1) == Tk::ellipsis && kind(2) == Tk::l_paren && kind(3) == Tk::identifier && kind(4) == Tk::r_paren) {
         NameId n = name_of(tok(3));
         for (int i = 0; i < 5; ++i) bump();
-        return s_->sizeof_pack(n, begin, pos());
+        const Ex result = s_->sizeof_pack(n, begin, pos());
+        if (writing_constraint_atom_)
+          if (auto pack = written_function_packs_.find(n); pack != written_function_packs_.end())
+            record_written_operator(result, Tk::ellipsis, {s_->ins().intern_value(pack->second)});
+        return result;
       }
       [[fallthrough]];
     case Tk::kw_alignof: {
@@ -4771,6 +5080,7 @@ public:
         // Tentatively a type-id: `sizeof(int(1))` and `sizeof(T{})` are expressions.
         u32 back = i_;
         bump();
+        const u32 type_at = pos();
         if (starts_type_id()) {
           std::size_t n = s_->diag_count();
           auto t = type_id();
@@ -4783,8 +5093,12 @@ public:
               if (layout_argument_at_ == begin) return s_->dependent_layout_query(*t, align, begin, pos());
             }
             Ex r = s_->size_of(*t, align, begin, pos());
-            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok())
-              written_operators_.insert_or_assign(r.id, s_->layout_query_value(*t, align));
+            if ((writing_constraint_atom_ || writing_pack_index_) && r.ok() &&
+                (!writing_constraint_atom_ || !fold_written_layout(r, align))) {
+              if (const auto spelling = written_decltypes_.find(type_at); spelling != written_decltypes_.end())
+                record_written_operator(r, align ? Tk::kw_alignof : Tk::kw_sizeof, {spelling->second});
+              else written_operators_.insert_or_assign(r.id, s_->layout_query_value(*t, align));
+            }
             return {r.id, begin, pos(), r.info};
           }
           s_->truncate_diags(n);
@@ -4805,8 +5119,16 @@ public:
       }
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
       if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
-      Ex r = s_->size_of(e.type(), false, begin, pos());
-      if (writing_constraint_atom_) record_written_operator(r, Tk::kw_sizeof, {written_atom(e)});
+      const auto operand = writing_constraint_atom_ ? written_atom(e) : ConstId::none;
+      bool defer = false;
+      if (defer_member_constraint_layout && s_->ins().values.is<ast::VWrittenOperator>(operand)) {
+        const auto op = s_->ins().values.get<ast::VWrittenOperator>(operand);
+        defer = Tk(op.token) == Tk::star && s_->ins().seqs.size(op.operands) == 1 &&
+                s_->ins().values.is<ast::VWrittenThis>(s_->ins().seqs.at(op.operands, 0));
+      }
+      Ex r = defer ? s_->dependent_layout_query(e.type(), false, begin, pos()) : s_->size_of(e.type(), false, begin, pos());
+      if (writing_constraint_atom_ && (s_->dependent(e) || !fold_written_layout(r, false)))
+        record_written_operator(r, Tk::kw_sizeof, {operand});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::coloncolon:
@@ -4854,6 +5176,7 @@ public:
 
   // This builtin takes a type-id and one assignment-expression (docs/EXTENSIONS.md).
   Ex bit_cast_expression(u32 begin) {
+    const NameId name = name_of(tok());
     bump();  // builtin name
     bump();  // '('
     Unangle unangle{angle_};
@@ -4862,11 +5185,15 @@ public:
     if (!destination || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
     Ex source = assignment_expression();
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    return s_->bit_cast(*destination, source, begin, pos(), type_at);
+    Ex result = s_->bit_cast(*destination, source, begin, pos(), type_at);
+    if (writing_constraint_atom_ && result.ok())
+      written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenBuiltin{name}));
+    return result;
   }
 
   // [support.types.layout]: a type-id and a direct non-static data member.
   Ex offsetof_expression(u32 begin) {
+    const NameId name = name_of(tok());
     bump();  // builtin name
     bump();  // '('
     int saved = std::exchange(angle_, 0);
@@ -4881,7 +5208,10 @@ public:
     NameId member = name_of(tok());
     bump();
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-    return s_->offset_of(*type, member, begin, pos(), member_at);
+    Ex result = s_->offset_of(*type, member, begin, pos(), member_at);
+    if (writing_constraint_atom_ && result.ok())
+      written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenBuiltin{name}));
+    return result;
   }
 
   // postfix-expression ([expr.post]).
@@ -5020,13 +5350,20 @@ public:
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
         const Ex object = e;
-        e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
-                       structural_member_argument() && !keyword && !targs);
+        const auto written_object = writing_constraint_atom_ ? written_atom(object) : ConstId::none;
+        const bool dependent_this = s_->declaration_part && targs &&
+            s_->ins().values.is<ast::VWrittenThis>(written_object) &&
+            std::ranges::any_of(*targs, [&](const ast::TemplateArg& arg) { return s_->dependent(arg); });
+        // A dependent member call in a trailing clause is checked at substitution.
+        // Class completion may still be processing the member's declaration here.
+        if (dependent_this) e = s_->dependent_node({object}, object.begin, pos());
+        else e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
+                            structural_member_argument() && !keyword && !targs);
         if (writing_constraint_atom_ && !member_class && e.ok()) {
-          if (const auto operand = written_atom(object); operand != ConstId::none) {
+          if (written_object != ConstId::none) {
             const auto args = targs ? std::span<const ast::TemplateArg>(*targs) : std::span<const ast::TemplateArg>{};
             written_operators_.insert_or_assign(e.id, s_->ins().intern_value(ast::VWrittenMember{
-                operand, n, s_->ins().intern_seq(args), arrow, targs.has_value()}));
+                written_object, n, s_->ins().intern_seq(args), arrow, targs.has_value()}));
           }
         }
         if (targs) s_->explicit_template_args(e, std::move(*targs));
@@ -5129,6 +5466,11 @@ public:
     } while (accept(Tk::comma));
     if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
     Ex result = s_->constructibility_expr(trait, name, args, begin, pos());
+    if (writing_constraint_atom_) {
+      std::vector<QualType> types;
+      for (const auto& operand : args) types.push_back(operand.type);
+      record_written_trait(result, trait, name, types);
+    }
     if (s_->dependent(result)) ++deferred_argument_checks_;  // An alias can discard this argument.
     return result;
   }
@@ -5301,6 +5643,7 @@ public:
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
           Ex result = s_->trait_expr(tr->trait, n, args, begin, pos());
+          record_written_trait(result, tr->trait, n, args);
           if (tr->replay_dependent && s_->dependent(result)) {
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
             if (tr->trait == lex::TypeTrait::array_rank) ++deferred_rank_checks_;
@@ -5330,6 +5673,13 @@ public:
         }
       if (kind(1) == Tk::coloncolon) return qualified_id(begin);
       bump();
+      if (is(Tk::less))
+        if (const auto* parameter = s_->template_param(n); parameter && parameter->concept_template) {
+          const auto head = *parameter;
+          const auto args = template_argument_list();
+          if (!args) return {NodeId::none, begin, pos()};
+          return s_->concept_parameter_expression(head, *args, begin, pos(), writing_constraint_atom_);
+        }
       if (writing_constraint_atom_ && is(Tk::less))
         if (auto c = s_->concept_named(n)) {
           auto args = template_argument_list();
@@ -5418,11 +5768,8 @@ public:
       if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to(e, *t, begin, pos());
       else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
       else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
-      if ((writing_constraint_atom_ || writing_pack_index_) && cast == Tk::kw_static_cast && r.ok()) {
-        const QualType target = s_->types().canonical(*t);
-        const ConstId type = s_->ins().intern_value(ast::VType{ast::without_cv(target), u8(ast::cv_of(target))});
-        record_written_operator(r, cast, {type, written_atom(e)});
-      }
+      if (writing_constraint_atom_ || (writing_pack_index_ && cast == Tk::kw_static_cast))
+        record_written_operator(r, cast, {written_type(*t), written_atom(e)});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {
@@ -5922,7 +6269,7 @@ public:
         DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
         Declarator d = declarator(spec.type, /*abstract=*/true, /*typedef_=*/false, /*conversion=*/false,
                                   NamedExceptionSpec::ordinary, /*defer_ref_check=*/false,
-                                  /*reject_parameter_defaults=*/true);
+                                  /*reject_parameter_defaults=*/s_->compatibility() != ast::Compatibility::clang);
         if (spec.ok && d.ok) {
           type = d.type;
           if (s_->types().is_array(type)) type = s_->types().pointer(s_->types().rec(type).inner);
@@ -6058,12 +6405,24 @@ public:
     intro = false;
     // A template-parameter-list: a generic lambda ([expr.prim.lambda.general]/2).
     const u16 depth = u16(s_->template_scopes.size());
+    struct RestoreHeadConstraints {
+      std::vector<ConstId>& constraints;
+      std::vector<ConstId> saved;
+      ~RestoreHeadConstraints() { constraints = std::move(saved); }
+    } restore_head{s_->head_constraints, std::exchange(s_->head_constraints, {})};
+    ConstId head_requires = ConstId::none;
+    ConstId trailing_requires = ConstId::none;
+    std::vector<ConstId> parameter_constraints;
     if (is(Tk::less)) {
       head = true;
       if (!template_head(depth, false)) return fail();
-      if (is(Tk::kw_requires)) {  // a requires-clause on a lambda (#281)
-        s_->diag(pos(), Diag::not_supported, Tk::kw_requires);
-        return fail();
+      if (accept(Tk::kw_requires)) {
+        const auto at = pos();
+        const auto before = s_->diag_count();
+        const sema::Sema::LambdaConstraintScope context(*s_, {});
+        head_requires = constraint_expression(true, &spec.head_constraint.expression);
+        spec.head_constraint.tokens = clause_fp(at, pos());
+        if (s_->has_error_since(before)) return fail();
       }
     }
     // lambda-declarator ([expr.prim.lambda.general]): parameters, specifiers, trailing return type;
@@ -6100,6 +6459,26 @@ public:
           inv.type = s_->types().template_param(depth, inv.index, pack);
           inv.default_ = {ast::TemplateArgKind::type, s_->builtin(Builtin::void_), sema::ConstId::none};
           inv.params = s_->world().ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+          auto placeholder = s_->types().rec(t);
+          while (placeholder.kind != sema::TypeKind::placeholder) placeholder = s_->types().rec(placeholder.inner);
+          if (placeholder.entity != EntityId::none) {
+            if (pack) {
+              s_->diag(p.at, Diag::not_supported, Tk::ellipsis);
+              return fail();
+            }
+            auto constraint_concept = questions().template_decl(placeholder.entity);
+            if (!constraint_concept) return fail();
+            // BOOTSTRAP: GCC 16.2 at -O3 reports array bounds when appending to the
+            // one-element initializer-list vector. Reserve the full argument count first.
+            const auto explicit_args = s_->ins().seqs.elements(placeholder.args);
+            std::vector<ast::TemplateArg> args;
+            args.reserve(explicit_args.size() + 1);
+            args.push_back(s_->templates().type_arg(inv.type));
+            for (const auto& arg : explicit_args) args.push_back(arg);
+            auto normal = s_->concept_constraint(*constraint_concept, args, p.at);
+            if (!normal) return fail();
+            parameter_constraints.push_back(*normal);
+          }
           s_->template_scopes.back().push_back(inv);
           sema::Bindings invent;
           invent.placeholder = inv.type;
@@ -6117,17 +6496,24 @@ public:
       bool constexpr_ = false;
       for (;;) {
         // [expr.prim.lambda.general]/3: each lambda-specifier at most once.
-        if ((is(Tk::kw_mutable) && spec.mutable_) || (is(Tk::kw_constexpr) && constexpr_)) {
+        if ((is(Tk::kw_mutable) && spec.mutable_) || (is(Tk::kw_constexpr) && constexpr_) ||
+            (is(Tk::kw_static) && spec.static_)) {
           s_->diag(pos(), Diag::duplicate_specifier, kind());
           return fail();
         }
         if (accept(Tk::kw_mutable)) spec.mutable_ = true;
         else if (accept(Tk::kw_constexpr)) {
           constexpr_ = true;
-        } else if (is(Tk::kw_consteval) || is(Tk::kw_static)) {
+        } else if (accept(Tk::kw_static)) {
+          spec.static_ = true;
+        } else if (is(Tk::kw_consteval)) {
           s_->diag(pos(), Diag::not_supported, kind());
           return fail();
         } else break;
+      }
+      if (spec.static_ && (spec.has_capture || spec.mutable_)) {
+        s_->diag(spec.begin, Diag::static_lambda_specifier_conflict);
+        return fail();
       }
       // The rest of the lambda-declarator is in the scope of the init-captures ([basic.scope.lambda])
       // and of the parameters ([basic.scope.param]).
@@ -6175,12 +6561,40 @@ public:
         if (!t) return fail();
         spec.trailing = *t;
       }
+      if (is(Tk::kw_requires)) {
+        if (!head) {
+          s_->diag(pos(), Diag::not_supported, Tk::kw_requires);
+          return fail();
+        }
+        bump();
+        const auto at = pos();
+        const auto before = s_->diag_count();
+        std::vector<Param> params;
+        std::vector<ast::ParamSema> replay;
+        for (const auto& p : spec.params) {
+          params.push_back({p.type, p.name, p.at});
+          replay.push_back({EntityId::none, p.type, p.name, NodeId::none, 0});
+        }
+        const sema::Sema::LambdaConstraintScope context(*s_, std::span<const ast::ParamSema>(replay));
+        trailing_requires = trailing_function_constraint(params, spec.trailing_constraint.expression);
+        spec.trailing_constraint.tokens = clause_fp(at, pos());
+        if (s_->has_error_since(before)) return fail();
+      }
     }
     if (!is(Tk::l_brace)) {
       s_->diag(pos(), Diag::expected_token, Tk::l_brace);
       return fail();
     }
-    if (head) spec.head = s_->template_scopes.back();
+    if (head) {
+      spec.head = s_->template_scopes.back();
+      auto templates = s_->templates();
+      for (ConstId clause : s_->head_constraints)
+        spec.constraints = templates.constraint_op(0, spec.constraints, clause);
+      spec.constraints = templates.constraint_op(0, spec.constraints, head_requires);
+      for (ConstId clause : parameter_constraints)
+        spec.constraints = templates.constraint_op(0, spec.constraints, clause);
+      spec.constraints = templates.constraint_op(0, spec.constraints, trailing_requires);
+    }
     u32 begin = spec.begin;
     if (!s_->open_lambda(std::move(spec))) {
       if (head) s_->template_scopes.pop_back();
@@ -6419,6 +6833,8 @@ public:
     }
     // [stmt.dcl]/2: the switch jumps here, so no initialization may be bypassed.
     if (sw && sema::Sema::bypasses(sw->initialized, s_->initialized_in_scope())) s_->diag(begin, Diag::jump_past_init);
+    if (is(Tk::r_brace) && s_->compatibility() == ast::Compatibility::gcc)
+      s_->diag(pos(), Diag::expected_expression);
     Ex st = labeled_statement();
     if (!sw) return st;
     if (dflt) return s_->node(ast::Default{sema::Sema::at(st, begin)}, begin, pos());
@@ -6745,9 +7161,18 @@ public:
     } else if (auto member = s_->as<ast::MemberCall>(call)) {
       function = member->function;
     } else if (auto sequence = s_->as<ast::OrderedBinary>(call); sequence && sequence->op == ast::OrderedOp::comma) {
-      // Sema represents a static call through an object by discarding the receiver,
-      // then calling the selected function. The complete invocation includes both.
-      if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) function = invocation->function;
+      // Sema sequences the discarded receiver before a static call. GCC evaluates the call
+      // by itself and preserves the receiver's effects in the containing expression.
+      if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) {
+        function = invocation->function;
+        if (s_->compatibility() == ast::Compatibility::gcc && !call.glvalue() &&
+            s_->ordinary_immediate_member(function, call.type())) {
+          Ex result = s_->immediate_invocation({sequence->rhs.id, call.begin + sequence->rhs.at, call.end, invocation->info});
+          if (!result.ok()) return result;
+          return s_->node(ast::OrderedBinary{call.info, ast::OrderedOp::comma, sequence->lhs,
+                                            sema::Sema::at(result, call.begin)}, call.begin, call.end, call.info);
+        }
+      }
     }
     if (!call.glvalue() && s_->ordinary_immediate_member(function, call.type())) return s_->immediate_invocation(call);
     if (direct && function != ast::EntityId::none && s_->is_consteval(function))
