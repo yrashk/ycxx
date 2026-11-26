@@ -327,6 +327,14 @@ struct CxxTargetPlan {
   std::vector<TargetLinkInput> link_inputs;
 };
 
+struct CxxTraversal {
+  std::vector<SourcePlan>& sources;
+  bool generated;
+  std::set<std::string> active = {};
+  std::map<std::string, CxxTargetPlan> finished = {};
+  std::size_t next_order = 0;
+};
+
 std::string artifact_origin(const ArtifactRef& ref) {
   return std::format("artifact({:?}, {:?})", ref.target, ref.output);
 }
@@ -621,9 +629,10 @@ class Planner {
     }
     if (kind != Primitive::executable && !(inspection_ && kind == Primitive::library))
       fail(root.location, "build requires a cpp.executable target");
-    const auto& native = cxx_target(root, kind);
+    CxxTraversal traversal{plan_.sources, true};
+    const auto& native = cxx_target(root, kind, traversal);
     if (kind == Primitive::executable && plan_.sources.empty()) fail(root.location, "build has no C++ source files");
-    append_link_inputs(native);
+    append_link_inputs(native, traversal);
     return std::move(plan_);
   }
 
@@ -1224,11 +1233,11 @@ class Planner {
   }
 
   void append_sources(const TargetDecl& decl, const std::vector<std::string>& includes,
-                      std::vector<SourcePlan>& sources, bool generated) {
+                      std::vector<SourcePlan>& sources, bool generated, bool emit_facts) {
     std::set<std::string> source_paths;
     const auto add = [&](std::string path, SourceLocation at, std::string_view origin) {
       if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
-      if (inspection_) {
+      if (emit_facts) {
         const auto display = display_path(path);
         fact("source", decl, display, display, origin, at);
       }
@@ -1241,7 +1250,7 @@ class Planner {
       });
       if (!matches) fail(at, matches.error());
       if (watch_) watch_->values.push_back(fingerprint(*matches));
-      const auto origin = inspection_ ? glob_origin(glob) : std::string{};
+      const auto origin = emit_facts ? glob_origin(glob) : std::string{};
       for (const auto& match : *matches) {
         const auto path = cwd_ / match;
         observe(path);
@@ -1276,7 +1285,7 @@ class Planner {
     const auto existing = std::ranges::find(plan_.host_executables, decl.name, &HostExecutablePlan::name);
     if (existing != plan_.host_executables.end())
       return static_cast<std::size_t>(existing - plan_.host_executables.begin());
-    check_fields(decl, {"sources", "public_include_dirs"});
+    check_fields(decl, {"sources", "public_include_dirs", "deps"});
     const auto* host = pp::native_target;
     if (!host) fail(decl.location, "no default native target for this host");
     if (inspection_) {
@@ -1284,24 +1293,20 @@ class Planner {
       fact("host-target", decl, "triple", host->triple, "build host", decl.location);
       fact("output", decl, host_executable_output, host_executable_output, "linked host executable", decl.location);
     }
-    std::vector<std::string> includes;
-    for_each_include_dir(decl, [&](std::string path, std::string_view origin, SourceLocation at) {
-      if (std::ranges::contains(includes, path)) return;
-      if (inspection_) fact("include", decl, std::to_string(includes.size()), display_path(path), origin, at);
-      includes.push_back(std::move(path));
-    });
     HostExecutablePlan tool{decl.name, {}};
-    append_sources(decl, includes, tool.sources, false);
+    CxxTraversal traversal{tool.sources, false};
+    cxx_target(decl, Primitive::host_executable, traversal);
     if (tool.sources.empty()) fail(decl.location, "host executable has no C++ source files");
     const auto index = plan_.host_executables.size();
     plan_.host_executables.push_back(std::move(tool));
     return index;
   }
 
-  void append_link_inputs(const CxxTargetPlan& root) {
-    if (std::ranges::none_of(finished_, [](const auto& entry) { return !entry.second.link_inputs.empty(); })) return;
-    std::vector<std::size_t> consumers(finished_.size());
-    for (const auto& [name, target] : finished_)
+  void append_link_inputs(const CxxTargetPlan& root, const CxxTraversal& traversal) {
+    if (std::ranges::none_of(traversal.finished, [](const auto& entry) { return !entry.second.link_inputs.empty(); }))
+      return;
+    std::vector<std::size_t> consumers(traversal.finished.size());
+    for (const auto& [name, target] : traversal.finished)
       for (const auto* dep : target.dependencies) ++consumers[dep->order];
 
     // A shared dependency must follow all its consumers. Among ready targets, keep the
@@ -1328,11 +1333,13 @@ class Planner {
     }
   }
 
-  const CxxTargetPlan& cxx_target(const TargetDecl& decl, Primitive kind) {
-    if (const auto it = finished_.find(decl.name); it != finished_.end()) return it->second;
-    if (!active_.insert(decl.name).second) fail(decl.location, std::format("dependency cycle at '{}'", decl.name));
-    check_fields(decl, {"sources", "deps", "public_include_dirs", "generated_headers", "runtime_assets",
-                        "link_inputs", "public_link_inputs"});
+  const CxxTargetPlan& cxx_target(const TargetDecl& decl, Primitive kind, CxxTraversal& traversal) {
+    if (const auto it = traversal.finished.find(decl.name); it != traversal.finished.end()) return it->second;
+    if (!traversal.active.insert(decl.name).second)
+      fail(decl.location, std::format("dependency cycle at '{}'", decl.name));
+    if (kind != Primitive::host_executable)
+      check_fields(decl, {"sources", "deps", "public_include_dirs", "generated_headers", "runtime_assets",
+                          "link_inputs", "public_link_inputs"});
     const auto* assets = field(decl, "runtime_assets");
     if (assets && kind != Primitive::executable) fail(assets->location, "runtime_assets requires an executable target");
     const auto* private_inputs = field(decl, "link_inputs");
@@ -1341,12 +1348,18 @@ class Planner {
     const auto* public_inputs = field(decl, "public_link_inputs");
     if (public_inputs && kind != Primitive::library)
       fail(public_inputs->location, "public_link_inputs requires a library target");
-    if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
+    // Facts and authored edges describe declarations. Each executable still
+    // collects its own source plan, even when another executable shares a library.
+    const bool emit_facts = inspection_ && inspected_cxx_.insert(decl.name).second;
+    if (emit_facts && kind != Primitive::host_executable)
+      fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
 
-    CxxTargetPlan target{&decl, next_cxx_target_++, {}, {}, {}, {}};
+    CxxTargetPlan target{&decl, traversal.next_order++, {}, {}, {}, {}};
     if (const auto* inputs = public_inputs ? public_inputs : private_inputs) {
       const auto field_name = public_inputs ? "public_link_inputs" : "link_inputs";
       for (const auto& value : as<List>(*inputs, "a list of linker archive inputs")) {
+        if (!traversal.generated)
+          fail(value.location, std::format("{} is not supported in host executable dependencies", field_name));
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
         const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
                                         : std::string{};
@@ -1358,7 +1371,8 @@ class Planner {
     const auto include = [&](std::string path, std::string_view origin, SourceLocation location) {
       if (std::ranges::contains(target.paths, path)) return;
       if (inspection_) {
-        fact("include", decl, std::to_string(target.paths.size()), display_path(path), origin, location);
+        if (emit_facts)
+          fact("include", decl, std::to_string(target.paths.size()), display_path(path), origin, location);
         target.origins.push_back({std::string(origin), location});
       }
       target.paths.push_back(std::move(path));
@@ -1366,6 +1380,8 @@ class Planner {
     for_each_include_dir(decl, include);
     if (const auto* headers = field(decl, "generated_headers")) {
       for (const auto& value : as<List>(*headers, "a list of generated headers")) {
+        if (!traversal.generated)
+          fail(value.location, "generated_headers is not supported in host executable dependencies");
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
         const auto path = native_artifact(ref, decl, "generated_headers", value.location);
         include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref) : std::string{}, value.location);
@@ -1374,14 +1390,14 @@ class Planner {
     if (const auto* deps = field(decl, "deps")) {
       std::size_t position = 0;
       for (const auto& value : as<List>(*deps, "a list of dependencies")) {
-        const auto [dep, kind] = find(as<std::string>(value, "a library target name"), value.location);
-        if (kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
-        if (inspection_) {
+        const auto [dep, dep_kind] = find(as<std::string>(value, "a library target name"), value.location);
+        if (dep_kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
+        if (emit_facts) {
           fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
           dependency(decl, dep.name, "deps", value.location);
         }
         ++position;
-        const auto& inherited = cxx_target(dep, kind);
+        const auto& inherited = cxx_target(dep, dep_kind, traversal);
         target.dependencies.push_back(&inherited);
         for (std::size_t i = 0; i < inherited.paths.size(); ++i) {
           if (inspection_) {
@@ -1394,7 +1410,7 @@ class Planner {
       }
     }
 
-    append_sources(decl, target.paths, plan_.sources, true);
+    append_sources(decl, target.paths, traversal.sources, traversal.generated, emit_facts);
     if (assets) {
       std::set<std::string> filenames;
       for (const auto& value : as<List>(*assets, "a list of runtime assets")) {
@@ -1411,8 +1427,8 @@ class Planner {
         plan_.runtime_assets.push_back(asset);
       }
     }
-    active_.erase(decl.name);
-    return finished_.emplace(decl.name, std::move(target)).first->second;
+    traversal.active.erase(decl.name);
+    return traversal.finished.emplace(decl.name, std::move(target)).first->second;
   }
 
   const fs::path& cwd_;
@@ -1429,9 +1445,7 @@ class Planner {
   std::map<std::string, std::size_t, std::less<>> resolving_rules_;
   std::map<std::string, std::size_t, std::less<>> active_generators_;
   std::size_t planning_edges_ = 0;
-  std::set<std::string> active_;
-  std::map<std::string, CxxTargetPlan> finished_;
-  std::size_t next_cxx_target_ = 0;
+  std::set<std::string> inspected_cxx_;
   ProjectPlan plan_;
 };
 

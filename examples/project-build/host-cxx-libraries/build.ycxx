@@ -1,0 +1,40 @@
+cpp.library "base" {
+    sources = ["base.cc"]
+    public_include_dirs = ["include/base"]
+}
+
+cpp.library "left" {
+    sources = ["left.cc"]
+    public_include_dirs = ["include/left"]
+    deps = ["base"]
+}
+
+cpp.library "right" {
+    sources = ["right.cc"]
+    public_include_dirs = ["include/right"]
+    deps = ["base"]
+}
+
+cpp.library "shared" {
+    sources = ["shared.cc"]
+    public_include_dirs = ["include/shared"]
+    deps = ["left", "right"]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["shared"]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["shared"]
+    generated_headers = [artifact("config", "header")]
+}

@@ -3702,6 +3702,13 @@ and executable mode of the staged image. Watch follows the tool's C++ inputs.
 Read-only plans show its host triple and the artifact dependency.
 [Native host tool example](examples/project-build/native-host-tool/README.md)
 
+A `cpp.host_executable` can link disk-backed `cpp.library` dependencies
+through `deps` (#1576). Each executable's closure includes its transitive
+public include directories and visits each library declaration once. The
+same declaration can also serve the selected target app. Inspection shows
+the shared declaration and each authored dependency edge.
+[Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
