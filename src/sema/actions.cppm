@@ -527,6 +527,7 @@ inline constexpr u16 mutable_ = 1;      // its function call operator is not con
 inline constexpr u16 captureless = 2;   // no lambda-capture: it converts to a pointer to function
 inline constexpr u16 pattern = 4;       // in a template's or a generic lambda's definition: not code
 inline constexpr u16 polymorphic_result = 8;  // checked return, without native or interpreter ABI support
+inline constexpr u16 generic_invoker = 16;   // a synthesized static invoker specialization
 }
 
 // What a cell demands of the program besides its value (query-engine.md §B1.4): a template
@@ -1265,6 +1266,15 @@ public:
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
       if (pattern.kind == AliasCallPattern::Kind::may_erase) return std::nullopt;
+    }
+    if (compatibility() == ast::Compatibility::gcc) {
+      // A dependent alias still carries the written transformations of its concrete
+      // result into a template signature. An already-bound alias uses the folded type.
+      if (!types().is_dependent(tmpl.type) && std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); }))
+        return tmpl.type;
+      auto result = templates_for_use(at).substitute(tmpl.type, bindings);
+      if (result && ins().types.is<ast::SWrittenTransform>(*result)) return types().canonical(*result);
+      return result;
     }
     return templates_for_use(at).substitute(tmpl.type, bindings);
   }
@@ -5762,7 +5772,7 @@ public:
     rec.fields = fr.fields;
     for (FieldRec& fd : rec.fields) fd.name = no_name();  // named by its lambda's body only
     rec.members.push_back({ins().names.intern("operator()"), fr.call, call_type, true, false, false, false, false, generic, fr.head, {}});
-    // A generic lambda's conversion is a template (/10), not yet (#339).
+    // A generic lambda forms each invoker after a pointer type supplies its template arguments.
     bool captureless = !fr.has_capture && !generic && !types().is_dependent(call_type);
     EntityId invoker = EntityId::none;
     NodeId invoker_body = NodeId::none;
@@ -5776,7 +5786,7 @@ public:
         invoker = w_->entities.entity({EntityKind::function, ins().names.intern("__invoke"), it, LangLinkage::cxx,
                                        w_->entities.rec(fr.closure).linkage, {}, fr.closure});
         rec.members.push_back({ins().names.intern("__invoke"), invoker, it, true, true, false, false, false, false, {}, {}});
-        invoker_body = invoker_tree(fr, call_type, nparams, body_begin);
+        invoker_body = invoker_tree(fr.closure, fr.call, call_type, body_begin);
       }
     }
     q_->publish_class(fr.closure, std::move(rec), *this);
@@ -5839,16 +5849,16 @@ public:
   // The static invoker's body ([expr.prim.lambda.closure]/9): the function call operator of a
   // closure object called with its own parameters, `{ return Closure{}(params...); }`; its locals
   // are the operator's parameters, the first `nparams` of the operator's locals.
-  NodeId invoker_tree(const LambdaFrame& fr, QualType call_type, std::size_t nparams, u32 at_) {
+  NodeId invoker_tree(EntityId cls, EntityId member, QualType call_type, u32 at_) {
     TypeRec cr = types().rec(call_type);
-    QualType ct = types().class_type(fr.closure);
+    QualType ct = types().class_type(cls);
     ExprInfo li{ct, ValueCategory::prvalue, 0};
-    Ex closure = node(ast::Lambda{li, fr.closure, b_->list(std::vector<Child>{})}, at_, at_, li);
+    Ex closure = node(ast::Lambda{li, cls, b_->list(std::vector<Child>{})}, at_, at_, li);
     Ex object = materialize(closure, ct, false);
     ExprInfo pi{types().pointer(ct), ValueCategory::prvalue, 0};
     Ex self = node(ast::Unary{pi, ast::UnaryOp::address_of, at(object, at_)}, at_, at_, pi);
     std::vector<Child> args;
-    for (std::size_t i = 0; i < nparams; ++i) {
+    for (std::size_t i = 0; i < cr.params.size(); ++i) {
       QualType p = cr.params[i];
       ExprInfo ai{types().referee(p), ValueCategory::lvalue, 0};
       Ex a = node(ast::LocalRef{ai, u32(i)}, at_, at_, ai);
@@ -5856,7 +5866,7 @@ public:
       args.push_back(at(a, at_));
     }
     ExprInfo ri = result_info(cr.inner);
-    Ex call = node(ast::MemberCall{ri, fr.call, at(self, at_), b_->list(args)}, at_, at_, ri);
+    Ex call = node(ast::MemberCall{ri, member, at(self, at_), b_->list(args)}, at_, at_, ri);
     if (types().is_void(cr.inner)) {
       Ex st = node(ast::ExprStmt{at(call, at_)}, at_, at_);
       Ex ret = node(ast::Return{at(Ex{}, at_)}, at_, at_);
@@ -5895,7 +5905,8 @@ public:
     EntityId spec;
     QualType type;
   };
-  std::optional<GenericCall> generic_call(const MemberDeclRec& m, std::span<const TemplateArg> args, u32 at_) {
+  std::optional<GenericCall> generic_call(const MemberDeclRec& m, std::span<const TemplateArg> args, u32 at_,
+                                          bool demand_definition = true) {
     ast::DeclSema tmpl{};
     tmpl.entity = m.entity;
     tmpl.type = m.type;
@@ -5912,7 +5923,7 @@ public:
     if (auto g = generic_closures_.find(std::to_underlying(m.entity)); g != generic_closures_.end()) known = &g->second;
     if (known && known->erroneous) return std::nullopt;  // its definition's errors say it
     // Its definition is required ([temp.inst]/8): emitted, and what it requires with it.
-    demands.push_back({spec, ast::Loc{item_, loc_base_ + at_}});
+    if (demand_definition) demands.push_back({spec, ast::Loc{item_, loc_base_ + at_}});
     GenericBinding binding{template_args, current_function};
     GenericResult t = q_->generic_instance(spec, known, binding);
     if (!t.type) {
@@ -6022,6 +6033,80 @@ public:
            types().function_pointer_conversion(m.type, types().pointee(Types::unqualified(to)))))
         return m.entity;
     return std::nullopt;
+  }
+
+  QualType invoker_type(QualType member) {
+    const auto call = types().rec(member);
+    return types().function(call.inner, call.params, call.variadic, call.linkage, Cv::none, ast::RefQual::none,
+                            call.fn_noexcept);
+  }
+
+  struct GenericInvoker {
+    EntityId closure;
+    GenericCall call;
+    QualType type;
+    std::vector<ast::TemplateParamSema> head;
+    std::vector<TemplateArg> args;
+  };
+
+  // [temp.deduct.conv], [expr.prim.lambda.closure]: the target function pointer
+  // fixes the call-operator template arguments. Its result may require instantiation.
+  std::optional<GenericInvoker> generic_invoker(QualType from, QualType to, u32 at_, bool demand_definition) {
+    if (!types().is_class(from) || !types().is_pointer(to) || !types().is_function(types().pointee(to))) return std::nullopt;
+    const EntityId closure = types().class_of(from);
+    const ClassRec* record = class_rec(closure);
+    if (!record || !record->closure || record->default_deleted) return std::nullopt;
+    auto member = std::ranges::find_if(record->members, [&](const MemberDeclRec& m) {
+      return m.is_template && m.name == ins().names.intern("operator()");
+    });
+    if (member == record->members.end()) return std::nullopt;
+    const MemberDeclRec call_member = *member;
+    ast::DeclSema parameter_pattern{};
+    parameter_pattern.entity = call_member.entity;
+    parameter_pattern.type = invoker_type(call_member.type);
+    parameter_pattern.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(call_member.head));
+    const QualType target = types().pointee(to);
+    // A nonthrowing invoker can also convert to a potentially throwing pointer.
+    QualType deduction_target = types().rec(parameter_pattern.type).fn_noexcept ? with_noexcept(target) : target;
+    auto args = templates().deduce_declaration(parameter_pattern, deduction_target, {}, /*address=*/true);
+    if (!args) return std::nullopt;
+    auto call = generic_call(call_member, *args, at_, demand_definition);
+    if (!call) return std::nullopt;
+    const QualType type = invoker_type(call->type);
+    if (types().canonical(type) != types().canonical(target) && !types().function_pointer_conversion(type, target))
+      return std::nullopt;
+    return GenericInvoker{closure, *call, type, call_member.head, std::move(*args)};
+  }
+
+  EntityId define_generic_invoker(const GenericInvoker& selected, u32 at_) {
+    const auto closure = w_->entities.rec(selected.closure);
+    const NameId name = ins().names.intern("__invoke");
+    auto head = selected.head;
+    for (auto& parameter : head) {
+      parameter.type = rebased(parameter.type, selected.head);
+      parameter.depth = 0;
+    }
+    EntityRec declaration{EntityKind::function_template, name, invoker_type(closure.type), LangLinkage::cxx,
+                          closure.linkage, {}, selected.closure};
+    declaration.generic_invoker_head = ins().intern_seq(std::span<const ast::TemplateParamSema>(head));
+    ast::DeclSema pattern{};
+    pattern.entity = w_->entities.entity(std::move(declaration));
+    const EntityId invoker = specialization(pattern, selected.args, selected.type);
+    if (unevaluated || std::ranges::contains(closures, invoker, &ast::ClosureDef::invoker)) return invoker;
+
+    std::vector<ast::LocalRec> locals;
+    for (QualType parameter : types().rec(selected.type).params)
+      locals.push_back({no_name(), parameter, EntityId::none, NodeId::none, local_flag::parameter});
+    closure_locals.push_back(locals);
+    closures.push_back({.closure = selected.closure, .call = EntityId::none, .call_type = selected.call.type,
+                        .body = NodeId::none, .locals = b_->seq(std::span<const ast::LocalRec>(locals)),
+                        .invoker = invoker, .conversion = EntityId::none,
+                        .invoker_body = invoker_tree(selected.closure, selected.call.spec, selected.call.type, at_),
+                        .conversion_body = NodeId::none, .begin = at_, .body_begin = at_, .end = at_,
+                        .flags = closure_flag::generic_invoker, .template_params = {},
+                        .consts = b_->seq(std::span<const ast::LocalRec>{}),
+                        .const_values = {}, .captures = {}});
+    return invoker;
   }
   // The conversion's result: the invoker's address, after `e`, which names the closure object,
   // is evaluated and discarded (the conversion function returns the address, /8).
@@ -7442,6 +7527,10 @@ public:
     // function pointer conversion ([over.ics.rank]/3.3).
     if (auto inv = closure_invoker(a.type(), to)) {
       const bool exact = types().canonical(types().pointer(w_->entities.rec(*inv).type)) == types().canonical(Types::unqualified(to));
+      return {true, Ics::user_defined, exact ? 0 : 1};
+    }
+    if (auto inv = generic_invoker(a.type(), to, a.begin, /*demand_definition=*/false)) {
+      const bool exact = types().canonical(types().pointer(inv->type)) == types().canonical(to);
       return {true, Ics::user_defined, exact ? 0 : 1};
     }
     QualType from = value_type(a);
@@ -9140,20 +9229,22 @@ public:
     return call(callee, {integer_literal(arg, begin, end)}, end, begin);
   }
 
-  // [lex.fcon]: `double`, or `float` or `long double` by the suffix. The lexer rounded the value to
-  // binary32 or binary64, the formats of these types on the target; the extended types' suffixes
-  // (`f16`, `bf16`, …) have no values yet (#336).
+  // [lex.fcon]: choose the target's representation of `double`, `float` or `long double`.
+  // The extended types' suffixes (`f16`, `bf16`, …) have no values yet (#336).
   Ex float_literal(const lex::Literal& lit, u32 begin, u32 end) {
     using enum lex::FloatSuffix;
     lex::FloatSuffix suffix = lit.float_suffix;
     Builtin k = suffix == f ? Builtin::float_ : suffix == l ? Builtin::long_double : Builtin::double_;
     ast::FloatFormat want = suffix == f ? ast::FloatFormat::binary32 : ast::FloatFormat::binary64;
-    if ((suffix != none && suffix != f && suffix != l) || w_->target[k].format != want) {
+    const bool x87 = suffix == l && w_->target[k].format == ast::FloatFormat::x87_extended;
+    if ((suffix != none && suffix != f && suffix != l) || (!x87 && w_->target[k].format != want)) {
       diag(begin, Diag::extended_float_not_supported);
       return {NodeId::none, begin, end};
     }
+    if (suffix == l && (x87 ? lit.x87_overflow : lit.overflow)) diag(begin, Diag::float_literal_out_of_range);
     QualType t = builtin(k);
-    return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
+    const ast::Bits128 bits = x87 ? ast::Bits128{lit.x87[0], lit.x87[1]} : ast::Bits128{lit.value, 0};
+    return literal(t, ast::float_value(ins(), w_->target, t, bits), ValueCategory::prvalue, begin, end);
   }
 
   static constexpr Builtin literal_character_type(lex::Encoding encoding) {
@@ -9792,6 +9883,11 @@ public:
     QualType target = Types::unqualified(to);
     if (auto inv = closure_invoker(e.type(), target)) {
       Ex p = invoker_pointer(e, *inv);
+      if (!p.ok() || types().canonical(p.type()) == types().canonical(target)) return p;
+      return convert_node(p, ast::ConversionKind::qualification, target);  // [conv.fctptr]
+    }
+    if (auto selected = generic_invoker(e.type(), target, at_, unevaluated == 0)) {
+      Ex p = invoker_pointer(e, define_generic_invoker(*selected, at_));
       if (!p.ok() || types().canonical(p.type()) == types().canonical(target)) return p;
       return convert_node(p, ast::ConversionKind::qualification, target);  // [conv.fctptr]
     }

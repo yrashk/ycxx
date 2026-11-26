@@ -1360,6 +1360,11 @@ public:
       for (EntityId f : {c.call, c.invoker})
         if (f != EntityId::none) declaration_closures_.insert_or_assign(std::to_underlying(f), DeclarationClosure{c, item, begin});
   }
+  void generated_invokers(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
+    for (const auto& c : w_->ins.seqs.elements(closures))
+      if (c.flags & sema::closure_flag::generic_invoker)
+        declaration_closures_.try_emplace(std::to_underlying(c.invoker), DeclarationClosure{c, item, begin});
+  }
   // A generic lambda's function call operator specialized ([temp.inst]): its body re-analysed
   // from the lambda's tokens with the arguments bound, an `Instance`; its type with the return
   // type deduced, none when it fails.
@@ -3788,7 +3793,10 @@ private:
         const auto ranks = ps_.deferred_rank_checks();
         const auto type_arguments = ps_.deferred_alias_type_arguments();
         ps_.namespace_alias_type = true;
-        auto t = ps_.type_id();
+        auto t = [&] {
+          const Parser::GccSignatureScope spelling{ps_};
+          return ps_.type_id();
+        }();
         ps_.namespace_alias_type = false;
         if (!t || !alias_template(name, name_at, *t)) return bad();
         sema::AliasCallPattern pattern;
@@ -3998,7 +4006,8 @@ private:
     do {
       s_.defer_type_access = true;
       const bool saved_defaults = std::exchange(ps_.consteval_parameter_defaults, spec.is_consteval);
-      parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
+      parse::Declarator d = template_ ? ps_.function_template_declarator(spec.type, spec.is_typedef)
+                                      : ps_.declarator(spec.type, false, spec.is_typedef);
       ps_.consteval_parameter_defaults = saved_defaults;
       // [dcl.spec.auto.general]: a function with a placeholder type is the only declarator.
       if (d.ok && s_.types().has_placeholder(spec.type) && s_.types().is_function(d.type) && (declarators > 0 || ps_.is(Tk::comma))) {
@@ -5930,7 +5939,10 @@ private:
         ps_.skip_attributes();
         ps_.bump();
         ps_.member_alias_type = true;
-        auto t = ps_.type_id();
+        auto t = [&] {
+          const Parser::GccSignatureScope spelling{ps_};
+          return ps_.type_id();
+        }();
         ps_.member_alias_type = false;
         if (!t || !member_alias(c, n, at, *t, /*alias_template=*/true)) return bad();
         if (!ps_.expect(Tk::semi)) bad();
@@ -6036,7 +6048,10 @@ private:
         return introduced->type;
       };
     }
-    DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
+    DeclSpec spec = [&] {
+      const Parser::GccSignatureScope spelling{ps_, member_template_};
+      return ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
+    }();
     spec.annotations = std::move(annotations);
     ps_.declare_class = std::move(declare_class);
     auto commit_introduction = [&] {
@@ -6110,9 +6125,13 @@ private:
       else if (member_template_) exception = member_template;
       const bool replay_array_bounds = !spec.is_static && !member_template_ && !conversion &&
                                        s_.templated() && p_->named_nested_class(it_->parent);
-      parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                                          /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false,
-                                          replay_array_bounds);
+      parse::Declarator d = [&] {
+        const Parser::GccSignatureScope spelling{ps_, member_template_};
+        return ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
+                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, replay_array_bounds);
+      }();
+      if (d.ok && d.function && member_template_ && s_.compatibility() == ast::Compatibility::gcc)
+        d.type = ps_.retain_gcc_signature_transforms(d.type);
       if (!d.ok || !d.named) return bad();
       if (conversion && !d.function) {
         s_.diag(d.name_at, Diag::conversion_parameters);
@@ -8371,9 +8390,8 @@ private:
         ? p_->is_namespace(s_.world().entities.rec(inst_->spec).scope)
         : s_.template_scopes.empty();
     const bool named = p_->items().items[it_->parent].unnamed_type_ordinal == items::none;
-    const bool nontrivial_destruction = s_.destructor_of(et) != EntityId::none;
     if (q_.classes().copy_of(et).first ||
-        (!(supported_scope && named && nontrivial_destruction) && (nontrivial_destruction || s_.has_member_inits(et)))) {
+        (!(supported_scope && named) && (s_.destructor_of(et) != EntityId::none || s_.has_member_inits(et)))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
       return false;
     }
@@ -11438,6 +11456,7 @@ public:
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree, root.begin);
+    p_->generated_invokers(out_.value.closures, k_, begin());
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -11528,6 +11547,7 @@ public:
                                          b_.seq(std::span<const u32>{}), r ? r->type : s_.builtin(sema::Builtin::void_), u8(r.has_value()),
                                          b_.seq(std::span<const ast::ClosureDef>(s_.closures))});
     s_.check_immediate_addresses(out_.value.tree, root.begin);
+    p_->generated_invokers(out_.value.closures, k_, begin());
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -14010,7 +14030,7 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
   if (auto it = declaration_closures_.find(key); it != declaration_closures_.end()) {
     const DeclarationClosure& c = it->second;
     if (c.item >= item) return r;
-    return define(c.def, c.item, c.begin, false);
+    return define(c.def, c.item, c.begin, (c.def.flags & sema::closure_flag::generic_invoker) != 0);
   }
   // The function whose body has the lambda: past the operators of enclosing lambdas.
   EntityId fn = w_->entities.rec(w_->entities.rec(f).scope).scope;
