@@ -578,7 +578,11 @@ struct Ops {
     Flow fl = Flow::next;
     switch (fn) {
     case ir::BuiltinFn::memchr: fl = m.find_byte(m.operand(f, n, 1), m.operand(f, n, 2), count.bits, result); break;
-    case ir::BuiltinFn::memcmp: fl = m.compare_bytes(m.operand(f, n, 1), m.operand(f, n, 2), count.bits, result); break;
+    case ir::BuiltinFn::memcmp:
+    case ir::BuiltinFn::memcmp_distinct_row_operands:
+      fl = m.compare_bytes(m.operand(f, n, 1), m.operand(f, n, 2), count.bits,
+                           fn == ir::BuiltinFn::memcmp_distinct_row_operands, result);
+      break;
     default: return m.unsupported(n);
     }
     if (fl != Flow::next) return fl;
