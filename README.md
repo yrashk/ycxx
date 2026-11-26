@@ -183,6 +183,11 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+A template argument is a type-id only when it parses as one. Functional casts such as `B<U(3)>`
+(with a typedef-name `U`), `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>` and `B<int((n))>`
+are constant expressions, while `F<int(int)>`, `F<U (&)[3]>` and `F<typename T::type(T)>` stay
+types. [#1190](https://github.com/yrashk/ycxx/issues/1190) · [#810](https://github.com/yrashk/ycxx/issues/810)
+
 Fixed reference and single-pointer arguments can deduce through a unique most-derived
 base that matches a named class-template parameter.
 [#1144](https://github.com/yrashk/ycxx/issues/1144)

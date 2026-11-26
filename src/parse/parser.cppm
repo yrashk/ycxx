@@ -3381,6 +3381,8 @@ public:
         } end_pattern{s_, arg_at};
         // A brace or an integer literal in the initializer rules out an abstract declarator.
         // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
+        std::optional<QualType> trial_type;
+        std::vector<engine::Diagnostic> trial_diags;  // a failed type-id's, if the expression fails too
         const bool decay_copy = is(Tk::kw_auto) &&
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (auto end = template_name_end_ahead()) {
@@ -3389,18 +3391,22 @@ public:
             for (u32 j = 0; j <= *end; ++j) bump();
             ok = false;
           }
-        } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
-          const bool saved_type_argument = std::exchange(in_template_type_argument_, true);
-          auto t = type_id(/*placeholder_ok=*/false,
-                           /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
-          in_template_type_argument_ = saved_type_argument;
+        } else if (bool trial = false; !decay_copy && starts_type_id(/*template_argument=*/true, &trial) &&
+                   (!trial || tentative_type_argument(trial_type, trial_diags))) {
+          auto t = trial ? trial_type : template_type_argument();
           if (!t) ok = false;
           else {
             const auto type = writing_gcc_template_signature_ ? retain_gcc_signature_transforms(*t) : *t;
             args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type), sema::ConstId::none});
           }
         } else {
+          const std::size_t expression_diags = s_->diag_count();
           Ex e = template_argument_expression(replay != nullptr);
+          // Neither reading works: report the one the grammar prefers ([temp.arg.general]/2).
+          if (!e.ok() && !trial_diags.empty()) {
+            s_->truncate_diags(expression_diags);
+            std::ranges::move(trial_diags, std::back_inserter(s_->diagnostics()));
+          }
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
@@ -3456,18 +3462,21 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
-  // A template argument `int(…)` ([temp.arg.general]/2) is a type-id only if it can be one: a
-  // function type, whose parentheses hold a parameter-declaration-clause or a grouped declarator
-  // and are followed by the declarator's suffixes or the argument's end. Otherwise it is a
-  // functional cast ([expr.type.conv]): `bool(T::value) || x`, `int(3) + 1`, `bool(N)`.
-  bool function_type_argument_ahead() {
-    auto ends_argument = [](Tk k) {
-      return k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis;
-    };
-    const u32 close = past_parentheses(1);
+  static bool ends_template_argument(Tk k) {
+    return k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis;
+  }
+  // A template argument `T(…)`, with T a simple-type-specifier (`int`, a typedef-name, `N::C`), is
+  // a type-id only if it can be one ([temp.arg.general]/2): a function type, whose parentheses
+  // hold a parameter-declaration-clause or a grouped declarator and are followed by the
+  // declarator's suffixes or the argument's end. Otherwise it is a functional cast
+  // ([expr.type.conv]): `bool(T::value) || x`, `int(3) + 1`, `U(3)`, `bool(N)`. `open` is the
+  // offset of the `(`. When the tokens allow both, `*trial` is set: only a tentative parse can
+  // tell (`int(&)[3]` from `bool(&g)`, `bool(S)` from `bool(S{})`).
+  bool function_type_argument_ahead(u32 open, bool* trial) {
+    const u32 close = past_parentheses(open);
     switch (kind(close)) {
     case Tk::comma: case Tk::greater: case Tk::greatergreater: case Tk::ellipsis: case Tk::l_paren:
-    case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept:
+    case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept: case Tk::arrow:
       break;
     case Tk::amp: case Tk::ampamp: {
       // [dcl.fct]: A ref-qualifier can precede an exception specification. Check its end:
@@ -3477,19 +3486,24 @@ public:
         ++suffix_end;
         if (kind(suffix_end) == Tk::l_paren) suffix_end = past_parentheses(suffix_end);
       }
-      if (!ends_argument(kind(suffix_end))) return false;
+      if (!ends_template_argument(kind(suffix_end))) return false;
       break;
     }
     default:
       return false;
     }
-    const Tk inner = kind(2);
-    if (inner == Tk::r_paren || inner == Tk::ellipsis || inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp ||
-        inner == Tk::caret || inner == Tk::l_paren || member_pointer_star(2) || past_attributes(2) != 2)
-      return true;  // a parameter's attributes ([dcl.fct]/3) start one too
+    const u32 first = open + 1;
+    const Tk inner = kind(first);
+    // `()`, `(...)`: only a parameter-declaration-clause.
+    if (inner == Tk::r_paren || inner == Tk::ellipsis) return true;
+    if (trial) *trial = true;
+    // A ptr-operator, a grouped declarator or a parameter's attributes ([dcl.fct]/3).
+    if (inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp || inner == Tk::caret || inner == Tk::l_paren ||
+        member_pointer_star(first) || past_attributes(first) != first)
+      return true;
     // A name starts a parameter only if it names a type; a member of a dependent class does so
     // only after `typename` here ([temp.res.general]/4).
-    const u32 saved = std::exchange(i_, i_ + 2);
+    const u32 saved = std::exchange(i_, i_ + first);
     const bool saved_half = qualified_half_;
     const bool parameter = starts_type_id();
     qualified_half_ = saved_half;
@@ -3497,9 +3511,34 @@ public:
     return parameter;
   }
 
-  bool starts_type_id(bool template_argument = false) {
+  // The offset past `typename nested-name-specifier [template] name [<args>]` at the current
+  // token ([temp.res.general]), read by tokens alone.
+  u32 past_typename_specifier() {
+    u32 j = 1;
+    if (kind(j) == Tk::coloncolon) ++j;
+    for (;;) {
+      if (kind(j) == Tk::kw_template) ++j;
+      if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) j = past_parentheses(j + 1);
+      else if (kind(j) == Tk::identifier) j = kind(j + 1) == Tk::less ? past_template_args(j + 1) : j + 1;
+      else return j;
+      if (kind(j) != Tk::coloncolon) return j;
+      ++j;
+    }
+  }
+
+  // Whether a type-id can start here. As a template argument (`template_argument`), `*trial` is
+  // set when the text may also be an expression and only a tentative parse can tell
+  // ([dcl.ambig.res]/2, `tentative_type_argument`).
+  bool starts_type_id(bool template_argument = false, bool* trial = nullptr) {
     if (transform_trait_ahead()) return true;
-    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren) return function_type_argument_ahead();
+    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren)
+      return function_type_argument_ahead(1, trial);
+    // `typename N::T{1}` and `typename N::T(2)` are functional casts too ([expr.type.conv]/1).
+    if (template_argument && is(Tk::kw_typename)) {
+      const u32 next = past_typename_specifier();
+      if (kind(next) == Tk::l_brace) return false;
+      if (kind(next) == Tk::l_paren) return function_type_argument_ahead(next, trial);
+    }
     if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
@@ -3512,12 +3551,57 @@ public:
                               template_argument);
       if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
       // A terminal namespace type-template-id can expand to a dependent member type.
-      return q && (!template_argument || kind(q->second) != Tk::l_brace) &&
-             (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
+      if (!q || (template_argument && kind(q->second) == Tk::l_brace) ||
+          (!terminal_template_id && s_->types().kind(q->first) == sema::TypeKind::dep_name))
+        return false;
+      return !template_argument || kind(q->second) != Tk::l_paren || function_type_argument_ahead(q->second, trial);
     }
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
-    return is(Tk::identifier) && kind(1) != Tk::coloncolon &&
-           (!template_argument || kind(1) != Tk::l_brace) && s_->class_name(name_of(tok())).has_value();
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
+      if (!template_argument) return true;
+      const u32 next = past_template_args(1);
+      return kind(next) != Tk::l_paren || function_type_argument_ahead(next, trial);
+    }
+    if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
+    if (!template_argument) return true;
+    return kind(1) != Tk::l_brace && (kind(1) != Tk::l_paren || function_type_argument_ahead(1, trial));
+  }
+
+  // [dcl.ambig.res]/2: a template argument that may be a type-id or an expression is a type-id
+  // if it parses as one up to the argument's end, with no syntax error. The choice is syntactic:
+  // an ill-formed type-id such as `P(P(p))[1]` (a function returning an array) stays one, with
+  // its diagnostics, in `t`. Otherwise nothing is read, and the diagnostics move to `failed`:
+  // `bool(&g)`, `int((n))`, `bool(S{})` and `U(3)` are expressions ([expr.type.conv]).
+  bool tentative_type_argument(std::optional<QualType>& t, std::vector<engine::Diagnostic>& failed) {
+    const u32 back = i_;
+    const std::size_t diags = s_->diag_count();
+    const int saved_angle = angle_;
+    const bool saved_half = half_, saved_qualified_half = qualified_half_;
+    const std::array counters{&deferred_argument_checks_, &deferred_immediate_calls_, &deferred_class_immediate_calls_,
+                              &deferred_rank_checks_, &deferred_qualified_type_arguments_,
+                              &deferred_alias_type_arguments_, &alias_constraint_failures_, &dependent_layout_arguments_};
+    std::array<u32, counters.size()> counts;
+    std::ranges::transform(counters, counts.begin(), [](const u32* c) { return *c; });
+    const std::size_t alias_checks = type_alias_checks_ ? type_alias_checks_->checks.size() : 0;
+    t = template_type_argument();
+    if (ends_template_argument(kind()) && !s_->has_syntax_error_since(diags)) return true;
+    t.reset();
+    auto& all = s_->diagnostics();
+    failed.assign(std::make_move_iterator(all.begin() + diags), std::make_move_iterator(all.end()));
+    s_->truncate_diags(diags);
+    i_ = back;
+    angle_ = saved_angle;
+    half_ = saved_half;
+    qualified_half_ = saved_qualified_half;
+    for (std::size_t c = 0; c < counters.size(); ++c) *counters[c] = counts[c];
+    if (type_alias_checks_) type_alias_checks_->checks.resize(alias_checks);
+    return false;
+  }
+  std::optional<QualType> template_type_argument() {
+    const bool saved_type_argument = std::exchange(in_template_type_argument_, true);
+    auto t = type_id(/*placeholder_ok=*/false,
+                     /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
+    in_template_type_argument_ = saved_type_argument;
+    return t;
   }
 
   // The language linkage function types get: from an enclosing linkage-specification.
