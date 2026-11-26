@@ -6607,12 +6607,14 @@ private:
       auto exception = class_member;
       if (p_->defaulted_body(k_)) exception = defaulted_assignment;
       else if (member_template_) exception = member_template;
-      const bool replay_array_bounds = !spec.is_static && !member_template_ && !conversion &&
-                                       s_.templated() && p_->named_nested_class(it_->parent);
+      auto array_bounds = Parser::MemberArrayBounds::none;
+      if (!spec.is_static && !member_template_ && !conversion && s_.templated())
+        array_bounds = p_->named_nested_class(it_->parent) ? Parser::MemberArrayBounds::nested_layout
+                                                         : Parser::MemberArrayBounds::sizeof_type;
       parse::Declarator d = [&] {
         const Parser::GccSignatureScope spelling{ps_, member_template_};
         return ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, replay_array_bounds);
+                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, array_bounds);
       }();
       if (d.ok && d.function && member_template_ && s_.compatibility() == ast::Compatibility::gcc)
         d.type = ps_.retain_gcc_signature_transforms(d.type);
