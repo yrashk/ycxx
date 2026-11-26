@@ -1259,6 +1259,9 @@ class Lowering {
         b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
         return {};
       }
+      case Op::compiler_memory_barrier:
+        out(n, 0, emit1(Op2::compiler_memory_barrier, T::state, {in(n, 0)}));
+        return {};
       case Op::asm_: {
         const ConstId text{std::uint32_t(imms[0])};
         if constexpr (requires { layout_.breakpoint_statement_asm(text); }) {

@@ -291,6 +291,7 @@ class Selector {
       }
       case l2::Op::ret: ret(n); return;
       case l2::Op::va_start: va_start(n); return;
+      case l2::Op::compiler_memory_barrier: return;  // its state result already separates load epochs
       default: break;
     }
     std::uint32_t d = nil;

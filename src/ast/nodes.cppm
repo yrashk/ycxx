@@ -434,6 +434,9 @@ struct Asm {
   ConstId text;
 };
 
+// GNU extended asm with an empty template, no operands and a single memory clobber.
+struct AsmMemoryBarrier {};
+
 // [dcl.pre]: `static_assert(condition, message)`, checked when it was analysed. The condition is
 // converted to bool; the message is a string literal's `VString`, or none.
 struct StaticAssert {
@@ -660,7 +663,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
                           ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation,
-                          ImmediateVirtualCall, BitCast>;
+                          ImmediateVirtualCall, BitCast, AsmMemoryBarrier>;
 
 static_assert(Nodes::size < max_node_kinds);
 

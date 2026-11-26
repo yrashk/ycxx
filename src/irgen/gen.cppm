@@ -770,6 +770,8 @@ class Gen {
     } else if (is<ast::Asm>(a)) {
       const std::uint64_t text[] = {word(get<ast::Asm>(a).text)};
       stateful(ir::Op::asm_, {}, {}, text);
+    } else if (is<ast::AsmMemoryBarrier>(a)) {
+      stateful(ir::Op::compiler_memory_barrier, {}, {});
     } else if (is<ast::StaticAssert>(a)) {
       // Checked when it was analysed; it has no effect ([dcl.pre]).
     } else if (is<ast::While>(a)) {

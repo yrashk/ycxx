@@ -2869,6 +2869,14 @@ operands, and targets are tracked in [#190](https://github.com/yrashk/ycxx/issue
 and [#659](https://github.com/yrashk/ycxx/issues/659).
 [Design](docs/design/linux-basic-asm.md) · [#950](https://github.com/yrashk/ycxx/issues/950)
 
+## Empty GNU extended asm with a memory clobber (#1121)
+
+At statement position, `asm volatile("" ::: "memory");` and its implicitly volatile
+form give a compiler read and write barrier on x86-64 Linux and arm64 macOS.
+The native back ends preserve memory ordering across the barrier and emit no
+instruction for it. Constant evaluation diagnoses an asm declaration it executes.
+Other extended asm forms remain under [#1121](https://github.com/yrashk/ycxx/issues/1121).
+
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 
 Fable decided the representation (ast.md §6.6); the Opus session wrote the code.

@@ -207,6 +207,9 @@ export enum class Op : std::uint16_t {
 
   // x86 INT3 can resume at the following instruction.
   int3 [[=state({S}, {S})]],
+
+  // Orders reads and writes through selection. Emits no instruction.
+  compiler_memory_barrier [[=state({S}, {S})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

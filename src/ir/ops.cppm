@@ -323,6 +323,9 @@ export enum class Op : std::uint16_t {
   // A virtual member invocation for constant evaluation: receiver, converted arguments,
   // selected function, and VirtualCallKind ([expr.call], [expr.const.core]).
   call_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
+
+  // Empty GNU extended asm with a memory clobber orders all memory accesses.
+  compiler_memory_barrier [[=state({S}, {S}).with({nonconstant})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

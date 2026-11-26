@@ -824,6 +824,8 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       frame_row(FrameState::entry);
       e_.emit({0xc3});  // ret
       return {};
+    case Op::compiler_memory_barrier:
+      return {};
     case Op::int3:
       e_.emit({0xcc});  // INT3 (Intel SDM vol. 2)
       return {};
