@@ -3278,8 +3278,10 @@ public:
     return l;
   }
   // Whether an operand of `&&` or `||` ends here.
-  bool operand_ends(bool primaries) {
-    return primaries || is(Tk::ampamp) || is(Tk::pipepipe) || is(Tk::r_paren) || is(Tk::semi) || at_end();
+  bool operand_ends(bool primaries, u32 ahead = 0) const {
+    const Tk token = kind(ahead);
+    return primaries || token == Tk::ampamp || token == Tk::pipepipe || token == Tk::r_paren ||
+           token == Tk::semi || i_ + ahead >= end_;
   }
   sema::ConstId constraint_operand(bool primaries) {
     u32 back = i_;
@@ -3361,10 +3363,30 @@ public:
   // short-circuit as satisfaction does ([temp.constr.op]), so an operand that is not checked may be
   // invalid. Its normal form is not needed: subsumption does not look into a requires-expression.
   enum class Truth : u8 { no, yes, dependent, invalid };
+  struct NestedConstraintSpans {
+    u32 begin;
+    std::vector<std::pair<u32, u32>> operands;
+    bool decomposable = true;
+
+    void finish_operand(u32 end) {
+      if (end > begin) operands.emplace_back(begin, end);
+      begin = end + 1;
+    }
+  };
+
+  // The parser still consumes a discarded operand using provisional function types.
+  struct DiscardedConstraintOperand {
+    bool& discard;
+    bool saved;
+    explicit DiscardedConstraintOperand(sema::Sema& sema, bool skipped)
+        : discard(sema.in_discarded_constraint_operand), saved(std::exchange(discard, discard || skipped)) {}
+    ~DiscardedConstraintOperand() { discard = saved; }
+  };
   Truth nested_constraint(bool templated) {
     Truth l = nested_conjunction(templated);
     while (accept(Tk::pipepipe)) {
       std::size_t n = s_->diag_count();
+      const DiscardedConstraintOperand discard(*s_, l == Truth::yes);
       Truth r = nested_conjunction(templated);
       if (l == Truth::yes) {
         s_->drop_failures(n);
@@ -3380,6 +3402,7 @@ public:
     Truth l = nested_operand(templated);
     while (accept(Tk::ampamp)) {
       std::size_t n = s_->diag_count();
+      const DiscardedConstraintOperand discard(*s_, l == Truth::no || l == Truth::invalid);
       Truth r = nested_operand(templated);
       if (l == Truth::no || l == Truth::invalid) {
         s_->drop_failures(n);
@@ -3391,10 +3414,44 @@ public:
     return l;
   }
   Truth nested_operand(bool templated) {
+    const u32 begin = index();
+    const bool pattern = s_->in_pattern();
+    // Use the pattern's grammar-correct boundary before performing any semantic checks.
+    // A discarded operand can otherwise start concept satisfaction in a fresh Sema.
+    if (!pattern && s_->in_discarded_constraint_operand)
+      if (auto end = questions().nested_constraint_operand_end(begin); end && *end < end_) {
+        seek(*end);
+        return Truth::invalid;
+      }
+    // The first inner span exists only when the entire written group can be decomposed.
+    // A postfix or tighter binary operator after its `)` makes the operand an atom.
+    if (!pattern && is(Tk::l_paren))
+      if (auto first_end = questions().nested_constraint_operand_end(begin + 1)) {
+        const u32 after = past_parentheses(0);
+        if (*first_end < begin + after && kind(after - 1) == Tk::r_paren && operand_ends(false, after)) {
+          deep_enough();
+          bump();
+          const int saved = std::exchange(angle_, 0);
+          const Truth group = nested_constraint(templated);
+          angle_ = saved;
+          return expect(Tk::r_paren) ? group : Truth::invalid;
+        }
+      }
+    // First reads and operands that did not parse successfully in the pattern have no extent.
     std::size_t n = s_->diag_count();
     u32 at = pos();
+    const bool recording = pattern && !s_->instantiating() && !s_->satisfying_atom;
+    struct RestoreRecording {
+      bool& active;
+      bool saved;
+      ~RestoreRecording() { active = saved; }
+    } restore{record_nested_constraint_groups_,
+              std::exchange(record_nested_constraint_groups_, record_nested_constraint_groups_ || recording)};
     Ex e = binary_expression(3);
-    if (s_->has_error_since(n) || !e.ok()) {
+    const bool failed = s_->has_error_since(n) || !e.ok();
+    if (recording && !failed && index() > begin && operand_ends(false))
+      questions().record_nested_constraint_operand(begin, index());
+    if (failed) {
       if (templated) s_->drop_failures(n);
       return Truth::invalid;
     }
@@ -3712,9 +3769,10 @@ public:
 
   // ------------------------------------------------------------ [expr]
 
-  Ex expression() {
-    Ex e = assignment_expression();
+  Ex expression(NestedConstraintSpans* spans = nullptr) {
+    Ex e = assignment_expression(spans);
     while (is(Tk::comma)) {
+      if (spans) spans->decomposable = false;
       u32 at = pos();
       bump();
       Ex r = assignment_expression();
@@ -3745,11 +3803,18 @@ public:
 
   // assignment-expression ([expr.assign]): right-associative; its left operand is a
   // logical-or-expression.
-  Ex assignment_expression() {
-    if (is(Tk::kw_throw)) return throw_expression();
-    Ex l = binary_expression(1);
-    if (is(Tk::question)) return conditional_rest(l);
+  Ex assignment_expression(NestedConstraintSpans* spans = nullptr) {
+    if (is(Tk::kw_throw)) {
+      if (spans) spans->decomposable = false;
+      return throw_expression();
+    }
+    Ex l = binary_expression(1, spans);
+    if (is(Tk::question)) {
+      if (spans) spans->decomposable = false;
+      return conditional_rest(l);
+    }
     if (auto op = assignment_operator(kind())) {
+      if (spans) spans->decomposable = false;
       u32 at = pos();
       bump();
       if (is(Tk::l_brace)) {
@@ -3835,7 +3900,7 @@ public:
 
   // logical-or-expression down to pm-expression ([expr.mptr.oper]–[expr.log.or]), all
   // left-associative, by precedence climbing.
-  Ex binary_expression(int min_prec) {
+  Ex binary_expression(int min_prec, NestedConstraintSpans* spans = nullptr) {
     Ex l = cast_expression();
     for (;;) {
       auto info = binary_operator(kind());
@@ -3843,8 +3908,10 @@ public:
       // [temp.names]/4: in a template argument list the first `>` outside parentheses ends it.
       if (angle_ > 0 && (is(Tk::greater) || is(Tk::greatergreater))) return l;
       u32 at = pos();
+      auto* logical_spans = info->prec < 3 ? spans : nullptr;
+      if (logical_spans) logical_spans->finish_operand(index());
       bump();
-      Ex r = binary_expression(info->prec + 1);
+      Ex r = binary_expression(info->prec + 1, logical_spans);
       if (!body && in_template_value_argument_ && info->op == sema::Sema::BinOp::logical_and &&
           (s_->dependent(l) || s_->dependent(r))) {
         const auto left = conjunction_operand(l);
@@ -4443,9 +4510,16 @@ public:
       if (fold_ahead()) return fold_expression(begin);
       bump();
       int saved = std::exchange(angle_, 0);
-      Ex e = expression();
+      NestedConstraintSpans spans{index(), {}};
+      const auto diagnostics = s_->diag_count();
+      Ex e = expression(record_nested_constraint_groups_ ? &spans : nullptr);
+      const u32 close = index();
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+      if (record_nested_constraint_groups_ && spans.decomposable && e.ok() && !s_->has_error_since(diagnostics)) {
+        spans.finish_operand(close);
+        for (auto [first, end] : spans.operands) questions().record_nested_constraint_operand(first, end);
+      }
       return s_->paren(e, begin, pos());
     }
     case Tk::identifier: {
@@ -6922,6 +6996,7 @@ private:
   bool variable_template_initializer_ = false;
   bool in_template_id_lookahead_ = false;
   bool alias_constraints_enabled_ = true;
+  bool record_nested_constraint_groups_ = false;
   u32 alias_constraint_failures_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
