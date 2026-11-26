@@ -13,7 +13,8 @@ import tempfile
 from project_build import action_keys, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
 from project_inspection import (
-    check_dependency_graph, check_value_bindings_html, dependency_edge, fact, scope_state,
+    check_dependency_changes_html, check_dependency_graph, check_value_bindings_html,
+    compare_value_bindings, dependency_edge, fact, scope_state,
 )
 from project_shader_bundle import check_external_actions, check_native_reused, publication
 from runtime_dir import runtime_root
@@ -66,7 +67,8 @@ def inspect(ycxx, scope, env, journal, binding=None, *, texture_count=2):
     if binding is None:
         assert not any(row['kind'] in {'value-export', 'fact-input'} for row in plan['facts']), plan
         assert any(row['kind'] == 'unresolved' for row in plan['facts']), plan
-        return None
+        assert plan['dependency_graph']['complete'] is False, plan
+        return plan
 
     export = fact(plan, 'value-export', PRODUCER, layout(binding, texture_count))
     consumer = fact(plan, 'fact-input', 'scene_bindings', layout(binding, texture_count))
@@ -110,37 +112,70 @@ def check_value_binding_views(ycxx, scope, env, journal, initial, current):
     graph = current['dependency_graph']
     assert graph['value_edges'] == initial['dependency_graph']['value_edges']
 
-    def show(format_, *args):
-        result = run_client(ycxx, scope, env, 'show', 'app', f'--format={format_}', *args)
+    def show(format_):
+        result = run_client(ycxx, scope, env, 'show', 'app', f'--format={format_}')
         assert result.returncode == 0, result.stderr
         return result.stdout
 
     encoded = show('json')
     assert json.loads(encoded) == current and show('json') == encoded
-    check_value_bindings_html(show('html'), current)
+    document = show('html')
+    check_value_bindings_html(document, current)
+    check_dependency_changes_html(document, current['definition'], None, value_bindings=True)
 
     baseline = scope.parent / 'value-baseline.json'
     baseline.write_text(json.dumps(initial), encoding='utf-8')
-    args = ('--against', str(baseline))
-    encoded = show('json', *args)
-    assert show('json', *args) == encoded
-    diff = json.loads(encoded)
+    diff = compare_value_bindings(ycxx, scope, env, baseline, current, [])
     assert diff['dependency_changes'] == [], diff
+    if 'module_graph' in initial and 'module_graph' in current:
+        assert 'module_changes' in diff, diff
     for kind, target in (('value-export', PRODUCER), ('fact-input', 'scene_bindings')):
         change = {'change': 'changed', 'before': fact(initial, kind, target, layout(1)),
                   'after': fact(current, kind, target, layout(3, 3))}
         assert change in diff['changes'], (change, diff)
-    check_value_bindings_html(show('html', *args), current)
 
     # A schema-1 graph from before value coverage still participates in artifact comparisons.
     added, *rest = graph['edges']
     legacy_graph = {'complete': True, 'edges': rest}
-    baseline.write_text(json.dumps({**current, 'dependency_graph': legacy_graph}), encoding='utf-8')
-    legacy_diff = json.loads(show('json', *args))
-    assert legacy_diff['dependency_changes'] == [{'before': [], 'after': [added]}], legacy_diff
-    check_value_bindings_html(show('html', *args), current)
+    for unavailable in (legacy_graph, {**legacy_graph, 'value_edges': None}, {**graph, 'complete': False}):
+        baseline.write_text(json.dumps({**current, 'dependency_graph': unavailable}), encoding='utf-8')
+        diff = compare_value_bindings(ycxx, scope, env, baseline, current, None)
+        if unavailable['complete']:
+            assert diff['dependency_changes'] == [{'before': [], 'after': [added]}], diff
+        else:
+            assert 'dependency_changes' not in diff, diff
+
+    # A saved snapshot can contain repeated occurrences and retire a binding or export independently.
+    live, = graph['value_edges']
+    escaped_site = {'path': '<b data-value-binding-probe="1">&.ycxx', 'line': 78, 'column': 19}
+    repeated = {**live, 'location': escaped_site}
+    old_binding = {**live, 'binding': 'retired-layout'}
+    old_export = {**live, 'export_name': 'retired-layout'}
+    old_usage = {**live, 'usage': 'capabilities'}
+    saved_graph = {**graph, 'value_edges': [old_binding, live, old_export, repeated, old_usage]}
+    baseline.write_text(json.dumps({**current, 'dependency_graph': saved_graph}), encoding='utf-8')
+    differences = [
+        {'before': [old_usage], 'after': []},
+        {'before': [repeated, live], 'after': [live]},
+        {'before': [old_export], 'after': []},
+        {'before': [old_binding], 'after': []},
+    ]
+    diff = compare_value_bindings(ycxx, scope, env, baseline, current, differences)
+    assert diff['changes'] == diff['dependency_changes'] == [], diff
     assert journal.read_bytes() == recorded, 'value binding inspection ran a shader tool'
     assert scope_state(scope) == before, 'value binding inspection changed the workspace'
+
+    baseline.write_text(json.dumps(current), encoding='utf-8')
+    try:
+        replace_source(scope, 'build.ycxx', '# Move the authored binding location.\n' + current['definition'])
+        moved = inspect(ycxx, scope, env, journal, 3, texture_count=3)
+        moved_edge, = moved['dependency_graph']['value_edges']
+        assert moved_edge['location']['line'] == live['location']['line'] + 1, moved_edge
+        diff = compare_value_bindings(ycxx, scope, env, baseline, moved, [])
+        assert diff['changes'] == diff['dependency_changes'] == [], diff
+    finally:
+        replace_source(scope, 'build.ycxx', current['definition'])
+    assert journal.read_bytes() == recorded, 'source-only comparison ran a shader tool'
 
 
 def read_journal(journal):
@@ -363,8 +398,14 @@ def check_builds(ycxx, scope, env, journal):
     compiler = scope / 'glslc-fixture'
     command = compiler.read_text(encoding='utf-8')
     compiler.write_text(command + '\n# changed compiler identity\n', encoding='utf-8')
-    inspect(ycxx, scope, env, journal)
-    compiler.write_text(command, encoding='utf-8')
+    try:
+        stale = inspect(ycxx, scope, env, journal)
+        baseline = scope.parent / 'initial-value-plan.json'
+        baseline.write_text(json.dumps(initial), encoding='utf-8')
+        diff = compare_value_bindings(ycxx, scope, env, baseline, stale, None)
+        assert 'dependency_changes' not in diff, diff
+    finally:
+        compiler.write_text(command, encoding='utf-8')
     current = inspect(ycxx, scope, env, journal, 3, texture_count=3)
     check_value_binding_views(ycxx, scope, env, journal, initial, current)
 

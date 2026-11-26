@@ -418,9 +418,10 @@ ycxx build app
 ycxx show app --format=json > before.json
 ```
 
-Rename the producer from `wire` to `wire_alt` in both its declaration and
-the `value("wire", "fast-mode")` reference in `build.ycxx`. Build the edited
-plan and open the comparison report.
+Rename the producer from `wire` to `wire_alt` in its declaration and its
+`value("wire", "fast-mode")` reference in `build.ycxx`. Make the same rename
+in the observer declaration and target check in `rules/codec.cc`. Build the
+edited plan and open the comparison report.
 
 ```sh
 ycxx build app
