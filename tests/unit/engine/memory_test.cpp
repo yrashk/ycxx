@@ -4,6 +4,7 @@
 // or by walking a value set from outside; re-executing a cell replaces its retained bytes; the
 // process's totals and a window's peak see a run's allocations.
 import std;
+import ycxx.execution;
 import ycxx.engine;
 import ycxx.memory;
 import ycxx.unit;
@@ -11,7 +12,7 @@ import ycxx.unit;
 using namespace ycxx::engine;
 using ycxx::unit::check;
 namespace memory = ycxx::memory;
-namespace ex = std::execution;
+namespace ex = ycxx::exec;
 
 namespace {
 

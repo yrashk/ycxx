@@ -1,5 +1,6 @@
 """Inspect source, resolved provenance, build diffs, and workspace targets (#1256, #1392, #1441, #1453)."""
 
+from collections import Counter, defaultdict
 import html
 import json
 import os
@@ -210,22 +211,96 @@ def check_value_bindings_html(document, plan):
     assert not any(node.attrs.get('data-value-probe') == '1' for node in parsed.elements)
 
 
-def check_dependency_changes_html(document, definition, changes):
+def check_target_dependencies_html(document, plan):
+    from project_module_graph import PlanHTML
+
+    parsed = PlanHTML(document)
+    navigation = parsed.section('target-dependencies', 'Target dependencies')
+    dependencies = parsed.section('dependencies', 'Dependencies')
+    assert parsed.elements.index(navigation) < parsed.elements.index(dependencies)
+    graph = plan['dependency_graph']
+    incomplete = 'Incomplete plan. Showing resolved target dependencies so far.'
+    assert (incomplete in navigation.visible()) == (not graph['complete']), navigation.visible()
+
+    outgoing = defaultdict(list)
+    names = {plan['target']}
+    for edge in graph['edges'] + graph['value_edges']:
+        outgoing[edge['consumer']].append(edge)
+        names.update((edge['consumer'], edge['producer']))
+    ordered = sorted(names, key=lambda name: name.encode('utf-8'))
+    ids = {name: f'plan-target-{index}' for index, name in enumerate(ordered)}
+    selected = plan['target']
+    order = [selected, *(name for name in ordered if name != selected)]
+    cards = [node for node in navigation.descendants if node.tag == 'article']
+    assert [card.attrs.get('id') for card in cards] == [ids[name] for name in order]
+    document_ids = (node.attrs.get('id', '') for node in parsed.elements)
+    assert Counter(value for value in document_ids if value.startswith('plan-target-')) == Counter(ids.values())
+
+    manifest = parsed.section('manifest', 'build.ycxx')
+    anchors = {node.attrs.get('id'): node for node in manifest.descendants}
+    lines = plan['definition'].splitlines()
+    for name, card in zip(order, cards):
+        heading, = (node for node in card.descendants if node.tag == 'h3')
+        assert [node.visible() for node in heading.descendants if node.tag == 'code'] == [name], name
+        rows = [node for node in card.descendants if node.tag == 'li']
+        edges = outgoing[name]
+        assert len(rows) == len(edges), name
+        if not edges:
+            empty = 'No resolved inputs.' if graph['complete'] else 'No resolved inputs yet.'
+            assert empty in card.visible(), (name, card.visible())
+        found, expected = Counter(), Counter()
+        for row in rows:
+            producer, location = (node for node in row.descendants if node.tag == 'a')
+            name_code, = (node for node in producer.descendants if node.tag == 'code')
+            usage, = (node for node in row.descendants if node.tag == 'code' and node.parent is row)
+            details = []
+            for node in row.descendants:
+                if node.tag == 'span' and node.attrs.get('class') == 'origin':
+                    value, = (item for item in node.descendants if item.tag == 'code')
+                    details.append((node.visible().split()[0], value.visible()))
+            found[producer.attrs['href'], name_code.visible(), usage.visible(), tuple(sorted(details)),
+                  location.attrs['href'], location.visible()] += 1
+        for edge in edges:
+            details = tuple(sorted((label, edge[key]) for label, key in (
+                ('Binding', 'binding'), ('Output', 'output'), ('Export', 'export_name'),
+            ) if key in edge))
+            producer = edge['producer']
+            path, line, column = (edge['location'][key] for key in ('path', 'line', 'column'))
+            anchor = f'manifest-line-{line}'
+            assert anchors[anchor].visible() == lines[line - 1], edge
+            expected[f'#{ids[producer]}', producer, edge['usage'], details,
+                     f'#{anchor}', f'{path}:{line}:{column}'] += 1
+        assert found == expected, (name, found, expected)
+    for attribute in ('data-dependency-probe', 'data-value-probe', 'data-value-binding-probe'):
+        assert not any(attribute in node.attrs for node in navigation.descendants), attribute
+
+
+def check_dependency_changes_html(document, definition, changes, *, value_bindings=False):
     # Module discovery also imports the plan fact checks here.
     from project_module_graph import PlanHTML
 
     parsed = PlanHTML(document)
+    if value_bindings:
+        identifier, heading, label = 'value-binding-changes', 'Value binding changes', 'Value binding'
+        detail = 'export_name'
+    else:
+        identifier, heading, label = 'dependency-changes', 'Dependency changes', 'Dependency'
+        detail = 'output'
     if changes is None:
-        assert not parsed.sections('dependency-changes'), 'show compared unavailable dependency graphs'
+        assert not parsed.sections(identifier), ('show compared unavailable dependency graphs', identifier)
         return
-    section = parsed.section('dependency-changes', 'Dependency changes')
+    section = parsed.section(identifier, heading)
+    if value_bindings:
+        artifacts = parsed.section('dependency-changes', 'Dependency changes')
+        current = parsed.section('dependencies', 'Dependencies')
+        assert parsed.elements.index(artifacts) < parsed.elements.index(section) < parsed.elements.index(current)
     if not changes:
-        assert 'No dependency changes.' in section.visible(), section.visible()
+        assert f'No {heading.lower()}.' in section.visible(), section.visible()
         return
 
     table, = (node for node in section.descendants if node.tag == 'table')
     assert [node.visible().strip() for node in table.descendants if node.tag == 'th'] == [
-        'Dependency', 'Before', 'After',
+        label, 'Before', 'After',
     ]
     rows = [[node for node in row.descendants if node.tag == 'td']
             for row in table.descendants if row.tag == 'tr']
@@ -235,12 +310,14 @@ def check_dependency_changes_html(document, definition, changes):
     anchors = {node.attrs.get('id'): node for node in source.descendants}
     lines = definition.splitlines()
     for row, group in zip(rows, changes):
-        label, before, after = row
+        identity, before, after = row
         edge = (group['after'] or group['before'])[0]
-        fields = ('consumer', 'producer', 'usage', 'binding', 'output')
-        assert [node.visible() for node in label.descendants if node.tag == 'code'] == [
+        fields = ('consumer', 'producer', 'usage', 'binding', detail)
+        assert [node.visible() for node in identity.descendants if node.tag == 'code'] == [
             edge[key] for key in fields if key in edge
-        ], (edge, label.visible())
+        ], (edge, identity.visible())
+        if value_bindings:
+            assert 'Binding' in identity.visible() and 'Export' in identity.visible(), edge
         for side, cell in (('before', before), ('after', after)):
             locations = [edge['location'] for edge in group[side]]
             count = len(locations)
@@ -259,6 +336,7 @@ def check_dependency_changes_html(document, definition, changes):
             assert links == expected, (group, links)
     assert not any(node.attrs.get('data-dependency-probe') == '1' for node in parsed.elements)
     assert not any(node.attrs.get('data-saved-dependency-probe') == '1' for node in parsed.elements)
+    assert not any(node.attrs.get('data-value-binding-probe') == '1' for node in parsed.elements)
 
 
 def scope_state(scope):
@@ -283,7 +361,33 @@ def compare_dependencies(ycxx, scope, snapshot, current, expected):
     document = show(ycxx, scope, '--format=html', *args).decode('utf-8')
     check_dependency_changes_html(document, current['definition'], expected)
     check_dependency_html(document, current)
+    check_target_dependencies_html(document, current)
     assert scope_state(scope) == before, 'dependency comparison changed the workspace'
+    return diff
+
+
+def compare_value_bindings(ycxx, scope, env, snapshot, current, expected):
+    before = scope_state(scope)
+    args = ('--against', str(snapshot))
+
+    def compare(format_):
+        result = run_client(ycxx, scope, env, 'show', 'app', f'--format={format_}', *args)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    encoded = compare('json')
+    assert compare('json') == encoded, 'value binding comparison changed between reads'
+    diff = json.loads(encoded)
+    assert diff['schema'] == 1 and diff['target'] == 'app', diff
+    if expected is None:
+        assert 'value_binding_changes' not in diff, diff
+    else:
+        assert diff.get('value_binding_changes') == expected, (diff.get('value_binding_changes'), expected)
+    document = compare('html')
+    check_dependency_changes_html(document, current['definition'], expected, value_bindings=True)
+    check_value_bindings_html(document, current)
+    check_target_dependencies_html(document, current)
+    assert scope_state(scope) == before, 'value binding comparison changed the workspace'
     return diff
 
 
@@ -485,6 +589,7 @@ def check_unresolved(ycxx, scope, definition):
     document = show(ycxx, scope, '--format=html').decode('utf-8')
     check_dependency_html(document, plan)
     check_value_bindings_html(document, plan)
+    check_target_dependencies_html(document, plan)
     assert not (scope / '.ycxx').exists(), 'cold inspection created build state'
     assert not (scope / 'generator-ran').exists(), 'cold inspection ran the generator'
 
@@ -523,13 +628,16 @@ def check_views(ycxx, scope, definition):
     assert show(ycxx, scope, '--format=text') == text.encode('utf-8')
     assert all(fragment in text for fragment in ('auto/first.cc', 'src/main.cc', 'wire.cc', 'core')), text
 
-    document = show(ycxx, scope, '--format=html').decode('utf-8')
+    encoded = show(ycxx, scope, '--format=html')
+    assert show(ycxx, scope, '--format=html') == encoded, 'same plan produced different HTML'
+    document = encoded.decode('utf-8')
     visible = html.unescape(document)
     assert all(fragment in visible for fragment in (MARKUP, UNSAFE_SOURCE, 'auto/first.cc', 'src/main.cc')), document
     assert MARKUP not in document and UNSAFE_SOURCE not in document, 'inspection HTML contains unescaped user text'
     assert '&lt;script&gt;' in document and '&lt;b&gt;&amp;' in document, 'inspection HTML did not escape markup'
     check_dependency_html(document, snapshot)
     check_value_bindings_html(document, snapshot)
+    check_target_dependencies_html(document, snapshot)
     assert scope_state(scope) == before, 'inspection changed files or build state'
 
     assert not (scope / 'generator-ran').exists(), 'inspection ran the generator'

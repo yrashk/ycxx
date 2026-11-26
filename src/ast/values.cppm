@@ -187,6 +187,7 @@ struct VLvalue {
   ConstId base;
   SeqId<u32> path;
   std::int64_t offset;
+  bool gcc_nested_end = false;
 };
 
 // An object of array or class type ([dcl.init.aggr]): its canonical type and the value of each
@@ -209,6 +210,7 @@ struct [[=dependent]] VDepParam {
 struct [[=dependent]] VDepFnParam {
   u16 depth;
   u16 index;
+  u8 cv = 0;
 };
 
 // A namespace variable template found at the point of definition, with dependent arguments.
@@ -218,6 +220,7 @@ struct [[=dependent]] VDepVariable {
   SeqId<TemplateArg> written_args;
   u8 qualified;
   u8 global;
+  SeqId<NameId> qualifier{};
 };
 
 // A call to a named immediate function. The arguments are explicit types for a function
@@ -336,6 +339,23 @@ struct VWrittenOperator {
   SeqId<ConstId> operands;
 };
 
+struct VWrittenCallee {
+  NameId name;
+  EntityId resolved;
+  SeqId<NameId> qualifier;
+  SeqId<TemplateArg> arguments;
+  bool global;
+  bool template_id;
+};
+
+struct VWrittenMember {
+  ConstId object;
+  NameId name;
+  SeqId<TemplateArg> arguments;
+  bool arrow;
+  bool template_id;
+};
+
 // A pack occupies one parameter slot in an atomic constraint's mapping.
 struct VConstraintPack {
   SeqId<ConstId> elements;
@@ -373,15 +393,23 @@ struct VConstraint {
   SeqId<ConstId> operands;
 };
 
-// The written form of requires { typename ...; ... } for constraint linkage.
-struct [[=dependent]] VRequiresTypes {
-  SeqId<TemplateArg> types;
+// The written form of a requires-expression in a constraint symbol.
+struct [[=dependent]] VRequiresExpression {
+  SeqId<QualType> parameters;
+  SeqId<WrittenRequirement> requirements;
+  bool parameter_list;
+};
+
+struct [[=dependent]] VRequiresParameter {
+  u32 scope;
+  u32 index;
+  Cv cv;
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes,
-                               VWrittenOperator>;
+                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional,
+                               VRequiresExpression, VRequiresParameter, VWrittenOperator, VWrittenCallee, VWrittenMember>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

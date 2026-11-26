@@ -172,9 +172,11 @@ reasoning; do not leave decisions only in issue threads.
 
 ## 3. Implementation language and bootstrap
 
-1. **C++26 with libycxx.** ycxx is written in C++26 and uses libycxx (submodule
-   `deps/libycxx`) as its standard library, with `import std;`. libycxx's preprocessor policy
-   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's own sources too.
+1. **C++26 with a selectable standard library.** The default build uses the pinned libycxx
+   submodule and `import std;`. A system build imports the bootstrap GCC installation's
+   libstdc++ module and builds libycxx's portable execution provider against that same library.
+   The bootstrap compiler and the source language stay the same. libycxx's preprocessor policy
+   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's sources in both configurations.
 2. **Modern C++, as far as the bootstrap compiler allows.** ycxx exercises C++20–26 as heavily
    as the bootstrap compiler supports. The test is: *how would this be written in fully
    implemented C++26?* Write it that way, unless the bootstrap compiler cannot.
@@ -438,6 +440,11 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      [closures.md](docs/design/closures.md), decided by Fable).
      An internal namespace variable can own a captureless closure. Its declarator anchors the
      identity before type deduction, and the declaration part carries its members (#338).
+   - **Local classes** ([class.local]) are items: the splitter cuts a class-specifier in a block
+     out of its function or declaration, the block's analysis gives it an entity local to the
+     function, numbered per name in token order, and records the block's names for its members;
+     the class is then analysed as any class (#117, [local-classes.md](docs/design/local-classes.md),
+     decided by Fable). This amends the AST design's §4.4 for local class definitions only.
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
     - **One daemon per project root and ycxx binary.** The root is found at the first `.ycxx`,

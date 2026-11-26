@@ -64,6 +64,7 @@ struct DeclSpec {
   Tk class_key = Tk::eof;
   NameId class_name{};
   u32 class_at = 0;
+  bool defined_class = false;  // a class-specifier: a local class ([class.local])
   bool ok = true;
 };
 
@@ -663,7 +664,8 @@ public:
     bool constraint_failed = false;
     const bool replay_partial_alias = namespace_alias_type || replayed_member_alias_type || s_->replaying_alias_type_arguments;
     auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
-                                      alias_constraints_enabled_ ? &constraint_failed : nullptr, replay_partial_alias);
+                                      alias_constraints_enabled_ ? &constraint_failed : nullptr, replay_partial_alias,
+                                      /*record_spelling=*/!in_template_id_lookahead_);
     if (type && defer_alias && !in_template_id_lookahead_)
       type_alias_checks_->checks.emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
     alias_constraint_failures_ += constraint_failed;
@@ -673,6 +675,14 @@ public:
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
   // declares the class ([basic.scope.pdecl]); set by the owner where that applies.
   std::function<std::optional<QualType>(NameId, Tk, u32)> declare_class;
+  // A local class's class-specifier at region token `index` ([class.local]), which the splitter cut
+  // as an item of its own: whether there is one; then its type, none after an error, and the
+  // index past its `}`. Set by the owner of a block.
+  struct LocalClass {
+    std::optional<QualType> type;
+    u32 end = 0;
+  };
+  std::function<std::optional<LocalClass>(u32)> define_class;
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
@@ -876,6 +886,23 @@ public:
       case Tk::kw_class:
       case Tk::kw_union: {
         u32 at = pos();
+        if (define_class && !qualified_ahead(1)) {
+          if (auto local = define_class(index())) {
+            seek(local->end);
+            if (!local->type) {
+              d.ok = false;
+              goto done;
+            }
+            if (any_type()) {
+              s_->diag(at, Diag::conflicting_specifiers, k);
+              d.ok = false;
+              goto done;
+            }
+            cls = *local->type;
+            d.defined_class = true;
+            continue;
+          }
+        }
         if (qualified_ahead(1)) {
           bump();
           const std::size_t diags = s_->diag_count();
@@ -968,6 +995,9 @@ public:
               d.ok = false;
               goto done;
             }
+            if (writing_gcc_template_signature_ && !s_->types().is_dependent(*t) &&
+                tr->name != "__remove_const" && tr->name != "__remove_volatile" && tr->name != "__remove_reference_t")
+              cls = s_->ins().intern_type(ast::SWrittenTransform{*cls, *t, u8(tr->trait)});
             continue;
           }
           if (qualified_ahead()) {
@@ -1193,7 +1223,8 @@ public:
       d.ref_at = d.name_at;
     }
     if (!abstract && !typedef_ && function_type && !conversion && !defer_ref_check &&
-        !(d.qualified && d.scope.type && s_->types().is_class(*d.scope.type)))
+        !(d.qualified && d.scope.type &&
+          (s_->types().is_class(*d.scope.type) || s_->types().is_dependent(*d.scope.type))))
       d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
       skip_attributes(&d.attributes, attr_gnu);
@@ -1241,14 +1272,19 @@ public:
       }
       if (gnu) bump();
       const u32 begin = index();
-      const Tk open = kind(), close = std_attr ? Tk::r_square : Tk::r_paren;
-      u32 depth = 0;
-      do {
-        if (is(open)) ++depth;
-        else if (is(close)) --depth;
-        bump();
-      } while (depth > 0 && !at_end());
-      const bool closed = depth == 0;
+      const auto end = std_attr ? items::standard_attribute_end(*r_, begin, end_) : std::nullopt;
+      bool closed = end.has_value();
+      if (end) seek(*end);
+      else {
+        const Tk open = kind(), close = std_attr ? Tk::r_square : Tk::r_paren;
+        u32 depth = 0;
+        do {
+          if (is(open)) ++depth;
+          else if (is(close)) --depth;
+          bump();
+        } while (depth > 0 && !at_end());
+        closed = depth == 0;
+      }
       if ((annotations || annotation_type_context) && std_attr && closed) {
         if (auto mixed = annotation_in_attribute_list(begin, index()))
           s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
@@ -1364,6 +1400,8 @@ public:
 
   u32 past_attribute_specifier(u32 ahead) const {
     Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+    if (open == Tk::l_square && kind(ahead + 1) == Tk::l_square)
+      if (auto end = items::standard_attribute_end(*r_, index() + ahead, end_)) return *end - index();
     u32 depth = 0;
     do {
       if (kind(ahead) == open) ++depth;
@@ -1382,12 +1420,86 @@ public:
       ahead = past_attribute_specifier(ahead + (gnu ? 1 : 0));
     }
   }
+
+  // Recognized attributes keep the normal grammar even when a peer recovers from a
+  // malformed argument on an unknown attribute. Vendor namespaces can add new spellings.
+  static bool known_attribute(std::string_view scope, std::string_view name) {
+    if (!scope.empty()) return scope == "gnu" || scope == "__gnu__" || scope == "clang" || scope == "__clang__" ||
+                               scope == "gsl" || scope == "msvc" || scope == "arm";
+    constexpr std::string_view names[] = {"assume", "carries_dependency", "deprecated", "fallthrough", "indeterminate",
+        "likely", "maybe_unused", "nodiscard", "noreturn", "no_unique_address", "unlikely"};
+    if (name.starts_with("__") && name.ends_with("__") && name.size() > 4) name = name.substr(2, name.size() - 4);
+    return std::ranges::contains(names, name);
+  }
+
+  std::optional<u32> attribute_argument_end(u32 open, u32 limit, ast::Compatibility mode) const {
+    std::vector<Tk> closing{Tk::r_paren};
+    std::vector<Tk> skipped;
+    for (u32 at = open + 1; at < limit; ++at) {
+      const Tk token = kind(at);
+      if (const Tk close = items::attribute_closer(token); close != Tk::eof) {
+        closing.push_back(close);
+        continue;
+      }
+      if (token != Tk::r_square && token != Tk::r_paren && token != Tk::r_brace && token != Tk::r_splice) continue;
+      const auto found = std::find(closing.rbegin(), closing.rend(), token);
+      if (found == closing.rend()) {
+        if (mode != ast::Compatibility::clang || (token != Tk::r_brace && token != Tk::r_square) ||
+            std::ranges::contains(skipped, token)) return std::nullopt;
+        continue;
+      }
+      const auto matched = std::prev(found.base());
+      if (mode == ast::Compatibility::gcc) {
+        closing.erase(matched);  // GCC balances each kind separately.
+      } else if (mode == ast::Compatibility::clang) {
+        skipped.insert(skipped.end(), std::next(matched), closing.end());
+        closing.erase(matched, closing.end());
+      } else {
+        if (matched != std::prev(closing.end())) return std::nullopt;
+        closing.pop_back();
+      }
+      if (closing.empty()) return at + 1;
+    }
+    if (mode == ast::Compatibility::clang) return limit;
+    return std::nullopt;
+  }
+
+  bool compiler_attribute_balanced(u32 first, u32 after, ast::Compatibility mode) const {
+    if (after < first + 4 || kind(after - 2) != Tk::r_square || kind(after - 1) != Tk::r_square) return false;
+    const u32 limit = after - 2;
+    for (u32 at = first + 2; at < limit;) {
+      if (kind(at) == Tk::comma) { ++at; continue; }
+      if (kind(at) != Tk::identifier) return false;
+      std::string_view scope;
+      if (kind(at + 1) == Tk::coloncolon && kind(at + 2) == Tk::identifier) {
+        scope = r_->name(tok(at));
+        at += 2;
+      }
+      const auto name = r_->name(tok(at++));
+      if (kind(at) == Tk::l_paren) {
+        const auto end = attribute_argument_end(at, limit, known_attribute(scope, name) ? ast::Compatibility::spec : mode);
+        if (!end) return false;
+        at = *end;
+      }
+      if (at != limit && kind(at) != Tk::comma) return false;
+    }
+    return true;
+  }
+
   // [dcl.attr.grammar]: each attribute argument must have balanced tokens.
   bool balanced_attributes() {
     const u32 count = past_attributes(0);
-    const bool clang = s_->compatibility() == ast::Compatibility::clang;
+    const auto mode = s_->compatibility();
     std::vector<Tk> closing;
     for (u32 offset = 0; offset < count; ++offset) {
+      if (mode != ast::Compatibility::spec && closing.empty() && kind(offset) == Tk::l_square &&
+          kind(offset + 1) == Tk::l_square) {
+        const u32 end = past_attribute_specifier(offset);
+        if (compiler_attribute_balanced(offset, end, mode)) {
+          offset = end - 1;
+          continue;
+        }
+      }
       switch (Tk token = kind(offset)) {
       case Tk::l_square: closing.push_back(Tk::r_square); break;
       case Tk::l_paren: closing.push_back(Tk::r_paren); break;
@@ -1398,7 +1510,7 @@ public:
       case Tk::r_brace:
       case Tk::r_splice:
         // Clang skips an unmatched splice opener in an ordinary attribute argument.
-        if (clang && token == Tk::r_paren)
+        if (mode == ast::Compatibility::clang && token == Tk::r_paren)
           while (!closing.empty() && closing.back() == Tk::r_splice) closing.pop_back();
         if (closing.empty()) {
           s_->diag(pos() + offset, Diag::unexpected_token, token);
@@ -1550,6 +1662,27 @@ public:
     return type;
   }
 
+  // An operator-function-id ([over.oper.general]) at `operator`: `operator@`, named as the
+  // splitter spells it; none, diagnosed, for an operator ycxx does not name yet.
+  std::optional<NameId> operator_function_name() {
+    bump();
+    std::string spelled = "operator";
+    if (auto pair = paired_operator_suffix(); !pair.empty()) {
+      spelled += pair;
+      bump();
+      bump();
+    } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
+      spelled = allocation_operator_name();
+    } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
+      spelled += lex::spelling(kind());
+      bump();
+    } else {
+      s_->diag(pos(), Diag::not_supported, Tk::kw_operator);
+      return std::nullopt;
+    }
+    return s_->world().ins.names.intern(spelled);
+  }
+
   // The allocation operator's keyword and optional empty brackets follow `operator`.
   std::string_view allocation_operator_name() {
     const auto f = is(Tk::kw_new) ? sema::AllocationFunction::allocate : sema::AllocationFunction::deallocate;
@@ -1622,23 +1755,12 @@ public:
     } else if (!abstract && is(Tk::kw_operator)) {
       // An operator-function-id ([over.oper.general]): `operator@`, named as the splitter spells it.
       l.name_at = pos();
-      bump();
-      std::string spelled = "operator";
-      if (auto pair = paired_operator_suffix(); !pair.empty()) {
-        spelled += pair;
-        bump();
-        bump();
-      } else if (is(Tk::kw_new) || is(Tk::kw_delete)) {
-        spelled = allocation_operator_name();
-      } else if (lex::is_punctuator(kind()) && overloadable(kind())) {
-        spelled += lex::spelling(kind());
-        bump();
-      } else {
-        s_->diag(pos(), Diag::not_supported, Tk::kw_operator);
+      auto n = operator_function_name();
+      if (!n) {
         ok = false;
         return l;
       }
-      l.name = s_->world().ins.names.intern(spelled);
+      l.name = *n;
       l.named = true;
     } else if (is(Tk::identifier)) {
       l.name = name_of(tok());
@@ -2303,6 +2425,74 @@ public:
     suffix.noexcept_condition = e;
   }
 
+  // An explicit-specifier, after `explicit` ([dcl.fct.spec]). Without a condition it is
+  // `explicit(true)`. A condition is a contextually converted constant expression of type bool.
+  // One that is value-dependent has no value yet; with `want_atom` it is also kept as an atom,
+  // read again once the template's arguments are known ([temp.deduct.general]). As in an atomic
+  // constraint, a type trait with dependent operands waits for them. None if it is diagnosed.
+  struct ExplicitSpec {
+    std::optional<bool> value;
+    sema::ConstId atom = sema::ConstId::none;
+  };
+  // An explicit-specifier's condition `e` as a contextually converted constant expression of type
+  // bool ([dcl.fct.spec], [expr.const.const]): from bool, an integral type or an enumeration,
+  // without narrowing. Its value, or none: value-dependent (`dependent` set) or diagnosed. A class
+  // operand needs a conversion function, which is not supported yet.
+  std::optional<bool> explicit_condition_value(Ex e, bool& dependent) {
+    Ex operand = s_->rvalue(e);
+    const QualType type = sema::Types::unqualified(s_->types().canonical(operand.type()));
+    if (!s_->types().is_dependent(type)) {
+      if (s_->types().is_class(type)) {
+        s_->diag(operand.begin, Diag::explicit_class_condition, type);
+        return std::nullopt;
+      }
+      if (!s_->types().is_integral(type) && !s_->types().is_enum(type)) {
+        s_->diag(operand.begin, Diag::explicit_condition_type, type);
+        return std::nullopt;
+      }
+    }
+    Ex condition = s_->to_bool(operand, operand.begin);
+    if (!condition.ok()) return std::nullopt;
+    sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(condition);
+    if (result.value) {
+      if (s_->narrows(operand, condition.type())) {
+        s_->diag(operand.begin, Diag::explicit_narrowing, operand.type());
+        return std::nullopt;
+      }
+      return s_->world().values.as_signed(*result.value) != 0;
+    }
+    if (result.dependent) dependent = true;
+    else s_->diag(condition.begin, Diag::not_constant, result.reason);
+    return std::nullopt;
+  }
+
+  std::optional<ExplicitSpec> explicit_specifier(bool want_atom) {
+    if (!accept(Tk::l_paren)) return ExplicitSpec{true};
+    const int saved = std::exchange(angle_, 0);
+    const u32 begin = pos();
+    Ex e = [&] {
+      const sema::Sema::ConstraintAtomScope scope{*s_};
+      return constant_expression();
+    }();
+    const u32 end = pos();
+    const u32 end_index = i_;
+    angle_ = saved;
+    if (!e.ok() || !expect(Tk::r_paren)) return std::nullopt;
+    bool dependent = false;
+    auto value = explicit_condition_value(e, dependent);
+    if (value) return ExplicitSpec{*value};
+    if (!dependent) return std::nullopt;
+    ExplicitSpec spec;
+    if (want_atom) {
+      // The template parameters it names: the atom's parameter mapping's ([temp.constr.atomic]/1).
+      std::vector<NameId> names;
+      for (u32 j = begin_ + begin; j < end_index; ++j)
+        if (r_->tokens[j].kind == Tk::identifier) names.push_back(name_of(r_->tokens[j]));
+      spec.atom = s_->atom(begin, end, names);
+    }
+    return spec;
+  }
+
   // The value of a noexcept-specifier's condition ([except.spec]/2). With `dependent`, a
   // value-dependent condition sets it instead of being diagnosed.
   bool noexcept_value(const std::optional<Ex>& condition, bool& ok, bool* dependent = nullptr) {
@@ -2760,6 +2950,23 @@ public:
     if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
+    // `auto X`, `decltype(auto) X`, `auto... Xs` ([temp.param]/7): each argument deduces the
+    // parameter's type ([temp.arg.nontype]/1, [dcl.type.auto.deduct]). Inside the template that
+    // type is dependent, the parameter's own position, so `decltype(X)` names it.
+    if (s_->types().kind(t) == sema::TypeKind::placeholder) {
+      const sema::TypeRec r = s_->types().rec(t);
+      if (r.entity != sema::EntityId::none) {  // `C auto X` (#286)
+        s_->diag(at, Diag::not_supported, Tk::kw_auto);
+        ok = false;
+        return std::nullopt;
+      }
+      p.placeholder = r.decltype_auto ? ast::Placeholder::decltype_auto : ast::Placeholder::auto_;
+      t = s_->types().template_param(depth, index, p.pack != 0);
+    } else if (s_->types().has_placeholder(t)) {  // `auto* P`, `auto& R` (#1401)
+      s_->diag(at, Diag::not_supported, Tk::kw_auto);
+      ok = false;
+      return std::nullopt;
+    }
     // [temp.param]: a structural type, including the supported flat aggregate profile.
     const bool class_parameter = !p.pack && s_->types().is_class(t) && !s_->types().is_dependent(t) &&
                                  s_->is_complete(t) && !questions().class_layout_uncertain(s_->types().class_of(t)) &&
@@ -2782,14 +2989,17 @@ public:
       const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
       in_integral_template_default_ = saved_default;
-      auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
-      if (!v) v = template_value(e, t);
+      // A placeholder parameter's default deduces its type as an argument does.
+      QualType dt = t;
+      if (p.placeholder != ast::Placeholder::none && e.ok()) dt = sema::Types::unqualified(s_->rvalue(e).type());
+      auto v = s_->types().is(dt, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
+      if (!v) v = template_value(e, dt);
       if (!v) {
         ok = false;
         return std::nullopt;
       }
       p.has_default = 1;
-      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(t), *v};
+      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(dt), *v};
     }
     return p;
   }
@@ -2893,10 +3103,97 @@ public:
 
   DeclSpec function_template_decl_specifiers(TypeAliasChecks& checks) {
     TypeAliasCheckScope aliases{*this, true, /*type_default=*/false};
+    const GccSignatureScope spelling{*this};
     auto spec = decl_specifiers();
     checks = std::move(aliases.checks);
     return spec;
   }
+
+  Declarator function_template_declarator(QualType base, bool typedef_) {
+    const GccSignatureScope spelling{*this};
+    auto declaration = declarator(base, false, typedef_);
+    if (writing_gcc_template_signature_ && declaration.ok && declaration.function && !typedef_)
+      declaration.type = retain_gcc_signature_transforms(declaration.type);
+    return declaration;
+  }
+
+  // GCC keeps these transforms distinct in function template patterns. Their concrete
+  // type is recovered by the same substitution that applies a dependent transform.
+  QualType retain_gcc_signature_transforms(QualType type) {
+    auto& in = s_->ins();
+    const auto cv = ast::cv_of(type);
+    const auto bare = ast::without_cv(type);
+    if (in.types.is<ast::SWrittenTransform>(bare)) {
+      const auto transform = in.types.get<ast::SWrittenTransform>(bare);
+      return in.qualified(s_->types().transform(transform.trait, transform.operand), cv);
+    }
+    if (in.types.is<ast::TFunction>(bare)) {
+      auto fn = in.types.get<ast::TFunction>(bare);
+      fn.ret = retain_gcc_signature_transforms(fn.ret);
+      auto params = in.seqs.elements(fn.params);
+      for (QualType& p : params) p = retain_gcc_signature_transforms(p);
+      fn.params = in.intern_seq(std::span<const QualType>(params));
+      return in.intern_type(fn, cv);
+    }
+    if (in.types.is<ast::TPointer>(bare)) {
+      auto pointer = in.types.get<ast::TPointer>(bare);
+      pointer.pointee = retain_gcc_signature_transforms(pointer.pointee);
+      return in.intern_type(pointer, cv);
+    }
+    if (in.types.is<ast::TLRef>(bare)) {
+      auto reference = in.types.get<ast::TLRef>(bare);
+      reference.referee = retain_gcc_signature_transforms(reference.referee);
+      return in.intern_type(reference, cv);
+    }
+    if (in.types.is<ast::TRRef>(bare)) {
+      auto reference = in.types.get<ast::TRRef>(bare);
+      reference.referee = retain_gcc_signature_transforms(reference.referee);
+      return in.intern_type(reference, cv);
+    }
+    if (in.types.is<ast::TArray>(bare)) {
+      auto array = in.types.get<ast::TArray>(bare);
+      array.elem = retain_gcc_signature_transforms(array.elem);
+      return in.intern_type(array, cv);
+    }
+    if (in.types.is<ast::TMemberPtr>(bare)) {
+      auto member = in.types.get<ast::TMemberPtr>(bare);
+      member.member = retain_gcc_signature_transforms(member.member);
+      return in.intern_type(member, cv);
+    }
+    return type;
+  }
+
+  std::optional<lex::TypeTrait> gcc_signature_transform(QualType type) {
+    if (type == QualType{}) return std::nullopt;
+    const auto rec = s_->types().rec(type);
+    if (rec.kind == sema::TypeKind::transform) return lex::TypeTrait(rec.trait);
+    if (auto trait = gcc_signature_transform(rec.inner)) return trait;
+    if (auto trait = gcc_signature_transform(rec.member_owner)) return trait;
+    for (QualType parameter : rec.params)
+      if (auto trait = gcc_signature_transform(parameter)) return trait;
+    auto argument_transform = [&](auto&& self, const ast::TemplateArg& argument) -> std::optional<lex::TypeTrait> {
+      if (argument.kind == ast::TemplateArgKind::type) return gcc_signature_transform(argument.type);
+      if (argument.kind == ast::TemplateArgKind::pack)
+        for (const auto& element : s_->ins().seqs.elements(argument.elems))
+          if (auto trait = self(self, element)) return trait;
+      return std::nullopt;
+    };
+    const auto args = rec.kind == sema::TypeKind::class_ ? s_->world().entities.rec(rec.entity).args
+                                                        : s_->ins().seqs.elements(rec.args);
+    for (const auto& argument : args)
+      if (auto trait = argument_transform(argument_transform, argument)) return trait;
+    return std::nullopt;
+  }
+
+  struct GccSignatureScope {
+    Parser& parser;
+    bool saved;
+    explicit GccSignatureScope(Parser& p, bool enabled = true)
+        : parser(p), saved(std::exchange(p.writing_gcc_template_signature_,
+                                        enabled && p.s_->compatibility() == ast::Compatibility::gcc)) {}
+    ~GccSignatureScope() { parser.writing_gcc_template_signature_ = saved; }
+  };
+  bool writing_gcc_template_signature_ = false;
 
   // Attach the checks after parsing the function's declarator, once its return type is built.
   QualType function_with_return_alias_checks(QualType type, const TypeAliasChecks& checks) {
@@ -3126,6 +3423,8 @@ public:
         } end_pattern{s_, arg_at};
         // A brace or an integer literal in the initializer rules out an abstract declarator.
         // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
+        std::optional<QualType> trial_type;
+        std::vector<engine::Diagnostic> trial_diags;  // a failed type-id's, if the expression fails too
         const bool decay_copy = is(Tk::kw_auto) &&
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (auto end = template_name_end_ahead()) {
@@ -3134,15 +3433,22 @@ public:
             for (u32 j = 0; j <= *end; ++j) bump();
             ok = false;
           }
-        } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
-          const bool saved_type_argument = std::exchange(in_template_type_argument_, true);
-          auto t = type_id(/*placeholder_ok=*/false,
-                           /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
-          in_template_type_argument_ = saved_type_argument;
+        } else if (bool trial = false; !decay_copy && starts_type_id(/*template_argument=*/true, &trial) &&
+                   (!trial || tentative_type_argument(trial_type, trial_diags))) {
+          auto t = trial ? trial_type : template_type_argument();
           if (!t) ok = false;
-          else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
+          else {
+            const auto type = writing_gcc_template_signature_ ? retain_gcc_signature_transforms(*t) : *t;
+            args.push_back({ast::TemplateArgKind::type, s_->types().canonical(type), sema::ConstId::none});
+          }
         } else {
+          const std::size_t expression_diags = s_->diag_count();
           Ex e = template_argument_expression(replay != nullptr);
+          // Neither reading works: report the one the grammar prefers ([temp.arg.general]/2).
+          if (!e.ok() && !trial_diags.empty()) {
+            s_->truncate_diags(expression_diags);
+            std::ranges::move(trial_diags, std::back_inserter(s_->diagnostics()));
+          }
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
@@ -3198,18 +3504,21 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
-  // A template argument `int(…)` ([temp.arg.general]/2) is a type-id only if it can be one: a
-  // function type, whose parentheses hold a parameter-declaration-clause or a grouped declarator
-  // and are followed by the declarator's suffixes or the argument's end. Otherwise it is a
-  // functional cast ([expr.type.conv]): `bool(T::value) || x`, `int(3) + 1`, `bool(N)`.
-  bool function_type_argument_ahead() {
-    auto ends_argument = [](Tk k) {
-      return k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis;
-    };
-    const u32 close = past_parentheses(1);
+  static bool ends_template_argument(Tk k) {
+    return k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis;
+  }
+  // A template argument `T(…)`, with T a simple-type-specifier (`int`, a typedef-name, `N::C`), is
+  // a type-id only if it can be one ([temp.arg.general]/2): a function type, whose parentheses
+  // hold a parameter-declaration-clause or a grouped declarator and are followed by the
+  // declarator's suffixes or the argument's end. Otherwise it is a functional cast
+  // ([expr.type.conv]): `bool(T::value) || x`, `int(3) + 1`, `U(3)`, `bool(N)`. `open` is the
+  // offset of the `(`. When the tokens allow both, `*trial` is set: only a tentative parse can
+  // tell (`int(&)[3]` from `bool(&g)`, `bool(S)` from `bool(S{})`).
+  bool function_type_argument_ahead(u32 open, bool* trial) {
+    const u32 close = past_parentheses(open);
     switch (kind(close)) {
     case Tk::comma: case Tk::greater: case Tk::greatergreater: case Tk::ellipsis: case Tk::l_paren:
-    case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept:
+    case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept: case Tk::arrow:
       break;
     case Tk::amp: case Tk::ampamp: {
       // [dcl.fct]: A ref-qualifier can precede an exception specification. Check its end:
@@ -3219,19 +3528,24 @@ public:
         ++suffix_end;
         if (kind(suffix_end) == Tk::l_paren) suffix_end = past_parentheses(suffix_end);
       }
-      if (!ends_argument(kind(suffix_end))) return false;
+      if (!ends_template_argument(kind(suffix_end))) return false;
       break;
     }
     default:
       return false;
     }
-    const Tk inner = kind(2);
-    if (inner == Tk::r_paren || inner == Tk::ellipsis || inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp ||
-        inner == Tk::caret || inner == Tk::l_paren || member_pointer_star(2) || past_attributes(2) != 2)
-      return true;  // a parameter's attributes ([dcl.fct]/3) start one too
+    const u32 first = open + 1;
+    const Tk inner = kind(first);
+    // `()`, `(...)`: only a parameter-declaration-clause.
+    if (inner == Tk::r_paren || inner == Tk::ellipsis) return true;
+    if (trial) *trial = true;
+    // A ptr-operator, a grouped declarator or a parameter's attributes ([dcl.fct]/3).
+    if (inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp || inner == Tk::caret || inner == Tk::l_paren ||
+        member_pointer_star(first) || past_attributes(first) != first)
+      return true;
     // A name starts a parameter only if it names a type; a member of a dependent class does so
     // only after `typename` here ([temp.res.general]/4).
-    const u32 saved = std::exchange(i_, i_ + 2);
+    const u32 saved = std::exchange(i_, i_ + first);
     const bool saved_half = qualified_half_;
     const bool parameter = starts_type_id();
     qualified_half_ = saved_half;
@@ -3239,9 +3553,34 @@ public:
     return parameter;
   }
 
-  bool starts_type_id(bool template_argument = false) {
+  // The offset past `typename nested-name-specifier [template] name [<args>]` at the current
+  // token ([temp.res.general]), read by tokens alone.
+  u32 past_typename_specifier() {
+    u32 j = 1;
+    if (kind(j) == Tk::coloncolon) ++j;
+    for (;;) {
+      if (kind(j) == Tk::kw_template) ++j;
+      if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) j = past_parentheses(j + 1);
+      else if (kind(j) == Tk::identifier) j = kind(j + 1) == Tk::less ? past_template_args(j + 1) : j + 1;
+      else return j;
+      if (kind(j) != Tk::coloncolon) return j;
+      ++j;
+    }
+  }
+
+  // Whether a type-id can start here. As a template argument (`template_argument`), `*trial` is
+  // set when the text may also be an expression and only a tentative parse can tell
+  // ([dcl.ambig.res]/2, `tentative_type_argument`).
+  bool starts_type_id(bool template_argument = false, bool* trial = nullptr) {
     if (transform_trait_ahead()) return true;
-    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren) return function_type_argument_ahead();
+    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren)
+      return function_type_argument_ahead(1, trial);
+    // `typename N::T{1}` and `typename N::T(2)` are functional casts too ([expr.type.conv]/1).
+    if (template_argument && is(Tk::kw_typename)) {
+      const u32 next = past_typename_specifier();
+      if (kind(next) == Tk::l_brace) return false;
+      if (kind(next) == Tk::l_paren) return function_type_argument_ahead(next, trial);
+    }
     if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
@@ -3254,12 +3593,57 @@ public:
                               template_argument);
       if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
       // A terminal namespace type-template-id can expand to a dependent member type.
-      return q && (!template_argument || kind(q->second) != Tk::l_brace) &&
-             (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
+      if (!q || (template_argument && kind(q->second) == Tk::l_brace) ||
+          (!terminal_template_id && s_->types().kind(q->first) == sema::TypeKind::dep_name))
+        return false;
+      return !template_argument || kind(q->second) != Tk::l_paren || function_type_argument_ahead(q->second, trial);
     }
-    if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
-    return is(Tk::identifier) && kind(1) != Tk::coloncolon &&
-           (!template_argument || kind(1) != Tk::l_brace) && s_->class_name(name_of(tok())).has_value();
+    if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
+      if (!template_argument) return true;
+      const u32 next = past_template_args(1);
+      return kind(next) != Tk::l_paren || function_type_argument_ahead(next, trial);
+    }
+    if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
+    if (!template_argument) return true;
+    return kind(1) != Tk::l_brace && (kind(1) != Tk::l_paren || function_type_argument_ahead(1, trial));
+  }
+
+  // [dcl.ambig.res]/2: a template argument that may be a type-id or an expression is a type-id
+  // if it parses as one up to the argument's end, with no syntax error. The choice is syntactic:
+  // an ill-formed type-id such as `P(P(p))[1]` (a function returning an array) stays one, with
+  // its diagnostics, in `t`. Otherwise nothing is read, and the diagnostics move to `failed`:
+  // `bool(&g)`, `int((n))`, `bool(S{})` and `U(3)` are expressions ([expr.type.conv]).
+  bool tentative_type_argument(std::optional<QualType>& t, std::vector<engine::Diagnostic>& failed) {
+    const u32 back = i_;
+    const std::size_t diags = s_->diag_count();
+    const int saved_angle = angle_;
+    const bool saved_half = half_, saved_qualified_half = qualified_half_;
+    const std::array counters{&deferred_argument_checks_, &deferred_immediate_calls_, &deferred_class_immediate_calls_,
+                              &deferred_rank_checks_, &deferred_qualified_type_arguments_,
+                              &deferred_alias_type_arguments_, &alias_constraint_failures_, &dependent_layout_arguments_};
+    std::array<u32, counters.size()> counts;
+    std::ranges::transform(counters, counts.begin(), [](const u32* c) { return *c; });
+    const std::size_t alias_checks = type_alias_checks_ ? type_alias_checks_->checks.size() : 0;
+    t = template_type_argument();
+    if (ends_template_argument(kind()) && !s_->has_syntax_error_since(diags)) return true;
+    t.reset();
+    auto& all = s_->diagnostics();
+    failed.assign(std::make_move_iterator(all.begin() + diags), std::make_move_iterator(all.end()));
+    s_->truncate_diags(diags);
+    i_ = back;
+    angle_ = saved_angle;
+    half_ = saved_half;
+    qualified_half_ = saved_qualified_half;
+    for (std::size_t c = 0; c < counters.size(); ++c) *counters[c] = counts[c];
+    if (type_alias_checks_) type_alias_checks_->checks.resize(alias_checks);
+    return false;
+  }
+  std::optional<QualType> template_type_argument() {
+    const bool saved_type_argument = std::exchange(in_template_type_argument_, true);
+    auto t = type_id(/*placeholder_ok=*/false,
+                     /*retain_alias_checks=*/type_alias_checks_ && argument_expands());
+    in_template_type_argument_ = saved_type_argument;
+    return t;
   }
 
   // The language linkage function types get: from an enclosing linkage-specification.
@@ -3321,6 +3705,20 @@ public:
   // parentheses and concept-ids decompose; any other operand is an atomic constraint. With
   // `primaries` (a requires-clause, [temp.pre]/9) operands are primary-expressions; otherwise (a
   // concept's definition) they are what binds tighter than `&&`.
+  sema::ConstId trailing_function_constraint(std::span<const Param> params, sema::ConstId& written) {
+    s_->push_scope();
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      const auto& p = params[i];
+      if (p.name == s_->no_name()) continue;
+      const auto local = s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+      written_function_parameters_.emplace(local, ast::VDepFnParam{0, u16(i), u8(ast::cv_of(p.type))});
+    }
+    const auto result = constraint_expression(true, &written);
+    s_->pop_scope();
+    written_function_parameters_.clear();
+    return result;
+  }
+
   sema::ConstId constraint_expression(bool primaries, sema::ConstId* written = nullptr) {
     sema::ConstId l = constraint_conjunction(primaries, written);
     while (is(Tk::pipepipe)) {
@@ -3360,6 +3758,12 @@ public:
   }
   sema::ConstId written_atom(Ex e) {
     if (const auto operand = written_operators_.find(e.id); operand != written_operators_.end()) return operand->second;
+    if (auto local = s_->as<ast::LocalRef>(e)) {
+      const auto parameter = written_requires_parameters_.find(local->local);
+      if (parameter != written_requires_parameters_.end()) return s_->ins().intern_value(parameter->second);
+      const auto fn_parameter = written_function_parameters_.find(local->local);
+      if (fn_parameter != written_function_parameters_.end()) return s_->ins().intern_value(fn_parameter->second);
+    }
     if (auto p = s_->as<ast::Paren>(e)) {
       e.id = p->operand.id;
       return written_atom(e);
@@ -3379,7 +3783,7 @@ public:
       }
       return literal->value;
     }
-    if (writing_pack_index_) {
+    if (writing_pack_index_ || writing_constraint_atom_) {
       if (auto declaration = s_->as<ast::DeclRef>(e); declaration && !declaration->reference) {
         const auto& entity = s_->world().entities.rec(declaration->entity);
         if (entity.kind == sema::EntityKind::variable && entity.templ == EntityId::none &&
@@ -3389,10 +3793,41 @@ public:
     }
     return sema::ConstId::none;
   }
-  void record_written_operator(Ex result, Tk token, std::initializer_list<ConstId> operands) {
+  void record_written_operator(Ex result, Tk token, std::span<const ConstId> operands) {
     if (!result.ok() || std::ranges::contains(operands, ConstId::none)) return;
     written_operators_.insert_or_assign(result.id, s_->ins().intern_value(
         ast::VWrittenOperator{u8(token), s_->ins().intern_seq(operands)}));
+  }
+  void record_written_operator(Ex result, Tk token, std::initializer_list<ConstId> operands) {
+    record_written_operator(result, token, std::span(operands));
+  }
+  ConstId written_type(QualType type) {
+    const auto canonical = s_->types().canonical(type);
+    return s_->ins().intern_value(ast::VType{ast::without_cv(canonical), u8(ast::cv_of(canonical))});
+  }
+  void record_written_callee(Ex result, NameId name, u32 qualifier_end, bool template_id,
+                             std::span<const ast::TemplateArg> args = {}) {
+    if (!writing_constraint_atom_ || !result.ok()) return;
+    EntityId resolved = EntityId::none;
+    if (!template_id) {
+      if (const auto direct = s_->as<ast::DeclRef>(result); direct && s_->types().is_function(result.type())) {
+        resolved = direct->entity;
+      } else if (const auto overload = s_->address_set(result)) {
+        if (overload->decls->size() == 1 && !(overload->decls->front().flags & sema::decl_flag::template_))
+          resolved = overload->decls->front().entity;
+      } else {
+        return;
+      }
+    }
+    std::vector<NameId> qualifier;
+    for (u32 i = result.begin; i < qualifier_end; ++i) {
+      const auto& token = r_->tokens[begin_ + i];
+      if (token.kind == Tk::identifier) qualifier.push_back(name_of(token));
+    }
+    const bool global = r_->tokens[begin_ + result.begin].kind == Tk::coloncolon;
+    written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenCallee{
+        name, resolved, s_->ins().intern_seq(std::span<const NameId>(qualifier)), s_->ins().intern_seq(args), global,
+        template_id}));
   }
   // Whether an operand of `&&` or `||` ends here.
   bool operand_ends(bool primaries, u32 ahead = 0) const {
@@ -3424,12 +3859,12 @@ public:
     const sema::Sema::ConstraintAtomScope atom{*s_};
     const bool saved = std::exchange(writing_constraint_atom_, written != nullptr);
     Ex e = primaries ? primary_expression() : binary_expression(3);
-    writing_constraint_atom_ = saved;
     if (written) {
       *written = written_atom(e);
       if (r_->tokens[begin_ + begin].kind == Tk::kw_requires &&
-          !s_->ins().values.is<ast::VRequiresTypes>(*written)) *written = sema::ConstId::none;
+          !s_->ins().values.is<ast::VRequiresExpression>(*written)) *written = sema::ConstId::none;
     }
+    writing_constraint_atom_ = saved;
     // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
     std::vector<NameId> names;
     for (u32 j = begin_ + begin; j < i_; ++j)
@@ -3476,6 +3911,9 @@ public:
   bool writing_constraint_atom_ = false;
   bool writing_pack_index_ = false;
   std::map<NodeId, ConstId> written_operators_;
+  std::map<u32, ast::VRequiresParameter> written_requires_parameters_;
+  std::map<u32, ast::VDepFnParam> written_function_parameters_;
+  u32 written_requires_depth_ = 0;
 
   // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
   std::optional<ast::DeclSema> concept_name() {
@@ -3517,12 +3955,14 @@ public:
         : discard(sema.in_discarded_constraint_operand), saved(std::exchange(discard, discard || skipped)) {}
     ~DiscardedConstraintOperand() { discard = saved; }
   };
-  Truth nested_constraint(bool templated) {
-    Truth l = nested_conjunction(templated);
+  Truth nested_constraint(bool templated, ConstId* written = nullptr) {
+    Truth l = nested_conjunction(templated, written);
     while (accept(Tk::pipepipe)) {
       std::size_t n = s_->diag_count();
       const DiscardedConstraintOperand discard(*s_, l == Truth::yes);
-      Truth r = nested_conjunction(templated);
+      ConstId rhs = ConstId::none;
+      Truth r = nested_conjunction(templated, written ? &rhs : nullptr);
+      if (written) *written = written_constraint_op(1, *written, rhs);
       if (l == Truth::yes) {
         s_->drop_failures(n);
         continue;
@@ -3533,12 +3973,14 @@ public:
     }
     return l;
   }
-  Truth nested_conjunction(bool templated) {
-    Truth l = nested_operand(templated);
+  Truth nested_conjunction(bool templated, ConstId* written) {
+    Truth l = nested_operand(templated, written);
     while (accept(Tk::ampamp)) {
       std::size_t n = s_->diag_count();
       const DiscardedConstraintOperand discard(*s_, l == Truth::no || l == Truth::invalid);
-      Truth r = nested_operand(templated);
+      ConstId rhs = ConstId::none;
+      Truth r = nested_operand(templated, written ? &rhs : nullptr);
+      if (written) *written = written_constraint_op(0, *written, rhs);
       if (l == Truth::no || l == Truth::invalid) {
         s_->drop_failures(n);
         continue;
@@ -3548,7 +3990,7 @@ public:
     }
     return l;
   }
-  Truth nested_operand(bool templated) {
+  Truth nested_operand(bool templated, ConstId* written) {
     const u32 begin = index();
     const bool pattern = s_->in_pattern();
     // Use the pattern's grammar-correct boundary before performing any semantic checks.
@@ -3567,7 +4009,7 @@ public:
           deep_enough();
           bump();
           const int saved = std::exchange(angle_, 0);
-          const Truth group = nested_constraint(templated);
+          const Truth group = nested_constraint(templated, written);
           angle_ = saved;
           return expect(Tk::r_paren) ? group : Truth::invalid;
         }
@@ -3584,6 +4026,7 @@ public:
               std::exchange(record_nested_constraint_groups_, record_nested_constraint_groups_ || recording)};
     Ex e = binary_expression(3);
     const bool failed = s_->has_error_since(n) || !e.ok();
+    if (written && !failed) *written = written_atom(e);
     if (recording && !failed && index() > begin && operand_ends(false))
       questions().record_nested_constraint_operand(begin, index());
     if (failed) {
@@ -3614,8 +4057,11 @@ public:
     const TemplateIdLookahead lookahead{*this, true};
     u32 begin = pos();
     bump();
-    std::optional<std::vector<ast::TemplateArg>> written_types;
-    if (writing_constraint_atom_ && !is(Tk::l_paren)) written_types.emplace();
+    const bool writing = writing_constraint_atom_;
+    const bool parameter_list = is(Tk::l_paren);
+    const u32 outer_depth = written_requires_depth_;
+    std::vector<QualType> written_parameters;
+    std::vector<ast::WrittenRequirement> written_requirements;
     s_->push_scope();
     const bool templated = s_->templated();
     const bool substituting = s_->instantiating();
@@ -3624,14 +4070,27 @@ public:
     auto close_requires_scope = [&] {
       s_->pop_scope();
       s_->discard_local_declarations(first_local);
+      if (writing) {
+        written_requires_parameters_.erase(written_requires_parameters_.lower_bound(first_local),
+                                          written_requires_parameters_.end());
+        written_requires_depth_ = outer_depth;
+      }
     };
     bool ok = true;
     if (accept(Tk::l_paren)) {
       Suffix params = parameters(ok);
       ok = ok && s_->diag_count() == param_diags;
-      for (const Param& p : params.params)
-        if (p.name != s_->no_name())
-          s_->declare_local(p.name, p.type, sema::local_flag::parameter | ast::local_flag::requires_parameter, p.at, false);
+      if (writing && (!params.params.empty() || s_->compatibility() != ast::Compatibility::gcc))
+        ++written_requires_depth_;
+      for (const Param& p : params.params) {
+        const u32 index = static_cast<u32>(written_parameters.size());
+        if (writing) written_parameters.push_back(ast::without_cv(s_->types().canonical(p.type)));
+        if (p.name == s_->no_name()) continue;
+        const u32 local = s_->declare_local(p.name, p.type, sema::local_flag::parameter | ast::local_flag::requires_parameter,
+                                            p.at, false);
+        if (writing) written_requires_parameters_.emplace(local, ast::VRequiresParameter{outer_depth, index,
+                                                                      ast::cv_of(s_->types().canonical(p.type))});
+      }
     }
     if (!expect(Tk::l_brace)) {
       close_requires_scope();
@@ -3663,12 +4122,13 @@ public:
     const sema::Sema::RequiresBodyScope requirements{*s_};
     bool satisfied = true;
     bool dependent = false;
+    bool captured = writing;
     while (!is(Tk::r_brace) && !at_end()) {
       std::size_t n = s_->diag_count();
       u32 before = i_;
       bool failed = false;
       auto substitution_failed = [&] { return substituting && (failed || s_->has_error_since(n)); };
-      if (!is(Tk::kw_typename)) written_types.reset();
+      ast::WrittenRequirement written{ast::RequirementKind::expression, ConstId::none};
       if (is(Tk::kw_typename)) {  // a type-requirement
         const TypeRequirementScope requirement{*this};
         // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
@@ -3678,7 +4138,11 @@ public:
         }
         auto t = type_id();
         failed = !t;
-        if (written_types && t) written_types->push_back(s_->templates().type_arg(*t));
+        if (captured && t) {
+          const auto canonical = s_->types().canonical(*t);
+          written = {ast::RequirementKind::type, s_->ins().intern_value(
+              ast::VType{ast::without_cv(canonical), u8(ast::cv_of(canonical))})};
+        }
         if (t && s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
         ++s_->unevaluated;
@@ -3687,9 +4151,11 @@ public:
         expect(Tk::r_brace);
         bool dep = s_->dependent(e);
         failed = !e.ok();
+        if (captured) written.operand = written_atom(e);
         // `{ e } noexcept`: e is not potentially-throwing ([expr.prim.req.compound]/2), as the
         // operator `noexcept(e)` answers.
-        if (accept(Tk::kw_noexcept) && !dep && !failed && !substitution_failed()) {
+        written.noexcept_ = accept(Tk::kw_noexcept);
+        if (written.noexcept_ && !dep && !failed && !substitution_failed()) {
           ++s_->unevaluated;
           Ex answer = s_->unary_noexcept(e, e.begin, e.end);
           --s_->unevaluated;
@@ -3702,6 +4168,18 @@ public:
           if (std::optional<ast::DeclSema> c = concept_name()) {
             std::vector<ast::TemplateArg> args;
             if (is(Tk::less)) args = template_argument_list().value_or(std::vector<ast::TemplateArg>{});
+            if (captured && e.ok()) {
+              auto result_args = args;
+              if (s_->compatibility() == ast::Compatibility::gcc) {
+                const auto diagnostics = s_->diag_count();
+                result_args.insert(result_args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
+                if (auto full = s_->template_arguments(*c, result_args, at); full && !full->empty())
+                  result_args.assign(full->begin() + 1, full->end());
+                else captured = false;
+                s_->truncate_diags(diagnostics);
+              }
+              if (captured) written.result_constraint = written_concept(*c, result_args);
+            }
             if (!dep && e.ok()) {
               args.insert(args.begin(), s_->templates().type_arg(s_->decltype_of(e, true)));
               auto nf = s_->concept_constraint(*c, args, at);
@@ -3717,7 +4195,8 @@ public:
         }
         if (dep) dependent = true;
       } else if (accept(Tk::kw_requires)) {  // a nested-requirement ([expr.prim.req.nested])
-        Truth t = nested_constraint(templated);
+        written.kind = ast::RequirementKind::nested;
+        Truth t = nested_constraint(templated, captured ? &written.operand : nullptr);
         if (t == Truth::dependent) dependent = true;
         else if (t != Truth::yes) failed = true;
       } else {  // a simple-requirement
@@ -3725,8 +4204,11 @@ public:
         Ex e = expression();
         --s_->unevaluated;
         failed = !e.ok();
+        if (captured) written.operand = written_atom(e);
         if (s_->dependent(e)) dependent = true;
       }
+      captured = captured && written.operand != ConstId::none;
+      if (captured) written_requirements.push_back(written);
       if (!substitution_failed()) {
         if (!expect(Tk::semi)) skip_to_semi();
         if (i_ == before) bump();  // no progress: drop the token
@@ -3746,9 +4228,10 @@ public:
     }
     expect(Tk::r_brace);
     close_requires_scope();
-    if (satisfied && written_types && !written_types->empty()) {
-      auto types = s_->ins().intern_seq(std::span<const ast::TemplateArg>(*written_types));
-      auto value = s_->ins().intern_value(ast::VRequiresTypes{types});
+    if (satisfied && captured && !written_requirements.empty()) {
+      auto parameters = s_->ins().intern_seq(std::span<const QualType>(written_parameters));
+      auto requirements = s_->ins().intern_seq(std::span<const ast::WrittenRequirement>(written_requirements));
+      auto value = s_->ins().intern_value(ast::VRequiresExpression{parameters, requirements, parameter_list});
       return s_->literal(s_->builtin(Builtin::bool_), value, ast::ValueCategory::prvalue, begin, pos());
     }
     if (satisfied && dependent) return s_->dependent_node({}, begin, pos(), s_->builtin(Builtin::bool_));
@@ -4006,7 +4489,9 @@ public:
     Ex t = expression();
     expect(Tk::colon);
     Ex f = assignment_expression();
-    return s_->conditional(cond, t, f, at, structural_member_argument());
+    Ex result = s_->conditional(cond, t, f, at, structural_member_argument());
+    if (writing_constraint_atom_) record_written_operator(result, Tk::question, {written_atom(cond), written_atom(t), written_atom(f)});
+    return result;
   }
 
   // The binary operators from `||` (precedence 1) to pointer-to-member access (12).
@@ -4311,6 +4796,7 @@ public:
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
       if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
+      if (writing_constraint_atom_) record_written_operator(r, Tk::kw_sizeof, {written_atom(e)});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::coloncolon:
@@ -4328,7 +4814,9 @@ public:
       --s_->unevaluated;
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-      return s_->unary_noexcept(operand, begin, pos());
+      Ex result = s_->unary_noexcept(operand, begin, pos());
+      if (writing_constraint_atom_) record_written_operator(result, Tk::kw_noexcept, {written_atom(operand)});
+      return result;
     }
     case Tk::kw_co_await:
     case Tk::caretcaret: {
@@ -4348,7 +4836,8 @@ public:
     address_op_ = saved_address;
     if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
     Ex result = s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
-    if (writing_pack_index_ && (token == Tk::plus || token == Tk::minus || token == Tk::exclaim || token == Tk::tilde))
+    if (writing_constraint_atom_ ||
+        (writing_pack_index_ && (token == Tk::plus || token == Tk::minus || token == Tk::exclaim || token == Tk::tilde)))
       record_written_operator(result, token, {written_atom(e)});
     return result;
   }
@@ -4424,7 +4913,13 @@ public:
             ++deferred_immediate_calls_;
             break;
           }
+        std::vector<ConstId> operands;
+        if (writing_constraint_atom_) {
+          operands.push_back(written_atom(e));
+          for (Ex arg : args) operands.push_back(written_atom(arg));
+        }
         e = immediate(s_->call(e, std::move(args), pos(), at));
+        if (writing_constraint_atom_) record_written_operator(e, Tk::l_paren, operands);
         break;
       }
       case Tk::l_square: {
@@ -4432,14 +4927,24 @@ public:
         Unangle u{angle_};
         Ex index = expression();
         if (!expect(Tk::r_square)) return {NodeId::none, e.begin, pos()};
+        const Ex array = e;
         e = s_->subscript(e, index, pos(), at);
+        if (writing_constraint_atom_) record_written_operator(e, Tk::l_square, {written_atom(array), written_atom(index)});
         break;
       }
       case Tk::plusplus:
       case Tk::minusminus: {
-        auto op = is(Tk::plusplus) ? ast::UnaryOp::post_inc : ast::UnaryOp::post_dec;
+        const auto token = kind();
+        auto op = token == Tk::plusplus ? ast::UnaryOp::post_inc : ast::UnaryOp::post_dec;
+        const Ex operand = e;
         bump();
         e = s_->unary(op, e, e.begin, pos(), at);
+        if (writing_constraint_atom_ && e.ok() && written_atom(operand) != ConstId::none) {
+          // A second, empty operand marks postfix rather than prefix in the ABI.
+          const std::array operands{written_atom(operand), ConstId::none};
+          written_operators_.insert_or_assign(e.id, s_->ins().intern_value(
+              ast::VWrittenOperator{u8(token), s_->ins().intern_seq(std::span<const ConstId>(operands))}));
+        }
         break;
       }
       case Tk::period:
@@ -4504,8 +5009,16 @@ public:
           targs = template_argument_list();
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
+        const Ex object = e;
         e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
                        structural_member_argument() && !keyword && !targs);
+        if (writing_constraint_atom_ && !member_class && e.ok()) {
+          if (const auto operand = written_atom(object); operand != ConstId::none) {
+            const auto args = targs ? std::span<const ast::TemplateArg>(*targs) : std::span<const ast::TemplateArg>{};
+            written_operators_.insert_or_assign(e.id, s_->ins().intern_value(ast::VWrittenMember{
+                operand, n, s_->ins().intern_seq(args), arrow, targs.has_value()}));
+          }
+        }
         if (targs) s_->explicit_template_args(e, std::move(*targs));
         break;
       }
@@ -4843,13 +5356,22 @@ public:
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
           // argument-dependent lookup.
           if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
-          return s_->dependent_node({}, begin, pos());
+          Ex result = s_->dependent_node({}, begin, pos());
+          if (is(Tk::l_paren)) record_written_callee(result, n, begin, /*template_id=*/true, *args);
+          return result;
+        }
+        if (writing_constraint_atom_ && is(Tk::l_paren)) {
+          Ex result = s_->template_id(n, *args, begin, pos());
+          record_written_callee(result, n, begin, /*template_id=*/true, *args);
+          return result;
         }
         return s_->template_id(n, std::move(*args), begin, pos());
       }
       const bool callee = is(Tk::l_paren);
       const bool immediate_default_call = callee && in_integral_template_default_ && !s_->unevaluated;
-      return s_->name_expr(n, begin, pos(), callee, immediate_default_call);
+      Ex result = s_->name_expr(n, begin, pos(), callee, immediate_default_call);
+      if (callee) record_written_callee(result, n, begin, /*template_id=*/false);
+      return result;
     }
     case Tk::coloncolon:
       if (!allocation_operator_ahead(1)) return qualified_id(begin);
@@ -5014,6 +5536,12 @@ public:
       if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
       if (!written_expansion) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
+      if (writing_constraint_atom_ && !written_expansion) {
+        std::vector<ConstId> operands{written_type(t)};
+        for (const auto& clause : b->clauses)
+          operands.push_back(clause.designated || clause.list ? ConstId::none : written_atom(clause.expr));
+        record_written_operator(r, Tk::l_brace, operands);
+      }
       return {r.id, begin, pos(), r.info};
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
@@ -5026,8 +5554,14 @@ public:
       while (accept(Tk::comma));
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
     const bool lambda_result = lambda_result_operand_ == begin && is(Tk::semi);
+    std::vector<ConstId> operands;
+    if (writing_constraint_atom_) {
+      operands.push_back(written_type(t));
+      for (Ex arg : args) operands.push_back(written_atom(arg));
+    }
     Ex r = lambda_result ? s_->lambda_result_cast(t, std::move(args), begin, pos())
                         : s_->functional_cast(t, std::move(args), begin, pos());
+    if (writing_constraint_atom_) record_written_operator(r, Tk::l_paren, operands);
     return {r.id, begin, pos(), r.info};
   }
 
@@ -5271,9 +5805,16 @@ public:
               return s_->dependent_variable_template_id(*known, *args, begin, pos());
             return s_->replayed_variable_template_id(*known, *args, replay.deferred, begin, pos());
           }
-          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+            std::vector<NameId> qualifier;
+            if (s_->compatibility() != ast::Compatibility::gcc)
+              for (u32 i = begin; i < name_at; ++i) {
+                const auto& token = r_->tokens[begin_ + i];
+                if (token.kind == Tk::identifier) qualifier.push_back(name_of(token));
+              }
             return s_->dependent_variable_template_id(*v, *args, begin, pos(), true,
-                                                       r_->tokens[begin_ + begin].kind == Tk::coloncolon);
+                                                       r_->tokens[begin_ + begin].kind == Tk::coloncolon, qualifier);
+          }
           return s_->variable_template_id(*v, *args, begin, pos());
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with
@@ -5294,14 +5835,21 @@ public:
             const bool allow_class_result = namespace_alias_type && in_template_value_argument_ == s_->unevaluated;
             if (auto call = deferred_immediate_template_call(r, *args, allow_class_result)) return *call;
           }
-          return s_->dependent_node({}, begin, pos());
+          Ex result = s_->dependent_node({}, begin, pos());
+          if (s->ns && is(Tk::l_paren)) record_written_callee(result, n, name_at, /*template_id=*/true, *args);
+          return result;
         }
+        if (s->ns && is(Tk::l_paren)) record_written_callee(r, n, name_at, /*template_id=*/true, *args);
         s_->explicit_template_args(r, std::move(*args));
         return r;
       }
     }
     const bool immediate_default_call = s->ns && in_integral_template_default_ && !s_->unevaluated && is(Tk::l_paren);
-    return scope_expr(immediate_default_call);
+    Ex result = scope_expr(immediate_default_call);
+    if (writing_constraint_atom_ && result.ok() && s->type && s_->types().is_dependent(*s->type))
+      written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VDepMember{s_->types().canonical(*s->type), n}));
+    if (s->ns && is(Tk::l_paren)) record_written_callee(result, n, name_at, /*template_id=*/false);
+    return result;
   }
 
   // ------------------------------------------------------------ [stmt]
@@ -6395,9 +6943,10 @@ public:
     if (!init.ok() || !(is_constexpr || usable_kind)) return;
     sema::Evaluator evaluator(*s_, questions());
     const bool scalar_record = memberwise && s_->as<ast::InitList>(init).has_value();
-    sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
-                                     : evaluator.evaluate(init);
+    const bool aggregate = scalar_record || (s_->is_union(t) && (s_->as<ast::InitList>(init) || s_->as<ast::ValueInit>(init)));
+    sema::Evaluated v = aggregate ? evaluator.evaluate_initializer(init, /*zero_default=*/false) : evaluator.evaluate(init);
     if (v.value) {
+      if (is_constexpr && !evaluator.check_constant_destruction(t, *v.value, init.begin)) return;
       if (is_constexpr && (s_->folded_immediate_result != ast::EntityId::none ||
                           s_->compatibility() != ast::Compatibility::spec) &&
           !s_->check_immediate_initializer(*v.value, init.begin)) return;
@@ -6745,6 +7294,15 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent && !v.variable_instantiation_failure)
         s_->diag(init.begin, Diag::not_constant, v.reason);
+      else if (s_->compatibility() == ast::Compatibility::gcc && s_->current_function != EntityId::none &&
+               !v.dependent && !v.variable_instantiation_failure) {
+        // GCC needs the enclosing template's ABI name for a dynamic static guard,
+        // including during syntax-only compilation of a specialization.
+        const auto entity = s_->world().entities.rec(s_->current_function);
+        if (entity.templ != EntityId::none)
+          if (auto trait = gcc_signature_transform(s_->world().entities.rec(entity.templ).type))
+            s_->diag(dbegin, Diag::gcc_static_guard_transform, s_->ins().names.intern(lex::type_trait_info(*trait).name));
+      }
     }
     if (spec.is_constinit && value != ast::ConstId::none)
       if (auto entity = s_->immediate_result_entity(value))
@@ -6898,6 +7456,16 @@ public:
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement(bool no_prefix_attributes) {
     u32 begin = pos();
+    // `class-key identifier ;` declares a class in the block, unless the block has declared it
+    // ([dcl.type.elab]/2, [basic.scope.pdecl]/7): a local class.
+    if (body && is_class_key(kind()) && kind(1) == Tk::identifier && kind(2) == Tk::semi && declare_class) {
+      const NameId n = name_of(tok(1));
+      if (!s_->innermost_block_type(n)) declare_class(n, kind(), begin + 1);
+      bump();
+      bump();
+      bump();
+      return s_->node(ast::ExprStmt{}, begin, pos());
+    }
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);
@@ -6912,6 +7480,8 @@ public:
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
+    // A local class's definition may declare nothing else ([dcl.pre]/5).
+    if (spec.defined_class && spec.ok && accept(Tk::semi)) return s_->node(ast::ExprStmt{}, begin, pos());
     if (spec.is_typedef) {
       // Block-scope typedef-names ([dcl.typedef]).
       do {

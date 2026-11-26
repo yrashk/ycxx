@@ -91,7 +91,7 @@ std::optional<fs::path> widened(const fs::path& marker) {
     if (!l.starts_with('=')) continue;
     fs::path rel(std::string(trim(l.substr(1))));
     fs::path p = (marker.parent_path() / rel).lexically_normal();
-    if (auto r = real_path(p.native_encoded_string())) return fs::path(*r);
+    if (auto r = real_path(p.native())) return fs::path(*r);
     return p;
   }
   return std::nullopt;
@@ -107,15 +107,15 @@ std::string find_root(const std::string& start, const std::string& home) {
   for (; !p.empty(); p = p.parent_path()) {
     fs::path marker = p / ".ycxx";
     if (fs::exists(marker, ec)) {
-      if (auto w = widened(marker)) return w->native_encoded_string();
-      return p.native_encoded_string();
+      if (auto w = widened(marker)) return w->native();
+      return p.native();
     }
-    if (fs::is_regular_file(p / "build.ycxx", ec)) return p.native_encoded_string();
+    if (fs::is_regular_file(p / "build.ycxx", ec)) return p.native();
     for (std::string_view vcs : {".hg", ".jj"})
-      if (fs::exists(p / vcs, ec)) return p.native_encoded_string();
+      if (fs::exists(p / vcs, ec)) return p.native();
     fs::path git = p / ".git";
-    if (fs::is_directory(git, ec)) return p.native_encoded_string();
-    if (fs::is_regular_file(git, ec) && !is_submodule_git_file(git)) return p.native_encoded_string();
+    if (fs::is_directory(git, ec)) return p.native();
+    if (fs::is_regular_file(git, ec) && !is_submodule_git_file(git)) return p.native();
     if (p == p.root_path()) break;
   }
   return real_path(home).value_or(home);
@@ -130,7 +130,7 @@ std::string root_for(const std::optional<std::string>& input, const std::string&
   // A source that does not exist yet still has a directory to start from.
   std::error_code ec;
   if (!fs::exists(p, ec)) p = p.parent_path();
-  return find_root(p.native_encoded_string(), home);
+  return find_root(p.native(), home);
 }
 
 std::string runtime_dir() {

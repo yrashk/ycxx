@@ -1,0 +1,16 @@
+use plugin("rules/package") as tools
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+}
+
+tools.observe "observed" {}
+
+tools.header "config" {
+    facts = { score = value("observed", "score") }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

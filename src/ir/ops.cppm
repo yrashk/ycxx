@@ -105,6 +105,8 @@ export enum class Flag : std::uint8_t {
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
+  ctz_gcc_zero,      // GCC mode accepts a zero operand for this spelling in constant evaluation
+  observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -200,7 +202,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V}).with({commutative})]],
   or_ [[=pure({V, V}, {V}).with({commutative})]],
   xor_ [[=pure({V, V}, {V}).with({commutative})]],
-  ctz [[=pure({V}, {V})]],  // trailing zero bits of an integer; undefined for zero
+  ctz [[=pure({V}, {V}).accepts({ctz_gcc_zero})]],  // trailing zero bits of an integer
   icmp [[=pure({V, V}, {V}).imms({pred})]],
   select [[=pure({V, V, V}, {V})]],
 
@@ -306,7 +308,7 @@ export enum class Op : std::uint16_t {
   // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
   // ([expr.const]) from falling off the end.
   unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
-  consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
+  consteval_br [[=control({}, {}, 2).accepts({observes_context})]],  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
   invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).imms({u32}).accepts({not_constexpr})]],
