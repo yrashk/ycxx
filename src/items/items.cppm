@@ -488,6 +488,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
                               [this](u32 n) { return is_value_trait(r_, n); });
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
+  bool trailing_requires = false;  // the declarator's trailing requires-clause began
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
   bool base_clause = false;  // a `:` after the class-key, before any parameter list
   bool typedef_ = false;
@@ -567,11 +568,18 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       ++j;
       continue;
-    case Tk::kw_requires:
+    case Tk::kw_requires: {
+      // After a parameter list and before a trailing requires-clause, a `&&` ends a ref-qualifier
+      // (`f() && requires C<T>`) or a trailing return type: this `requires` begins the
+      // requires-clause ([dcl.decl.general]), whose `(…)` and the body that follows are no
+      // requires-expression's.
+      const bool declarator_clause = params && !initializer && !trailing_requires;
+      if (declarator_clause) trailing_requires = true;
       // A requires-expression, after an operator or another `requires`: its parameter list and
       // its requirement braces are no declarator and no body.
-      if (prev == Tk::kw_requires || prev == Tk::ampamp || prev == Tk::pipepipe || prev == Tk::exclaim ||
-          prev == Tk::l_paren || prev == Tk::equal || prev == Tk::comma) {
+      if (!(declarator_clause && prev == Tk::ampamp) &&
+          (prev == Tk::kw_requires || prev == Tk::ampamp || prev == Tk::pipepipe || prev == Tk::exclaim ||
+           prev == Tk::l_paren || prev == Tk::equal || prev == Tk::comma)) {
         ++j;
         if (kind(j) == Tk::l_paren) j = match(j);
         if (kind(j) == Tk::l_brace) j = match(j);
@@ -579,6 +587,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       ++j;
       continue;
+    }
     case Tk::kw_class:
     case Tk::kw_struct:
     case Tk::kw_union:
@@ -641,6 +650,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         class_key = none;
         base_clause = false;
         params = false;
+        trailing_requires = false;
         continue;
       }
       if (params) {
