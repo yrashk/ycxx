@@ -41,6 +41,9 @@ when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
+Use `ycxx show --targets` to list the workspace's declared target names and rule
+kinds before a build. Add `--format=html` for a catalog with links to their
+declarations in the manifest.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
