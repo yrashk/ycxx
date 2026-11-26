@@ -412,9 +412,12 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
                                 t.move_constructor == eligible_nontrivial ||
                                 (t.copy_constructor == ineligible && t.move_constructor == ineligible);
+        // A class with virtual functions has no trivial copy or move constructor ([class.copy.ctor]/11).
+        // Clang allows callers to reserve result storage for an abstract class with a known layout.
+        const bool abstract_result = unit_source.config.compatibility == ast::Compatibility::clang && record.is_abstract();
         // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
         shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && (!known || !nontrivial) &&
-                                    !(linux && nontrivial_destructor(c));
+                                    !abstract_result && !(linux && nontrivial_destructor(c));
       }
       // Only a class outside the general dynamic layout lacks a native complete-object type.
       shape.layout_requires_virtual_support = record.virtual_layout_unsupported;

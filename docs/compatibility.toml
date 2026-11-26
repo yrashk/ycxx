@@ -167,8 +167,49 @@ prior = "memchr stopped at the first match as in Clang. memcmp required both obj
 spec = "Retain the C-library-based rule used for the ycxx builtins."
 gcc = "Require and read the full range for both builtins."
 clang = "Check bytes as read and stop at the first match or difference for both builtins."
-limits = "Constant evaluation uses ycxx's character-object model. Oracle behavior on other object representations and GCC's folding shortcuts are independent gaps."
+limits = "Constant evaluation uses ycxx's character-object model. See constexpr-memcmp-identical-address and constexpr-memory-integer-object for the separate identity and representation cases."
 evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/memchr-memcmp-reads-stop.accept.cpp", "tests/own/builtins/memchr-memcmp-whole-range.reject.cpp"]
+
+[[divergence]]
+id = "constexpr-memcmp-identical-address"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [cstring.syn], #1092"
+prior = "Apply the same read checks to identical addresses as distinct addresses."
+spec = "Require readable input ranges even when the pointers compare equal. A count of zero needs no reads."
+gcc = "Fold identical evaluated pointers to zero without reading either range. This also applies to null pointers, one-past pointers, and pointers to a noncharacter object."
+clang = "Read through the character representation as for distinct addresses, and reject an invalid read. A count of zero needs no reads."
+probe = 'constexpr char a[] = "a"; static_assert(__builtin_memcmp(a, a, 123) == 0);'
+evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constexpr-memcmp-equal-address-distinct-paths"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [basic.compound]"
+prior = "Apply the byte-access checks to an equal address reached through different subobject paths."
+spec = "Reject the tested invalid reads. A count of zero needs no reads."
+gcc = "Same as prior."
+clang = "Same as spec."
+gcc_observed = "For the equal addresses at the end of one char row and the beginning of the next, accepts comparison counts of one and two in either argument order and rejects counts three through five. Comparing the address of a row or a flat array to its first element also folds at the larger counts. Comparing the address of the complete nested array to its first row folds only for one and two bytes in the probe."
+clang_observed = "Rejects the tested positive counts and accepts zero on Linux x86-64 and Darwin arm64."
+limits = "An equal byte offset alone is insufficient to decide which GCC fold and bounds check apply."
+probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; static_assert(__builtin_memcmp(a[0] + 2, a[1], 2) == 0);'
+evidence = ["Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
+
+[[divergence]]
+id = "constexpr-memory-integer-object"
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+reference = "[expr.const], [cstring.syn], #1092"
+prior = "Limit byte reads by these constexpr builtins to narrow character objects."
+spec = "Use the narrow-character constexpr model for these built-in extensions."
+gcc = "Compare the little-endian bytes of the supported integer scalars and array elements in memcmp. memchr still uses the narrow-character model."
+clang = "Same as spec."
+gcc_observed = "Also permits memchr to find a byte in a constexpr int object."
+limits = "memchr needs a pointer that can denote a byte inside a noncharacter scalar."
+probe = 'constexpr int a = 12, b = 13; static_assert(__builtin_memcmp(&a, &b, sizeof(a)) < 0);'
+evidence = ["tests/daemon/compatibility.py", "tests/own/builtins/memchr-memcmp-whole-range.reject.cpp"]
 
 [[divergence]]
 id = "system-header-dialect"
@@ -377,16 +418,32 @@ evidence = ["tests/own/consteval/erased-array-row-end.reject.cpp", "tests/daemon
 
 [[divergence]]
 id = "constexpr-void-cast-nested-provenance"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "[expr.const], [expr.add]"
 prior = "The cast at a nested array's one-past position was rejected before pointer arithmetic."
 spec = "Reject the cast."
-gcc = "Preserve the original array path after accepting the cast."
+gcc = "Use the following row's start when the address is inside a complete nested array. Keep the old path at the end of the complete array."
 clang = "Preserve the original array path after accepting the cast."
-gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array."
+gcc_observed = "A cast at the end of the first row can dereference the next row's first element. Reading end[-1] is rejected at either row's end in the nested probe, but succeeds for a flat array. At the end of the complete nested array the pointer compares equal to the last row's one-past pointer and can be advanced by one."
 clang_observed = "Preserves the prior row. Reading end[-1] succeeds, and dereferencing end is rejected."
+limits = "The address at the end of the complete array compares correctly. Arithmetic and dereferencing after that terminal cast still need GCC provenance."
 evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constexpr-out-of-bounds-pointer-formation"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.add]/4, [expr.const]"
+prior = "Require constexpr pointer arithmetic to stay within the array or at its one-past position."
+spec = "Reject forming an out-of-bounds pointer in a constant expression."
+gcc = "Currently follows the draft bounds check."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts comparing pointers formed before the start or beyond the one-past position of the tested flat or nested arrays, including after casting the last row's end through void*. Dereferencing the tested out-of-bounds flat-array pointer is rejected."
+clang_observed = "Clang 23.1.6 rejects the five address formation probes and the dereference probe on Linux x86-64 and Darwin arm64."
+limits = "GCC mode needs to represent the out-of-bounds address separately from access to an array element."
+probe = 'constexpr int a[] = {1, 2}; static_assert(a + 3 == a + 3);'
+evidence = ["Black-box -std=c++2c -pedantic-errors -fsyntax-only probes on GCC 16.2 and Clang 23.1.6 (Linux x86-64 and Darwin arm64)"]
 
 [[divergence]]
 id = "structured-binding-array-cv"
@@ -511,15 +568,32 @@ evidence = ["tests/own/builtins/pack-arguments-addressof.run.cpp", "tests/daemon
 
 [[divergence]]
 id = "empty-union-list"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "unverified" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "[dcl.init.aggr], CWG2084"
 prior = "Initialize the first variant member of a nonempty union when the applicable C++26 empty-list rule selects it."
-spec = "Initialize the first variant in the tested aggregate cases."
-gcc = "Same as spec."
+spec = "Copy-list-initialize the first variant of an empty aggregate union initializer when there is no default member initializer. This includes omission inside another aggregate."
+gcc = "Use zero initialization without calling the first variant's constructor in the tested empty lists. A written default initializer on the first variant still runs."
 clang = "Same as spec."
-gcc_observed = "GCC 16.2 leaves the first variant uninitialized in the pinned fixture."
-evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp"]
+gcc_observed = "GCC 16.2 zeroes automatic union storage without calling a constructor for the first variant in direct lists, copy lists, and nested lists. A constexpr aggregate union can expose zero in the first variant even when the variant's constructor would produce a different value."
+limits = "The first-variant constructor and its implicit copy-list checks are covered for the supported directly and indirectly initialized runtime aggregates. Reading a union variant during constant evaluation still needs coverage."
+evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "empty-union-new-list"
+status = "partial"
+mode_status = { spec = "partial", gcc = "pending", clang = "partial" }
+reference = "[dcl.init.aggr], [expr.new]"
+prior = "Use the ordinary aggregate list initializer for the allocation."
+spec = "Initialize the first variant in the tested named union with a written destructor and a nontrivial first variant."
+gcc = "Accept the tested allocation and skip the variant constructor, as for an automatic union object."
+clang = "Same as spec."
+spec_observed = "Empty list-initialization through new copy-list-initializes the first variant under the same rules as for an automatic object."
+gcc_observed = "Rejects new U{} because the union default constructor is deleted, even though U u{} is accepted and skips the variant constructor. A default member initializer on either variant makes both forms valid in the probes."
+clang_observed = "Both targets accept new U{} and apply the same variant initialization checks as for an automatic object. The native executable runs the first variant's default constructor."
+probe = 'struct A { A() noexcept {} ~A() noexcept {} }; union U { A first; char other; ~U() {} }; U* create() { return new U{}; }'
+limits = "The native ycxx executable with a written union destructor runs the first variant's constructor in spec and Clang modes. Remaining class shapes and the GCC diagnostic still need regression coverage."
+evidence = ["src/sema/actions.cppm", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes, plus native Clang and ycxx executable checks"]
 
 [[divergence]]
 id = "class-head-alignment"
@@ -584,16 +658,14 @@ evidence = ["tests/own/three-way-comparison/defaulted-noexcept.accept.cpp", "tes
 
 [[divergence]]
 id = "abstract-prvalue-contexts"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
-reference = "[class.abstract], [expr.call], [dcl.type.decltype]"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[class.abstract], [expr.call], [dcl.type.decltype], Itanium C++ ABI §3.1.3.1"
 prior = "Apply abstractness at the point that a value needs an object and allow declarations that form no object."
 spec = "Apply the draft checks for abstract prvalues, discarded values and nondefining declarations."
 gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Rejects the tested abstract prvalues and accepts the nondefining extern declaration."
-clang_observed = "The fixtures record accepted calls and discarded abstract prvalues, and rejected nondefining declarations."
-evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own/classes/pure-abstract/call-decltype-discard-comma.reject.cpp", "tests/own/classes/pure-abstract/extern-object.accept.cpp"]
+clang = "Allow calls returning an abstract type, including the tested discard, receiver, and sizeof contexts. Diagnose nondefining extern declarations and static data member declarations of abstract type. Parameters and object definitions still require concrete types."
+evidence = ["tests/own/classes/pure-abstract/call-return.reject.cpp", "tests/own/classes/pure-abstract/call-decltype-discard-comma.reject.cpp", "tests/own/classes/pure-abstract/extern-object.accept.cpp", "tests/own/classes/pure-abstract/static-self.accept.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "dependent-template-disambiguator"
@@ -610,16 +682,16 @@ evidence = ["STATUS.md", "tests/own/templates/member-alias-template-mangling.run
 
 [[divergence]]
 id = "new-array-constant-unrepresentable-bound"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
-reference = "[expr.new], #1172"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.new]/8, #1172"
 prior = "Diagnose a constant bound that cannot be represented as an allocation size."
-spec = "Reject the unrepresentable constant array allocation bound."
+spec = "Check the original integer value for the target's constant array allocation limit before unsigned conversion."
 gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Diagnoses a bound exceeding the maximum object size."
-clang_observed = "Diagnoses a constant conversion to size_t as a warning. The tested bound 2^64+1 allocates a single char and does not throw."
-evidence = ["tests/own/int128/new-bound.reject.cpp"]
+clang = "Convert a wider integer constant to the target's size_t before checking the allocation limit. For example, 2^64+1 and 1-2^64 each allocate one char. Warn under -Wconstant-conversion when the value changes."
+limits = "Native array allocation is available for supported x86-64 Linux forms. Syntax checking covers both targets."
+probe = 'char* f() { return new char[((__int128)1 << 64) + 1]; }'
+evidence = ["tests/own/int128/new-bound.reject.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "pack-index-named-expression-symbol"

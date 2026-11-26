@@ -147,6 +147,7 @@ enum class Diag : std::uint32_t {
   allocation_declaration [[=message{Severity::error, "unsupported declaration of '{0:n}'; expected an ordinary global allocation or deallocation function"}]],
   negative_new_bound [[=message{Severity::error, "array new bound is negative"}]],
   oversized_new_bound [[=message{Severity::error, "array new bound exceeds the maximum allocation size"}]],
+  new_bound_conversion [[=message{Severity::warning, "converting the array new bound to size_t changes its value from {0:i} to {1:i}", lex::Warning::constant_conversion}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
   default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],

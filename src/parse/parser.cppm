@@ -4079,6 +4079,7 @@ public:
 
   // Keep the written provenance even when semantic analysis has folded an expression.
   bool literal_arithmetic_tokens(u32 first, u32 last) const {
+    const bool clang = s_->compatibility() == ast::Compatibility::clang;
     return std::ranges::all_of(std::span(r_->tokens).subspan(first, last - first), [&](Tok token) {
       switch (token.kind) {
       case Tk::int_lit: {
@@ -4087,6 +4088,9 @@ public:
       }
       case Tk::l_paren: case Tk::r_paren: case Tk::plus: case Tk::minus: case Tk::star:
         return true;
+      case Tk::kw___int128: case Tk::kw_signed: case Tk::kw_unsigned:
+      case Tk::lessless: case Tk::greatergreater:
+        return clang;
       default:
         return false;
       }
@@ -4275,7 +4279,7 @@ public:
         return {NodeId::none, begin, pos()};
       }
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
-      if (!e.glvalue() && !s_->require_concrete_object(e.type(), e.begin)) return {NodeId::none, begin, pos()};
+      if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
     }

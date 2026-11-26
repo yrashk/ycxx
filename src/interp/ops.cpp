@@ -274,9 +274,19 @@ struct Ops {
         if (p.past || past) {
           QualType from = m.type_of(f, f.fn->operands_of(n)[0]);
           const auto mode = m.config_.compatibility;
-          if (ast::is_void(*m.in_, m.shape(from).inner) &&
-              (mode == ast::Compatibility::spec || (mode == ast::Compatibility::gcc && p.past)))
-            return m.fail(Reason::void_cast_type);
+          if (ast::is_void(*m.in_, m.shape(from).inner)) {
+            if (mode == ast::Compatibility::spec || (mode == ast::Compatibility::gcc && p.past))
+              return m.fail(Reason::void_cast_type);
+            // GCC treats an address inside a nested array as a position in its complete
+            // array, so the end of one row designates the start of the next row.
+            const auto& object = m.objects_[p.ref];
+            if (mode == ast::Compatibility::gcc && m.shape(object.type).kind == M::Kind::array) {
+              const i64 offset = m.offset_of(p);
+              if (offset >= 0 && u64(offset) < m.complete_size(object)) {
+                if (Flow fl = m.address(p.ref, to, offset, p); fl != Flow::next) return fl;
+              }
+            }
+          }
         }
       }
     }
