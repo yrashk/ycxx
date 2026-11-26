@@ -206,6 +206,7 @@ struct Options {
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
   bool check_policies = false;
+  pipeline::OptimizationMode optimization = pipeline::OptimizationMode::none;
   bool shared = false;
   std::optional<std::string> output, interpreter, soname;
   bool dependencies = false;  // `-MD`
@@ -259,6 +260,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     } else if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-fcheck-policies") o.check_policies = true;
+    else if (a == "-O0") o.optimization = pipeline::OptimizationMode::none;
+    else if (a == "-fycxx-optimize=heuristic") o.optimization = pipeline::OptimizationMode::heuristic;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-MD") o.dependencies = true;
     else if (a.starts_with("-MF") || a.starts_with("-MT")) {
@@ -866,6 +869,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   // The units, named by what they are (#139), and the whole request as one root.
   pipeline::BuildKey key;
   key.check_policies = opts->check_policies;
+  key.optimization = opts->optimization;
   key.until = opts->stop == Options::Stop::syntax ? pipeline::Until::syntax
               : opts->stop == Options::Stop::object ? pipeline::Until::object
                                                     : pipeline::Until::link;
@@ -937,7 +941,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
         {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic),
-         std::move(archive_link), key.check_policies, std::move(opts->soname)});
+         std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;

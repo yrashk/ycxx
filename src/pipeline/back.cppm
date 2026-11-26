@@ -16,7 +16,7 @@
 //                            which of its references this TU defines; its value is the unit's
 //                            fingerprint, the unit itself is in a content-addressed store
 //   optimized(unit, target, level)  level 0: selection, slot allocation and emission
-//   codegen(TU, F)           best_available(unit, B, S) over the opt_cache_snapshot input S
+//   codegen(TU, F, mode)     best_available(unit, B, S) over the opt_cache_snapshot input S
 //   tu(TU)                   the object, in definition order (§A5.3), and the first-demand table
 //   layout                   `layout_type(T)`, `layout_step(T, s)`, `layout_constant(c)` (cheap)
 //
@@ -705,24 +705,31 @@ struct UnitQ {
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
 };
 
+enum class OptimizationMode : std::uint8_t { none, heuristic };
+
 struct OptKey {
   Fp128 unit;
   obj::target target = obj::target::aarch64_macos;
   std::uint8_t level = 0;
+  OptimizationMode mode = OptimizationMode::none;
   bool operator==(const OptKey&) const = default;
 };
+enum class RewriteOutcome : std::uint8_t { none, applied, no_candidates, rejected, unsupported_target };
 struct Machine {
   std::optional<aarch64::MachineCode> code;
   std::string error;
   std::optional<x86_64::MachineCode> linux_code{};
+  RewriteOutcome rewrites = RewriteOutcome::none;
+  std::uint32_t candidates = 0;
   bool ok() const { return code.has_value() || linux_code.has_value(); }
 };
-// `optimized(unit, target, options, optimizer_version, level)` (§A8.1). Options and the optimizer
-// version have nothing to choose yet: the version is the binary's, and a daemon serves one binary.
+// `optimized(unit, target, options, optimizer_version, level)` (§A8.1). The version is the
+// binary's, and a daemon serves one binary.
 struct Optimized {
   using Key = OptKey;
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, OptKey k);
+  static std::string describe(const Key& k);
   static std::string show(const Value& v);  // the instruction words, for traces (#245)
   static std::string errors(const Value& v) { return v.ok() ? std::string() : v.error; }
 };
@@ -730,10 +737,20 @@ struct Optimized {
 // `codegen(F)`: `best_available(unit, B, S)` (§A8.3; optimization design §7: S is consulted only
 // for B ≥ 1, so -O0 is level 0 exactly).
 struct Codegen {
-  using Key = FnKey;
-  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
+  struct Key {
+    FnKey function;
+    OptimizationMode mode = OptimizationMode::none;
+    bool operator==(const Key&) const = default;
+
+    friend void hash_into(Hasher& h, const Key& k) noexcept {
+      hash_append(h, k.function);
+      if (k.mode != OptimizationMode::none) h.uint(std::to_underlying(k.mode));
+    }
+    friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.function); }
+  };
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k.function); }
   using Value = Machine;
-  static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
+  static engine::query_task<Value> run(engine::Ctx& cx, Key k);
   static std::string show(const Value& v) { return Optimized::show(v); }
   static std::string errors(const Value& v) { return Optimized::errors(v); }
 };
@@ -758,11 +775,14 @@ struct Tu {
   struct Key {
     TuId tu;
     bool check_policies = false;
+    OptimizationMode optimization = OptimizationMode::none;
     bool operator==(const Key&) const = default;
 
     friend void hash_into(Hasher& h, const Key& k) noexcept {
       hash_append(h, k.tu);
-      if (k.check_policies) h.uint(std::uint8_t(1));
+      if (k.check_policies || k.optimization != OptimizationMode::none)
+        h.uint(std::uint8_t(k.check_policies));
+      if (k.optimization != OptimizationMode::none) h.uint(std::to_underlying(k.optimization));
     }
     friend void trace_describe(std::string& out, const Key& k) { trace_describe(out, k.tu); }
   };
@@ -1371,13 +1391,40 @@ std::string Lower::show(const Lowered& v) {
   return v.body ? unnamed(l2::print(EntityId::none, v.body->f)) : std::string();
 }
 
+std::string Optimized::describe(const Key& k) {
+  std::string out = "{";
+  engine::describe_into(out, k.unit);
+  out += ", ";
+  engine::describe_into(out, k.target);
+  out += ", ";
+  engine::describe_into(out, k.level);
+  if (k.mode != OptimizationMode::none) {
+    out += ", ";
+    engine::describe_into(out, k.mode);
+  }
+  return out + '}';
+}
+
 std::string Optimized::show(const Machine& m) {
+  std::string decision;
+  switch (m.rewrites) {
+    case RewriteOutcome::none: break;
+    case RewriteOutcome::applied:
+      decision = std::format("path=heuristic candidates={0} applied={0} validation=passed\n", m.candidates);
+      break;
+    case RewriteOutcome::no_candidates: decision = "path=baseline fallback=no_candidates\n"; break;
+    case RewriteOutcome::rejected:
+      decision = std::format("path=baseline candidates={} applied=0 fallback=validation_or_emission_failed\n",
+                             m.candidates);
+      break;
+    case RewriteOutcome::unsupported_target: decision = "path=baseline fallback=unsupported_target\n"; break;
+  }
   if (m.linux_code)
-    return std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
+    return decision + std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
   if (m.code)
-    return std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
+    return decision + std::format("{} bytes, {} relocations\n", m.code->bytes.size(), m.code->relocs.size()) +
            aarch64::disassemble(*m.code, [](EntityId e) { return entity_name(e); });
-  return m.error.empty() ? std::string() : "error: " + m.error;
+  return m.error.empty() ? decision : decision + "error: " + m.error;
 }
 
 engine::query_task<FunctionIrValue> FunctionIr::run(engine::Ctx& cx, FnKey k) {
@@ -1701,21 +1748,106 @@ engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   co_return UnitRef{universe().units->add(std::move(u)), std::nullopt};
 }
 
+struct DivisionRewrite {
+  std::uint32_t node;
+  std::uint32_t immediate;
+  l2::Op op;
+  std::uint64_t operand;
+  bool operator==(const DivisionRewrite&) const = default;
+};
+
+namespace {
+
+bool unsigned_division(const l2::Node& node) {
+  return node.flags == 0 && (node.op == l2::Op::udiv || node.op == l2::Op::urem);
+}
+
+std::vector<DivisionRewrite> power_of_two_divisions(const l2::Function& body) {
+  std::vector<DivisionRewrite> rewrites;
+  if (std::ranges::none_of(body.nodes, unsigned_division)) return rewrites;
+
+  // Successor arguments live in operands too. Changing the constant is safe only when this
+  // division or remainder is its sole use.
+  std::vector<std::uint8_t> uses(body.values.size());
+  for (const auto operand : body.operands) {
+    auto& count = uses[ir::raw(operand)];
+    if (count < 2) ++count;
+  }
+  for (std::uint32_t i = 0; i < body.nodes.size(); ++i) {
+    const auto& node = body.nodes[i];
+    if (!unsigned_division(node)) continue;
+    const auto divisor = body.operands_of(ir::NodeId(i))[1];
+    const auto& value = body.value(divisor);
+    if (value.param || uses[ir::raw(divisor)] != 1 ||
+        (value.type != l2::Type::i32 && value.type != l2::Type::i64))
+      continue;
+    const auto& constant = body.nodes[value.def];
+    if (constant.op != l2::Op::const_) continue;
+    auto bits = body.imms[constant.imm0];
+    if (value.type == l2::Type::i32) bits = std::uint32_t(bits);
+    if (!std::has_single_bit(bits)) continue;
+
+    // In both widths, division by 2^k drops the low k bits. The remainder retains exactly
+    // those bits. The nonzero divisor and in-range shift preserve defined behavior.
+    if (node.op == l2::Op::udiv)
+      rewrites.push_back({i, constant.imm0, l2::Op::lshr, std::uint64_t(std::countr_zero(bits))});
+    else
+      rewrites.push_back({i, constant.imm0, l2::Op::and_, bits - 1});
+  }
+  return rewrites;
+}
+
+}  // namespace
+
+struct DivisionModel {
+  using Key = Fp128;
+  using Value = std::vector<DivisionRewrite>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    auto rewrites = power_of_two_divisions(universe().units->at(unit).body.f);
+    co_await cx.stop_point();
+    co_return rewrites;
+  }
+  static std::string show(const Value& v) {
+    return std::format("model=unsigned_power_of_two_division candidates={}", v.size());
+  }
+};
+
 engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   (void)cx.fetch<CostModelIn>(k.target);  // part of `target` (§O8); level 0 reads no cost
   const OptUnit& u = universe().units->at(k.unit);
   // Level 0: `lower` already ran (it made the unit); selection and stack slots (§O7).
   if (k.target == obj::target::x86_64_linux) {
+    RewriteOutcome outcome = RewriteOutcome::none;
+    std::uint32_t candidates = 0;
+    if (k.mode != OptimizationMode::none) {
+      const auto& rewrites = co_await cx.fetch<DivisionModel>(k.unit);
+      candidates = std::uint32_t(rewrites.size());
+      outcome = RewriteOutcome::no_candidates;
+      if (!rewrites.empty()) {
+        auto body = u.body.f;
+        for (const auto& rewrite : rewrites) {
+          body.nodes[rewrite.node].op = rewrite.op;
+          body.imms[rewrite.immediate] = rewrite.operand;
+        }
+        auto optimized = x86_64::compile_function(body, u.local, u.got_symbols);
+        co_await cx.stop_point();
+        if (optimized)
+          co_return Machine{std::nullopt, {}, std::move(*optimized), RewriteOutcome::applied, candidates};
+        outcome = RewriteOutcome::rejected;
+      }
+    }
     auto m = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
-    if (!m) co_return Machine{std::nullopt, m.error()};
-    co_return Machine{std::nullopt, {}, std::move(*m)};
+    if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome, candidates};
+    co_return Machine{std::nullopt, {}, std::move(*m), outcome, candidates};
   }
+  const auto outcome = k.mode == OptimizationMode::none ? RewriteOutcome::none : RewriteOutcome::unsupported_target;
   auto m = aarch64::compile_function(u.body.f, u.local);
-  if (!m) co_return Machine{std::nullopt, m.error()};
-  co_return Machine{std::move(*m), {}};
+  if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome};
+  co_return Machine{std::move(*m), {}, {}, outcome};
 }
 
-engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
+engine::query_task<Machine> Codegen::run(engine::Ctx& cx, Key key) {
+  const FnKey k = key.function;
   const obj::target target = object_target(unit_target(cx, k.tu));
   const UnitRef& unit = co_await cx.fetch<UnitQ>(k);
   if (!unit.unit) co_return Machine{std::nullopt, unit.error ? unit.error->message : "no unit"};
@@ -1725,7 +1857,7 @@ engine::query_task<Machine> Codegen::run(engine::Ctx& cx, FnKey k) {
     for (const SnapshotEntry& e : cx.fetch<OptCacheSnapshot>(target))
       if (e.unit == *unit.unit) level = std::max(level, e.level);
   }
-  co_return co_await cx.fetch<Optimized>({*unit.unit, target, level});
+  co_return co_await cx.fetch<Optimized>({*unit.unit, target, level, key.mode});
 }
 
 // ------------------------------------------------------------------------------------- tu(TU)
@@ -2705,7 +2837,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
 
   // Code: codegen(F) for every function, in definition order.
-  auto ms = co_await cx.par_map<Codegen>(fns);
+  auto ms = co_await cx.par_map<Codegen>(fns | std::views::transform([&](FnKey fn) {
+    return Codegen::Key{fn, k.optimization};
+  }));
   for (std::size_t i = 0; i < fns.size(); ++i) {
     if (ms[i].get().ok()) continue;
     const auto& def = *definitions[i];
