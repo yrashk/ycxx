@@ -243,7 +243,14 @@ Typed witness values have a separate identity per target triple. Read-only
 inspection shows each argument and its manifest location. Value traces show
 the resolved argv position and selector. [Target-aware example](../../examples/project-build/target-aware-action/README.md)
 
-`host_action` package recipes build the rule package for the host.
+The same selectors can be used as project generator and witness
+`environment` values (#1540). The tool receives the resolved strings.
+Receipt identity includes those strings, so equal literal values can
+reuse a receipt. Plan inspection shows the resolved environment entry
+and the selector that supplied it. [Environment walkthrough](../../examples/project-build/target-aware-action/README.md#pass-the-triples-in-the-action-environment)
+
+`host_action` package recipes build the rule package for the host and
+accept string values in `environment`.
 
 Named-module discovery reads the preprocessor's marked module and import
 directives before the native front end runs (#1349). It uses the registered

@@ -72,3 +72,62 @@ test "$status" -eq 43
 ```
 
 Press `q` in the trace view to stop watch.
+
+## Pass the triples in the action environment
+
+Use a fresh copy of the workspace and set `alternate` as above. Replace the
+`target_header` declaration in the copy's `build.ycxx`.
+
+```text
+generate "target_header" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("header")]
+    environment = {
+        BUILD_HOST = host_triple()
+        BUILD_TARGET = target_triple()
+    }
+    inputs = { script = "generate-header.sh", score = "score.txt" }
+    outputs = { header = "build_target.hh" }
+}
+```
+
+In `generate-header.sh`, set `target=$BUILD_TARGET` in place of `target=$1`.
+Read the score from `"$1"` and write the header to `"$2"` because the
+target triple now comes from the environment. Add this line to the header
+output block to record the tool's host.
+
+```sh
+printf 'inline constexpr char generator_host[] = "%s";\n' "$BUILD_HOST"
+```
+
+Build and inspect both variants.
+
+```sh
+ycxx build app --trace-engine=json 2> env-host.jsonl
+ycxx build app --target="$alternate" --trace-engine=json 2> env-alternate.jsonl
+ycxx show app --format=html > env-host-plan.html
+ycxx show app --target="$alternate" --format=html > env-alternate-plan.html
+grep -F '"kind":"ExternalAction"' env-host.jsonl env-alternate.jsonl
+```
+
+Find `target_header` in **Plan facts**. The two `environment` rows show
+the resolved strings and their selectors. `BUILD_HOST` stays the same
+across both plans and `BUILD_TARGET` follows the requested variant.
+The alternate build's trace shows `target_header` running again. The
+build reuses the host-only header's receipt.
+
+To see how receipt identity works on the default build, replace just the
+two selectors in `target_header.environment` with the quoted values shown
+in `env-host-plan.html`. Rebuild in the same workspace and inspect the
+generator count in the trace.
+
+```sh
+ycxx build app --trace-engine=json 2> env-literals.jsonl
+grep -Fc '"kind":"ExternalAction"' env-literals.jsonl || :
+```
+
+The generator count is zero because the resolved environment and the
+other declared inputs match. Restore the selectors, then run
+`ycxx build app --watch --trace-engine=interactive` and make the `score.txt`
+edit from the watch walkthrough above. The app returns `43` after the
+target header regenerates.
