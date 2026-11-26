@@ -298,7 +298,7 @@ void run(const std::filesystem::path& dir, const std::string& name, std::vector<
   }
   std::filesystem::permissions(exe, std::filesystem::perms::owner_all);
   const auto out = dir / (name + ".out");
-  int rc = shell(std::format("'{}' > '{}'", exe.native_encoded_string(), out.native_encoded_string()));
+  int rc = shell(std::format("'{}' > '{}'", exe.native(), out.native()));
   check(rc == exit_code, std::format("{}: exits with {} (got {})", name, exit_code, rc));
   std::string got = slurp(out);
   check(got == output, std::format("{}: prints {:?} (got {:?})", name, output, got));
@@ -739,7 +739,7 @@ void test_harness(const std::filesystem::path& dir, std::string_view cc) {
   c += "  if (fails == 0) printf(\"ok\\n\");\n  return fails ? 1 : 0;\n}\n";
   const auto src = dir / "harness.c", o = dir / "harness.o";
   std::ofstream(src) << c;
-  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native_encoded_string(), o.native_encoded_string())) != 0) {
+  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native(), o.native())) != 0) {
     check(false, "the host compiler compiles harness.c");
     return;
   }

@@ -336,6 +336,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Toolchain
 
+- **GCC's stock contract runtime needs the link driver flag.** Compile and link with
+  `-fcontracts` in the system standard-library configuration. The driver adds
+  `libstdc++exp`, which contains the default contract handler and its reporter.
+  The libycxx configuration gets its handler from libycxx's own runtime.
+
 - **A sandbox command's `/dev/shm` is private to that command.** A compiler built there by one
   command was inaccessible to the next.
   - Do: build and test in the same command when using `/dev/shm`. Copy the binary and test logs

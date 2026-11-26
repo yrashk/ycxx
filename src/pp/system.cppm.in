@@ -53,7 +53,7 @@ std::vector<std::string> system_dirs(const ast::Target& target, std::string_view
     std::error_code ec;
     // Keep missing include candidates so the daemon can observe headers created later.
     if (sdk.is_absolute() && !fs::equivalent(sdk, sdk.root_path(), ec))
-      dirs.push_back((sdk / "usr/include").generic_native_encoded_string());
+      dirs.push_back((sdk / "usr/include").generic_string<char>());
   }
   return dirs;
 }

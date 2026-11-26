@@ -1,6 +1,7 @@
 // The regular driver, plus a fixture entry point with private, inherited control sockets.
 // A gate is used once per source so interrupted Build attempts can restart normally.
 import std;
+import ycxx.execution;
 import ycxx.daemon;
 import ycxx.driver;
 
@@ -28,7 +29,7 @@ class Gate {
  public:
   Gate(Mode mode, int fd) : mode_(mode), fd_(fd) {}
 
-  void reached(std::inplace_stop_token stop) const {
+  void reached(ycxx::exec::inplace_stop_token stop) const {
     if (used_.test_and_set()) return;
     if (mode_ == Mode::observe) {
       send('P');
@@ -41,7 +42,7 @@ class Gate {
     }
     const auto& [reader, writer] = *pipe;
     // The engine's stop only wakes this worker. Build's normal stop point unwinds its frame.
-    std::inplace_stop_callback wake(stop, [fd = writer.get()] noexcept {
+    ycxx::exec::inplace_stop_callback wake(stop, [fd = writer.get()] noexcept {
       const std::byte byte{};
       write_all(fd, std::span(&byte, 1));
     });
@@ -75,7 +76,7 @@ class Gate {
 int serve_test(std::span<const std::string_view> args) {
   if (args.empty() || (args.size() - 1) % 3 != 0) return 2;
   ServerOptions options;
-  options.root = root_for(std::nullopt, std::filesystem::current_path().native_encoded_string());
+  options.root = root_for(std::nullopt, std::filesystem::current_path().native());
   options.ready_fd = descriptor(args.front());
   options.idle_exit = 300s;
   if (!options.ready_fd) return 2;
@@ -86,7 +87,7 @@ int serve_test(std::span<const std::string_view> args) {
     auto fd = descriptor(args[i + 2]);
     if (!mode || !fd || !gates.try_emplace(std::string(args[i + 1]), *mode, *fd).second) return 2;
   }
-  options.build_checkpoint = [&gates](std::string_view path, std::inplace_stop_token stop) {
+  options.build_checkpoint = [&gates](std::string_view path, ycxx::exec::inplace_stop_token stop) {
     if (auto it = std::as_const(gates).find(path); it != gates.cend()) it->second.reached(stop);
   };
   return serve(options);

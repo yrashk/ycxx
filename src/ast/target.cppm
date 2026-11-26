@@ -305,6 +305,7 @@ inline constexpr Target aarch64_darwin{
     .va_list = VaList::char_pointer,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
+    .native_operations = std::to_underlying(NativeOperation::source_location_descriptor),
     .always_pic = true,
     .little_endian_unsigned_integers = true,
 };

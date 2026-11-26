@@ -83,7 +83,7 @@ Runs runs(pl::Session& s, ast::EntityId f) {
   const auto& unit = s.get<pl::UnitQ>(k);
   std::uint32_t optimized = unit.unit ? db.runs<pl::Optimized>({*unit.unit, ycxx::obj::target::aarch64_macos, 0}) : 0;
   return {db.runs<pl::FunctionGen>(k), db.runs<pl::FunctionIr>(k), db.runs<pl::Lower>(k), db.runs<pl::UnitQ>(k),
-          db.runs<pl::Codegen>(k), optimized};
+          db.runs<pl::Codegen>({k}), optimized};
 }
 
 void incremental() {
@@ -288,7 +288,7 @@ void headers() {
   write(dir / "a" / "v.h", "#define V 1\n");
   write(dir / "b" / "v.h", "#define V 2\n");
   auto build_in = [&](pl::Session& s, const fs::path& cwd) {
-    s.set_source(tu, "m.cpp", main_text, "m.o", cwd.native_encoded_string());
+    s.set_source(tu, "m.cpp", main_text, "m.o", cwd.native());
     s.set_program(program, {{tu}, {}, "m"});
     return s.get<pl::Link>(program).image;
   };
@@ -304,7 +304,7 @@ void headers() {
   build_in(s, dir / "a");
   check(s.db().stats().executed == 0, "rebuilt with no edit: nothing executes");
 
-  const pp::PathId h = pp::path_id((dir / "a" / "v.h").lexically_normal().generic_native_encoded_string());
+  const pp::PathId h = pp::path_id((dir / "a" / "v.h").lexically_normal().generic_string<char>());
   write(dir / "a" / "v.h", "#define V 3\n");
   check(s.db().set<pp::FileContent>(h, std::string("#define V 3\n")), "the header's input changes");
   s.db().reset_stats();
@@ -328,9 +328,9 @@ void editor_view() {
   const std::string main_text = "#include \"v.h\"\nint main() { return V - 1; }\n";
   write(dir / "m.cpp", main_text);
   write(dir / "v.h", "#define V 1\n");
-  auto id = [&](std::string_view name) { return pp::path_id((dir / name).lexically_normal().generic_native_encoded_string()); };
+  auto id = [&](std::string_view name) { return pp::path_id((dir / name).lexically_normal().generic_string<char>()); };
   auto build_in = [&](pl::Session& s) {
-    s.set_source(tu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
+    s.set_source(tu, "m.cpp", main_text, "m.o", dir.native());
     s.set_program(program, {{tu}, {}, "m"});
     return s.get<pl::Link>(program).image;
   };
@@ -338,7 +338,7 @@ void editor_view() {
   pp::Config editor_config;
   editor_config.view = pp::View::editor;
   auto check_editor = [&](pl::Session& s) {
-    s.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
+    s.set_source(editor, "m.cpp", "", "m.o", dir.native(), editor_config);
     return !s.get<pl::TuFront>(editor).has_errors();
   };
 
@@ -510,7 +510,7 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
       } else {
         text += std::format("int f{0}() {{ S s({0}); Part t; return s.get() + t.id + {1}; }}\n", i, i == 3 ? edit : 0);
       }
-      s.set_source({i}, std::format("u{}.cpp", i), text, std::format("u{}.o", i), dir.native_encoded_string());
+      s.set_source({i}, std::format("u{}.cpp", i), text, std::format("u{}.o", i), dir.native());
       tus.push_back({i});
     }
     s.set_program(program, {tus, {}, "pooled"});
@@ -541,7 +541,7 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
     engine::Pool pool(threads);
     pl::Session s(pool);
     for (std::uint32_t i = 0; i < 2; ++i)
-      s.set_source({i}, std::format("l{}.cpp", i), "#include \"late.h\"\n", std::format("l{}.o", i), dir.native_encoded_string());
+      s.set_source({i}, std::format("l{}.cpp", i), "#include \"late.h\"\n", std::format("l{}.o", i), dir.native());
     s.set_program(program, {{{0}, {1}}, {}, "late"});
     s.get<pl::Link>(program);
     check(s.get<pl::TuFront>({0}).has_errors() && s.get<pl::TuFront>({1}).has_errors(),
@@ -558,7 +558,7 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
       engine::Pool pool(threads, 7);
       pl::Session s(pool);
       for (std::uint32_t i = 0; i < 2; ++i)
-        s.set_source({i}, std::format("n{}.cpp", i), texts[i ^ swapped], std::format("n{}.o", i), dir.native_encoded_string());
+        s.set_source({i}, std::format("n{}.cpp", i), texts[i ^ swapped], std::format("n{}.o", i), dir.native());
       s.set_program(program, {{{0}, {1}}, {}, "named"});
       const pl::Linked& l = s.get<pl::Link>(program);
       check(!s.get<pl::TuFront>({0}).has_errors() && !s.get<pl::TuFront>({1}).has_errors() && l.errors.empty(),

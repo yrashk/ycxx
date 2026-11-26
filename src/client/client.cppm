@@ -5,6 +5,7 @@
 export module ycxx.client;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.build.inspection;
 import ycxx.build.plan;
@@ -64,7 +65,7 @@ void expand(std::string_view a, std::vector<std::string>& out, int depth) {
 
 std::string cwd_now() {
   std::error_code ec;
-  return std::filesystem::current_path(ec).native_encoded_string();
+  return std::filesystem::current_path(ec).native();
 }
 
 constexpr std::string_view target_prefix = "--target=";
@@ -516,7 +517,8 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
     shared.notes.push_back(std::format("ycxx: {}: traced again", why));
   };
   // The stack the daemon gives a request's thread: the compile's own recursion runs on it (#178).
-  std::jthread builder(std::jthread::stack_size_hint(std::size_t{256} << 20), [&] {
+  exec::worker_thread builder;
+  exec::start_worker(builder, std::size_t{256} << 20, [&] {
     if (use != Use::off) {
       auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
         std::lock_guard g(shared.m);

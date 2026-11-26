@@ -98,7 +98,7 @@ class FileTable final : public pp::Host {
   std::string absolute(const std::string& path) const {
     std::filesystem::path p(path);
     if (p.is_relative() && !cwd().empty()) p = std::filesystem::path(cwd()) / p;
-    return p.lexically_normal().generic_native_encoded_string();
+    return p.lexically_normal().generic_string<char>();
   }
 
  private:
@@ -139,16 +139,16 @@ class FileTable final : public pp::Host {
     fs::path rest;
     for (;;) {
       fs::path parent = p.parent_path();
-      if (auto real = real_path(parent.native_encoded_string())) {
+      if (auto real = real_path(parent.native())) {
         watch(e, *real);
         fs::path r = fs::path(*real) / p.filename();
         if (!rest.empty()) r /= rest;
         // A symbolic link to a file is watched where its target is, too.
         if (auto target = real_path(key); target && rest.empty()) {
-          watch(e, fs::path(*target).parent_path().native_encoded_string());
+          watch(e, fs::path(*target).parent_path().native());
           return *target;
         }
-        return r.lexically_normal().native_encoded_string();
+        return r.lexically_normal().native();
       }
       if (parent == p) return key;
       rest = p.filename() / rest;
@@ -170,9 +170,9 @@ class FileTable final : public pp::Host {
       auto st = fs::symlink_status(prefix, ec);
       if (ec || !fs::exists(st)) break;
       if (!fs::is_symlink(st)) continue;
-      if (auto dir = real_path(prefix.parent_path().native_encoded_string())) {
+      if (auto dir = real_path(prefix.parent_path().native())) {
         watch(e, *dir);
-        names.push_back((fs::path(*dir) / prefix.filename()).native_encoded_string());
+        names.push_back((fs::path(*dir) / prefix.filename()).native());
       }
     }
     return names;
