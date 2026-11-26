@@ -30,6 +30,8 @@ enum class GnuVisibility : u8 { none, default_, hidden };
 // while dependent it is a template template parameter's `TTemplateParam` or a `TDepName` in
 // `type` ([temp.arg.template]).
 enum class TemplateArgKind : u8 { type, value, pack, template_ };
+// A non-type template parameter's placeholder type, if it has one ([dcl.spec.auto.general]).
+enum class Placeholder : u8 { none, auto_, decltype_auto };
 struct TemplateArg {
   TemplateArgKind kind;
   QualType type;
@@ -56,6 +58,10 @@ struct TemplateParamSema {
   // `depth + 1`; empty otherwise.
   SeqId<TemplateParamSema> params{};
   u8 rank_type_default = 0;  // substituting the written type default can check a dependent rank
+  // A non-type parameter declared with a placeholder ([temp.param]/7, [dcl.type.auto.deduct]):
+  // `auto` or `decltype(auto)`. Its `type` is then its own position's `TTemplateParam`, the type
+  // each argument deduces, which substitution reads from the bound value.
+  Placeholder placeholder = Placeholder::none;
   ConstId type_constraint = ConstId::none;  // concept and its explicit arguments, for linkage
   constexpr bool operator==(const TemplateParamSema&) const = default;
 };

@@ -2389,6 +2389,27 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - Tests: `tests/own/templates/enum-parameters/`. A functional cast as a template argument,
   `h<E(5)>()`, is an expression (#810, `tests/own/templates/functional-cast-argument-tentative.accept.cpp`).
 
+## Placeholder non-type template parameters (#1244)
+
+- `template<auto X>`, `template<decltype(auto) X>` and `auto... Xs` ([temp.param]/7). Each
+  argument, written, defaulted or deduced through a specialization or an array bound, gives the
+  parameter its own type without cv ([temp.arg.nontype]/1, [dcl.type.auto.deduct]): integral,
+  enumeration, pointer, `std::nullptr_t` or a flat structural class. That type is part of the
+  argument, so `v<1>` (`int`) and `v<sizeof(char)>` (`std::size_t`) are different
+  specializations ([temp.type]).
+- Inside the template the parameter's type is its own position's `TTemplateParam`, which
+  substitution reads from the bound value, so `decltype(X)` is dependent and later parameters and
+  defaults may use it. As an independent parameter type it is a non-deduced context.
+  `TemplateParamSema::placeholder` records `auto` or `decltype(auto)` for the template-head's
+  identity and for symbols, which write `TnDa`/`TnDc` (`TpTnDa` for a pack) before the argument, as
+  Clang and GCC do (GCC writes none for an empty pack).
+- Tests: `tests/own/templates/placeholder-parameters/`, with a Clang peer for the symbols.
+- Not yet: `C auto X` (#286), `auto* P`, `auto& R`, and `decltype(auto)` of a parenthesized lvalue
+  or a reference, which deduces the prvalue's type instead of a reference (#1401). A floating-point
+  argument is rejected (#317), and a `nullptr` argument has no symbol yet (#64). `decltype(X)` in
+  a function template's signature is mangled as `T_`, not `DtT_E` (#1406), and an alias template
+  passes `I<'a'>` on as a `char` where its pattern's parameter is `int` (#1405).
+
 ## Pack-index-specifiers (#297)
 
 - `T...[I]` ([dcl.type.pack.index]) names the element of a template type parameter pack, with

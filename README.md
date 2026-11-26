@@ -133,6 +133,11 @@ An explicitly specialized class can name a flat structural argument directly, as
 `template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
 selects the same specialization. [#1248](https://github.com/yrashk/ycxx/issues/1248)
 
+Templates can declare `auto`, `decltype(auto)` and `auto...` non-type parameters. Each argument
+keeps its own type, so `v<1>` and `v<sizeof(char)>` are different specializations.
+Constrained `C auto` and `auto*` or `auto&` parameters are not supported yet.
+[#1244](https://github.com/yrashk/ycxx/issues/1244) [#1401](https://github.com/yrashk/ycxx/issues/1401)
+
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
 [#340](https://github.com/yrashk/ycxx/issues/340)

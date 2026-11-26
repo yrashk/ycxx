@@ -156,10 +156,6 @@ public:
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
     return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
   }
-  bool is_plain_auto(QualType type) const {
-    const auto r = rec(type);
-    return r.kind == TypeKind::placeholder && !r.decltype_auto && r.entity == EntityId::none;
-  }
   // Whether a declared type holds a placeholder still to be deduced ([dcl.type.auto.deduct]): as
   // the type, or as what it points or refers to, an array's element or a function's return type.
   bool has_placeholder(QualType q) const {

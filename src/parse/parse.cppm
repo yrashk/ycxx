@@ -8949,7 +8949,7 @@ private:
   sema::Fp128 head_fp(std::span<const ast::TemplateParamSema> ps) {
     sema::Fp128 f = ast::seed("ycxx.sema.TemplateHead");
     for (const ast::TemplateParamSema& p : ps) {
-      f = ast::mix(ast::mix(f, std::to_underlying(p.kind)), p.pack);
+      f = ast::mix(ast::mix(ast::mix(f, std::to_underlying(p.kind)), p.pack), std::to_underlying(p.placeholder));
       if (p.kind == ast::TemplateArgKind::value) f = ast::mix(f, s_.types().fp(s_.types().canonical(p.type)));
       // A template template parameter's own head ([temp.over.link]/6).
       if (p.kind == ast::TemplateArgKind::template_) f = ast::mix(f, head_fp(s_.world().ins.seqs.elements(p.params)));

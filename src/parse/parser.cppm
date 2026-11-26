@@ -2950,14 +2950,30 @@ public:
     if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
+    // `auto X`, `decltype(auto) X`, `auto... Xs` ([temp.param]/7): each argument deduces the
+    // parameter's type ([temp.arg.nontype]/1, [dcl.type.auto.deduct]). Inside the template that
+    // type is dependent, the parameter's own position, so `decltype(X)` names it.
+    if (s_->types().kind(t) == sema::TypeKind::placeholder) {
+      const sema::TypeRec r = s_->types().rec(t);
+      if (r.entity != sema::EntityId::none) {  // `C auto X` (#286)
+        s_->diag(at, Diag::not_supported, Tk::kw_auto);
+        ok = false;
+        return std::nullopt;
+      }
+      p.placeholder = r.decltype_auto ? ast::Placeholder::decltype_auto : ast::Placeholder::auto_;
+      t = s_->types().template_param(depth, index, p.pack != 0);
+    } else if (s_->types().has_placeholder(t)) {  // `auto* P`, `auto& R` (#1401)
+      s_->diag(at, Diag::not_supported, Tk::kw_auto);
+      ok = false;
+      return std::nullopt;
+    }
     // [temp.param]: a structural type, including the supported flat aggregate profile.
-    const bool deduced_parameter = s_->types().is_plain_auto(t);
     const bool class_parameter = !p.pack && s_->types().is_class(t) && !s_->types().is_dependent(t) &&
                                  s_->is_complete(t) && !questions().class_layout_uncertain(s_->types().class_of(t)) &&
                                  s_->templates().structural_class_parameter(t);
     if (!s_->types().is_integral(t) && !s_->types().is_enum(t) && !s_->types().is_pointer(t) &&
         !s_->types().is_reference(t) && !s_->types().is(t, Builtin::nullptr_t) &&
-        !s_->types().is_dependent(t) && !class_parameter && !deduced_parameter) {
+        !s_->types().is_dependent(t) && !class_parameter) {
       bool later = s_->types().is_class(t) || s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
                s_->types().is_class(t)      ? Tk::kw_class
@@ -2973,17 +2989,17 @@ public:
       const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
       in_integral_template_default_ = saved_default;
-      QualType target = deduced_parameter
-                          ? s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type()))
-                          : t;
-      auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
-      if (!v) v = template_value(e, target);
+      // A placeholder parameter's default deduces its type as an argument does.
+      QualType dt = t;
+      if (p.placeholder != ast::Placeholder::none && e.ok()) dt = sema::Types::unqualified(s_->rvalue(e).type());
+      auto v = s_->types().is(dt, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
+      if (!v) v = template_value(e, dt);
       if (!v) {
         ok = false;
         return std::nullopt;
       }
       p.has_default = 1;
-      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(target), *v};
+      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(dt), *v};
     }
     return p;
   }
