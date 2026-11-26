@@ -3394,6 +3394,11 @@ arguments to get the canonical host triple independently of target selection
 targets can share an action with identical resolved arguments and inputs.
 Inspection and traces identify the host selector.
 
+Project generators and rule witnesses can also use both selectors in
+their `environment` records (#1540). The resolved strings enter the action
+identity and can share receipts with equal literals. Inspection reports
+each resolved environment value and its selector origin.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
