@@ -119,7 +119,7 @@ struct GlobalVar {
   QualType type{};                // as declared, cv included
   std::optional<ConstId> value;   // its value when constant-initialized; else zero
   bool usable = false;            // usable in constant expressions ([expr.const])
-  std::optional<ConstantRecordLayout> record{};
+  std::optional<ConstantRecordLayout> record{};  // the record itself or the array's leaf element
 };
 
 // A callee, as the host answers for it (in the engine, a fetch of `function_ir(F, ctx)`).
@@ -212,6 +212,7 @@ private:
       u32 cell;
       u32 ncells;
     };
+    QualType type;
     u64 size;
     u32 ncells;
     std::vector<Field> fields;
@@ -229,10 +230,15 @@ private:
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
+    const RecordStorage* array_record = nullptr;
     Life record_life = Life::before;        // distinct from the lifetimes of its subobjects
     Life primary_base_life = Life::before;
     bool dynamic_initialized = false;     // set only by a completed constructor
     bool unknown_reference = false;       // an opaque referent can alias another outside object
+  };
+  struct StorageExtent {
+    u64 cells;
+    u64 bytes;
   };
   struct PathNode {
     u32 parent = 0;
@@ -292,12 +298,14 @@ private:
   // ------------------------------------------------------------ objects
 
   const RecordStorage* record_storage(QualType t, const ConstantRecordLayout* known = nullptr);
+  StorageExtent storage_extent(QualType t, const RecordStorage* array_record);
   bool can_allocate(u64 ncells) const;
-  u32 make_object(QualType t, Origin o, const RecordStorage* record = nullptr);
+  u32 make_object(QualType t, Origin o, const RecordStorage* record = nullptr,
+                  const RecordStorage* array_record = nullptr);
   void fill_zero(const Object& object);
   void fill_zero(QualType t, u32 cell);
-  bool fill_constant(QualType t, u32 cell, ConstId value);
-  bool fill_record_constant(Object& object, ConstId value);
+  bool fill_constant(QualType t, u32 cell, ConstId value, const RecordStorage* array_record = nullptr);
+  bool fill_record_constant(const RecordStorage& record, u32 cell, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
   void set_lifetime(const Place& p, bool complete, Life life);
@@ -531,7 +539,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
     if (layout) known = &*layout;
   }
   if (!known) return nullptr;
-  RecordStorage record{known->size, 0, {}, known->dynamic, known->primary_base};
+  RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base};
   record.fields.reserve(known->fields.size());
   for (const auto& field : known->fields) {
     const u64 leaves = shape(field.type).leaves;
@@ -543,18 +551,34 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
   return &*storage;
 }
 
+// A stored record array needs its leaf layout only for this object. Its cell stride follows
+// declaration order, while its byte stride includes target padding.
+Machine::StorageExtent Machine::storage_extent(QualType t, const RecordStorage* array_record) {
+  const Shape& s = shape(t);
+  if (!array_record) return {s.leaves, s.size};
+  if (t == array_record->type) return {array_record->ncells, array_record->size};
+  if (s.kind != Kind::array) return {s.leaves, s.size};
+  const auto e = storage_extent(s.inner, array_record);
+  if (e.bytes == 0 || s.bound > std::numeric_limits<u32>::max() ||
+      s.bound > u64(std::numeric_limits<i64>::max()) / e.bytes ||
+      (e.cells != 0 && s.bound > std::numeric_limits<u32>::max() / e.cells))
+    return {0, 0};
+  return {e.cells * s.bound, e.bytes * s.bound};
+}
+
 bool Machine::can_allocate(u64 ncells) const {
   constexpr u64 max_cells = std::numeric_limits<u32>::max();
   return ncells <= max_cells && cells_.size() <= max_cells - ncells;
 }
 
-u32 Machine::make_object(QualType t, Origin o, const RecordStorage* record) {
+u32 Machine::make_object(QualType t, Origin o, const RecordStorage* record, const RecordStorage* array_record) {
   Object ob;
   ob.type = in_->canonical(t);
   ob.origin = o;
   ob.cell0 = u32(cells_.size());
-  ob.ncells = record ? record->ncells : u32(shape(t).leaves);
+  ob.ncells = record ? record->ncells : u32(storage_extent(ob.type, array_record).cells);
   ob.record = record;
+  ob.array_record = array_record;
   cells_.resize(cells_.size() + ob.ncells);
   objects_.push_back(ob);
   return u32(objects_.size() - 1);
@@ -579,9 +603,9 @@ void Machine::fill_zero(QualType t, u32 cell) {
   cells_[cell].v = s.kind == Kind::pointer ? Value::null() : s.kind == Kind::floating ? Value::floating(0) : Value::integer(0);
 }
 
-// [dcl.init.aggr]: each nested array supplies a value for every element. Leave pointer and
+// [dcl.init.aggr]: each aggregate supplies a value for every element. Leave pointer and
 // other scalar constants to the usual lazy load, which can ask the host for another global.
-bool Machine::fill_constant(QualType t, u32 cell, ConstId value) {
+bool Machine::fill_constant(QualType t, u32 cell, ConstId value, const RecordStorage* array_record) {
   const ast::Values& vs = in_->values;
   const Shape& s = shape(t);
   switch (s.kind) {
@@ -590,9 +614,9 @@ bool Machine::fill_constant(QualType t, u32 cell, ConstId value) {
     auto aggregate = vs.get<ast::VAggregate>(value);
     auto elements = in_->seqs.elements(aggregate.elems);
     if (!similar(t, aggregate.type) || elements.size() != s.bound) return false;
-    u32 leaves = u32(shape(s.inner).leaves);
+    const u32 leaves = u32(storage_extent(s.inner, array_record).cells);
     for (ConstId element : elements) {
-      if (!fill_constant(s.inner, cell, element)) return false;
+      if (!fill_constant(s.inner, cell, element, array_record)) return false;
       cell += leaves;
     }
     return true;
@@ -608,22 +632,21 @@ bool Machine::fill_constant(QualType t, u32 cell, ConstId value) {
     if (!vs.is<ast::VNullptr>(value) && (s.is_nullptr || !vs.is<ast::VLvalue>(value))) return false;
     break;
   default:
-    return false;
+    return array_record && t == array_record->type && fill_record_constant(*array_record, cell, value);
   }
   cells_[cell] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(value)}};
   return true;
 }
 
-bool Machine::fill_record_constant(Object& object, ConstId value) {
+bool Machine::fill_record_constant(const RecordStorage& record, u32 cell, ConstId value) {
   const auto& values = in_->values;
   if (!values.is<ast::VAggregate>(value)) return false;
   const auto aggregate = values.get<ast::VAggregate>(value);
   const auto elements = in_->seqs.elements(aggregate.elems);
-  const auto& fields = object.record->fields;
-  if (!similar(object.type, aggregate.type) || elements.size() != fields.size()) return false;
+  const auto& fields = record.fields;
+  if (!similar(record.type, aggregate.type) || elements.size() != fields.size()) return false;
   for (std::size_t i = 0; i < fields.size(); ++i)
-    if (!fill_constant(fields[i].layout.type, object.cell0 + fields[i].cell, elements[i])) return false;
-  object.record_life = Life::alive;
+    if (!fill_constant(fields[i].layout.type, cell + fields[i].cell, elements[i])) return false;
   return true;
 }
 
@@ -646,10 +669,11 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
       pl.primary_base = true;
       continue;
     }
-    if (i == 0 && path[i].step == ir::Step::field && ob.record) {
+    const auto* record = i == 0 ? ob.record : ob.array_record;
+    if (path[i].step == ir::Step::field && record && pl.type == record->type) {
       const auto index = path[i].index;
-      if (index >= ob.record->fields.size()) return std::nullopt;
-      const auto& field = ob.record->fields[index];
+      if (index >= record->fields.size()) return std::nullopt;
+      const auto& field = record->fields[index];
       pl.type = field.layout.type;
       pl.cell0 += field.cell;
       pl.ncells = field.ncells;
@@ -659,7 +683,7 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
     const Shape& s = shape(pl.type);
     if (path[i].step != ir::Step::elem || s.kind != Kind::array) return std::nullopt;
     if (path[i].index > s.bound) return std::nullopt;
-    u64 n = shape(s.inner).leaves;
+    const u64 n = storage_extent(s.inner, ob.array_record).cells;
     pl.type = s.inner;
     if (path[i].index == s.bound) {
       past = true;
@@ -866,7 +890,8 @@ Machine::Flow Machine::address_from_path(u32 obj, QualType pointee, std::span<co
     return fail(Reason::unsupported_constant);
   i64 start = offset_of(pointer);
   if (offset != start) {
-    const u64 size = indices.empty() ? complete_size(objects_[obj]) : shape(place->type).size;
+    const Object& object = objects_[obj];
+    const u64 size = indices.empty() ? complete_size(object) : storage_extent(place->type, object.array_record).bytes;
     if (past || offset < start || u64(offset - start) != size)
       return fail(Reason::unsupported_constant);
     pointer.past = true;
@@ -878,7 +903,8 @@ Machine::Flow Machine::address_from_path(u32 obj, QualType pointee, std::span<co
 // A pointer to `pointee` at `offset` bytes into object `obj`: down through array elements until
 // the type is `pointee`, or one past the end of the last such element or of the whole object.
 Machine::Flow Machine::address(u32 obj, QualType pointee, i64 offset, Value& out) {
-  QualType cur = objects_[obj].type;
+  const Object& object = objects_[obj];
+  QualType cur = object.type;
   u32 path = 0;
   if (offset < 0) return fail(Reason::unsupported_constant);
   u64 off = u64(offset);
@@ -895,7 +921,7 @@ Machine::Flow Machine::address(u32 obj, QualType pointee, i64 offset, Value& out
       }
     }
     if (cs.kind != Kind::array) return fail(Reason::unsupported_constant);
-    u64 es = shape(cs.inner).size;
+    const u64 es = storage_extent(cs.inner, object.array_record).bytes;
     if (es == 0 || off / es > cs.bound) return fail(Reason::unsupported_constant);
     u64 index = off / es;
     off -= index * es;
@@ -925,21 +951,32 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
   if (!info->second) return fail(Reason::ill_formed, 0, e);
   const GlobalVar& g = *info->second;
   const Shape s = shape(g.type);
-  const RecordStorage* record = g.record ? record_storage(g.type, &*g.record) : nullptr;
-  const u64 leaves = record ? record->ncells : s.leaves;
-  if (!can_allocate(leaves) || (leaves == 0 && !record) ||
-      (g.record && (!record || !g.usable || !g.value)) ||
+  const RecordStorage* layout = nullptr;
+  if (g.record) {
+    QualType leaf = in_->canonical(g.type);
+    while (shape(leaf).kind == Kind::array) leaf = shape(leaf).inner;
+    layout = record_storage(leaf, &*g.record);
+    if (!layout || !g.usable || !g.value) return fail(Reason::unsupported_constant);
+  }
+  const auto* record = s.kind == Kind::array ? nullptr : layout;
+  const auto* array_record = s.kind == Kind::array ? layout : nullptr;
+  const auto extent = storage_extent(g.type, array_record);
+  const u64 leaves = record ? record->ncells : extent.cells;
+  if (!can_allocate(leaves) || (leaves == 0 && !layout) ||
+      (array_record && (extent.bytes == 0 || array_record->dynamic || array_record->primary_base)) ||
       (!g.record && g.value && s.kind != Kind::array && leaves != 1))
     return fail(Reason::unsupported_constant);
-  u32 o = make_object(g.type, Origin::global, record);
+  u32 o = make_object(g.type, Origin::global, record, array_record);
   Object& ob = objects_[o];
   ob.entity = e;
   ob.outside = true;
   ob.usable = g.usable;
-  if (g.record) {
-    if (!fill_record_constant(ob, *g.value)) return fail(Reason::unsupported_constant);
+  if (record) {
+    if (!fill_record_constant(*record, ob.cell0, *g.value)) return fail(Reason::unsupported_constant);
+    ob.record_life = Life::alive;
   } else if (g.value && s.kind == Kind::array) {
-    if (!fill_constant(g.type, ob.cell0, *g.value)) return fail(Reason::unsupported_constant);
+    if (!fill_constant(ob.type, ob.cell0, *g.value, array_record)) return fail(Reason::unsupported_constant);
+    if (array_record) ob.record_life = Life::alive;
   } else if (g.value) {
     cells_[ob.cell0] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(*g.value)}};
   } else {
@@ -1485,7 +1522,7 @@ Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Valu
 }
 
 u64 Machine::complete_size(const Object& object) {
-  return object.record ? object.record->size : shape(object.type).size;
+  return object.record ? object.record->size : storage_extent(object.type, object.array_record).bytes;
 }
 
 // The byte offset of an object pointer from the start of its complete object: its address,
@@ -1500,16 +1537,17 @@ i64 Machine::offset_of(const Value& p) {
       return i64(base.offset + (p.past ? base.size : 0));
     }
     if (st.step == ir::Step::field) {
-      const auto& field = object.record->fields[st.index];
+      const auto* record = object.array_record ? object.array_record : object.record;
+      const auto& field = record->fields[st.index];
       off += i64(field.layout.offset);
       cur = field.layout.type;
       continue;
     }
     const Shape& s = shape(cur);
-    off += i64(st.index * shape(s.inner).size);
+    off += i64(st.index * storage_extent(s.inner, object.array_record).bytes);
     cur = s.inner;
   }
-  if (p.past) off += i64(p.bits == 0 ? complete_size(object) : shape(cur).size);
+  if (p.past) off += i64(p.bits == 0 ? complete_size(object) : storage_extent(cur, object.array_record).bytes);
   return off;
 }
 
