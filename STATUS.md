@@ -2942,6 +2942,36 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
+## Trailing requires-clauses on members of class templates (#1417)
+
+- A member function, constructor or prospective destructor of a class template, a nested class of
+  one, or a member template can have a trailing requires-clause ([class.mem.general],
+  [dcl.decl.general]/4), defaulted (`B() requires C<T> = default;`), deleted or user-provided, and
+  so can its out-of-class definition, which must repeat it ([temp.over.link]/6). A non-templated
+  function with one is an error.
+- The clause is part of the member's identity (`EntityRec::constraints`, mixed for non-template
+  functions only when present, [basic.scope.scope]/4), so members that differ only in it are
+  overloads. A specialization reads it as the pattern does and substitutes its arguments into
+  the atoms' mappings ([temp.constr.normal]); nothing in it is checked before the member is a
+  candidate ([temp.inst]), and a mapping that cannot be formed is unsatisfied
+  ([temp.constr.atomic]/3). `MemberDeclRec::constraints` keeps the specialization's normal form.
+- Member calls, constructor selection and qualified calls skip a candidate whose constraints are
+  not satisfied ([over.match.viable]/3) and prefer the more constrained of non-template functions
+  with the same parameters ([over.match.best.general]/2.6).
+- When a specialization is complete, `Program::eligible_special_members` marks the special members
+  that are not eligible: unsatisfied, or outranked by a more constrained satisfied one of their kind
+  and parameters ([special]/6). They stay user-declared and suppress implicit declarations, but are
+  no candidates, are never defined and do not count for the class's triviality. Of the
+  prospective destructors one is selected ([class.dtor]/4); none or several is an error.
+- Not yet: constraints of constructor templates are checked by
+  [#1398](https://github.com/yrashk/ycxx/issues/1398); constrained friends are
+  [#1180](https://github.com/yrashk/ycxx/issues/1180); type-trait built-ins on class template
+  specializations are [#218](https://github.com/yrashk/ycxx/issues/218); a qualified call of an
+  overloaded static member also instantiates the overloads it did not select
+  ([#1461](https://github.com/yrashk/ycxx/issues/1461)).
+- Tests: `tests/own/member-requires/` (spec-only author, 41 tests; XFAILs cite #218, #157, #311,
+  #1150 and #1461).
+
 ## Access control and friends (#119, 2026-11-18)
 
 - **Records:** `ClassRec::access` holds each member's access by entity: data members, member
@@ -4048,7 +4078,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), trailing requires-clauses on member templates, static data member templates,
+  templates (#339), static data member templates (trailing requires-clauses on member templates
+  came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
 
