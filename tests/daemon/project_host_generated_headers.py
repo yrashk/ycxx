@@ -388,7 +388,7 @@ def check_rejections(ycxx, workspace, env, other):
         ('other_tool', 'generated headers for host executables require a producer chain without host executable inputs'),
     ):
         scope = workspace / name
-        journal, schema_runs = workspace / f'{name}-runs', workspace / f'{name}-schemas'
+        journal, schema_runs = workspace / f'rejected-{name}-runs', workspace / f'rejected-{name}-schemas'
         definition = prepare(scope, journal, schema_runs)
         binding = f'settings = "{SETTINGS}"'
         assert definition.count(binding) == 1, definition
