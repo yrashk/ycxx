@@ -3338,6 +3338,7 @@ provenance. The trace carries the compiler target for the request.
 with their declared rule kinds and source locations. JSON includes the same
 records with schema 1.
 HTML links each record to its declaration line in the displayed manifest.
+The catalog accepts a regular UTF-8 manifest and follows symlinks to one (#1441).
 
 Named-module discovery runs before native semantic analysis through
 `ModuleDirectives` and `ModuleGraph` (#1349). It follows the marked module

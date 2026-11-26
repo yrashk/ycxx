@@ -1,4 +1,10 @@
 // Read-only descriptions and semantic comparisons of build plans (#1256).
+module;
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 export module ycxx.build.inspection;
 
 import std;
@@ -9,6 +15,7 @@ import ycxx.build.manifest;
 import ycxx.build.module_graph_diff;
 import ycxx.build.plan;
 import ycxx.build.project;
+import ycxx.lex;
 import ycxx.lsp;
 
 export namespace ycxx::build {
@@ -86,6 +93,60 @@ std::expected<std::string, std::string> read_text(const std::filesystem::path& p
   return text;
 }
 
+std::expected<std::string, std::string> read_catalog_manifest(const std::filesystem::path& path) {
+  const auto name = path.generic_native_encoded_string();
+  std::error_code error;
+  const auto status = std::filesystem::status(path, error);
+  if (error || !std::filesystem::exists(status))
+    return std::unexpected(std::format("cannot open build definition '{}'", name));
+  const auto not_regular = [&] {
+    return std::unexpected(std::format("build definition '{}' is not a regular file", name));
+  };
+  if (!std::filesystem::is_regular_file(status)) return not_regular();
+
+  struct Fd {
+    explicit Fd(int value) : value(value) {}
+    Fd(const Fd&) = delete;
+    ~Fd() { if (value >= 0) ::close(value); }
+    int value;
+  };
+  // The path can change after status(). Check the opened file before reading it.
+  const Fd file(::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC));
+  if (file.value < 0) return std::unexpected(std::format("cannot open build definition '{}'", name));
+  struct stat opened{};
+  if (::fstat(file.value, &opened) != 0)
+    return std::unexpected(std::format("cannot stat build definition '{}'", name));
+  if (!S_ISREG(opened.st_mode)) return not_regular();
+
+  std::string contents;
+  std::array<char, 8192> buffer;
+  for (;;) {
+    const auto size = ::read(file.value, buffer.data(), buffer.size());
+    if (size == 0) return contents;
+    if (size < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(std::format("cannot read build definition '{}'", name));
+    }
+    contents.append(buffer.data(), static_cast<std::size_t>(size));
+  }
+}
+
+std::optional<SourceLocation> invalid_utf8_location(std::string_view text) {
+  auto rest = text;
+  while (!rest.empty()) {
+    const auto decoded = lex::unicode::decode_utf8(rest);
+    if (!decoded) {
+      const auto prefix = text.substr(0, text.size() - rest.size());
+      const auto line = static_cast<std::size_t>(std::ranges::count(prefix, '\n')) + 1;
+      const auto newline = prefix.rfind('\n');
+      const auto column = newline == std::string_view::npos ? prefix.size() + 1 : prefix.size() - newline;
+      return SourceLocation{line, column};
+    }
+    rest.remove_prefix(decoded->length);
+  }
+  return std::nullopt;
+}
+
 std::expected<PlanInspection, std::string> read_snapshot(const std::filesystem::path& path) {
   const auto text = read_text(path, "build snapshot");
   if (!text) return std::unexpected(text.error());
@@ -127,8 +188,11 @@ std::string diff_text(const PlanComparison& diff) {
 std::expected<std::string, std::string> show_targets(const std::filesystem::path& cwd, InspectionFormat format) {
   if (format == InspectionFormat::source)
     return std::unexpected("--targets requires text, JSON, or HTML output");
-  const auto text = read_text(cwd / "build.ycxx", "build definition");
+  const auto text = read_catalog_manifest(cwd / "build.ycxx");
   if (!text) return std::unexpected(text.error());
+  if (const auto location = invalid_utf8_location(*text))
+    return std::unexpected(std::format("build.ycxx:{}:{}: invalid UTF-8 in build definition",
+                                       location->line, location->column));
   auto manifest = parse_manifest(*text);
   if (!manifest) {
     const auto& error = manifest.error();
