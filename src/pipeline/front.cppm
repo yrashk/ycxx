@@ -1687,6 +1687,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if ((d.flags & sema::decl_flag::consteval_) && (immediate_free || immediate_constructor) && !it.template_depth &&
           !it.specialization && entity.templ == EntityId::none && can_defer_body(body))
         continue;
+      // GCC defers repeated C-linkage definitions across namespaces until code generation.
+      if (!tu.duplicate_c_definition && program.compatibility() == ast::Compatibility::gcc &&
+          (d.flags & sema::decl_flag::lang_c) && program.function_defined_before(d.entity, k))
+        tu.duplicate_c_definition = at.front().value_or(ast::Loc{program.id(k), 0});
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       tu.functions.back().emit_if_referenced = immediate_if_referenced(d, entity, body);
       namespace flag = sema::decl_flag;
@@ -2235,6 +2239,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       if (variables.insert(v.entity).second) tu.variables.push_back(std::move(v));
     if (tu.main == EntityId::none) tu.main = p.tu.main;
     if (!tu.namespace_destruction) tu.namespace_destruction = p.tu.namespace_destruction;
+    if (!tu.duplicate_c_definition) tu.duplicate_c_definition = p.tu.duplicate_c_definition;
     tu.base_object_variants.insert(p.tu.base_object_variants.begin(), p.tu.base_object_variants.end());
     for (const auto& [function, layouts] : p.base_object_variant_layouts)
       if (uncertain_layouts.empty() || std::ranges::none_of(layouts, [&](EntityId e) { return uncertain_layouts.contains(e); }))

@@ -39,6 +39,8 @@ enum class LexDiag : u32 {
   stray_basic_character [[=message{Severity::error, "stray '{0:c}' in program"}]],
   unterminated_char [[=message{Severity::error, "missing terminating ' character"}]],
   unterminated_string [[=message{Severity::error, "missing terminating \" character"}]],
+  skipped_unterminated_char [[=message{Severity::warning, "missing terminating ' character"}]],
+  skipped_unterminated_string [[=message{Severity::warning, "missing terminating \" character"}]],
   empty_char [[=message{Severity::error, "empty character literal"}]],
   // [lex.universal.char]
   ucn_not_scalar [[=message{Severity::error, "universal-character-name U+{0:x} is not a Unicode scalar value"}]],

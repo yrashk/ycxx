@@ -2442,10 +2442,16 @@ public:
   }
   std::vector<ast::DeclSema> friend_namespace_decls(EntityId ns, ast::NameId name) {
     std::vector<ast::DeclSema> declarations;
-    for (DeclId id : p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
-                                        namespace_lookup_includes_item(name), p_->namespace_path(ns),
-                                        {}, Program::LookupNames::types, /*innermost_only=*/true))
-      if (auto d = lookup_declaration(id); d && d->entity != EntityId::none) declarations.push_back(*d);
+    const auto spelling = p_->world().ins.names.spelling(name);
+    const auto item = namespace_lookup_item();
+    const auto self = namespace_lookup_includes_item(name);
+    const auto& path = p_->namespace_path(ns);
+    const auto candidates = p_->compatibility() == ast::Compatibility::gcc
+        ? p_->declared_in(spelling, path, item, self, /*inhabit=*/true)
+        : p_->visible_decls(spelling, item, self, path, {}, Program::LookupNames::types, /*innermost_only=*/true);
+    for (DeclId id : candidates)
+      if (auto d = lookup_declaration(id); d && d->entity != EntityId::none && sema::Sema::is_type(d->kind))
+        declarations.push_back(*d);
     return declarations;
   }
   // Name conflicts when introducing a template concern declarations that bind in this namespace
@@ -5871,7 +5877,7 @@ private:
       p_->classes_.publish_enum(e, std::move(er));
       return;
     }
-    if (scoped && inst_ && replay == EntityId::none) {
+    if (scoped && inst_ && replay == EntityId::none && s_.compatibility() != ast::Compatibility::gcc) {
       // [temp.inst]/3–4: class instantiation needs the declaration and fixed type. The list is
       // instantiated when referenced in a context that requires the enumeration's definition.
       er.defined = false;

@@ -4227,6 +4227,15 @@ def historical_syntax_modes(world, gxx):
         ('stmt/switch-constexpr-past-vacuous.accept.cpp', ('spec', 'clang')),
         ('block-try-catch/named-function-pointer-default.reject.cpp', ('clang',)),
         ('block-try-catch/abstract-function-pointer-default.reject.cpp', ('clang',)),
+        ('classes/inherited-alias-equal-types.accept.cpp', ('spec', 'clang')),
+        ('classes/inherited-static-initializer-equal-types.accept.cpp', ('spec', 'clang')),
+        ('member-pointer/qualified-function-alias.accept.cpp', ('spec', 'clang')),
+        ('template-friends/friend-class-template-contained-namespace.run.cpp', ('spec', 'clang')),
+        ('templates/dependent-scoped-enum/type-only.accept.cpp', ('spec', 'clang')),
+        ('templates/dependent-scoped-enum/unused-default-member-initializer.accept.cpp', ('spec', 'clang')),
+        ('builtins/layout-compatible-no-unique-address.accept.cpp', ('spec', 'clang')),
+        ('builtins/memchr-written-declaration.reject.cpp', ('gcc',)),
+        ('decls/annotations.accept.cpp', ('spec', 'gcc')),
     )
     checks = []
     for path, accepted in cases:
@@ -4273,6 +4282,33 @@ static_assert(f(2) == 7);
 '''),
         ('catch-default-lookup.cpp', (),
          'void f() { try {} catch (int (*)(int = missing_name)) {} }'),
+        ('same-inherited-alias.cpp', MODES,
+         'struct A { using T = short; }; struct B : A {}; struct C : A {}; struct D : B, C { using X = T; };'),
+        ('member-function-alias-qualifiers.cpp', ('gcc',), '''
+struct S;
+using Fn = void(double) const && noexcept;
+using P = Fn S::*;
+static_assert(__is_same(P, void(S::*)(double) const noexcept));
+'''),
+        ('layout-overlap-attribute-control.cpp', MODES, '''
+struct E {};
+struct A { [[no_unique_address]] E e; int n; };
+struct B { E e; int n; };
+static_assert(!__is_layout_compatible(A, B));
+'''),
+        ('valid-scoped-enum-replay.cpp', MODES, '''
+template<int N> struct S { enum class E : unsigned char { a = N }; E value = E::a; };
+static_assert(sizeof(S<3>) == 1);
+static_assert(int(S<3>::E::a) == 3);
+'''),
+        ('declared-memcmp.cpp', ('gcc',), '''
+extern "C" int memcmp(const void*, const void*, decltype(sizeof(0)));
+static_assert(memcmp("a", "a", 1) == 0);
+'''),
+        ('defined-memchr.cpp', (), '''
+extern "C" const void* memchr(const void* p, int, decltype(sizeof(0))) { return p; }
+static_assert(memchr("abc", 98, 3) != nullptr);
+'''),
     )
     for name, accepted, source in controls:
         (scope / name).write_text(source)
@@ -4307,6 +4343,26 @@ extern "C" int run() { int result = receiver().value(); return result == 7 && ca
             subprocess.run([gxx, '-std=c++26', 'immediate-receiver-caller.cpp', 'immediate-receiver.o',
                             '-o', 'immediate-receiver'], cwd=scope, check=True, capture_output=True, timeout=40)
             subprocess.run([scope / 'immediate-receiver'], cwd=scope, check=True, timeout=20)
+
+
+def skipped_quote_diagnostics(world):
+    scope = world.scope
+    (scope / 'skipped-quote.cpp').write_text(
+        '#if 0\n' + "it's an unmatched quote\n" + '"an open string\n' + '#endif\nint value;\n')
+    (scope / 'active-quote.cpp').write_text(
+        '#if 0\nint skipped;\n#else\n' + "it's an unmatched quote\n" + '#endif\nint value;\n')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            options = [target, '-fcompat=' + mode, '-fsyntax-only']
+            for warning, source in (((), 'skipped-quote.cpp'), (('-w',), 'skipped-quote.cpp'),
+                                    (('-Werror',), 'skipped-quote.cpp'), ((), 'active-quote.cpp')):
+                command = [*options, *warning, source]
+                cold, warm = (world.cxx(command, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                active = source == 'active-quote.cpp'
+                failed = active or mode == 'spec' or (mode == 'gcc' and warning == ('-Werror',))
+                diagnosed = active or mode == 'spec' or (mode == 'gcc' and warning != ('-w',))
+                assert cold == warm and warm[0] == int(failed), (mode, target, warning, source, cold, warm)
+                assert (b'missing terminating' in warm[2]) == diagnosed, (mode, target, warning, source, warm)
 
 
 def general_mode_tests(world, gxx):
@@ -4344,6 +4400,7 @@ def general_mode_tests(world, gxx):
     concrete_transform_signatures(world)
     immediate_template_escalation(world)
     historical_syntax_modes(world, gxx)
+    skipped_quote_diagnostics(world)
     compile_database(world)
     world.same_daemon('compatibility modes', pid)
 

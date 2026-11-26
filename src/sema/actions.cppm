@@ -940,7 +940,12 @@ public:
     // can supply the selected type ([class.member.lookup], [class.access]).
     if (class_prefix || (type_at && (injected || inherited_alias || enum_lookup || before_parameter))) {
       QualType selected = types().canonical(*first->type);
-      if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
+      const bool gcc_alias = compatibility() == ast::Compatibility::gcc && inherited_alias &&
+                             w_->entities.rec(first->declaration).kind == EntityKind::type_alias;
+      if (std::ranges::any_of(hits, [&](const Hit& h) {
+            return !h.type || types().canonical(*h.type) != selected ||
+                   (gcc_alias && h.declaration != first->declaration);
+          })) {
         if (type_at) diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
         if (enum_lookup || class_prefix) return {true, std::nullopt};
       } else if (type_at) {
@@ -2900,15 +2905,11 @@ public:
     // Copies: deciding a member's type can read other class records.
     const std::vector<FieldRec> fx = *mx, fy = *my;
     if (fx.size() != fy.size()) return false;
-    // A struct's common initial sequence ends before a `[[no_unique_address]]` member when
-    // `__has_cpp_attribute(no_unique_address)` is nonzero; ycxx answers 0 for every attribute so
-    // far (#1141) and does not apply the attribute to the layout. A layout attribute the layout
-    // does not apply could also change a member's alignment.
-    const auto overlapping = [](const FieldRec& f) { return f.no_unique_address; };
-    if (std::ranges::any_of(fx, overlapping) || std::ranges::any_of(fy, overlapping) || rx->unapplied_layout ||
-        ry->unapplied_layout || q_->class_layout_uncertain(x) || q_->class_layout_uncertain(y))
+    if (rx->unapplied_layout || ry->unapplied_layout || q_->class_layout_uncertain(x) || q_->class_layout_uncertain(y))
       return std::nullopt;
     if (rx->union_) {
+      const auto overlapping = [](const FieldRec& f) { return f.no_unique_address; };
+      if (std::ranges::any_of(fx, overlapping) || std::ranges::any_of(fy, overlapping)) return std::nullopt;
       // Unions pair their members in any order. Layout compatibility is an equivalence, so any
       // compatible partner will do; an undecided pair leaves the answer open only when no
       // partner is found.
@@ -2928,6 +2929,11 @@ public:
     // Structs: the common initial sequence must be all members of both.
     for (std::size_t i = 0; i < fx.size(); ++i) {
       const FieldRec &f = fx[i], &g = fy[i];
+      if (f.no_unique_address || g.no_unique_address) {
+        // [class.mem.general] ends the common initial sequence at an overlapping member.
+        // GCC continues when both members carry the attribute.
+        if (compatibility() != ast::Compatibility::gcc || f.no_unique_address != g.no_unique_address) return false;
+      }
       if (f.bit_width != g.bit_width || f.wide_bit_width != g.wide_bit_width) return false;
       const auto same = layout_compatible(f.type, g.type);
       if (same != true) return same;
@@ -8956,6 +8962,25 @@ public:
     return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
+  ast::LibraryBuiltin written_library_builtin(EntityId function, const TypeRec& signature) {
+    using enum ast::LibraryBuiltin;
+    if (compatibility() != ast::Compatibility::gcc || function == EntityId::none || signature.variadic) return none;
+    const auto& entity = w_->entities.rec(function);
+    if (entity.kind != EntityKind::function || entity.lang != LangLinkage::c || entity.scope != EntityId::none ||
+        entity.linkage != ast::Linkage::external) return none;
+    const auto* library = string_function_named(ins().names.spelling(entity.name));
+    if (!library || library->constant == none) return none;
+    const auto expected = types().rec(w_->string_function(*library, compatibility()).type);
+    if (expected.params != signature.params ||
+        (expected.inner != signature.inner && (library->constant != memchr ||
+         signature.inner != types().pointer(types().add_cv(builtin(Builtin::void_), Cv::const_)))))
+      return none;
+    // A visible user definition is an ordinary function, even with a recognized declaration.
+    for (const auto& declaration : q_->namespace_members(EntityId::none, entity.name))
+      if (declaration.entity == function && (declaration.flags & decl_flag::definition)) return none;
+    return library->constant;
+  }
+
   Ex builtin_overflow_call(ast::BuiltinOp op, std::span<const Ex> args, u32 begin, u32 end) {
     const Ex invalid{NodeId::none, begin, end};
     if (!builtin_arity(3, args.size(), begin) ||
@@ -13647,7 +13672,8 @@ public:
     auto children = call_args(fr, args, begin, paren_at, begin, defaults, default_origin, default_source);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
-    return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
+    return node(ast::Call{info, function, at(callee, begin), b_->list(*children), written_library_builtin(function, fr)},
+                begin, end, info);
   }
 
   // The unqualified-id of a callee that permits ADL ([basic.lookup.argdep]/1). A qualified or

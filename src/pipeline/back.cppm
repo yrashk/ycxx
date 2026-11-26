@@ -264,6 +264,7 @@ struct TranslationUnit {
   // startup array slot.
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
+  std::optional<ast::Loc> duplicate_c_definition;  // GCC mode defers the error to native emission
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
@@ -284,8 +285,7 @@ struct TranslationUnit {
   std::vector<EntityId> written_constraint_lambdas;
 };
 
-// What failed, at a location in an item when there is one. Every error here is something the α
-// subset does not support yet: valid code that the front end accepted.
+// What failed during native emission, at a location in an item when there is one.
 struct BackError {
   std::optional<ast::Loc> at;
   std::string message;
@@ -2610,6 +2610,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
+  }
+  if (tu.duplicate_c_definition) {
+    errors.push_back({tu.duplicate_c_definition, "repeated definition of a C-linkage function"});
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   if (tu.unsupported_typed_dynamic_cast) {
     errors.push_back({tu.unsupported_typed_dynamic_cast,

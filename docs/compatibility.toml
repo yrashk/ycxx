@@ -1462,3 +1462,94 @@ spec = "Require the default argument to be written in the parameter list of a fu
 gcc = "Same as spec for the tested named and abstract function pointers."
 clang = "Accept the tested default on a named or abstract function pointer in an exception declaration. Still diagnose an invalid default argument expression."
 evidence = ["tests/own/block-try-catch/named-function-pointer-default.reject.cpp", "tests/own/block-try-catch/abstract-function-pointer-default.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 exception-declaration probes"]
+
+[[divergence]]
+id = "equivalent-inherited-type-aliases"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[class.member.lookup], [basic.scope.scope]"
+prior = "Merge inherited type aliases that designate the same type."
+spec = "Merge the two inherited aliases based on the type they designate."
+gcc = "Diagnose ambiguity between separate same-type alias declarations in different bases. Two paths to the same alias declaration remain unambiguous."
+clang = "Same as spec."
+limits = "Covers the tested unqualified lookup in an alias, member body, and static initializer."
+evidence = ["tests/own/classes/inherited-alias-equal-types.accept.cpp", "tests/own/classes/inherited-static-initializer-equal-types.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 inherited alias probes"]
+
+[[divergence]]
+id = "member-function-pointer-type-alias-ref-qualifier"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.mptr], [dcl.fct], #238"
+prior = "Preserve the ref qualifier of a function type supplied by an alias for a member pointer."
+spec = "Preserve the aliased function type, including its ref qualifier."
+gcc = "Omit the lvalue or rvalue ref qualifier when forming the tested member pointer through a function alias. Keep const and noexcept. A ref qualifier written on the member-pointer declarator itself stays part of the type."
+clang = "Same as spec."
+evidence = ["tests/own/member-pointer/qualified-function-alias.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 redeclaration and type identity probes"]
+
+[[divergence]]
+id = "friend-template-contained-namespace-lookup"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.type.elab], [namespace.udir], [namespace.def], [temp.friend]"
+prior = "Find existing templates in contained namespaces nominated by using-directives and by inline namespace declarations."
+spec = "Include the existing template at the innermost lookup level, including via the tested using-directive and inline namespace."
+gcc = "For the tested unqualified friend class-template declaration, require a declaration that binds in the immediate namespace. A template imported by a using-declaration is found."
+clang = "Same as spec."
+evidence = ["tests/own/template-friends/friend-class-template-contained-namespace.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 direct and imported friend lookup probes"]
+
+[[divergence]]
+id = "scoped-member-enum-definition-timing"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[temp.inst], [dcl.enum]"
+prior = "Keep the scoped enumeration's fixed type when instantiating its enclosing class and defer enumerator values."
+spec = "Instantiate the declaration but defer enumerator values until a use requires their definitions."
+gcc = "Instantiate the tested enumerators with the class. Report the out-of-range enumerator when the program only requests the size of the class, including with an unused default member initializer."
+clang = "Same as spec."
+evidence = ["tests/own/templates/dependent-scoped-enum/type-only.accept.cpp", "tests/own/templates/dependent-scoped-enum/unused-default-member-initializer.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 class and enumerator instantiation probes"]
+
+[[divergence]]
+id = "layout-compatible-overlapping-structure-member"
+status = "partial"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[class.mem.general], [meta.rel], #1141"
+prior = "Diagnose the trait as unsupported for distinct structure types with potentially overlapping members."
+spec = "The common initial sequence ends before a field declared with no_unique_address when the attribute is supported. The distinct tested structure types are incompatible."
+gcc = "Continue the sequence if both corresponding fields have the attribute. Treat the tested pair with the attribute on only one field as incompatible."
+clang = "Same as spec."
+limits = "Covers the common initial sequence of the tested standard-layout structures. Union pairing with potentially overlapping variants is outside this case."
+evidence = ["tests/own/builtins/layout-compatible-no-unique-address.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 trait probes for equal and unequal attributes"]
+
+[[divergence]]
+id = "constexpr-written-memory-library-declarations"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [constexpr.functions], docs/EXTENSIONS.md"
+prior = "Constant evaluation recognizes the explicit builtins, and ordinary written library declarations stay non-constexpr."
+spec = "Reject a constant call to the tested ordinary declarations."
+gcc = "Recognize the tested external C declarations of memchr and memcmp for constant evaluation. A user definition visible at the call remains an ordinary function."
+clang = "Same as spec."
+limits = "Covers direct calls to declarations with recognized parameter and result types. The explicit header-required builtin spellings remain common to all modes."
+evidence = ["tests/own/builtins/memchr-written-declaration.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 direct declaration and visible-definition controls"]
+
+[[divergence]]
+id = "declaration-annotation-syntax"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[dcl.attr.grammar], [dcl.attr.annotation]"
+prior = "Support the pinned declaration-annotation syntax in the modeled contexts."
+spec = "Accept the tested declaration annotations with scalar or structural constant operands."
+gcc = "Same as spec for the tested declaration annotations."
+clang = "Reject the tested annotation syntax."
+evidence = ["tests/own/decls/annotations.accept.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 C++26 syntax probes on ELF and Mach-O"]
+
+[[divergence]]
+id = "unmatched-quote-in-skipped-preprocessor-group"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+reference = "[lex.phases], [lex.pptoken], [cpp.cond]"
+prior = "The lexer diagnoses a missing terminating quote even in an excluded conditional group."
+spec = "Diagnose an unmatched single or double quote in skipped source as an error."
+gcc = "Warn about the tested unmatched quote in skipped source. Suppress it with -w and promote it with -Werror."
+clang = "Suppress the diagnostic in the tested skipped source. An unmatched quote on an active source line remains invalid."
+evidence = ["tests/own/pp/cond-skipped-quote.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 skipped and active conditional-group probes"]

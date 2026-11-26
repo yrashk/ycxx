@@ -1249,6 +1249,8 @@ public:
       if (!(forms & form)) return any;
       any |= form;
       if (std_attr && kind(2) == Tk::equal) {
+        if (s_->compatibility() == ast::Compatibility::clang)
+          s_->diag(pos() + 2, Diag::attributes_not_allowed);
         if (annotations) {
           annotation_list(*annotations);
           continue;
@@ -2277,6 +2279,14 @@ public:
           s_->diag(p.at, Diag::member_pointer_type, t);
           d.ok = false;
           return t;
+        }
+        if (!fn && s_->compatibility() == ast::Compatibility::gcc && s_->types().is_function(t)) {
+          // GCC drops ref qualification when the function type is supplied by an alias.
+          auto function = s_->ins().types.get<ast::TFunction>(s_->types().canonical(t));
+          if (function.ref != ast::RefQual::none) {
+            function.ref = ast::RefQual::none;
+            t = s_->ins().intern_type(function);
+          }
         }
         t = s_->types().add_cv(s_->types().member_pointer(*p.owner, t), p.cv);
         continue;
