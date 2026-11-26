@@ -149,8 +149,8 @@ struct Ops {
     if (s->enum_range && constant(m)) {
       if (from.kind != M::Kind::integer) return m.fail(Reason::ill_formed);
       auto [minimum, maximum] = *s->enum_range;
-      bool outside = from.is_signed && ast::is_negative(x) ? x.hi != ~u64{0} || i64(x.lo) >= 0 || i64(x.lo) < minimum
-                                                            : x.hi != 0 || x.lo > maximum;
+      const bool negative = from.is_signed && ast::is_negative(x);
+      const bool outside = negative ? ast::wide::slt(x, minimum) : ast::wide::ult(maximum, x);
       if (outside) return m.fail(Reason::enum_range);
     }
     // To bool it is the boolean conversion ([conv.integral]/1 defers to [conv.bool]).
@@ -204,15 +204,31 @@ struct Ops {
     u64 bound = 0;
     bool single = false;
     if (Flow fl = m.pointer_index(p, imm_type(f, n), base, index, bound, single); fl != Flow::next) return fl;
-    // `index` is in [0, bound], so negating it cannot overflow, while negating `by` could.
-    if ((by > 0 && index > i64(bound) - by) || (by < 0 && by < -index)) return m.fail(Reason::pointer_bounds);
-    i64 at = index + by;
+    using ast::bits_of;
+    const auto at = M::signed_offset(ast::wide::add(bits_of(index), bits_of(by)));
+    if (!at || !std::in_range<i64>(bound)) return m.fail(Reason::pointer_bounds);
+    const i64 limit = i64(bound);
+    const bool displaced = *at < 0 || *at > limit;
+    if (displaced && (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc))
+      return m.fail(Reason::pointer_bounds);
+    // In GCC mode an out-of-bounds address retains its array. Access still requires a
+    // valid element, so store the displacement separately from the path to that array.
+    const i64 anchor = single && displaced ? 0 : std::clamp(*at, i64{0}, limit);
     Value r{VKind::object, false, p.ref, 0};
     if (single) {
       r.bits = base;
-      r.past = at == 1;
+      r.past = anchor == 1;
     } else {
-      r.bits = m.child(base, {ir::Step::elem, u32(at)});
+      r.bits = m.child(base, {ir::Step::elem, u32(anchor)});
+    }
+    if (displaced) {
+      const u64 size = m.storage_extent(imm_type(f, n), m.objects_[p.ref].array_record).bytes;
+      if (size == 0 || !std::in_range<i64>(size)) return m.fail(Reason::pointer_bounds);
+      const auto relative = ast::wide::mul(bits_of(*at - anchor), bits_of(size));
+      const auto delta = M::signed_offset(relative);
+      if (!delta || !M::signed_offset(ast::wide::add(bits_of(m.offset_of(r)), relative)))
+        return m.fail(Reason::pointer_bounds);
+      r.hi = u64(*delta);
     }
     return m.set(f, n, r);
   }
@@ -231,9 +247,9 @@ struct Ops {
     if (Flow fl = m.pointer_index(a, imm_type(f, n), ba, ia, na, sa); fl != Flow::next) return fl;
     if (Flow fl = m.pointer_index(b, imm_type(f, n), bb, ib, nb, sb); fl != Flow::next) return fl;
     if (ba != bb || sa != sb) return m.fail(Reason::pointer_difference);
-    i64 d = ia - ib;
-    if (!M::fits(d, s->width)) return m.fail(Reason::signed_overflow);
-    return m.set(f, n, Value::integer(u64(d)));
+    const auto d = M::signed_offset(ast::wide::sub(ast::bits_of(ia), ast::bits_of(ib)));
+    if (!d || !M::fits(*d, s->width)) return m.fail(Reason::signed_overflow);
+    return m.set(f, n, Value::integer(u64(*d)));
   }
 
   static Flow ptr_cmp(M& m, Frame& f, N n) {
