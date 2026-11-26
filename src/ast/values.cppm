@@ -215,6 +215,9 @@ struct [[=dependent]] VDepFnParam {
 struct [[=dependent]] VDepVariable {
   EntityId templ;
   SeqId<TemplateArg> args;
+  SeqId<TemplateArg> written_args;
+  u8 qualified;
+  u8 global;
 };
 
 // A call to a named immediate function. The arguments are explicit types for a function
@@ -229,6 +232,8 @@ struct [[=dependent]] VDepCall {
 struct [[=dependent]] VDepConcept {
   EntityId concept_;
   SeqId<TemplateArg> args;
+  bool qualified = false;
+  bool global = false;
 };
 
 // A value named through a dependent nested-name-specifier.
@@ -360,9 +365,14 @@ struct VConstraint {
   SeqId<ConstId> operands;
 };
 
+// The written form of requires { typename ...; ... } for constraint linkage.
+struct [[=dependent]] VRequiresTypes {
+  SeqId<TemplateArg> types;
+};
+
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional>;
+                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

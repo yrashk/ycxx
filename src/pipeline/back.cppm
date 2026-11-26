@@ -104,8 +104,10 @@ struct Entity {
   std::vector<ast::TemplateParamSema> template_params{};  // its template's head
   // BOOTSTRAP: std::vector<bool>: GCC 16 writes a module unit exporting one that importers cannot read.
   std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
+  ast::WrittenConstraint template_head_constraint{}, template_trailing_constraint{};
   // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label{};
+  std::optional<ast::Loc> asm_label_at{};
   // A static local ([stmt.dcl]/3), or with `guard` its guard variable: the function it is local
   // to, whose <encoding> its <local-name> begins with, and its number among that function's
   // statics of its name (Itanium C++ ABI §5.1.6, §3.3.3).
@@ -189,6 +191,7 @@ struct ClassShape {
   // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
+  bool gcc_stack_calls = false;  // GCC's System V MEMORY class for an implicit deletion
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   std::vector<std::uint32_t> overlapping_fields{};  // [[no_unique_address]] ([intro.object])
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
@@ -900,7 +903,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.layout_uncertain = it->layout_uncertain;
     l.contains_explicit_alignment = it->explicit_alignment != 0 || !it->field_alignments.empty();
     if (target.triple == ast::x86_64_linux.triple) {
-      l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it, *r);
+      l.sysv_stack_record = it->gcc_stack_calls && !l.layout_uncertain && !l.empty && l.align <= 16;
+      if (!l.sysv_stack_record) l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it, *r);
       l.sysv_empty_record = l.empty && l.size == 1 && l.align == 1 && l.trivial_calls &&
                             !l.copy_abi_unknown && !l.calls_abi_uncertain && !l.layout_uncertain &&
                             !l.contains_explicit_alignment && !it->union_ && it->bases.empty() && it->fields.empty();
@@ -1424,7 +1428,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (f.variadic && l.kind == ir::TypeKind::integer && l.size == 16)  // #1172
       return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
-        (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+        (allow_aggregates && (l.sysv_integer_eightbytes || (l.sysv_stack_record && (result || l.size <= 16))))) return {};
     if (fixed_direct && l.sysv_empty_record) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
@@ -2248,6 +2252,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   const auto* config = unit_config(cx, id);
   const ast::Target& target = config ? *config->target : *universe().target;
   const bool emit_table_type_info = !config || config->rtti_enabled;
+  const auto compatibility = config ? config->compatibility : ast::Compatibility::spec;
   const bool linux = object_target(target) == obj::target::x86_64_linux;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
@@ -2485,7 +2490,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   auto spec_of = [](const Entity& e) {
-    return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
+    return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
+                        e.template_head_constraint, e.template_trailing_constraint};
   };
   const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
     auto found = by_id.find(ir::raw(id));
@@ -2578,7 +2584,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::virtual_table || e.special == Special::type_info) {
-      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names);
+      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility);
       const bool table = e.special == Special::virtual_table;
       if (!encoding) {
         errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
@@ -2590,7 +2596,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
         if (emit_table_type_info && owned->primary_base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -2605,7 +2611,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
           dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
         std::optional<std::string> base;
         if (dynamic->base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -2620,7 +2626,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::template_parameter_object) {
-      auto name = mangled_template_parameter_object(in, e.template_args.front(), names);
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility);
       if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
       else {
         symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
@@ -2634,10 +2640,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                    e.special == Special::destructor ? "D1" :
                                    e.special == Special::base_object_destructor ? "D2" :
                                    e.special == Special::deleting_destructor ? "D0" : std::string_view(e.name);
-    TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
+    const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names, object_names);
+                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility);
     };
     auto name = encode(entry);
     if (!name) {

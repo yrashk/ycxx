@@ -54,14 +54,15 @@ struct Preprocessed {
 
 namespace detail {
 
-// Clang's source-line builtin uses the closing line of a function-like macro invocation.
+// The source builtins observe the opening site in GCC mode and the closing site otherwise.
 // The closing offsets belong to this occurrence's physical file. A replacement can supply
 // the name of another macro whose written argument list closes later in that same file.
-TokLoc source_line_site(std::span<const Expansion> expansions, TokLoc loc) {
+TokLoc source_line_site(std::span<const Expansion> expansions, TokLoc loc, ast::Compatibility compatibility) {
   u32 after_closing = 0;
   while (loc.expansion != 0) {
     const Expansion& e = expansions[loc.expansion];
-    if (e.kind == ExpansionKind::function) after_closing = std::max(after_closing, e.operand_a);
+    if (compatibility != ast::Compatibility::gcc && e.kind == ExpansionKind::function)
+      after_closing = std::max(after_closing, e.operand_a);
     loc = {e.site_file, e.parent, e.site_offset};
   }
   if (after_closing != 0) loc.offset = after_closing - 1;
@@ -178,7 +179,7 @@ public:
         // here, before its physical file is shared in the flat table.
         Flat::LineDelta change{out_->tokens.size(), 0, std::nullopt};
         if (!r.lines.empty()) {
-          const auto at = source_line_site(r.expansions, t.loc).offset;
+          const auto at = source_line_site(r.expansions, t.loc, s_->config.compatibility).offset;
           const auto line = std::ranges::upper_bound(r.lines, at, {}, &FileRegion::Line::at);
           if (line != r.lines.begin()) {
             change.delta = (line - 1)->delta;
@@ -371,7 +372,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     if (!flat.has_line_builtin && !flat.has_location_builtin) return;
     while (next_delta < flat.line_deltas.size() && flat.line_deltas[next_delta].at <= i)
       adjustment = flat.line_deltas[next_delta++];
-    const TokLoc at = detail::source_line_site(flat.expansions, pp[i].loc);
+    const TokLoc at = detail::source_line_site(flat.expansions, pp[i].loc, s.config.compatibility);
     auto [entry, inserted] = physical_lines.try_emplace(at.file);
     if (inserted) {
       const Files::Content* content = s.files.content(flat.files[at.file]);
