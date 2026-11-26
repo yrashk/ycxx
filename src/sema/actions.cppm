@@ -638,10 +638,16 @@ public:
     }
     // One the class's scope hides ([temp.local]/7): what it declares, a type or not.
     if (declared_template_param(name)) {
-      const ClassRec* cr = class_rec(current_class);
-      return class_body_type(current_class, cr && cr->defined ? *cr : ClassRec{}, name, type_at,
-                             ClassBodyLookup::before_template_parameter, elaborated)
-          .type;
+      for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls)) {
+        const ClassRec* cr = class_rec(cls);
+        if ((!cr || !cr->defined) && cls != current_class)
+          if (auto m = q_->enclosing_earlier_member(cls, name, elaborated))
+            return is_type(m->kind) && !(m->flags & decl_flag::template_) ? std::optional(m->type) : std::nullopt;
+        auto hit = class_body_type(cls, cr && cr->defined ? *cr : ClassRec{}, name, type_at,
+                                   ClassBodyLookup::before_template_parameter, elaborated);
+        if (hit.found) return hit.type;
+      }
+      return std::nullopt;
     }
     if (!elaborated && earlier_nested_enumerator(name)) return std::nullopt;
     // In a class template, its name without arguments is the injected-class-name: the current
@@ -663,6 +669,7 @@ public:
           if (hit.found) return hit.type;
         }
         if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
+        if (c.name == name && enclosing_class(current_class) != EntityId::none) return types().class_type(current_class);
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
         const auto prefix_bases = class_prefix_bases(current_class);
@@ -748,14 +755,13 @@ public:
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
-  // The class that class `c` is a member of ([class.nest]), none at namespace scope. A class
-  // template's members are not nested classes of this kind (#306).
+  // The class that class `c` is a member of ([class.nest]), none at namespace scope.
   EntityId enclosing_class(EntityId c) const {
     if (c == EntityId::none) return EntityId::none;
     const EntityRec& r = w_->entities.rec(c);
     if (r.kind != EntityKind::class_ || r.templ != EntityId::none || r.scope == EntityId::none) return EntityId::none;
     const EntityRec& s = w_->entities.rec(r.scope);
-    return s.kind == EntityKind::class_ && s.templ == EntityId::none ? r.scope : EntityId::none;
+    return s.kind == EntityKind::class_ ? r.scope : EntityId::none;
   }
   // Whether class `c` encloses the class whose member is being analysed ([class.nest]).
   bool encloses_current_class(EntityId c) const {
@@ -838,7 +844,7 @@ public:
     auto collect = [&](this auto&& visit, EntityId cls, const ClassRec& cr) -> void {
       const EntityRec& c = w_->entities.rec(cls);
       if (c.kind == EntityKind::class_ && c.name == name &&
-          (c.templ == EntityId::none || (before_parameter && cls != naming))) {
+          (c.templ == EntityId::none || class_prefix || (before_parameter && cls != naming))) {
         hits.push_back({types().class_type(cls), cls, cls, ast::Access::public_, true, path});
         return;
       }
@@ -2646,7 +2652,7 @@ public:
       if (same != true) return same;
       const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
       if (!fa || !ga) return std::nullopt;
-      if (*fa != *ga) return false;
+      if (std::max(*fa, u64(f.explicit_alignment)) != std::max(*ga, u64(g.explicit_alignment))) return false;
     }
     return true;
   }
@@ -2970,6 +2976,8 @@ public:
     }
     if (c == current_class)
       if (auto m = q_->earlier_member(n, /*type_only=*/true); m && !(m->flags & decl_flag::template_)) return m->type;
+    for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls))
+      if (enclosing_class(cls) == c && w_->entities.rec(cls).name == n) return types().class_type(cls);
     if (encloses_current_class(c)) return enclosing_prefix_type(c, n, std::nullopt, /*type_only=*/true).type;
     return std::nullopt;
   }
@@ -2987,8 +2995,11 @@ public:
     // A member type of the current instantiation is found where it is declared ([temp.dep.type]).
     // A type-only context can assume a dependent name denotes a type until instantiation
     // ([temp.res.general]).
-    if (s.type && types().is_class(*s.type) && (!types().is_dependent(*s.type) || types().class_of(*s.type) == current_class))
-      if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
+    if (s.type && types().is_class(*s.type)) {
+      const auto cls = types().class_of(*s.type);
+      if (!types().is_dependent(*s.type) || cls == current_class || encloses_current_class(cls))
+        if (auto t = member_type(cls, n)) return Scope{std::nullopt, *t};
+    }
     if (assume_dependent_type && s.type && types().is_dependent(*s.type))
       return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
@@ -4424,14 +4435,22 @@ public:
     }
     return n;
   }
-  // Whether the class whose scope this is declares `name`, or one of its nondependent bases does,
-  // or names a base so ([class.member.lookup], [class.pre]/2: a base's injected-class-name).
+  // Whether a class scope before the template parameter scope declares `name`, including
+  // each enclosing class's nondependent bases ([temp.local]/7).
   bool class_scope_declares(NameId name) {
-    const ClassRec* cr = class_rec(current_class);
-    const bool defined = cr && cr->defined;
-    if (defined ? direct_member(current_class, *cr, name).has_value() : q_->earlier_member(name).has_value()) return true;
-    std::span<const BaseRec> bases = defined ? std::span<const BaseRec>(cr->bases) : q_->defining_base_records(current_class);
-    return std::ranges::any_of(bases, [&](const BaseRec& b) { return !b.dependent_in_pattern && base_declares(b.cls, name); });
+    for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls)) {
+      const ClassRec* cr = class_rec(cls);
+      if (cr && cr->defined) {
+        if (direct_member(cls, *cr, name)) return true;
+      } else if (cls == current_class ? q_->earlier_member(name).has_value()
+                                     : q_->enclosing_earlier_member(cls, name, /*type_only=*/false).has_value()) {
+        return true;
+      }
+      const auto bases = cr && cr->defined ? std::span<const BaseRec>(cr->bases) : q_->defining_base_records(cls);
+      if (std::ranges::any_of(bases, [&](const BaseRec& b) { return !b.dependent_in_pattern && base_declares(b.cls, name); }))
+        return true;
+    }
+    return false;
   }
   bool base_declares(EntityId c, NameId name) {
     if (w_->entities.rec(c).name == name) return true;
@@ -10009,7 +10028,7 @@ public:
     // establishes no other object layout or virtual emission support.
     const auto& entity = w_->entities.rec(cls);
     if (w_->target.triple != ast::x86_64_linux.triple || entity.linkage != ast::Linkage::external ||
-        record->explicit_alignment || q_->class_layout_uncertain(cls) ||
+        record->has_explicit_alignment() || q_->class_layout_uncertain(cls) ||
         (record->peer_virtual_layout != PeerVirtualLayout::root && !q_->peer_pure_dispatch(cls))) {
       diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
       return fail;
@@ -10741,6 +10760,7 @@ public:
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
+      m->align = std::max(m->align, u64(f.explicit_alignment));
       places.push_back(*m);
     }
     const bool dynamic_root = c.dynamic && !c.dynamic->primary_base;
@@ -12435,7 +12455,7 @@ public:
 
     const auto* record = class_rec(cls);
     if (!record || !record->member_declarations_valid || record->union_ || record->closure ||
-        record->layout_requires_virtual_support || record->explicit_alignment || record->unapplied_layout ||
+        record->layout_requires_virtual_support || record->has_explicit_alignment() || record->unapplied_layout ||
         !record->bases.empty() || record->fields.size() != 1 || record->user_ctors ||
         record->destructor_declaration() != EntityId::none || !record->destructor_usable) return false;
     // [except.throw]: construction from const T& in an unrelated context must also work.

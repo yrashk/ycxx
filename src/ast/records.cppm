@@ -116,6 +116,7 @@ struct DeclSema {
   bool is_final = false;  // written on a class head or virtual member ([class.pre], [class.virtual])
   bool explicit_default_visibility = false;
   GnuVisibility namespace_visibility = GnuVisibility::none;  // lexical namespace-definition occurrence
+  u8 field_alignment = 0;  // a validated alignment stricter than the field type's natural alignment
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
