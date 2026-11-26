@@ -3242,6 +3242,21 @@ public:
     return parameter;
   }
 
+  // The offset past `typename nested-name-specifier [template] name [<args>]` at the current
+  // token ([temp.res.general]), read by tokens alone.
+  u32 past_typename_specifier() {
+    u32 j = 1;
+    if (kind(j) == Tk::coloncolon) ++j;
+    for (;;) {
+      if (kind(j) == Tk::kw_template) ++j;
+      if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) j = past_parentheses(j + 1);
+      else if (kind(j) == Tk::identifier) j = kind(j + 1) == Tk::less ? past_template_args(j + 1) : j + 1;
+      else return j;
+      if (kind(j) != Tk::coloncolon) return j;
+      ++j;
+    }
+  }
+
   // Whether a type-id can start here. As a template argument (`template_argument`), `*trial` is
   // set when the text may also be an expression and only a tentative parse can tell
   // ([dcl.ambig.res]/2, `tentative_type_argument`).
@@ -3249,6 +3264,12 @@ public:
     if (transform_trait_ahead()) return true;
     if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren)
       return function_type_argument_ahead(1, trial);
+    // `typename N::T{1}` and `typename N::T(2)` are functional casts too ([expr.type.conv]/1).
+    if (template_argument && is(Tk::kw_typename)) {
+      const u32 next = past_typename_specifier();
+      if (kind(next) == Tk::l_brace) return false;
+      if (kind(next) == Tk::l_paren) return function_type_argument_ahead(next, trial);
+    }
     if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).

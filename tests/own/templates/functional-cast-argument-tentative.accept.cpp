@@ -1,6 +1,6 @@
 // A template argument is a type-id only if it parses as one ([temp.arg.general]/2,
 // [dcl.ambig.res]/2). `T(…)` with T a simple-type-specifier, a typedef-name or a qualified type
-// name is otherwise a functional cast ([expr.type.conv]) (#1190).
+// name, also after `typename`, is otherwise a functional cast ([expr.type.conv]) (#1190, #810).
 template<bool B> struct BC { static constexpr bool value = B; };
 template<int N> struct IC { static constexpr int value = N; };
 template<class T> struct Ty { using type = T; };
@@ -38,6 +38,18 @@ static_assert(IC<ns::P::J(5)>::value == 5);
 static_assert(Traits<char16_t, u16, u16(0xFFFF)>::eof == 0xFFFF);
 template<class T> struct Y : IC<U(sizeof(T))> {};
 static_assert(Y<int>::value == sizeof(int));
+enum En { e0, e5 = 5 };
+template<En V> constexpr int h() { return V; }
+static_assert(h<En(5)>() == 5);
+
+// After `typename` (#810).
+struct H { using type = int; };
+static_assert(IC<typename ns::I(2)>::value == 2);
+static_assert(IC<typename ns::I{1}>::value == 1);
+static_assert(IC<typename ns::P::J(6)>::value == 6);
+template<class T> struct D : IC<typename T::type(3)> {};
+template<class T> struct DB : IC<typename T::type{4}> {};
+static_assert(D<H>::value == 3 && DB<H>::value == 4);
 
 // Type-ids keep their precedence.
 static_assert(__is_same(Ty<int(int)>::type, int(int)));
@@ -54,3 +66,7 @@ static_assert(__is_same(Ty<ns::I (*)(U)>::type, int (*)(int)));
 static_assert(__is_same(Ty<ns::P::J()>::type, int()));
 template<class T> struct Z : Ty<U(T)> {};
 static_assert(__is_same(Z<S>::type, int(S)));
+static_assert(__is_same(Ty<typename ns::I(int)>::type, int(int)));
+static_assert(__is_same(Ty<typename ns::I (&)[3]>::type, int (&)[3]));
+template<class T> struct TZ : Ty<typename T::type(T)> {};
+static_assert(__is_same(TZ<H>::type, int(H)));

@@ -2281,8 +2281,8 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   specialization work.
 - Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
   as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
-- Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
-  `h<E(5)>()`, which the template-argument parser takes for a type-id (#810).
+- Tests: `tests/own/templates/enum-parameters/`. A functional cast as a template argument,
+  `h<E(5)>()`, is an expression (#810, `tests/own/templates/functional-cast-argument-tentative.accept.cpp`).
 
 ## Pack-index-specifiers (#297)
 
@@ -3669,10 +3669,19 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   decltype-specifier as a mem-initializer-id (#1286) are missing. Namespace-scope function template signatures,
   variable template types and default arguments with an unrepresented operand stay dependent (#1269).
   Tests: `tests/own/templates/decltype-*`, `tests/own/inherit/decltype-base*` (#1243).
-- **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
-  type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
-  are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
-  `R(A...)` with a type parameter `R` is #1186.
+- **Functional casts as template arguments** (`function_type_argument_ahead`,
+  `tentative_type_argument`): `T(…)` is a type-id only if it can be a function type
+  ([temp.arg.general]/2, [dcl.ambig.res]/2). T is a simple-type keyword, a typedef-name, a class
+  or enumeration name, a class template-id, a qualified type name or a `typename`-specifier.
+  The token lookahead settles most shapes: `bool(x) || y`, `int(3) + 1`, `bool(T::value)`, `U(3)`
+  and `typename T::type{4}` are expressions, and `int()` and `void(...)` are types. When the
+  parentheses begin with a ptr-operator, a `(`, attributes or a type name, the argument is parsed
+  tentatively as a type-id. It is one if that parse ends at the argument's end with no new
+  error. Otherwise the parser's position, diagnostics and deferred-check counters are restored and
+  the argument is read as an expression: `bool(&g)`, `int((n))`, `int(E{2})` and `int(auto(3))`
+  are expressions, while `int(&)[3]`, `U(int)` and `int(*(int))` stay types (#1190, #810).
+  `bool(S{})` with a conversion function parses, but conversion functions are #339. `R(A...)` with
+  a type parameter `R` is #1186.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
