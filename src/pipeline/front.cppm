@@ -208,6 +208,8 @@ void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidd
                              const std::map<EntityId, FunctionVisibility>& function_visibility, bool target_is_linux) {
   if (!inline_declarations.empty())
     for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
+  if (!inline_declarations.empty())
+    for (Entity& e : tu.entities) e.inline_function = e.is_function && inline_declarations.contains(e.id);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
@@ -1300,7 +1302,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
     // A constructor, destructor or ordinary class-template member binds locally when its
     // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
-    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+    // So does an implicit or defaulted assignment operator, which any unit can emit.
+    const bool synthesized_assignment = r.kind == sema::EntityKind::function && program.synthesized_assignment(e);
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || synthesized_assignment ||
+         ordinary_class_template_member(r)) &&
         linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     return linkage;
@@ -1353,6 +1358,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     Entity& emitted = tu.entities.back();
     if (fn) {
       const auto* owner = r.scope == EntityId::none ? nullptr : world.entities.find(r.scope);
+      emitted.namespace_static = program.is_namespace(r.scope) &&
+          (d.storage == ast::Storage::static_ ||
+           (r.linkage == ast::Linkage::internal && !parse::Program::unnamed(program.namespace_path(r.scope))));
       if (has_class_argument(r) || (owner && has_class_argument(*owner)))
         emitted.unsupported_class_parameter_signature = !default_visible_type(d.type) ||
             !std::ranges::all_of(r.args, default_visible_argument) ||
@@ -1378,13 +1386,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           std::ranges::any_of(type.params, [&](QualType param) { return names_tu_local(program, param); });
     }
     if (r.templ != EntityId::none) {
-      tu.entities.back().template_type = world.entities.rec(r.templ).type;
+      const auto& pattern = world.entities.rec(r.templ);
+      emitted.template_type = pattern.type;
+      emitted.generic_invoker_head = pattern.generic_invoker_head;
+      const bool invoker = ins.seqs.size(pattern.generic_invoker_head) != 0;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
-      if (sema::Sema::closure_member(world, r.templ))
-        tu.entities.back().template_type = world.entities.rec(world.entities.rec(r.templ).scope).type;
+      if (!invoker && sema::Sema::closure_member(world, r.templ))
+        emitted.template_type = world.entities.rec(pattern.scope).type;
       tu.entities.back().template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
-      if (world.entities.rec(r.templ).kind == sema::EntityKind::function_template)
+      if (!invoker && pattern.kind == sema::EntityKind::function_template)
         if (auto td = program.declaration(r.templ, program.end())) {
           std::vector<ast::TemplateParamSema> ps = ins.seqs.elements(td->template_params);
           sema::Templates t = program.templates();
@@ -1425,7 +1436,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
-        if (in_declaration) declaration_closure_member(tu.functions.back());
+        if (in_declaration || (c.flags & sema::closure_flag::generic_invoker))
+          declaration_closure_member(tu.functions.back());
       }
     }
   };
@@ -1580,24 +1592,37 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
       classes_with_unapplied_rtti_abi.insert(d.entity);
   };
+  auto record_class_template_spellings = [&](ast::SeqId<ast::TemplateTypeSpelling> spellings, std::uint32_t k) {
+    for (const auto& spelling : ins.seqs.elements(spellings)) {
+      const auto located = std::pair{ast::Loc{program.id(k), spelling.at}, spelling.arguments};
+      auto [it, added] = tu.class_template_spellings.try_emplace(spelling.specialization, located);
+      if (!added && it->second.first.item == located.first.item && located.first.offset < it->second.first.offset)
+        it->second = located;
+    }
+  };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   (program.in_global_scope(it.parent) || program.named_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
+    if (const auto* body = program.analysed_body(k)) record_class_template_spellings(body->template_type_spellings, k);
     // A class template member is not emitted from its pattern. A friend class declaration
     // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
     if (member && !program.enclosing_heads(k).empty()) {
-      if (const auto* pattern = target_is_linux ? program.analysed_item(k) : nullptr)
-        for (const auto& declaration : ins.seqs.elements(pattern->decls))
-          if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      if (const auto* pattern = target_is_linux || program.compatibility() == ast::Compatibility::clang ? program.analysed_item(k) : nullptr) {
+        record_class_template_spellings(pattern->template_type_spellings, k);
+        if (target_is_linux)
+          for (const auto& declaration : ins.seqs.elements(pattern->decls))
+            if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      }
       continue;
     }
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
+    record_class_template_spellings(is.template_type_spellings, k);
     if (!ast::is_none(is.asm_hidden_symbol))
       tu.asm_hidden_symbols.push_back({std::string(ins.names.spelling(is.asm_hidden_symbol)),
                                        {program.id(k), is.asm_directive_at}});
@@ -1909,11 +1934,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
-                                          s.kind == default_constructor ||
-                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
-                                         !internal_class(cls);
-    return dynamic_member(tu.functions.size() - 1);
+    // Implicit and defaulted special members are inline ([class.copy.ctor], [dcl.fct.def.default]).
+    else tu.functions.back().coalesced = !internal_class(cls) && !names_tu_local(program, cls, /*include_value_types=*/true);
+    const std::size_t function = tu.functions.size() - 1;
+    // The lambdas of default member initializers that a constructor runs.
+    closures_of(tu.functions.back().body.closures, program.id(s.item), 0);
+    return dynamic_member(function);
   };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
@@ -2183,14 +2209,19 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
+    for (const auto& [specialization, spelling] : p.tu.class_template_spellings) {
+      auto [it, added] = tu.class_template_spellings.try_emplace(specialization, spelling);
+      if (!added && label_order(spelling.first) < label_order(it->second.first)) it->second = spelling;
+    }
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));
-      } else if (!e.asm_label.empty()) {
+      } else if (e.namespace_static || !e.asm_label.empty()) {
         // A group may read another declaration out of order. Compare written positions.
         auto& kept = *std::ranges::find(tu.entities, e.id, &Entity::id);
-        if (kept.asm_label.empty() ||
-            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at))) {
+        kept.namespace_static |= e.namespace_static;
+        if (!e.asm_label.empty() && (kept.asm_label.empty() ||
+            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at)))) {
           kept.asm_label = std::move(e.asm_label);
           kept.asm_label_at = e.asm_label_at;
         }

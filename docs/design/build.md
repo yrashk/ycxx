@@ -233,15 +233,41 @@ external actions run on the host and share receipts when their declared inputs
 match. An external action that supplies a linker input must produce an archive
 for the selected target.
 
-An action can opt into that selection by placing `target_triple()` in its
-`args` (#1347). The planner supplies one canonical argv word and the tool
-executes on the host. The default request supplies the host triple. The
-resolved word enters the action key, so requests with the same resolved argv
-and inputs can reuse its receipt. Generated planning inputs and rule witnesses
-resolve the argument with the same target. Typed witness values have a
-separate identity per triple. Read-only inspection shows the argument and its
-manifest location. Value traces show the resolved argv position and origin.
-`host_action` package recipes build the rule package for the host.
+The standard rule package's `cpp.host_executable` rule exposes one named
+`executable` artifact (#1559). Its resident native build uses disk sources,
+ordinary includes, and the canonical host target. The selected app target
+has its own compilation request. A generator stages the linked bytes and
+executable mode in an ordinary input, which can also be used in
+`tool = input("name")`. The build trace includes the host compilation and
+link. The action receipt reuses an equal staged image.
+
+The coordinator verifies the engine revision before launching an action
+that depends on a host build and again before admitting its receipt. Watch
+observes the source and include reads through the same file table as native
+compilation. Host executables are available to ordinary generator recipes
+and staged witness tools, including generator chains that use a host
+executable upstream. Host executable support for rule planning inputs
+remains in #1259.
+[Native host tool example](../../examples/project-build/native-host-tool/README.md)
+
+Project generators and rule witnesses accept `target_triple()` (#1347)
+and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
+argv word. `target_triple()` resolves to the selected compiler target and
+defaults to the host. `host_triple()` resolves to the host across all target
+selections. The resolved words enter the action key, so identical argv and
+inputs can reuse a receipt across target selections and equivalent literals.
+Typed witness values have a separate identity per target triple. Read-only
+inspection shows each argument and its manifest location. Value traces show
+the resolved argv position and selector. [Target-aware example](../../examples/project-build/target-aware-action/README.md)
+
+The same selectors can be used as project generator and witness
+`environment` values (#1540). The tool receives the resolved strings.
+Receipt identity includes those strings, so equal literal values can
+reuse a receipt. Plan inspection shows the resolved environment entry
+and the selector that supplied it. [Environment walkthrough](../../examples/project-build/target-aware-action/README.md#pass-the-triples-in-the-action-environment)
+
+`host_action` package recipes build the rule package for the host and
+accept string values in `environment`.
 
 Named-module discovery reads the preprocessor's marked module and import
 directives before the native front end runs (#1349). It uses the registered
@@ -706,7 +732,8 @@ An input has a single logical name and cannot share a name with an ordinary
 the selected receipt's bytes. The artifact is available to planning before
 the rule emits its declarations. The same generator and receipt serve any
 ordinary artifact consumers. The planner rejects cycles across planning,
-artifact and value edges.
+artifact and value edges. Planning input producer chains must be independent
+of host executable artifacts (#1259).
 
 The worker's request depends on the named input bytes. When a generator
 runs and produces equal bytes, the existing worker result stays reusable.
@@ -860,9 +887,46 @@ and native compilation. Build the example with `ycxx build app` and inspect
 the artifact and value links with `ycxx show app --format=html`.
 [Runnable example](../../examples/project-build/staged-witness/README.md)
 
+A witness can bind `tool = input("name")` directly to the `executable`
+artifact of a `cpp.host_executable` (#1566). The resident host query captures
+its linked image and the paths and content fingerprints of its source
+and include reads in one revision. The observations include missing
+include candidates so a newly preferred header can invalidate them.
+Read-only inspection checks the saved paths and fingerprints. Watch
+retains the lookups from a failed compile so creating a missing header
+can wake the build.
+
+The witness receipt uses the staged executable bytes and mode. Edits
+that preserve the image refresh the saved file observations and reuse
+the receipt. The coordinator checks the image again if its inputs change
+while the witness runs. [Native host witness example](../../examples/project-build/native-host-witness/README.md)
+
 The same staged analyzer can call a helper at an absolute host path. Declare
 the path in `tool_inputs` to track helper changes as witness inputs. Equal
 classified scores still reuse the app. [Helper walkthrough](../../examples/project-build/staged-witness/README.md#track-a-helper-executable)
+
+### Witnesses with host producers (#1571)
+
+A staged witness can select an ordinary generator output whose producer
+chain consumes native host executables. The example runs the host
+`scanner` in `analyzer_source` to write an executable script. The
+`analyzer` action copies that script and preserves its mode. The emitted
+`observed` witness selects it through `tool = input("analyzer")` and
+`inputs = { analyzer = artifact("analyzer", "executable") }`.
+The `config` rule consumes the classified score with
+`facts = { score = value("observed", "score") }`.
+
+The coordinator collects the linked images and source and include
+observations of all reachable host tools in one current engine revision
+before staging the producers. It revalidates the recipe and staged inputs
+when files change during generation or classification. Generator and
+witness action keys use the concrete staged bytes and executable mode.
+Equal selected outputs can therefore reuse the witness receipt, which
+stores the exit status, stdout, and stderr. The classifier publishes a
+separate typed value. Equal values preserve reuse for downstream consumers
+such as the header generator. Read-only inspection and watch reobserve
+the reachable host tool inputs.
+[Host producer witness example](../../examples/project-build/host-producer-witness/README.md)
 
 ### Structured shader reflection
 

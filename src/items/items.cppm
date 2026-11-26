@@ -135,6 +135,10 @@ struct Item {
   std::vector<DeclName> names;
   std::vector<u32> members;  // nested items, by index
   u32 parent = none;
+  // A local class ([class.local]): the item whose function body or declaration's initializer
+  // holds its class-specifier, which is also its parent. Its tokens stay inside that item's, and
+  // the declarators after its `}` belong to that item (docs/design/local-classes.md).
+  u32 local_owner = none;
   std::string scope;  // the syntactic scope path: enclosing namespaces and classes, `::`-joined
   u32 unnamed_type_ordinal = none;  // the class scope's unnamed types in declaration order (Itanium §5.1.5.5)
   u32 ordinal = 0;    // earlier siblings with the same scope and declaration-part tokens
@@ -282,6 +286,43 @@ private:
 
   u32 item(u32 parent, const std::string& scope, u32& unnamed_types);
   void general(u32 k, u32& unnamed_types);
+  void local_classes(u32 k, u32 from, u32 to);
+  // The `{` of a class-specifier whose class-key is at `key`, before `to`, or `none`: attributes,
+  // an unqualified name or none, `final`, then the braces or a base-clause ([class.pre]). An
+  // elaborated-type-specifier (`struct S s{1};`, `struct S* p;`) is none.
+  u32 local_class_open(u32 key, u32 to) const {
+    u32 n = key + 1;
+    auto attributes = [&] {
+      for (;;) {
+        if (kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) n = match(n);
+        else if ((kind(n) == Tk::kw_alignas || is_name(n, "__attribute__") || is_name(n, "__declspec")) &&
+                 kind(n + 1) == Tk::l_paren) n = match(n + 1);
+        else return;
+      }
+    };
+    attributes();
+    if (kind(n) == Tk::identifier && !(is_name(n, "final") && (kind(n + 1) == Tk::l_brace || kind(n + 1) == Tk::colon))) {
+      if (kind(n + 1) == Tk::coloncolon || kind(n + 1) == Tk::less) return none;
+      ++n;
+    }
+    if (is_name(n, "final")) ++n;
+    if (n >= to) return none;
+    if (kind(n) == Tk::l_brace) return n;
+    if (kind(n) != Tk::colon) return none;
+    // A base-clause, up to the class's `{` ([class.derived.general]).
+    for (++n; n < to; ++n) {
+      Tk t = kind(n);
+      if (t == Tk::l_brace) return n;
+      if (t == Tk::semi || t == Tk::r_brace || t == Tk::r_paren || t == Tk::r_square || t == Tk::eof) return none;
+      if (t == Tk::l_paren || t == Tk::l_square) n = match(n) - 1;
+      else if (t == Tk::less) {
+        u32 e = match_angle(n, true);
+        if (e == none) return none;
+        n = e - 1;
+      }
+    }
+    return none;
+  }
   u32 ctor_initializer(u32 j);
   u32 past_gnu_attributes(u32 n) const {
     while (is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren) n = match(n + 1);
@@ -419,6 +460,7 @@ u32 Splitter::item(u32 parent, const std::string& scope, u32& unnamed_types) {
     at(k).kind = ItemKind::consteval_block;
     at(k).body_begin = j + 1;
     at(k).body_end = at(k).end = i_ = match(j + 1);
+    local_classes(k, at(k).body_begin, at(k).body_end);
     return k;
   }
   if ((kind(j) == Tk::kw_public || kind(j) == Tk::kw_protected || kind(j) == Tk::kw_private) &&
@@ -438,7 +480,46 @@ u32 Splitter::item(u32 parent, const std::string& scope, u32& unnamed_types) {
   }
   i_ = j;
   general(k, unnamed_types);
+  if (at(k).kind == ItemKind::function) {
+    local_classes(k, at(k).body_begin, at(k).body_end);
+  } else if (at(k).kind == ItemKind::declaration) {
+    local_classes(k, at(k).begin, at(k).end);  // in a lambda of an initializer or default argument
+  }
   return k;
+}
+
+// The class-specifiers in tokens [from, to) of item `k`, in blocks ([class.local]): items of their
+// own, `k`'s members. A class's own members are split by `nested`, so a class in one of its member
+// functions is that function's.
+void Splitter::local_classes(u32 k, u32 from, u32 to) {
+  const u32 saved = i_;
+  for (u32 j = from; j < to; ++j) {
+    if (!is_class_key(kind(j))) continue;
+    // `enum class E`, a trailing return type `-> struct S {…}`, `new struct S{…}`: no class-head.
+    u32 before = j;  // past cv-qualifiers: `-> const struct S {`
+    while (before > from && (kind(before - 1) == Tk::kw_const || kind(before - 1) == Tk::kw_volatile)) --before;
+    if (j > from && (kind(j - 1) == Tk::kw_enum || (before > from && (kind(before - 1) == Tk::arrow || kind(before - 1) == Tk::kw_new))))
+      continue;
+    const u32 open = local_class_open(j, to);
+    if (open == none) continue;
+    // An anonymous union or struct in a block declares its members in the block
+    // ([class.union.anon]): not a local class of its own (#117).
+    const u32 name = class_name_token(j, open);
+    if (name == 0 && kind(match(open)) == Tk::semi) {
+      j = match(open) - 1;
+      continue;
+    }
+    const std::string scope = at(k).scope + (at(k).scope.empty() ? "" : "::") + "(local)";
+    const u32 c = add(k, scope);
+    at(c).kind = ItemKind::class_def;
+    at(c).begin = j;
+    at(c).local_owner = k;
+    const std::string inner = scope + "::" + (name != 0 ? class_scope(name, open) : std::string("(unnamed)"));
+    at(c).end = nested(c, open, inner);
+    at(k).members.push_back(c);
+    j = at(c).end - 1;
+  }
+  i_ = saved;
 }
 
 u32 Splitter::nested(u32 k, u32 open, const std::string& scope) {
@@ -525,6 +606,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
                               [this](u32 n) { return is_value_trait(r_, n); });
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
+  bool trailing_requires = false;  // the declarator's trailing requires-clause began
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
   bool base_clause = false;  // a `:` after the class-key, before any parameter list
   bool typedef_ = false;
@@ -604,11 +686,18 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       ++j;
       continue;
-    case Tk::kw_requires:
+    case Tk::kw_requires: {
+      // After a parameter list and before a trailing requires-clause, a `&&` ends a ref-qualifier
+      // (`f() && requires C<T>`) or a trailing return type: this `requires` begins the
+      // requires-clause ([dcl.decl.general]), whose `(…)` and the body that follows are no
+      // requires-expression's.
+      const bool declarator_clause = params && !initializer && !trailing_requires;
+      if (declarator_clause) trailing_requires = true;
       // A requires-expression, after an operator or another `requires`: its parameter list and
       // its requirement braces are no declarator and no body.
-      if (prev == Tk::kw_requires || prev == Tk::ampamp || prev == Tk::pipepipe || prev == Tk::exclaim ||
-          prev == Tk::l_paren || prev == Tk::equal || prev == Tk::comma) {
+      if (!(declarator_clause && prev == Tk::ampamp) &&
+          (prev == Tk::kw_requires || prev == Tk::ampamp || prev == Tk::pipepipe || prev == Tk::exclaim ||
+           prev == Tk::l_paren || prev == Tk::equal || prev == Tk::comma)) {
         ++j;
         if (kind(j) == Tk::l_paren) j = match(j);
         if (kind(j) == Tk::l_brace) j = match(j);
@@ -616,6 +705,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       ++j;
       continue;
+    }
     case Tk::kw_class:
     case Tk::kw_struct:
     case Tk::kw_union:
@@ -678,6 +768,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         class_key = none;
         base_clause = false;
         params = false;
+        trailing_requires = false;
         continue;
       }
       if (params) {
@@ -915,10 +1006,14 @@ private:
           last = j;
           spelled = name(j);
         } else if (kind(j) == Tk::kw_operator) {
+          last = j;
           if (auto id = literal_operator_id(r_, j, limit)) {
-            last = j;
             spelled = lex::literal_operator_name(id->suffix);
             j = id->end - 1;
+          } else {
+            // An operator-function-id or conversion-function-id ([class.conv.fct]).
+            spelled = "operator";
+            j = operator_spelling(j + 1, limit, spelled, /*comma_ends=*/true) - 1;
           }
         } else if (kind(j) == Tk::less) {
           j = match_angle(j, limit) - 1;
@@ -1018,6 +1113,26 @@ private:
     }
   }
 
+  // The rest of an operator-function-id or conversion-function-id after `operator`, from `n`,
+  // appended to `spelled` as declarators spell it; the first token after it: a `(`, `to`, or
+  // with `comma_ends` a `,` past its first token (a using-declarator's end).
+  u32 operator_spelling(u32 n, u32 to, std::string& spelled, bool comma_ends) {
+    const u32 first = n;
+    if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
+        (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
+      spelled += kind(n) == Tk::l_paren ? "()" : "[]";
+      n += 2;
+    }
+    for (; n < to && kind(n) != Tk::l_paren && !(comma_ends && n > first && kind(n) == Tk::comma); ++n) {
+      Tk o = kind(n);
+      bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
+      if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';
+      if (word && spelled == "operator" && o != Tk::string_lit) spelled += ' ';
+      spelled += r_.spelling(r_.tokens[n]);
+    }
+    return n;
+  }
+
   void declarator(u32 k, u32 from, u32 to, Flags f, bool first) {
     u32 cand = none;
     u32 cand_end = none;
@@ -1083,20 +1198,7 @@ private:
           n = cand_end = id->end;
           continue;
         }
-        ++n;
-        if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
-            (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
-          spelled += kind(n) == Tk::l_paren ? "()" : "[]";
-          n += 2;
-        }
-        while (n < to && kind(n) != Tk::l_paren) {
-          Tk o = kind(n);
-          bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
-          if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';
-          if (word && spelled == "operator" && o != Tk::string_lit) spelled += ' ';
-          spelled += r_.spelling(r_.tokens[n]);
-          ++n;
-        }
+        n = operator_spelling(n + 1, to, spelled, /*comma_ends=*/false);
         cand_end = n;
       } else if (t == Tk::l_paren) {
         // A ptr-operator after `(` starts a grouped declarator, including `T (C::*p)(…)`.
@@ -1213,12 +1315,15 @@ Items split(const pp::Region& r, Fp128 file) {
   Splitter(r, out).top();
   Names names(r, out);
   for (u32 k : out.top) names.run(k);
-  // Ids: siblings in order, so an ordinal counts the earlier ones with the same hash.
-  auto ids = [&](this auto& self, const std::vector<u32>& list) -> void {
+  // Ids: siblings in order, so an ordinal counts the earlier ones with the same hash. The items
+  // inside a function body or declaration (local classes, their members) also hash that
+  // owner's id, since their scope paths name no function (docs/design/local-classes.md).
+  auto ids = [&](this auto& self, const std::vector<u32>& list, Fp128 owner) -> void {
     std::map<std::pair<std::uint64_t, std::uint64_t>, u32> seen;
     for (u32 k : list) {
       Hasher h;
       h.fp(item_seed).fp(file);
+      if (owner != Fp128{}) h.fp(owner);
       h.uint(static_cast<std::uint64_t>(out.items[k].scope.size())).bytes(out.items[k].scope);
       if (out.items[k].unnamed_type_ordinal != none) h.uint(out.items[k].unnamed_type_ordinal);
       decl_tokens(out, k, [&](u32 j) { hash_token(h, r, r.tokens[j]); });
@@ -1232,10 +1337,12 @@ Items split(const pp::Region& r, Fp128 file) {
         for (u32 j = it.body_begin; j < it.body_end; ++j) hash_token(b, r, r.tokens[j]);
         it.body = b.finish();
       }
-      self(it.members);
+      const bool owns_locals = it.kind == ItemKind::function || it.kind == ItemKind::declaration ||
+                               it.kind == ItemKind::consteval_block || it.local_owner != none || owner != Fp128{};
+      self(it.members, owns_locals ? it.id : Fp128{});
     }
   };
-  ids(out.top);
+  ids(out.top, Fp128{});
   return out;
 }
 

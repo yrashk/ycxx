@@ -123,7 +123,13 @@ struct Ops {
     const Value arg = m.operand(f, n, 0);
     if (arg.kind != VKind::integer) return m.fail(Reason::ill_formed);
     const ast::Bits128 bits{arg.bits, arg.hi};
-    if (ast::wide::is_zero(bits)) return m.fail(Reason::ctz_zero);
+    if (ast::wide::is_zero(bits)) {
+      if (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc || !has(f, n, ir::Flag::ctz_gcc_zero))
+        return m.fail(Reason::ctz_zero);
+      const M::Shape* type;
+      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), type); fl != Flow::next) return fl;
+      return m.set(f, n, Value::integer(type->width));
+    }
     return m.set(f, n, Value::integer(ast::wide::countr_zero(bits)));
   }
 
@@ -711,7 +717,11 @@ struct Ops {
     }
     return m.jump(f, n, 0);
   }
-  static Flow consteval_br(M& m, Frame& f, N n) { return m.jump(f, n, constant(m) ? 0 : 1); }
+  static Flow consteval_br(M& m, Frame& f, N n) {
+    // `if consteval` lets the program see that it is constant-evaluated ([stmt.if]/5).
+    if (constant(m) && has(f, n, ir::Flag::observes_context)) m.observed_constant_context_ = true;
+    return m.jump(f, n, constant(m) ? 0 : 1);
+  }
 
   // Returns to the caller, whose call node receives the state, then the values.
   static Flow ret(M& m, Frame& f, N n) {
