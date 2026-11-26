@@ -614,8 +614,7 @@ private:
         // not make a class variable potentially constant ([expr.const]).
         Types& types = e->s_->types();
         const QualType type = types.canonical(value->type);
-        QualType leaf = type;
-        while (types.is_array(leaf)) leaf = types.rec(leaf).inner;
+        const QualType leaf = types.innermost_array_element(type);
         if (Types::is_const(leaf) && e->s_->world().entities.rec(v).linkage != ast::Linkage::none &&
             (leaf == type || e->s_->is_aggregate(leaf)))
           value->record = e->constant_record_layout(leaf);
