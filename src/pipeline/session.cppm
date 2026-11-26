@@ -54,6 +54,7 @@ struct BuildKey {
   ProgramId program{};  // with `link`
   bool want_dependencies = false;
   bool check_policies = false;
+  OptimizationMode optimization = OptimizationMode::none;
   bool operator==(const BuildKey&) const = default;
 };
 // A request, numbered by the registry (`Session::request`): a key holds no vector.
@@ -491,7 +492,8 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   if (k.until == Until::syntax) co_return out;
   std::vector<Tu::Key> compiled;
   for (std::size_t i = 0; i < k.units.size(); ++i)
-    if (out.units[i].readable && !out.units[i].front_failed) compiled.push_back({k.units[i], k.check_policies});
+    if (out.units[i].readable && !out.units[i].front_failed)
+      compiled.push_back({k.units[i], k.check_policies, k.optimization});
   {
     const auto tus = co_await cx.par_map<Tu>(compiled);
     std::size_t j = 0;

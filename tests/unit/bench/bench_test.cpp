@@ -102,6 +102,59 @@ void sampling() {
 }
 
 
+void memory_telemetry() {
+  using namespace std::chrono_literals;
+  constexpr std::size_t bytes = 16u * 1024 * 1024;
+  Configuration config;
+  config.warmup_time = 0ns;
+  config.measurement_time = 1ns;
+  config.minimum_sample_time = 1ns;
+  config.samples = 1;
+  config.maximum_iterations = 1;
+  config.process_telemetry = true;
+
+  std::unique_ptr<unsigned char[]> allocation;
+  auto result = measure([&] {
+    allocation.reset(new unsigned char[bytes]);
+    volatile unsigned char* visible = allocation.get();
+    for (std::size_t i = 0; i < bytes; i += 4096) visible[i] = 1;
+    return allocation.get();
+  }, config);
+  check(result.samples.size() == 1 && result.samples.front().process.has_value(),
+    "one process-telemetry sample retained");
+  if (result.samples.empty() || !result.samples.front().process) return;
+
+  const auto& process = *result.samples.front().process;
+  check(process.rss_source != RssSource::unspecified && process.rss_before_bytes && process.rss_after_bytes
+    && process.peak_rss_bytes, "native snapshot supplies current RSS, high-water and provenance");
+  if (process.rss_before_bytes && process.rss_after_bytes && process.peak_rss_bytes) {
+    check(*process.rss_after_bytes >= *process.rss_before_bytes + bytes / 2,
+      "boundary RSS observes touched pages retained by the workload");
+    check(*process.peak_rss_bytes >= *process.rss_after_bytes,
+      "native lifetime high-water covers the current RSS in the same snapshot");
+  }
+  std::ostringstream machine;
+  write_ndjson(machine, "touched pages", result);
+  check(machine.str().contains("\"peak_rss_scope\":\"process_lifetime\"")
+    && (machine.str().contains("\"rss_source\":\"linux_proc_status\"")
+      || machine.str().contains("\"rss_source\":\"mach_task_basic_info\"")),
+    "NDJSON discloses which high-water counter was measured");
+
+  // A resource counter can be available when the resident-memory probe fails.
+  auto& missing = *result.samples.front().process;
+  missing.rss_source = RssSource::unspecified;
+  missing.peak_rss_bytes.reset();
+  missing.rss_before_bytes.reset();
+  missing.rss_after_bytes.reset();
+  missing.rusage_max_rss_bytes = bytes;
+  std::ostringstream fallback;
+  write_ndjson(fallback, "missing RSS snapshot", result);
+  check(fallback.str().contains("\"peak_rss_bytes\":null")
+    && fallback.str().contains("\"peak_rss_scope\":null")
+    && fallback.str().contains("\"rusage_max_rss_bytes\":16777216"),
+    "an available resource counter does not fill an unavailable native high-water snapshot");
+}
+
 struct DescribedCase {
   int calls = 0;
   mutable int metadata_calls = 0;
@@ -166,6 +219,7 @@ void descriptions() {
 int main() {
   statistics();
   sampling();
+  memory_telemetry();
   descriptions();
   return ycxx::unit::result("bench");
 }

@@ -35,6 +35,10 @@ What is true of the code today. Work in progress and its owners are tracked in
   offline solver's integer range. Optional CTest runs exported models through Chuffed.
   The standalone solver build pins HiGHS, CaDiCaL, and Chuffed by revision and archive
   hash. See [optimizer experiments](docs/BUILDING.md#optimizer-experiments) and [#66](https://github.com/yrashk/ycxx/issues/66).
+- Experimental x86-64 Linux optimization rewrites unsigned division and remainder by
+  powers of two. The solver mode also selects compatible quotient/remainder pairs using
+  an exact prefix model with emitted byte costs. The query engine traces modeling, solving,
+  validation and fallback. [Unsigned division experiment](docs/design/optimization.md#93-unsigned-division-on-x86-64).
 - `ycxx.bench` in `packages/ycxx-bench/` provides calibrated, warmed sampling and balanced
   comparisons, with typed callable properties and metadata. It reports clock and
   host context, retained samples, and practical comparison verdicts. The optimizer
@@ -3349,6 +3353,13 @@ includes the resolved plan and its definition.
 Use the same `--target` option to read the chosen variant and its target
 provenance. The trace carries the compiler target for the request.
 
+Schema-1 JSON plans include a typed `dependency_graph` of resolved library
+and named artifact uses (#1453). Each edge gives the consumer, producer,
+planner field, and manifest location. Artifact edges name the output, and
+named input edges also give the consumer binding. Unresolved rules can yield
+an incomplete graph with the edges resolved so far. The HTML report shows
+these records under **Dependencies**, with links into the manifest.
+
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
 with their declared rule kinds and source locations. JSON includes the same
@@ -4160,7 +4171,8 @@ static argument tracked in #1301 and #209.
   constrained `decltype(auto)`, and abbreviated function templates remain open.
 - **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
   its initializer once and binds the names to elements or whole rows of the hidden array.
-  Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).
+  Value bindings copy scalar elements in order. Spec mode takes cv from the declaration
+  (CWG 2506). GCC and Clang modes also retain the initializer's cv-qualification.
   Reference bindings deduce and bind to the initializer with ordinary reference rules.
   `decltype(x)` gives the element type, and `decltype((x))` gives its lvalue reference.
 - **Class-member structured bindings** ([dcl.struct.bind], #285): a block-scope declaration

@@ -43,6 +43,11 @@ ycxx show app --format=html > plan.html
 ```
 
 The trace shows requests and reuse. Open `plan.html` to read the resolved plan
-alongside its build definition. Use `ycxx build app --watch` to rerun on edits.
+alongside its build definition. In the generated archive example, follow
+`app` through `score` and `bonus` to the `bonus_archive` output in
+**Dependencies**. Its location link opens the archive reference in the
+displayed manifest. [Generated archive walkthrough](generated-archive/README.md)
+
+Use `ycxx build app --watch` to rerun on edits.
 
 Read the [build design](../../docs/design/build.md) for the rule and artifact model.

@@ -1,4 +1,4 @@
-"""Inspect source, resolved provenance, semantic build diffs, and workspace targets (#1256, #1392, #1441)."""
+"""Inspect source, resolved provenance, build diffs, and workspace targets (#1256, #1392, #1441, #1453)."""
 
 import html
 import json
@@ -15,7 +15,10 @@ from runtime_dir import runtime_root
 MARKUP = '<script>alert("definition")</script> & report'
 UNSAFE_SOURCE = 'src/literal <b>&".cc'
 UNSAFE_TARGET = 'group/<script data-catalog-probe="1">&\tleaf</script>'
-INSPECTION_TARGETS = [('app', 'cpp.executable'), ('core', 'cpp.library'), ('wire', 'generate')]
+CORE = 'core <b data-dependency-probe="1">&'
+INSPECTION_TARGETS = [
+    ('app', 'cpp.executable'), (CORE, 'cpp.library'), ('wire', 'generate'), ('wire_schema', 'generate'),
+]
 
 
 def prepare(scope):
@@ -36,20 +39,26 @@ printf '\n' > "$4"
 
     # Keep the CRLF on the original comment and omit the final newline.
     return f'''# {MARKUP}\r
+generate "wire_schema" {{
+    tool = "/bin/cp"
+    args = [input("file"), output("schema")]
+    inputs = {{ file = "schema.txt" }}
+    outputs = {{ schema = "schema.txt" }}
+}}
 generate "wire" {{
     tool = {json.dumps(str(generator))}
     args = [{json.dumps(str(scope / 'generator-ran'))}, input("schema"), output("source"), output("header")]
-    inputs = {{ schema = "schema.txt" }}
+    inputs = {{ schema = artifact("wire_schema", "schema") }}
     outputs = {{ source = "wire.cc" header = "wire.h" }}
 }}
-cpp.library "core" {{
+cpp.library {json.dumps(CORE)} {{
     sources = ["src/core.cc"]
     public_include_dirs = ["include", "fallback"]
 }}
 cpp.executable "app" {{
     sources = ["src/main.cc", {json.dumps(UNSAFE_SOURCE)}, glob("auto/*.cc"), artifact("wire", "source")]
     generated_headers = [artifact("wire", "header")]
-    deps = ["core"]
+    deps = [{json.dumps(CORE)}]
 }}'''
 
 
@@ -76,11 +85,86 @@ def fact(snapshot, kind, target, value):
     return item
 
 
-def check_location(item, definition, spelling):
-    start = definition.index(spelling)
+def manifest_location(definition, start):
     line = definition.count('\n', 0, start) + 1
-    column = start - definition.rfind('\n', 0, start)
-    assert (item['line'], item['column']) == (line, column), (spelling, line, column, item)
+    previous = definition.rfind('\n', 0, start)
+    column = len(definition[previous + 1:start].encode('utf-8')) + 1
+    return {'path': 'build.ycxx', 'line': line, 'column': column}
+
+
+def check_location(item, definition, spelling):
+    location = manifest_location(definition, definition.index(spelling))
+    assert (item['line'], item['column']) == (location['line'], location['column']), (spelling, location, item)
+
+
+def dependency_edge(definition, consumer, producer, usage, spelling, *, start=0, output=None, binding=None):
+    edge = {'consumer': consumer, 'producer': producer, 'usage': usage,
+            'location': manifest_location(definition, definition.index(spelling, start))}
+    if output is not None:
+        edge['output'] = output
+    if binding is not None:
+        edge['binding'] = binding
+    return edge
+
+
+def check_dependency_graph(plan, edges, *, complete=True):
+    def order(edge):
+        location = edge['location']
+        return (edge['consumer'], location['line'], location['column'], edge['usage'], edge['producer'],
+                edge.get('output', ''), edge.get('binding', ''))
+
+    assert 'dependency_graph' in plan, 'selected plan omitted the dependency graph'
+    expected = {'complete': complete, 'edges': sorted(edges, key=order)}
+    assert plan['dependency_graph'] == expected, (plan['dependency_graph'], expected)
+    assert plan['dependency_graph']['complete'] is complete, plan['dependency_graph']
+
+
+def check_dependency_html(document, plan):
+    # Module discovery also imports the plan fact checks here.
+    from project_module_graph import PlanHTML
+
+    parsed = PlanHTML(document)
+    section = parsed.section('dependencies', 'Dependencies')
+    facts = parsed.section('facts', 'Plan facts')
+    assert parsed.elements.index(section) < parsed.elements.index(facts)
+    graph = plan['dependency_graph']
+    incomplete = 'Incomplete plan. Showing resolved dependencies so far.'
+    assert (incomplete in section.visible()) == (not graph['complete']), section.visible()
+    if not graph['edges']:
+        message = 'No dependencies.' if graph['complete'] else 'No resolved dependencies yet.'
+        assert message in section.visible(), section.visible()
+        return
+
+    table, = (node for node in section.descendants if node.tag == 'table')
+    assert [node.visible().strip() for node in table.descendants if node.tag == 'th'] == [
+        'Consumer', 'Usage', 'Producer', 'Declared at',
+    ]
+    rows = [[node for node in row.descendants if node.tag == 'td']
+            for row in table.descendants if row.tag == 'tr']
+    rows = [row for row in rows if row]
+    assert len(rows) == len(graph['edges']), rows
+    manifest = parsed.section('manifest', 'build.ycxx')
+    anchors = {node.attrs.get('id'): node for node in manifest.descendants}
+    lines = plan['definition'].splitlines()
+    for row, edge in zip(rows, graph['edges']):
+        consumer, usage, producer, declared = row
+        for cell, field, label, optional in (
+            (consumer, 'consumer', None, None),
+            (usage, 'usage', 'Binding', 'binding'),
+            (producer, 'producer', 'Output', 'output'),
+        ):
+            wanted = [edge[field]]
+            if optional in edge:
+                wanted.append(edge[optional])
+                assert label in cell.visible(), (edge, cell.visible())
+            assert [node.visible() for node in cell.descendants if node.tag == 'code'] == wanted, (
+                edge, cell.visible())
+        line, column = edge['location']['line'], edge['location']['column']
+        link, = (node for node in declared.descendants if node.tag == 'a')
+        identifier = f'manifest-line-{line}'
+        assert link.attrs['href'] == f'#{identifier}' and link.visible() == f'build.ycxx:{line}:{column}', edge
+        assert anchors[identifier].visible() == lines[line - 1], edge
+    assert not any(node.attrs.get('data-dependency-probe') == '1' for node in parsed.elements)
 
 
 def scope_state(scope):
@@ -285,13 +369,17 @@ def check_unresolved(ycxx, scope, definition):
     assert unresolved['name'] == 'cpp.executable', unresolved
     check_location(unresolved, definition, 'cpp.executable "app"')
     assert not any(item['kind'] == 'source' for item in plan['facts']), plan
+    check_dependency_graph(plan, [], complete=False)
+    check_dependency_html(show(ycxx, scope, '--format=html').decode('utf-8'), plan)
     assert not (scope / '.ycxx').exists(), 'cold inspection created build state'
     assert not (scope / 'generator-ran').exists(), 'cold inspection ran the generator'
 
 
 def check_views(ycxx, scope, definition):
+    before = scope_state(scope)
     assert show(ycxx, scope, '--format=source') == definition.encode('utf-8')
     snapshot = show_json(ycxx, scope)
+    assert show_json(ycxx, scope) == snapshot, 'same plan produced different inspection output'
     assert snapshot['definition'] == definition, snapshot
     assert not any(item['kind'] == 'unresolved' for item in snapshot['facts']), snapshot
 
@@ -308,7 +396,14 @@ def check_views(ycxx, scope, definition):
     check_location(inherited, definition, '"include"')
     assert fact(snapshot, 'output', 'wire', '.ycxx/virtual/wire/wire.h')['name'] == 'header'
     fact(snapshot, 'tool', 'wire', 'generator.sh')
-    fact(snapshot, 'input', 'wire', 'schema.txt')
+    fact(snapshot, 'input', 'wire', 'artifacts/schema/schema.txt')
+    check_dependency_graph(snapshot, [
+        dependency_edge(definition, 'app', 'wire', 'sources', 'artifact("wire", "source")', output='source'),
+        dependency_edge(definition, 'app', 'wire', 'generated_headers', 'artifact("wire", "header")', output='header'),
+        dependency_edge(definition, 'app', CORE, 'deps', json.dumps(CORE), start=definition.index('deps = [')),
+        dependency_edge(definition, 'wire', 'wire_schema', 'inputs', 'artifact("wire_schema", "schema")',
+                        output='schema', binding='schema'),
+    ])
 
     text = show(ycxx, scope).decode('utf-8')
     assert show(ycxx, scope, '--format=text') == text.encode('utf-8')
@@ -319,6 +414,8 @@ def check_views(ycxx, scope, definition):
     assert all(fragment in visible for fragment in (MARKUP, UNSAFE_SOURCE, 'auto/first.cc', 'src/main.cc')), document
     assert MARKUP not in document and UNSAFE_SOURCE not in document, 'inspection HTML contains unescaped user text'
     assert '&lt;script&gt;' in document and '&lt;b&gt;&amp;' in document, 'inspection HTML did not escape markup'
+    check_dependency_html(document, snapshot)
+    assert scope_state(scope) == before, 'inspection changed files or build state'
 
     assert not (scope / 'generator-ran').exists(), 'inspection ran the generator'
     assert not (scope / '.ycxx' / 'out').exists(), 'inspection published build output'
@@ -327,7 +424,8 @@ def check_views(ycxx, scope, definition):
 
 def check_diff(ycxx, scope, definition, snapshot):
     before = scope / 'before.json'
-    before.write_text(json.dumps(snapshot), encoding='utf-8')
+    earlier_schema_1 = {key: value for key, value in snapshot.items() if key != 'dependency_graph'}
+    before.write_text(json.dumps(earlier_schema_1), encoding='utf-8')
     (scope / 'auto' / 'new.cc').write_text('', encoding='utf-8')
     after = show_json(ycxx, scope)
     assert after['definition'] == snapshot['definition'] == definition, 'the glob changed without a manifest edit'
@@ -337,6 +435,8 @@ def check_diff(ycxx, scope, definition, snapshot):
     changes = diff['changes']
     assert len(changes) == 1 and changes[0]['change'] == 'added', diff
     assert changes[0]['after'] == new_source and changes[0].get('before') is None, diff
+    document = show(ycxx, scope, '--format=html', '--against', before.name).decode('utf-8')
+    check_dependency_html(document, after)
 
     baseline = scope / 'after.json'
     baseline.write_text(json.dumps(after), encoding='utf-8')

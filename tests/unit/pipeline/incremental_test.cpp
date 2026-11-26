@@ -83,7 +83,7 @@ Runs runs(pl::Session& s, ast::EntityId f) {
   const auto& unit = s.get<pl::UnitQ>(k);
   std::uint32_t optimized = unit.unit ? db.runs<pl::Optimized>({*unit.unit, ycxx::obj::target::aarch64_macos, 0}) : 0;
   return {db.runs<pl::FunctionGen>(k), db.runs<pl::FunctionIr>(k), db.runs<pl::Lower>(k), db.runs<pl::UnitQ>(k),
-          db.runs<pl::Codegen>(k), optimized};
+          db.runs<pl::Codegen>({k}), optimized};
 }
 
 void incremental() {

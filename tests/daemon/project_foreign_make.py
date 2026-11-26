@@ -12,7 +12,7 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import check_location, fact
+from project_inspection import check_dependency_graph, check_dependency_html, check_location, dependency_edge, fact
 from project_shader_bundle import check_external_actions, publication
 from runtime_dir import runtime_root
 
@@ -85,16 +85,27 @@ def journal_bytes(journal):
     return journal.read_bytes() if journal.exists() else b''
 
 
-def inspect(ycxx, scope, env, journal, tool, *, cold=False, inventory_files=(SOURCE, HEADER, CONFIG)):
+def inspect(ycxx, scope, env, journal, tool, *, cold=False, partial=False, inventory_files=(SOURCE, HEADER, CONFIG)):
     before = journal_bytes(journal)
     result = run_client(ycxx, scope, env, 'show', 'app', '--format=json')
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
     assert plan['schema'] == 1 and plan['target'] == 'app', plan
+    definition = plan['definition']
+    dependencies = []
+    if not cold:
+        dependencies.append(dependency_edge(definition, 'app', 'bridge', 'deps', '"bridge"',
+                                            start=definition.index('deps = [')))
+    if not (cold or partial):
+        dependencies.append(dependency_edge(definition, 'bridge', PRODUCER, 'public_link_inputs',
+                                            REFERENCE, output='archive'))
+    check_dependency_graph(plan, dependencies, complete=not (cold or partial))
     if cold:
         assert any(row['kind'] == 'unresolved' and row['target'] == 'app' for row in plan['facts']), plan
         assert not any(row['kind'] == 'tool-input' for row in plan['facts']), plan
         assert not (scope / '.ycxx').exists(), 'cold show created build state'
+    elif partial:
+        assert any(row['kind'] == 'unresolved' and row['target'] == PRODUCER for row in plan['facts']), plan
     else:
         fact(plan, 'tool', PRODUCER, str(tool))
         inputs = {row['name']: row['value'] for row in plan['facts']
@@ -109,8 +120,11 @@ def inspect(ycxx, scope, env, journal, tool, *, cold=False, inventory_files=(SOU
         assert all(part in archive['origin'] for part in ('inherited from bridge', 'public_link_inputs', REFERENCE)), archive
         check_location(archive, plan['definition'], REFERENCE)
 
+    if not cold:
         result = run_client(ycxx, scope, env, 'show', 'app', '--format=html')
         assert result.returncode == 0, result.stderr
+        check_dependency_html(result.stdout, plan)
+    if not (cold or partial):
         document = html.unescape(result.stdout)
         assert all(part in document for part in (f'inputs/{MAKEFILE}', *inventory_files, ARCHIVE,
                                                   'inherited from bridge')), document
@@ -222,6 +236,12 @@ def check_builds(ycxx, scope, env, journal, tool):
     check_program(executable, 42)
     installed = publication(executable)
     inspect(ycxx, scope, env, journal, tool)
+
+    inventory = (scope / INVENTORY).read_text(encoding='utf-8')
+    replace_source(scope, INVENTORY, inventory + '\n')
+    inspect(ycxx, scope, env, journal, tool, partial=True)
+    assert publication(executable) == installed
+    replace_source(scope, INVENTORY, inventory)
 
     summary, events = traced_build(ycxx, scope, env, 'unchanged foreign project')
     assert summary['actions_executed'] == 0, summary
