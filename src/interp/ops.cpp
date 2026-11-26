@@ -290,7 +290,8 @@ struct Ops {
     auto storage = ir::Storage(imms(f, n)[1]);
     auto init = ir::Init(imms(f, n)[2]);
     if (storage != ir::Storage::automatic && storage != ir::Storage::temporary) return m.unsupported(n);
-    const auto* record = constant(m) ? m.record_storage(t) : nullptr;
+    // Lay out the record independently of cv. The object below retains it for access checks.
+    const auto* record = constant(m) ? m.record_storage(ast::without_cv(t)) : nullptr;
     const u64 leaves = record ? record->ncells : m.shape(t).leaves;
     if (!m.can_allocate(leaves) || (leaves == 0 && !record)) return m.unsupported(n);
     u32 o = m.make_object(t, M::Origin::automatic, record);
