@@ -96,9 +96,8 @@ the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
-Generated actions can track the executable bytes of declared helper tools.
-Generators and witnesses can run a generated executable selected as a named
-artifact input.
+Generators and witnesses can track helper executables by path and run
+generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.

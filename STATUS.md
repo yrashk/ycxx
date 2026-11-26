@@ -3547,6 +3547,11 @@ Inspection reports current helper identity or availability without launching
 the action. The Make adapter uses these declarations for its C compiler and
 archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
+Rule witnesses also accept `tool_inputs`. A helper change invalidates the
+witness receipt, and an equal classified value preserves downstream reuse.
+The staged-witness walkthrough passes an absolute helper path to its
+analyzer and watches helper-only edits. [#1526](https://github.com/yrashk/ycxx/issues/1526)
+
 A rule-emitted generator can select an executable artifact with
 `tool = input("name")` (#1505). The producer's named output is staged using
 its bytes and executable mode, which enter the consumer's ordinary action

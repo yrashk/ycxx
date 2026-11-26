@@ -126,14 +126,17 @@ The caller owns cache admission and materialization. A crash, cancellation
 or failed command produces no reusable successful result. The first runner
 can return owned bytes, before deciding on durable artifact storage.
 
-Generators can name helper executables through a record such as
+Generators and witnesses can name helper executables through a record such as
 `tool_inputs = { cc = "/usr/bin/cc", ar = "/usr/bin/ar" }`. Each helper's name,
 declared absolute path, canonical pathname, and executable content fingerprint
 enter the ordinary action receipt identity. The declaration observes the
-helper at its host path. The direct tool still gets the declared arguments
-and environment. Watch reobserves both spellings, and `ycxx show` reports
-the current canonical path and fingerprint or the reason it is unavailable.
+helper at its host path. Pass a helper path through the declared arguments
+or environment when the action needs it. Watch reobserves both spellings.
+`ycxx show` reports the canonical path and fingerprint of a current helper.
+An unavailable generator helper has a diagnostic fact, and a stale witness
+snapshot is reported as a partial plan until the next successful build.
 [#1343](https://github.com/yrashk/ycxx/issues/1343)
+[#1526](https://github.com/yrashk/ycxx/issues/1526)
 
 Keep subprocess execution outside ordinary reevaluation. A query returns
 pending action demands to the build coordinator. The coordinator deduplicates
@@ -856,6 +859,10 @@ An edit that preserves the classified score can reuse header generation
 and native compilation. Build the example with `ycxx build app` and inspect
 the artifact and value links with `ycxx show app --format=html`.
 [Runnable example](../../examples/project-build/staged-witness/README.md)
+
+The same staged analyzer can call a helper at an absolute host path. Declare
+the path in `tool_inputs` to track helper changes as witness inputs. Equal
+classified scores still reuse the app. [Helper walkthrough](../../examples/project-build/staged-witness/README.md#track-a-helper-executable)
 
 ### Structured shader reflection
 
