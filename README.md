@@ -61,6 +61,9 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 inspect that variant.
 Generators and witnesses can use `target_triple()` and `host_triple()` in
 `args` or `environment` to pass canonical triples to the tool.
+A generator can take the executable output of a `cpp.host_executable` rule
+as an input. ycxx builds the tool for the host even when the app targets
+another platform. [Native host tool example](examples/project-build/native-host-tool/README.md)
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
@@ -129,6 +132,11 @@ produce the structural argument, as in `Box<detail::make<T, U>()>`.
 An explicitly specialized class can name a flat structural argument directly, as in
 `template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
 selects the same specialization. [#1248](https://github.com/yrashk/ycxx/issues/1248)
+
+Templates can declare `auto`, `decltype(auto)` and `auto...` non-type parameters. Each argument
+keeps its own type, so `v<1>` and `v<sizeof(char)>` are different specializations.
+Constrained `C auto` and `auto*` or `auto&` parameters are not supported yet.
+[#1244](https://github.com/yrashk/ycxx/issues/1244) [#1401](https://github.com/yrashk/ycxx/issues/1401)
 
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
@@ -447,10 +455,10 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
 definitions for runtime construction. Ordinary in-class constructor declarations support
 bare `explicit`. Eligible inline constructors link across separate objects on both targets.
-An ordinary class can explicitly default its copy constructor as its first
-declaration and use it for trivial member copies. A non-template empty tag class at namespace
-scope with no bases and an implicit trivial destructor can first declare `T() = default`
-in class and use it to initialize an `inline constexpr` tag object.
+A class or class template can explicitly default its default, copy and move constructors, its
+copy and move assignment operators and its nonvirtual destructor as their first declarations in
+the class. Nontrivial ones run each base's and member's own operation, and work in constant
+evaluation. Local classes and defaulting outside the class are not done.
 [#157](https://github.com/yrashk/ycxx/issues/157) · [#1096](https://github.com/yrashk/ycxx/issues/1096)
 
 An explicit class return can select a written move constructor for an eligible named local
@@ -526,6 +534,11 @@ declaration order and can call a function or read an earlier field through `this
 initializer takes precedence. The same rules apply to ordinary non-inline namespace objects,
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
+An array member of scalars with a constant default member initializer, such as `T w[N] = {};`
+in a class template or an ordinary class, is initialized by `S s;`, `S{}`, `new S` and aggregate
+initialization that omits it, with omitted elements zero. Constant evaluation of an object with
+an array member is not supported yet.
+[#1418](https://github.com/yrashk/ycxx/issues/1418) · [#1140](https://github.com/yrashk/ycxx/issues/1140)
 
 An out-of-line constructor evaluates a default member initializer with the namespace names
 visible where the initializer was written and lookup in the complete enclosing class.
@@ -616,7 +629,7 @@ written default member initializer are value-initialized.
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - implicit lvalue copy assignment for ordinary classes without bases, including class members
   with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
-- first-declaration in-class defaulted copy assignment for ordinary classes without bases.
+- copy and move assignment defaulted in the class, for ordinary classes and class templates.
   The written operator keeps its access and assigns supported members in declaration order.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - first-declaration in-class deleted move assignment for unconstrained, nonvirtual members of
@@ -1010,6 +1023,15 @@ can have virtual functions. Class templates and their specializations support in
 of non-template member classes. An implicit instantiation checks the member definition when a use
 requires the member class to be complete.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
+
+**Local classes.** A class can be defined in a function body, a lambda, or a member function of
+a class template: named or unnamed, with declarators after it, constructors, a destructor that runs
+when the block exits, member functions and default member initializers. Its members use the
+block's types and constants, and the function's access. Each specialization of a templated
+function has its own local class. Block-scope enumerations and local classes with virtual
+functions are not supported yet.
+[#117](https://github.com/yrashk/ycxx/issues/117) · [#1442](https://github.com/yrashk/ycxx/issues/1442) ·
+[#1155](https://github.com/yrashk/ycxx/issues/1155)
 
 **Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
 class templates with external linkage and single public nonvirtual inheritance can declare virtual

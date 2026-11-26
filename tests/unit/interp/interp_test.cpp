@@ -440,6 +440,27 @@ func {@ce} {
 )");
   expect_value(r.go(), 11, "constant mode: true and the consteval edge");
   expect_value(r.runtime(), 0, "runtime mode: false and the runtime edge");
+  check(!r.go().observed_constant_context, "an unflagged consteval_br is not the program's observation");
+
+  // `if consteval` lowers to a flagged consteval_br; taking its consteval edge is reported (#1459).
+  Run observed(R"(
+func {@ce} {
+^0(%0: !state):
+  consteval_br observes_context ^1(%0), ^2(%0)
+^1(%1: !state):
+  %2: {int} = const [{i1}]
+  ret %1, %2
+^2(%3: !state):
+  %4: {int} = const [{i2}]
+  ret %3, %4
+}
+)");
+  const auto constant = observed.go();
+  expect_value(constant, 1, "constant mode takes the consteval edge");
+  check(constant.observed_constant_context, "constant mode reports the observation");
+  const auto run = observed.runtime();
+  expect_value(run, 2, "runtime mode takes the runtime edge");
+  check(!run.observed_constant_context, "runtime mode observes nothing");
 }
 
 // ------------------------------------------------------------------ memory and lifetime

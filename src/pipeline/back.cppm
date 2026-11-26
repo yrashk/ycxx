@@ -2403,6 +2403,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   // another type are two entities with one C symbol (#1095). It names this object's strong
   // definition of the name if there is one, else its weak one, else one undefined symbol.
   std::map<EntityId, bool> definitions;  // entity → weak
+  std::vector<EntityId> defined;
+  for (const auto& f : functions) defined.push_back(f.entity);
+  for (const auto& d : data) defined.push_back(d.entity);
+  if (auto error = aarch64::repeated_definition(std::move(defined))) return std::unexpected(std::move(*error));
   for (const auto& f : functions) definitions.emplace(f.entity, f.weak);
   for (const auto& d : data) definitions.emplace(d.entity, d.weak);
   for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
@@ -2986,8 +2990,19 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (spelling != tu.class_template_spellings.end()) n.args = in.seqs.elements(spelling->second.second);
     }
     const auto written = written_closure_numbers.find(c);
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
-        (r.scope != EntityId::none || written != written_closure_numbers.end())) {
+    if (r.kind == sema::EntityKind::class_ && r.local_class) {
+      // A local class ([class.local]): a <local-name> in its function's encoding (§5.1.6).
+      n.local_class = true;
+      n.closure_number = r.ordinal;
+      if (n.name.empty()) n.unnamed_type_ordinal = r.ordinal;
+      if (auto f = by_id.find(ir::raw(r.scope)); f != by_id.end() && f->second->is_function) {
+        const Entity& fe = *f->second;
+        std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+        n.local = std::make_shared<const LocalFunction>(LocalFunction{
+            fname, fe.type, fe.scope, fe.special != Special::none, fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+      }
+    } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
+               (r.scope != EntityId::none || written != written_closure_numbers.end())) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;

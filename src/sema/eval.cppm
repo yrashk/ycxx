@@ -104,6 +104,9 @@ struct Evaluated {
   bool variable_instantiation_failure = false;
   // The selected callee already diagnosed its body.
   bool function_instantiation_failure = false;
+  // An `if consteval` took its consteval edge: the value holds only where the expression is
+  // manifestly constant-evaluated ([expr.const]).
+  bool observed_constant_context = false;
 
   bool diagnosed_failure() const {
     return type_trait_failure || variable_instantiation_failure || function_instantiation_failure;
@@ -342,7 +345,9 @@ private:
       return {std::nullopt, reason_arg({interp::Reason::null_access, 0, {}})};
     if (reference_initializer && value.past)
       return {std::nullopt, reason_arg({interp::Reason::past_end_access, 0, {}})};
-    return constant(value);
+    Evaluated result = constant(value);
+    result.observed_constant_context = out.observed_constant_context;
+    return result;
   }
 
 public:
@@ -373,14 +378,18 @@ private:
         owner = s_->types().class_of(e.type());
       std::vector<ConstId> elements;
       elements.reserve(clauses.size());
+      bool observed = false;
       for (const Ex& element : clauses) {
         irgen::FunctionInput::InitializedFields fields;
         if (owner != EntityId::none && s_->as<ast::DefaultMemberInit>(element)) fields = {owner, elements};
         Evaluated result = evaluate_initializer(element, zero_default, fields);
         if (!result.value) return result;
+        observed |= result.observed_constant_context;
         elements.push_back(*result.value);
       }
-      return {s_->world().values.aggregate(e.type(), elements), 0, true};
+      Evaluated aggregate{s_->world().values.aggregate(e.type(), elements), 0, true};
+      aggregate.observed_constant_context = observed;
+      return aggregate;
     }
     if (auto dmi = s_->as<ast::DefaultMemberInit>(e))
       return evaluate_initializer({dmi->init.id, e.begin, e.end, e.info}, zero_default, initialized_fields);
@@ -481,7 +490,9 @@ private:
   std::optional<ConstId> zero_constant(QualType t, bool raw_union_member = false) {
     Types& types = s_->types();
     Values& values = s_->world().values;
-    if (s_->is_aggregate(t)) {
+    // [dcl.init.general]: value-initialization by a trivial default constructor is zero-initialization.
+    const ClassRec* record = types.is_class(t) ? s_->class_rec(types.class_of(t)) : nullptr;
+    if (s_->is_aggregate(t) || (record && record->trivial_defaulted_default_ctor && constant_record_layout(t))) {
       raw_union_member = raw_union_member || (s_->is_union(t) && s_->compatibility() == ast::Compatibility::gcc);
       std::vector<ConstId> elements;
       for (const Sema::Element& element : s_->elements(t)) {

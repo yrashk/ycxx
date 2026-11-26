@@ -9,6 +9,7 @@ out of the checkout and build it there.
 | [Freestanding targets](freestanding-targets/README.md) | [build.ycxx](freestanding-targets/build.ycxx) | Build one app for Linux x86-64 and macOS arm64 and inspect each target's output. |
 | [Target-aware action](target-aware-action/README.md) | [build.ycxx](target-aware-action/build.ycxx) | Pass host and target triples through arguments or environment variables and inspect receipt reuse. |
 | [Staged tool](staged-tool/README.md) | [build.ycxx](staged-tool/build.ycxx) | Run a generated executable to produce a C++ header, then edit the executable under watch. |
+| [Native host tool](native-host-tool/README.md) | [build.ycxx](native-host-tool/build.ycxx) | Compile a host scanner to generate a C++ header and reuse it across native targets. |
 | [Staged witness](staged-witness/README.md) | [build.ycxx](staged-witness/build.ycxx) | Run a generated analyzer and watch helper edits that preserve or change its typed result. |
 | [Module discovery](module-discovery/README.md) | [build.ycxx](module-discovery/build.ycxx) | Inspect named module providers and compare the imports selected for Linux and macOS. |
 | [Module providers](module-providers/README.md) | [build.ycxx](module-providers/build.ycxx) | Resolve a shared module through two import paths and compare its provider on Linux and macOS. |

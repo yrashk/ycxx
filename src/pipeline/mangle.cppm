@@ -82,6 +82,10 @@ struct ClassName {
   std::optional<std::uint32_t> unnamed_type_ordinal{};
   ast::EntityId closure_variable = ast::EntityId::none;
   std::optional<ast::SeqId<ast::TemplateParamSema>> template_params{};
+  // A local class ([class.local]): the function it is local to (`local`), and its number among
+  // that function's local classes of its name (`closure_number`), or among its unnamed types
+  // (`unnamed_type_ordinal`): a <local-name> with a discriminator (§5.1.6).
+  bool local_class = false;
   std::optional<std::uint32_t> private_closure_number{};
   bool static_closure = false;
 };
@@ -463,6 +467,20 @@ class Mangler {
     }
     if (n.name.empty() && !n.unnamed_type_ordinal)
       return std::unexpected(enumeration ? "an unnamed enumeration in a mangled type" : "a class whose name is unknown");
+    // A local class, or a class nested in one: `Z <encoding> E <entity name> [<discriminator>]`.
+    if (auto root = local_root(e)) {
+      auto l = local_encoding(*root->second.local);
+      if (!l) return l;
+      std::string r = class_component(n);
+      if (e != root->first) {
+        auto p = prefix(n.scope);
+        if (!p) return p;
+        r = "N" + *p + r + "E";
+      }
+      r = "Z" + *l + "E" + r + discriminator(root->second);
+      candidates_.push_back(key);
+      return r;
+    }
     if (n.templ != ast::EntityId::none) {
       // The template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
       auto r = specialization_prefix(e, n);
@@ -507,6 +525,11 @@ class Mangler {
     }
     if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a scope whose name is unknown");
     if (n.templ != ast::EntityId::none) return specialization_prefix(e, n);
+    if (n.local_class) {  // the <local-name>'s function comes before the nested-name it begins
+      std::string r = class_component(n);
+      candidates_.push_back(key);
+      return r;
+    }
     std::string r;
     if (n.scope != ast::EntityId::none) {
       auto p = prefix(n.scope);
@@ -518,8 +541,12 @@ class Mangler {
     return r;
   }
   // Global names and direct members of ::std are <unscoped-name>s (§5.1.5).
+  // Whether a name in `scope` is a <nested-name>, not an <unscoped-name> (global or `St`).
+  bool nested_name(ast::EntityId scope) const {
+    return scope != ast::EntityId::none && !(classes_ && is_global_std(classes_(scope)));
+  }
   std::string delimit_name(std::string components, ast::EntityId scope) const {
-    if (scope == ast::EntityId::none || (classes_ && is_global_std(classes_(scope)))) return components;
+    if (!nested_name(scope)) return components;
     return "N" + components + "E";
   }
   // The <data name> part of an <encoding> (§5.1.2), sharing substitutions with its use.
@@ -529,6 +556,26 @@ class Mangler {
     auto p = prefix(scope);
     if (!p) return p;
     return delimit_name(*p + component, scope);
+  }
+  // The local class that is class `e` or encloses it, with its name, if there is one.
+  std::optional<std::pair<ast::EntityId, ClassName>> local_root(ast::EntityId e) const {
+    for (int depth = 0; e != ast::EntityId::none && classes_ && depth < 64; ++depth) {
+      ClassName n = classes_(e);
+      if (!n.is_class || n.closure) return std::nullopt;
+      if (n.local_class) {
+        if (!n.local) return std::nullopt;
+        return std::pair{e, std::move(n)};
+      }
+      e = n.scope;
+    }
+    return std::nullopt;
+  }
+  // <discriminator> ::= _ <digit> | __ <number> _: the n-th local class of one name in its function
+  // is numbered n − 2 (§5.1.6). Unnamed types are numbered by their <unnamed-type-name>.
+  static std::string discriminator(const ClassName& local) {
+    if (local.unnamed_type_ordinal || local.closure_number == 0) return "";
+    const std::uint32_t d = local.closure_number - 1;
+    return d < 10 ? "_" + std::to_string(d) : "__" + std::to_string(d) + "_";
   }
   // <unnamed-type-name> ::= Ut [<number>] _ (Itanium ABI §5.1.5.5).
   static std::string class_component(const ClassName& n) {
@@ -589,11 +636,17 @@ class Mangler {
     std::string out = unqualified;
     if (scope != ast::EntityId::none) {
       std::string local;
+      std::string disc;  // a local class's discriminator, after the whole nested-name (§5.1.6)
       if (sc.closure && sc.closure_variable == ast::EntityId::none) {
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;
         local = "Z" + *l + "E";
+      } else if (auto root = local_root(scope)) {
+        auto l = local_encoding(*root->second.local);
+        if (!l) return l;
+        local = "Z" + *l + "E";
+        disc = discriminator(root->second);
       }
       // <nested-name> ::= N [<CV-qualifiers>] <prefix> <unqualified-name> E, the member function's
       // cv-qualifiers in the order r V K (§5.1.5.3).
@@ -606,7 +659,7 @@ class Mangler {
       }
       const std::string cv = member_qualifiers(f);
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
-      out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);
+      out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope) + disc;
     }
     auto sig = signature(f, false);
     if (!sig) return sig;
@@ -678,7 +731,7 @@ class Mangler {
         unqualified = *code;
       }
       candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());  // the <template-prefix>
-      auto args = specialization_args(spec);
+      auto args = specialization_args(spec, /*nested=*/true);
       if (!args) return args;
       auto sig = signature_for_closure(f, sc, spec, scope, gcc_deduced);
       if (!sig) return sig;
@@ -691,9 +744,10 @@ class Mangler {
     if (!n) return n;
     // GCC's primary nested-name encoding uses only the arguments at this position.
     // A trailing requires-clause is still part of the subsequent function signature.
-    const bool plain_arguments = compatibility_ == ast::Compatibility::gcc && scope != ast::EntityId::none &&
+    const bool nested = nested_name(scope);
+    const bool plain_arguments = compatibility_ == ast::Compatibility::gcc && nested &&
                                  in_.types.is<ast::TFunction>(c);
-    auto args = plain_arguments ? template_args(spec.args) : specialization_args(spec, *n);
+    auto args = plain_arguments ? template_args(spec.args) : specialization_args(spec, nested, *n);
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
@@ -1523,6 +1577,7 @@ class Mangler {
       return r + "Tk" + delimit_name(name + args, n.scope);
     }
     if (p.kind == ast::TemplateArgKind::value) {
+      if (p.placeholder != ast::Placeholder::none) return r + (p.placeholder == ast::Placeholder::decltype_auto ? "TnDc" : "TnDa");
       auto t = type(p.type);
       if (!t) return t;
       return r + "Tn" + *t;
@@ -1542,10 +1597,12 @@ class Mangler {
   }
   // A function template specialization's own <template-args>, with Clang's prefixes: `Tn <type>`
   // before a value whose parameter's type is dependent, `Tt <decl>* E` before a template whose head
-  // is not the parameter's ([temp.arg.template]).
+  // is not the parameter's ([temp.arg.template]). GCC writes its prefixes only after an
+  // <unscoped-name>: a template in a namespace other than `std`, or a member, has none (`nested`).
   std::expected<std::string, std::string> own_template_args(std::span<const ast::TemplateArg> args,
                                                             std::span<const ast::TemplateParamSema> params,
-                                                            const std::vector<std::uint8_t>& same_heads, std::string_view owner) {
+                                                            const std::vector<std::uint8_t>& same_heads,
+                                                            bool nested, std::string_view owner) {
     std::string out = "I";
     for (std::size_t i = 0; i < args.size(); ++i) {
       const ast::TemplateArg& a = args[i];
@@ -1557,7 +1614,7 @@ class Mangler {
         bool empty = p.pack && a.kind == ast::TemplateArgKind::pack && in_.seqs.size(a.elems) == 0;
         bool same = i < same_heads.size() && same_heads[i];
         const bool gcc = compatibility_ == ast::Compatibility::gcc;
-        const bool placeholder = in_.types.is<ast::TAuto>(in_.types.canon(p.type));
+        const bool placeholder = p.placeholder != ast::Placeholder::none;
         const bool value_prefix = placeholder ? !gcc || !empty : !gcc && (dependent(p.type) || empty);
         const bool concept_dependent_head = p.kind == ast::TemplateArgKind::template_ &&
             (p.type_constraint != ast::ConstId::none ||
@@ -1566,9 +1623,10 @@ class Mangler {
              }));
         const bool decl = p.kind == ast::TemplateArgKind::value    ? value_prefix
                           : p.kind == ast::TemplateArgKind::template_ ? !p.concept_template &&
-                                                                        (concept_dependent_head || (empty ? !gcc : !same))
+                                                                        (concept_dependent_head ||
+                                                                         (empty ? !gcc : !same || (gcc && placeholder_head(p))))
                                                                       : p.type_constraint != ast::ConstId::none;
-        if (decl) {
+        if (decl && !(gcc && nested)) {
           auto d = param_decl(p, owner);
           if (!d) return d;
           out += *d;
@@ -1581,8 +1639,16 @@ class Mangler {
     return out + "E";
   }
 
-  std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec, std::string_view owner = {}) {
-    auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads, owner);
+  // Whether a template template parameter's own head declares a placeholder parameter: GCC then
+  // writes its `Tt` prefix even for an argument whose head is the same.
+  bool placeholder_head(const ast::TemplateParamSema& p) const {
+    return std::ranges::any_of(in_.seqs.elements(p.params),
+                               [](const ast::TemplateParamSema& q) { return q.placeholder != ast::Placeholder::none; });
+  }
+  std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec, bool nested = false,
+                                                               std::string_view owner = {}) {
+    auto args = spec.params.empty() ? template_args(spec.args)
+                                    : own_template_args(spec.args, spec.params, spec.same_heads, nested, owner);
     if (!args || spec.head.tokens == Fp128{}) return args;
     auto head = constraint_suffix(spec.head, true);
     if (!head) return head;

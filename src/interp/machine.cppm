@@ -194,6 +194,9 @@ public:
 
   const Failure& failure() const { return failure_; }
   u64 steps() const { return steps_; }
+  // Whether an `if consteval` took its consteval edge: the value holds only where the evaluation
+  // is manifestly constant-evaluated ([expr.const]).
+  bool observed_constant_context() const { return observed_constant_context_; }
   // After `done`: the entry's results, described.
   std::vector<Result> results() const;
 
@@ -426,6 +429,7 @@ private:
   EntityId wanted_{};
   Event pending_ = Event::done;
   bool failed_ = false;
+  bool observed_constant_context_ = false;
   Failure failure_;
   u64 steps_ = 0;
   u32 since_poll_ = 0;

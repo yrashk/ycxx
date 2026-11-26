@@ -1415,7 +1415,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Ordinary classes and namespace-scope class templates support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
+note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Defaulting outside the class, in local classes and with a requires-clause remains open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1626,7 +1626,7 @@ std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
 issues = [244, 360, 309, 157, 747]
-note = 'Memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations remain open.'
+note = 'Memberwise implicit copy assignment for ordinary classes without bases. Copy and move operations defaulted on their first declaration, with base, member and array subobjects. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Other implicit moves, implicit assignment with nontrivial base and array subobjects and virtual assignment remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S&) = default; };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
@@ -1719,8 +1719,8 @@ clauses = ['class.mem']
 std = 'C++11'
 ftm = '__cpp_nsdmi'
 status = 'partial'
-issues = [118]
-note = 'initializers that are not constants'
+issues = [118, 1140]
+note = 'initializers that are not constants (#118); constant evaluation of objects whose array members use one (#1140)'
 probe = '''
 int seven() { return 7; }
 struct S { int a = 1; int b{2}; int c = seven(); };
@@ -1774,8 +1774,9 @@ name = 'Local classes'
 group = 'class'
 clauses = ['class.local']
 std = 'C++98'
-status = 'missing'
-issues = [117]
+status = 'partial'
+issues = [1140, 1155, 1442, 1443]
+note = 'Local classes in functions, lambdas and templates, with members, constructors and destructors. Block-scope enumerations (#1442), member classes defined later in the block (#1443), virtual functions (#1155) and constant evaluation of class or array members (#1140) remain.'
 probe = '''
 int main() { struct L { int v; }; L l{0}; return l.v; }
 '''
@@ -2166,8 +2167,8 @@ std = 'C++17'
 ftm = '__cpp_nontype_template_parameter_auto'
 detect = '''\btemplate\s*<[^;{<>]*\bauto\b'''
 status = 'partial'
-note = 'Deduces scalar constant template arguments and packs, including mode-specific array-bound deduction. Floating-point and further structural argument forms remain open.'
-issues = [286]
+issues = [286, 1401]
+note = '`auto`, `decltype(auto)` and `auto...` parameters deduce the type of each argument, which is part of the identity and the name of the specialization (#1244), including the mode-specific array-bound deduction. Constrained `C auto` (#286), `auto*` and `auto&`, and `decltype(auto)` of a parenthesized lvalue (#1401) remain open.'
 probe = '''
 template<auto N> int get() { return N; }
 int main() { return get<3>() + get<'a'>() - 100; }

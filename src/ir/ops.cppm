@@ -91,6 +91,7 @@ export enum class Flag : std::uint8_t {
   unknown_reference, // the record is the unknown referent of a parameter
   ctz_gcc_zero,      // GCC mode accepts a zero operand for this spelling in constant evaluation
   switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
+  observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -293,7 +294,7 @@ export enum class Op : std::uint16_t {
   // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
   // ([expr.const]) from falling off the end.
   unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
-  consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
+  consteval_br [[=control({}, {}, 2).accepts({observes_context})]],  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
   invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).imms({u32}).accepts({not_constexpr})]],

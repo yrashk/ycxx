@@ -660,9 +660,30 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   with `--pull never` where that platform of it is already local (#1153). On #309 this
   ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
   - Learned on #309.
+- **Without that image, a freestanding static ELF in `busybox` runs the same tests.** Compile with
+  the Mac's ycxx, add a small Clang-built `_start` that runs `.init_array`, calls `main` and exits
+  with its result, link with `ld.lld -static`, and run it with `docker run --platform linux/amd64`.
+  Rosetta rejects some `.bss` segments ("bss_size overflow"), so a linker script puts `.bss` in
+  `.data`. Include a control whose `main` returns 7. No image of several gigabytes is needed, which
+  mattered when the disk was full.
+  - Learned on #157.
+- **Classify by what overload resolution selects, everywhere.** Defaulted special members were
+  classified by resolving each subobject's operation, but array elements, implicit moves and
+  trivial operations with a written `noexcept(false)` still followed older structural shortcuts.
+  An independent review found four P0s there, all where the two disagreed.
+  - Learned on #157.
 
 ## Data the front end needs
 
+- **A point is not an item.** `Program::is_complete(c, item)` and its kin also get points past
+  the item table (`end()`, an instantiation point). On #117 a helper that walked `items[k].parent`
+  from such a point read past the table, and the `<iostream>` run segfaulted with no diagnostic
+  (exit 139, an empty log that first read as "0 errors"). Bound-check any per-item helper a point
+  can reach, and check a compiler run's exit status before its error count.
+- **Items inside bodies need their owner in their identity.** Local classes (#117) are items whose
+  scope paths name no function, so same-shaped classes of two functions got one id: `instance()`
+  threw, diagnostics landed in the other function, and group reuse switched off. The review found
+  it with two functions; a test with one local class per program could not.
 - **Deferred analysis reads committed parameter lists.** On #713, the exception-specification
   replay read a declaration copied by `Program::declared` before its item committed. A draft
   `SeqId<ParamSema>` happened to name a different parameter list in the global interner.

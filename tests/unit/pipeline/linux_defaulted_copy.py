@@ -35,7 +35,7 @@ def main():
             return run(ycxx, 'cxx', *args, **kwargs)
 
         for source in ('scalar-copy.cpp', 'private-copy.cpp', 'const-reference-copy.cpp',
-                       'member-copy-friend.cpp'):
+                       'member-copy-friend.cpp', 'nontrivial-member-copy.cpp'):
             compile(linux, '-nostdlib', source, '-o', 'native')
             run('./native')
             compile(darwin, '-c', source, '-o', 'darwin.o')
@@ -49,16 +49,15 @@ def main():
         stderr = compile(linux, '-fsyntax-only', 'inaccessible-member-copy-invalid.cpp', status=1,
                          error='deleted constructor')
         assert 'inaccessible-member-copy-invalid.cpp:4:' in stderr, stderr
-        compile(linux, '-fsyntax-only', 'nontrivial-member-copy.cpp', status=1,
-                error="defaulted copy construction of 'W' is not supported")
 
-        # An implicit member copy does not prove triviality for the enclosing defaulted copy.
+        # [class.copy.ctor]/10: an rvalue reference member of the leaf deletes the enclosing copy.
         dependency = 'struct Leaf { %s; };\nstruct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n'
         copy = 'void copy(const Wrapper& source) { Wrapper destination(source); }\n'
-        for member, expected in (('int&& ref', 'deleted constructor'),
-                                 ('volatile int value', "defaulted copy construction of 'Wrapper' is not supported")):
-            (scope / 'implicit-leaf.cpp').write_text((dependency % member) + copy)
-            compile(linux, '-fsyntax-only', 'implicit-leaf.cpp', status=1, error=expected)
+        (scope / 'implicit-leaf.cpp').write_text((dependency % 'int&& ref') + copy)
+        compile(linux, '-fsyntax-only', 'implicit-leaf.cpp', status=1, error='deleted constructor')
+        # [class.copy.ctor]/11: a volatile scalar does not make a copy nontrivial.
+        (scope / 'implicit-leaf.cpp').write_text((dependency % 'volatile int value') + copy)
+        compile(linux, '-fsyntax-only', 'implicit-leaf.cpp')
 
         (scope / 'repeated-leaf.cpp').write_text('''
 struct Leaf { int value; };
@@ -72,22 +71,25 @@ void copy(const Wrapper& source) { Wrapper destination(source); }
 ''')
         compile(linux, '-fsyntax-only', 'repeated-leaf.cpp')
 
-        (scope / 'uncertain-abi.cpp').write_text(
+        # It is trivial for calls on both targets. The x86-64 back end does not lower a nested
+        # record parameter yet, whatever its members.
+        (scope / 'volatile-abi.cpp').write_text(
             (dependency % 'volatile int value') + 'int read(Wrapper object) { return object.leaf.value; }\n')
-        for target in (linux, darwin):
-            compile(target, '-fsyntax-only', 'uncertain-abi.cpp')
-            compile(target, '-c', 'uncertain-abi.cpp', status=1, error='defaulted copy ABI classification is unavailable')
+        compile(darwin, '-c', 'volatile-abi.cpp', '-o', 'darwin.o')
+        compile(linux, '-fsyntax-only', 'volatile-abi.cpp')
+        compile(linux, '-c', 'volatile-abi.cpp', status=1, error='unsupported aggregate parameter layout')
 
-        for part in ('main', 'peer'):
-            compile(linux, '-c', f'copy-abi-{part}.cpp', '-o', f'copy-{part}.o')
-        compile(linux, '-nostdlib', 'copy-main.o', 'copy-peer.o', '-o', 'native')
-        run('./native')
-        for level in ('-O0', '-O2'):
+        for name in ('copy-abi', 'volatile-abi'):
             for part in ('main', 'peer'):
-                run(host, '-std=c++26', level, '-fPIE', '-c', f'copy-abi-{part}.cpp', '-o', f'host-{part}.o')
-            for left, right in (('copy-main.o', 'host-peer.o'), ('host-main.o', 'copy-peer.o')):
-                run(host, '-pie', left, right, '-o', 'mixed')
-                run('./mixed')
+                compile(linux, '-c', f'{name}-{part}.cpp', '-o', f'copy-{part}.o')
+            compile(linux, '-nostdlib', 'copy-main.o', 'copy-peer.o', '-o', 'native')
+            run('./native')
+            for level in ('-O0', '-O2'):
+                for part in ('main', 'peer'):
+                    run(host, '-std=c++26', level, '-fPIE', '-c', f'{name}-{part}.cpp', '-o', f'host-{part}.o')
+                for left, right in (('copy-main.o', 'host-peer.o'), ('host-main.o', 'copy-peer.o')):
+                    run(host, '-pie', left, right, '-o', 'mixed')
+                    run('./mixed')
 
         # Keep the constructor head and the source path while changing the definition.
         edit = scope / 'edit.cpp'

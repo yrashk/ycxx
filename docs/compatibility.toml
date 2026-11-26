@@ -206,7 +206,7 @@ reference = "Itanium C++ ABI §5.1.5.7, #208, #281"
 limits = "This entry covers the primary symbols for ordinary typed parameters and packs. GCC also emits legacy ABI aliases for some unequal heads. Placeholder parameter types are tracked separately."
 prior = "Clang's extra parameter-declaration prefixes on some function template specializations."
 spec = "Retain the disambiguating prefixes on the supported template heads."
-gcc = "Omit prefixes for the covered value parameters and empty template-template packs. Use Tt for an unequal argument head. In a nonempty template-template pack, use the first argument's head."
+gcc = "Write prefixes only after an unscoped name (global or St), none in a nested name. There, omit value-parameter prefixes and empty template-template pack prefixes, except TnDa/TnDc before a placeholder parameter's argument, but not for an empty pack. Use Tt for a nonempty argument whose head differs (in a nonempty template-template pack, the first argument's head), or whose parameter's head declares a placeholder parameter."
 clang = "Same as spec."
 evidence = ["tests/daemon/compatibility.py"]
 
@@ -214,14 +214,17 @@ evidence = ["tests/daemon/compatibility.py"]
 id = "function-template-placeholder-argument-prefix"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
-reference = "[temp.param], [dcl.spec.auto], Itanium C++ ABI §5.1.5.7"
+reference = "[temp.param], [dcl.spec.auto], Itanium C++ ABI §5.1.5.7, #1244"
+limits = "Uses current primary symbols, with no GCC legacy aliases. Placeholders in compound declarators (auto*, auto&) are rejected (#1401). A decltype(X) parameter type is mangled as a type (#1406)."
 prior = "Reject the tested placeholder-typed constant template parameter."
-spec = "Deduce ordinary auto from each argument. Use TnDa for a single auto parameter and TpTnDa for empty and nonempty auto packs."
-gcc = "Use the same prefixes except for an empty auto pack, which uses J...E alone."
+spec = "Deduce auto and decltype(auto) from each argument. Write TnDa (TnDc for decltype(auto)) before each argument and TpTnDa before a pack, including an empty pack."
+gcc = "Write TnDa, TnDc and TpTnDa only after an unscoped name (global or St), and none before an empty pack."
 clang = "Same as spec."
-limits = "Covers bare auto with the currently supported constant template argument types. Uses current primary symbols, with no GCC legacy aliases."
+spec_observed = "A placeholder type can be used in a constant template parameter."
+gcc_observed = "GCC 16.2 callers use TnDa for a single auto parameter and TpTnDa for a nonempty auto pack. An empty auto pack uses J...E alone."
+clang_observed = "Uses TnDa for a single auto parameter and TpTnDa for both empty and nonempty auto packs on x86-64 Linux and AArch64 Darwin."
 probe = 'template<auto... V> int f(); int use() { return f<>() + f<4>(); }'
-evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 primary symbols for single parameters, heterogeneously typed packs, and defaults"]
+evidence = ["tests/draft/temp/temp.arg.template-2.accept.cpp", "tests/daemon/compatibility.py", "tests/own/templates/placeholder-parameters/mangling.run.cpp", "GCC 16.2 and Clang 23.1.6 primary symbols for single parameters, heterogeneously typed packs, and defaults"]
 
 [[divergence]]
 id = "placeholder-template-array-bound-deduction"
@@ -1553,3 +1556,26 @@ spec = "Diagnose an unmatched single or double quote in skipped source as an err
 gcc = "Warn about the tested unmatched quote in skipped source. Suppress it with -w and promote it with -Werror."
 clang = "Suppress the diagnostic in the tested skipped source. An unmatched quote on an active source line remains invalid."
 evidence = ["tests/own/pp/cond-skipped-quote.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 skipped and active conditional-group probes"]
+
+[[divergence]]
+id = "local-class-lookup"
+status = "shared"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[class.local], [basic.lookup.unqual], [basic.scope.class], [temp.res], #117"
+prior = "Local classes were rejected."
+spec = "A member of a local class in a lambda that initializes a static data member finds the enclosing class's earlier members and its injected-class-name."
+gcc = "Use the standard lookup behavior required by libycxx's tuple_cat implementation."
+clang = "Same as spec."
+gcc_observed = "In a class template, reports the members and the injected-class-name as undeclared [-Wtemplate-body], also from the local class's member function bodies. The same local class in a member function compiles. In a non-template class, it finds the member but requires the local class's default member initializer before the end of the enclosing class, as if the local class were nested."
+clang_observed = "Accepts the template and non-template cases and runs them."
+probe = '''
+template <int N> struct Plan {
+  static constexpr int count = N;
+  static constexpr auto first = [] {
+    struct Pick { int index = count - 1; int get() const { return count; } } p{};
+    return p;
+  }();
+};
+int main() { return Plan<4>::first.index + Plan<4>::first.get() != 7; }
+'''
+evidence = ["tests/own/local-classes/class-being-defined.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]

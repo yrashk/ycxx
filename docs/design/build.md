@@ -233,6 +233,22 @@ external actions run on the host and share receipts when their declared inputs
 match. An external action that supplies a linker input must produce an archive
 for the selected target.
 
+The standard rule package's `cpp.host_executable` rule exposes one named
+`executable` artifact (#1559). Its resident native build uses disk sources,
+ordinary includes, and the canonical host target. The selected app target
+has its own compilation request. A generator stages the linked bytes and
+executable mode in an ordinary input, which can also be used in
+`tool = input("name")`. The build trace includes the host compilation and
+link. The action receipt reuses an equal staged image.
+
+The coordinator verifies the engine revision before launching an action
+that depends on a host build and again before admitting its receipt. Watch
+observes the source and include reads through the same file table as native
+compilation. Host executables are available to ordinary generator recipes.
+Witness and planning inputs that reach them require content-sensitive
+freshness validation, tracked in #1259.
+[Native host tool example](../../examples/project-build/native-host-tool/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and

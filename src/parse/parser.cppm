@@ -64,6 +64,7 @@ struct DeclSpec {
   Tk class_key = Tk::eof;
   NameId class_name{};
   u32 class_at = 0;
+  bool defined_class = false;  // a class-specifier: a local class ([class.local])
   bool ok = true;
 };
 
@@ -685,6 +686,14 @@ public:
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
   // declares the class ([basic.scope.pdecl]); set by the owner where that applies.
   std::function<std::optional<QualType>(NameId, Tk, u32)> declare_class;
+  // A local class's class-specifier at region token `index` ([class.local]), which the splitter cut
+  // as an item of its own: whether there is one; then its type, none after an error, and the
+  // index past its `}`. Set by the owner of a block.
+  struct LocalClass {
+    std::optional<QualType> type;
+    u32 end = 0;
+  };
+  std::function<std::optional<LocalClass>(u32)> define_class;
 
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
@@ -888,6 +897,23 @@ public:
       case Tk::kw_class:
       case Tk::kw_union: {
         u32 at = pos();
+        if (define_class && !qualified_ahead(1)) {
+          if (auto local = define_class(index())) {
+            seek(local->end);
+            if (!local->type) {
+              d.ok = false;
+              goto done;
+            }
+            if (any_type()) {
+              s_->diag(at, Diag::conflicting_specifiers, k);
+              d.ok = false;
+              goto done;
+            }
+            cls = *local->type;
+            d.defined_class = true;
+            continue;
+          }
+        }
         if (qualified_ahead(1)) {
           bump();
           const std::size_t diags = s_->diag_count();
@@ -2960,14 +2986,30 @@ public:
     if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
+    // `auto X`, `decltype(auto) X`, `auto... Xs` ([temp.param]/7): each argument deduces the
+    // parameter's type ([temp.arg.nontype]/1, [dcl.type.auto.deduct]). Inside the template that
+    // type is dependent, the parameter's own position, so `decltype(X)` names it.
+    if (s_->types().kind(t) == sema::TypeKind::placeholder) {
+      const sema::TypeRec r = s_->types().rec(t);
+      if (r.entity != sema::EntityId::none) {  // `C auto X` (#286)
+        s_->diag(at, Diag::not_supported, Tk::kw_auto);
+        ok = false;
+        return std::nullopt;
+      }
+      p.placeholder = r.decltype_auto ? ast::Placeholder::decltype_auto : ast::Placeholder::auto_;
+      t = s_->types().template_param(depth, index, p.pack != 0);
+    } else if (s_->types().has_placeholder(t)) {  // `auto* P`, `auto& R` (#1401)
+      s_->diag(at, Diag::not_supported, Tk::kw_auto);
+      ok = false;
+      return std::nullopt;
+    }
     // [temp.param]: a structural type, including the supported flat aggregate profile.
-    const bool deduced_parameter = s_->types().is_plain_auto(t);
     const bool class_parameter = !p.pack && s_->types().is_class(t) && !s_->types().is_dependent(t) &&
                                  s_->is_complete(t) && !questions().class_layout_uncertain(s_->types().class_of(t)) &&
                                  s_->templates().structural_class_parameter(t);
     if (!s_->types().is_integral(t) && !s_->types().is_enum(t) && !s_->types().is_pointer(t) &&
         !s_->types().is_reference(t) && !s_->types().is(t, Builtin::nullptr_t) &&
-        !s_->types().is_dependent(t) && !class_parameter && !deduced_parameter) {
+        !s_->types().is_dependent(t) && !class_parameter) {
       bool later = s_->types().is_class(t) || s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
                s_->types().is_class(t)      ? Tk::kw_class
@@ -2983,17 +3025,17 @@ public:
       const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
       in_integral_template_default_ = saved_default;
-      QualType target = deduced_parameter
-                          ? s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type()))
-                          : t;
-      auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
-      if (!v) v = template_value(e, target);
+      // A placeholder parameter's default deduces its type as an argument does.
+      QualType dt = t;
+      if (p.placeholder != ast::Placeholder::none && e.ok()) dt = sema::Types::unqualified(s_->rvalue(e).type());
+      auto v = s_->types().is(dt, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
+      if (!v) v = template_value(e, dt);
       if (!v) {
         ok = false;
         return std::nullopt;
       }
       p.has_default = 1;
-      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(target), *v};
+      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(dt), *v};
     }
     return p;
   }
@@ -7839,6 +7881,16 @@ public:
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement(bool no_prefix_attributes) {
     u32 begin = pos();
+    // `class-key identifier ;` declares a class in the block, unless the block has declared it
+    // ([dcl.type.elab]/2, [basic.scope.pdecl]/7): a local class.
+    if (body && is_class_key(kind()) && kind(1) == Tk::identifier && kind(2) == Tk::semi && declare_class) {
+      const NameId n = name_of(tok(1));
+      if (!s_->innermost_block_type(n)) declare_class(n, kind(), begin + 1);
+      bump();
+      bump();
+      bump();
+      return s_->node(ast::ExprStmt{}, begin, pos());
+    }
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);
@@ -7853,6 +7905,8 @@ public:
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
+    // A local class's definition may declare nothing else ([dcl.pre]/5).
+    if (spec.defined_class && spec.ok && accept(Tk::semi)) return s_->node(ast::ExprStmt{}, begin, pos());
     if (spec.is_typedef) {
       // Block-scope typedef-names ([dcl.typedef]).
       do {
