@@ -3360,6 +3360,12 @@ exports and their consumers are scoped by triple. Package bootstrap recipes
 continue to describe host builds. Inspection shows the argument source and
 the action trace shows its position and resolved word.
 
+Project generators and rule witnesses can use `host_triple()` in their
+arguments to get the canonical host triple independently of target selection
+(#1534). Receipts key on the resolved argument, so builds for different
+targets can share an action with identical resolved arguments and inputs.
+Inspection and traces identify the host selector.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
