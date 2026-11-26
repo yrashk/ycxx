@@ -111,10 +111,14 @@ struct DependencyGraphInspection {
   std::optional<std::vector<PlanValueDependencyEdge>> value_edges = std::nullopt;
 };
 
-struct DependencyOccurrenceChange {
-  std::vector<PlanDependencyEdge> before;
-  std::vector<PlanDependencyEdge> after;
+template<class Edge>
+struct OccurrenceChange {
+  std::vector<Edge> before;
+  std::vector<Edge> after;
 };
+
+using DependencyOccurrenceChange = OccurrenceChange<PlanDependencyEdge>;
+using ValueBindingOccurrenceChange = OccurrenceChange<PlanValueDependencyEdge>;
 
 struct PlanInspection {
   int schema = 1;
