@@ -390,6 +390,7 @@ enum class Diag : std::uint32_t {
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
+  builtin_addressof_pack [[=message{Severity::error, "'__builtin_addressof' cannot use a pack expansion in GCC compatibility mode"}]],
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   builtin_overflow_operand [[=message{Severity::error, "checked integer builtin requires an argument of type '{0:t}', got '{1:t}'"}]],
   builtin_ctzg_operand [[=message{Severity::error, "the supported form of '__builtin_ctzg' requires an 'unsigned int' operand but got '{0:t}'"}]],

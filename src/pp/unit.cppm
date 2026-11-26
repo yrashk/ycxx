@@ -1580,7 +1580,8 @@ private:
         report(f, at, lex::LexDiag::embed_bad_parameter);
         return std::nullopt;
       }
-      std::string_view name = s_->spellings.name(at.tok.payload);
+      const std::string_view name = s_->spellings.name(at.tok.payload);
+      const auto compatibility = s_->config.compatibility;
       std::optional<EmbedParam> parameter;
       const bool scoped = i < line.size() && line[i].tok.kind == Tk::coloncolon;
       if (scoped) {
@@ -1589,8 +1590,13 @@ private:
           report(f, at, lex::LexDiag::embed_bad_parameter);
           return std::nullopt;
         }
+        const std::string_view member = s_->spellings.name(line[i - 1].tok.payload);
+        if ((compatibility == ast::Compatibility::gcc && (name == "gnu" || name == "__gnu__") &&
+             (member == "offset" || member == "__offset__")) ||
+            (compatibility == ast::Compatibility::clang && name == "clang" && member == "offset"))
+          parameter = EmbedParam::offset;
       } else if (name == "limit") parameter = EmbedParam::limit;
-      else if (name == "offset") parameter = EmbedParam::offset;
+      else if (name == "offset" && compatibility == ast::Compatibility::spec) parameter = EmbedParam::offset;
       else if (name == "prefix") parameter = EmbedParam::prefix;
       else if (name == "suffix") parameter = EmbedParam::suffix;
       else if (name == "if_empty") parameter = EmbedParam::if_empty;

@@ -166,6 +166,102 @@ struct Base { private: int n; char c; };
 struct Derived : Base { char next; };
 static_assert(sizeof(Derived) == EXPECTED);
 ''')
+    (world.scope / 'member-alignment.cpp').write_text('''\
+struct alignas(16) Aligned { int a; };
+struct Natural { int a; };
+struct A { Aligned a; };
+struct B { Natural a; };
+struct C { alignas(16) Natural a; };
+struct D { alignas(int) Natural a; };
+union U { alignas(16) int a; };
+union V { int a; };
+static_assert(__is_layout_compatible(U, V));
+#ifdef CLANG_MODE
+static_assert(__is_layout_compatible(A, B));
+static_assert(!__is_layout_compatible(A, C));
+static_assert(!__is_layout_compatible(B, D));
+#else
+static_assert(!__is_layout_compatible(A, B));
+static_assert(__is_layout_compatible(A, C));
+static_assert(__is_layout_compatible(B, D));
+#endif
+''')
+    (world.scope / 'incomplete-self.cpp').write_text('''\
+struct Incomplete;
+union Union;
+struct Complete {};
+static_assert(!__builtin_is_virtual_base_of(Union, Union));
+static_assert(!__builtin_is_virtual_base_of(Complete, Complete));
+static_assert(__is_pointer_interconvertible_base_of(Incomplete, Incomplete));
+#ifdef INCOMPLETE
+static_assert(!__builtin_is_virtual_base_of(const Incomplete, Incomplete));
+#endif
+''')
+    (world.scope / 'embed.bin').write_bytes(bytes((13, 255, 65)))
+    offset_spellings = (('spec', 'offset'), ('gcc', 'gnu::offset'), ('gcc', '__gnu__::__offset__'),
+                        ('clang', 'clang::offset'))
+    for i, (_, spelling) in enumerate(offset_spellings):
+        (world.scope / f'offset-{i}.cpp').write_text(f'''\
+#if (__has_embed("embed.bin" {spelling}(2)) == __STDC_EMBED_FOUND__) != EXPECTED
+#error incorrect offset support
+#endif
+#if EXPECTED || defined(FORCE_DIRECTIVE)
+constexpr int byte =
+#embed "embed.bin" {spelling}(1) limit(1)
+;
+static_assert(byte == 255);
+#endif
+''')
+    (world.scope / 'function-template-pack.cpp').write_text('''\
+#ifndef VALID_ONLY
+template<class... A, class... B> void two_packs() {}
+template<class... A, class B> void missing() {}
+#endif
+template<class... A, class B> void deduce(B) {}
+template<class... A, class B = int> void with_default() {}
+void check() {
+#ifndef VALID_ONLY
+  two_packs();
+  two_packs<int>();
+#endif
+  deduce<int>(42);
+  with_default<int>();
+#ifdef MISSING
+  missing<int>();
+#endif
+}
+''')
+    (world.scope / 'ref-qualified.cpp').write_text('''\
+struct Receiver {
+  int f();
+  int f() &;
+  operator int() { return 3; }
+  operator int() & { return 4; }
+};
+int Receiver::f() { return 1; }
+int Receiver::f() & { return 2; }
+int use(Receiver& receiver) {
+#ifdef LVALUE_CALL
+  return receiver.f();
+#else
+  return Receiver{}.f();
+#endif
+}
+#ifdef STATIC_MEMBER
+struct Static { static int f(); int f() &; };
+#endif
+''')
+    (world.scope / 'addressof-pack.cpp').write_text('''\
+template<class... Ts> int* address(Ts&... args) { return __builtin_addressof(args...); }
+#ifdef TWO_WRITTEN
+template<class... Ts> int* address_twice(int& first, Ts&... rest) {
+  return __builtin_addressof(first, rest...);
+}
+#endif
+#ifdef INSTANTIATE
+int* forward_address(int& value) { return address(value); }
+#endif
+''')
     default = invoke('-E', 'version.cpp')
     assert b'202603L' in default[1], default
     pid = world.pid()
@@ -176,6 +272,8 @@ static_assert(sizeof(Derived) == EXPECTED);
         assert expected in invoke(*flags, '-E', 'version.cpp')[1]
         if mode == 'gcc':
             flags.append('-DGCC_MODE')
+        if mode == 'clang':
+            flags.append('-DCLANG_MODE')
         invoke(*flags, '-fsyntax-only', 'line.cpp')
         invoke(*flags, '-fsyntax-only', 'descriptor.cpp')
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
@@ -187,6 +285,29 @@ static_assert(sizeof(Derived) == EXPECTED);
         invoke(*flags, '-fsyntax-only', 'macro.cpp', status=mode == 'clang')
         invoke(*flags, '-isystem', 'includes', '-fsyntax-only', 'system-macro.cpp')
         invoke(*flags, '-DEXPECTED=8', '-fsyntax-only', 'layout.cpp')
+        invoke(*flags, '-fsyntax-only', 'incomplete-self.cpp')
+        _, _, diagnostic = invoke(*flags, '-DINCOMPLETE', '-fsyntax-only', 'incomplete-self.cpp', status=1)
+        assert b'incomplete' in diagnostic, diagnostic
+        for target in (LINUX, DARWIN):
+            invoke(target, *flags, '-fsyntax-only', 'member-alignment.cpp')
+        for i, (owner, _) in enumerate(offset_spellings):
+            expected = mode == owner
+            invoke(*flags, f'-DEXPECTED={int(expected)}', '-fsyntax-only', f'offset-{i}.cpp')
+            if not expected:
+                _, _, diagnostic = invoke(*flags, '-DEXPECTED=0', '-DFORCE_DIRECTIVE', '-fsyntax-only',
+                                         f'offset-{i}.cpp', status=1)
+                assert b'unsupported embed parameter' in diagnostic, diagnostic
+        invoke(*flags, '-fsyntax-only', 'function-template-pack.cpp', status=mode == 'spec')
+        invoke(*flags, '-DVALID_ONLY', '-fsyntax-only', 'function-template-pack.cpp')
+        if mode != 'spec':
+            invoke(*flags, '-DMISSING', '-fsyntax-only', 'function-template-pack.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'ref-qualified.cpp', status=mode != 'gcc')
+        if mode == 'gcc':
+            invoke(*flags, '-DLVALUE_CALL', '-fsyntax-only', 'ref-qualified.cpp', status=1)
+            invoke(*flags, '-DSTATIC_MEMBER', '-fsyntax-only', 'ref-qualified.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'addressof-pack.cpp')
+        invoke(*flags, '-DTWO_WRITTEN', '-fsyntax-only', 'addressof-pack.cpp', status=mode == 'gcc')
+        invoke(*flags, '-DINSTANTIATE', '-fsyntax-only', 'addressof-pack.cpp', status=mode == 'gcc')
         if mode != 'gcc':
             expected_layout = '12' if mode == 'clang' else '8'
             invoke(DARWIN, *flags, '-DEXPECTED=' + expected_layout, '-fsyntax-only', 'layout.cpp')

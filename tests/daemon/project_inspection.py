@@ -1,4 +1,4 @@
-"""Inspect source, resolved provenance, and semantic build diffs (#1256)."""
+"""Inspect source, resolved provenance, semantic build diffs, and workspace targets (#1256, #1392)."""
 
 import html
 import json
@@ -7,12 +7,14 @@ import subprocess
 import sys
 import tempfile
 
-from project_build import env_for, run_client, traced_build
+from project_build import daemon_identity, env_for, run_client, traced_build
 from runtime_dir import runtime_root
 
 
 MARKUP = '<script>alert("definition")</script> & report'
 UNSAFE_SOURCE = 'src/literal <b>&".cc'
+UNSAFE_TARGET = 'group/<script data-catalog-probe="1">&\tleaf</script>'
+INSPECTION_TARGETS = [('app', 'cpp.executable'), ('core', 'cpp.library'), ('wire', 'generate')]
 
 
 def prepare(scope):
@@ -78,6 +80,152 @@ def check_location(item, definition, spelling):
     line = definition.count('\n', 0, start) + 1
     column = start - definition.rfind('\n', 0, start)
     assert (item['line'], item['column']) == (line, column), (spelling, line, column, item)
+
+
+def scope_state(scope):
+    state = {}
+    for path in scope.rglob('*'):
+        stat = path.lstat()
+        state[path.relative_to(scope)] = stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_mode
+    return state
+
+
+def check_catalog_html(document, definition, targets):
+    # Module discovery also imports the plan fact checks below.
+    from project_module_graph import PlanHTML
+
+    parsed = PlanHTML(document)
+    assert any(node.tag in ('h1', 'h2') and node.visible().strip() == 'Workspace targets'
+               for node in parsed.elements), document
+    manifest = parsed.section('manifest', 'build.ycxx')
+    if not targets:
+        assert 'No target declarations.' in html.unescape(document), document
+        return
+    table, = (node for node in parsed.elements if node.tag == 'table')
+    assert [node.visible().strip() for node in table.descendants if node.tag == 'th'] == [
+        'Target', 'Rule', 'Declared at',
+    ]
+    rows = [[node for node in row.descendants if node.tag == 'td']
+            for row in table.descendants if row.tag == 'tr']
+    rows = [row for row in rows if row]
+    assert len(rows) == len(targets), rows
+    anchors = {node.attrs.get('id'): node for node in manifest.descendants}
+    lines = definition.splitlines()
+    for row, target in zip(rows, targets):
+        line, column = target['location']['line'], target['location']['column']
+        location = f'build.ycxx:{line}:{column}'
+        assert [cell.visible().strip() for cell in row] == [target['name'], target['kind'], location], target
+        link, = (node for node in row[-1].descendants if node.tag == 'a')
+        assert link.attrs['href'] == f'#manifest-line-{line}' and link.visible().strip() == location, target
+        assert anchors[f'manifest-line-{line}'].visible() == lines[line - 1], target
+    assert not any(node.attrs.get('data-catalog-probe') == '1' for node in parsed.elements)
+
+
+def check_catalog(ycxx, scope, env, definition, declarations, *, warm=False):
+    before = scope_state(scope)
+    daemon = daemon_identity(ycxx, scope, env)
+    assert (daemon is not None) == warm, daemon
+
+    def catalog(*args):
+        result = run_client(ycxx, scope, env, 'show', '--targets', *args)
+        assert result.returncode == 0 and not result.stderr, (args, result)
+        return result.stdout
+
+    obj = json.loads(catalog('--format=json'))
+    assert obj.keys() == {'schema', 'targets'} and obj['schema'] == 1, obj
+    targets = obj['targets']
+    assert [(target['name'], target['kind']) for target in targets] == declarations, targets
+    for target in targets:
+        assert target.keys() == {'name', 'kind', 'location'}, target
+        location = target['location']
+        assert location.keys() == {'path', 'line', 'column'} and location['path'] == 'build.ycxx', location
+        spelling = f"{target['kind']} {json.dumps(target['name'], ensure_ascii=False)}"
+        check_location(location, definition, spelling)
+
+    text = catalog()
+    assert catalog('--format=text') == text
+    heading, *rows = text.splitlines()
+    assert heading == 'Workspace targets', text
+    if targets:
+        assert len(rows) == len(targets), text
+        decoder = json.JSONDecoder()
+        for row, target in zip(rows, targets):
+            location = target['location']
+            site = f"{location['path']}:{location['line']}:{location['column']}"
+            row = row.strip()
+            name, end = decoder.raw_decode(row)
+            assert name == target['name'] and row[end:].split() == [target['kind'], site], row
+    else:
+        assert [row.strip() for row in rows] == ['No target declarations.'], text
+
+    check_catalog_html(catalog('--format=html'), definition, targets)
+    assert scope_state(scope) == before, 'catalog changed the workspace or build state'
+    assert daemon_identity(ycxx, scope, env) == daemon, 'catalog changed the resident daemon'
+    return obj
+
+
+def check_catalog_options(ycxx, scope, env):
+    before = scope_state(scope)
+    for args in (
+        ('--targets', 'app'), ('app', '--targets'),
+        ('--targets', '--target', 'x86_64-pc-linux-gnu'),
+        ('--target=x86_64-pc-linux-gnu', '--targets'),
+        ('--targets', '--against', 'unused.json'),
+        ('--format=source', '--targets'),
+        ('--targets', '--format=source', '--format=html'),
+        ('--targets', '--format=json', '--format=source'),
+        ('--targets', '--targets'),
+    ):
+        result = run_client(ycxx, scope, env, 'show', *args)
+        assert result.returncode == 2 and result.stderr and not result.stdout, (args, result)
+    assert scope_state(scope) == before, 'invalid catalog flags changed the workspace'
+
+
+def check_catalog_scopes(ycxx, scope, env):
+    scope.mkdir()
+    child = scope / 'child'
+    recipe = scope / 'rules'
+    vacant = scope / 'empty'
+    broken = scope / 'broken'
+    missing = scope / 'missing'
+    for directory in (child, recipe, vacant, broken, missing):
+        directory.mkdir()
+
+    parent = f'''# {MARKUP}\r
+use plugin("rules/package") as media
+    media.cook {json.dumps(UNSAFE_TARGET)} {{}}
+cpp.executable "leaf" {{ sources = ["main.cc"] }}
+  cpp.library "é-last" {{ sources = ["other.cc"] }}
+cpp.library "Z-first" {{ sources = ["other.cc"] }}
+  cpp.library "group/leaf" {{ sources = ["other.cc"] }}'''
+    current = '   generate "leaf" {}\ncpp.library "child-only" {}\n'
+    empty = '# A plugin import is not a declared target.\nuse plugin("absent/package") as ghost\n'
+    (scope / 'build.ycxx').write_bytes(parent.encode('utf-8'))
+    (child / 'build.ycxx').write_text(current, encoding='utf-8')
+    (vacant / 'build.ycxx').write_text(empty, encoding='utf-8')
+    (broken / 'build.ycxx').write_text('cpp.library "dupe" {}\ncpp.executable "dupe" {}\n', encoding='utf-8')
+
+    script = 'printf ran > "$1"; exit 7'
+    (recipe / 'build.ycxx').write_text(f'''host_action "package" {{
+    tool = "/bin/sh"
+    args = ["-c", {json.dumps(script)}, "recipe", {json.dumps(str(scope / 'recipe-ran'))}, output("plugin")]
+    outputs = {{ plugin = "rules.so" }}
+}}
+''', encoding='utf-8')
+
+    before = scope_state(scope)
+    check_catalog(ycxx, scope, env, parent, [
+        ('Z-first', 'cpp.library'), (UNSAFE_TARGET, 'media.cook'), ('group/leaf', 'cpp.library'),
+        ('leaf', 'cpp.executable'), ('é-last', 'cpp.library'),
+    ])
+    check_catalog(ycxx, child, env, current, [('child-only', 'cpp.library'), ('leaf', 'generate')])
+    check_catalog(ycxx, vacant, env, empty, [])
+    for directory in (broken, missing):
+        result = run_client(ycxx, directory, env, 'show', '--targets', '--format=json')
+        assert result.returncode == 1 and 'build.ycxx' in result.stderr and not result.stdout, result
+        if directory == broken:
+            assert 'duplicate target' in result.stderr, result
+    assert scope_state(scope) == before, 'catalog touched a nested workspace or package recipe'
 
 
 def check_unresolved(ycxx, scope, definition):
@@ -165,11 +313,15 @@ def main():
         scope = Path(directory).resolve()
         definition = prepare(scope)
         (scope / 'build.ycxx').write_bytes(definition.encode('utf-8'))
+        env = env_for(runtime)
+        cold_catalog = check_catalog(ycxx, scope, env, definition, INSPECTION_TARGETS)
+        check_catalog_options(ycxx, scope, env)
+        check_catalog_scopes(ycxx, scope / 'catalog-nesting', env)
         check_unresolved(ycxx, scope, definition)
         (scope / '.ycxx').mkdir()
-        env = env_for(runtime)
         try:
             traced_build(ycxx, scope, env, 'admit the inspection plan')
+            assert check_catalog(ycxx, scope, env, definition, INSPECTION_TARGETS, warm=True) == cold_catalog
             marker = scope / 'generator-ran'
             assert marker.read_text(encoding='utf-8') == 'ran', 'build did not run the generator'
             marker.unlink()

@@ -95,4 +95,21 @@ struct PlanChange {
   std::optional<PlanFact> after;
 };
 
+struct TargetDeclarationLocation {
+  std::string path = "build.ycxx";
+  std::size_t line;
+  std::size_t column;
+};
+
+struct TargetCatalogEntry {
+  std::string name;
+  std::string kind;
+  TargetDeclarationLocation location;
+};
+
+struct TargetCatalog {
+  int schema = 1;
+  std::vector<TargetCatalogEntry> targets = {};
+};
+
 }  // namespace ycxx::build

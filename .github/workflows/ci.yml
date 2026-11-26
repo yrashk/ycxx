@@ -68,6 +68,9 @@ jobs:
       - name: Build and bootstrap smoke test (tools/build)
         run: tools/build -j ${{ matrix.host.jobs }}
 
+      - name: Standalone YCXX Bench install and external consumer
+        run: tools/ci/bench-package ${{ matrix.host.jobs }}
+
       # The driver's fail-fast state (DECISIONS §9.6), keyed as tools/test (#5) expects.
       - name: Restore test state
         uses: actions/cache/restore@v4

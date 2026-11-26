@@ -5,6 +5,7 @@ import std;
 import ycxx.ast;
 import ycxx.build.inspection_html;
 import ycxx.build.inspection_model;
+import ycxx.build.manifest;
 import ycxx.build.module_graph_diff;
 import ycxx.build.plan;
 import ycxx.build.project;
@@ -18,6 +19,9 @@ std::expected<std::string, std::string> show_project(
     const std::filesystem::path& cwd, std::string_view target, InspectionFormat format,
     const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against = std::nullopt,
     const ast::Target* selected_target = nullptr);
+
+std::expected<std::string, std::string> show_targets(
+    const std::filesystem::path& cwd, InspectionFormat format);
 
 }  // namespace ycxx::build
 
@@ -119,6 +123,35 @@ std::string diff_text(const PlanComparison& diff) {
 }
 
 }  // namespace
+
+std::expected<std::string, std::string> show_targets(const std::filesystem::path& cwd, InspectionFormat format) {
+  if (format == InspectionFormat::source)
+    return std::unexpected("--targets requires text, JSON, or HTML output");
+  const auto text = read_text(cwd / "build.ycxx", "build definition");
+  if (!text) return std::unexpected(text.error());
+  auto manifest = parse_manifest(*text);
+  if (!manifest) {
+    const auto& error = manifest.error();
+    return std::unexpected(std::format("build.ycxx:{}:{}: {}", error.location.line, error.location.column, error.message));
+  }
+
+  TargetCatalog catalog;
+  for (auto& target : manifest->targets)
+    catalog.targets.push_back({std::move(target.name), std::move(target.kind),
+                               {.line = target.location.line, .column = target.location.column}});
+  std::ranges::sort(catalog.targets, {}, &TargetCatalogEntry::name);
+  if (format == InspectionFormat::json) return lsp::dump(lsp::to_json(catalog)) + "\n";
+  if (format == InspectionFormat::html) return render_target_catalog_html(catalog, *text);
+
+  std::string out = "Workspace targets\n";
+  if (catalog.targets.empty()) out += "  No target declarations.\n";
+  for (const auto& entry : catalog.targets) {
+    const auto& [path, line, column] = entry.location;
+    std::format_to(std::back_inserter(out), "  {}  {}  {}:{}:{}\n",
+                   lsp::dump(lsp::to_json(entry.name)), entry.kind, path, line, column);
+  }
+  return out;
+}
 
 std::expected<std::string, std::string> show_project(
     const std::filesystem::path& cwd, std::string_view target, InspectionFormat format,
