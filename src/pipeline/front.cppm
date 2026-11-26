@@ -75,6 +75,7 @@ struct SemaMessage {
   bool error = true;
   std::string text;
   std::uint32_t token = 0;
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 
 // The analysis of a unit (#947, slice 0): what `TuFront` was, less placing messages in files.
@@ -204,14 +205,14 @@ struct FunctionVisibility {
 // The attributes of the unit's symbols, from every declaration in it.
 void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations,
                              const std::set<EntityId>& inline_declarations, const std::set<EntityId>& weak_declarations,
-                             const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+                             const std::map<EntityId, FunctionVisibility>& function_visibility, bool target_is_linux) {
   if (!inline_declarations.empty())
     for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
     const bool inline_entity = inline_declarations.contains(e.id);
-    e.weak_reference = linux && !e.is_function && !inline_entity && weak_declarations.contains(e.id);
+    e.weak_reference = target_is_linux && !e.is_function && !inline_entity && weak_declarations.contains(e.id);
     // An inline variable falls outside the ordinary data visibility profile.
     e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_entity);
     if (!e.is_function || inline_entity) continue;
@@ -393,7 +394,7 @@ void init_function(sema::World& world, TranslationUnit& tu, std::span<const Dyna
   EntityId atexit = runtime.atexit();
   EntityId dso = runtime.dso();
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
-  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
+  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native();
   // One function per declaration, so that what fails points at it; startup runs them in order.
   for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
     std::size_t last = first;
@@ -1175,7 +1176,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   const auto& classes = program.classes();
   const bool has_typed_cast = program.has_typed_dynamic_cast();
   if (!has_typed_cast && !native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
-  const bool linux = world.target.triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = world.target.triple == ast::x86_64_linux.triple;
   const bool exceptions_enabled = program.exceptions_enabled();
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
@@ -1577,7 +1578,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     return true;
   };
   auto record_class_rtti_abi = [&](const ast::DeclSema& d, std::uint32_t k) {
-    if (!linux || d.kind != ast::DeclKind::class_ || d.entity == EntityId::none) return;
+    if (!target_is_linux || d.kind != ast::DeclKind::class_ || d.entity == EntityId::none) return;
     const bool friend_declaration = (d.flags & sema::decl_flag::friend_) != 0;
     if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
       classes_with_unapplied_rtti_abi.insert(d.entity);
@@ -1591,7 +1592,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     // A class template member is not emitted from its pattern. A friend class declaration
     // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
     if (member && !program.enclosing_heads(k).empty()) {
-      if (const auto* pattern = linux ? program.analysed_item(k) : nullptr)
+      if (const auto* pattern = target_is_linux ? program.analysed_item(k) : nullptr)
         for (const auto& declaration : ins.seqs.elements(pattern->decls))
           if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
       continue;
@@ -1729,12 +1730,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       }
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
-      if (linux && entity.kind == sema::EntityKind::constructor) {
+      if (target_is_linux && entity.kind == sema::EntityKind::constructor) {
         if (exceptions_enabled) hosted_union_constructor(program, tu.functions.back());
       } else if (!member && tu.main != d.entity && !it.specialization &&
                  program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
-        if (linux && exceptions_enabled) {
+        if (target_is_linux && exceptions_enabled) {
           f.hosted_catch = hosted_catch(program, d, body);
           f.unwind = f.hosted_catch ? UnwindEligibility::hosted_catch : cleanup_free_definition(program, d, body);
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
@@ -1743,7 +1744,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         if (exceptions_enabled && f.unwind == UnwindEligibility::none) {
           f.cleanup_call = hosted_cleanup_call(program, d, body);
           if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
-          else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
+          else if (target_is_linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
         }
       }
       coalesce_inline_function(tu.functions.back(), member);
@@ -2155,7 +2156,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
                            .special = Special::template_parameter_object, .template_args = object.args});
     tu.variables.push_back({.entity = e, .type = object.type, .init = object.args.front().value, .at = {}, .coalesced = true});
   }
-  apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, linux);
+  apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, target_is_linux);
   if (part) {
     part->attributed_members = std::move(attributed_members);
     part->classes_with_unapplied_rtti_abi = std::move(classes_with_unapplied_rtti_abi);
@@ -2340,7 +2341,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const SemaResult& sema = co_await cx.fetch<TuSema>(tu);
   for (const SemaMessage& m : sema.messages) {
     const pp::TokLoc at = region.site(std::min<std::size_t>(m.token, region.locs.size() - 1));
-    out.messages.push_back({at.offset, m.error, m.text, locations.at(at), m.token});
+    out.messages.push_back({at.offset, m.error, m.text, locations.at(at), m.token, m.warning});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
   out.shapes = sema.shapes;
@@ -2380,7 +2381,7 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
   auto absolute = [&](const std::string& name) {
     std::filesystem::path p(name);
     if (p.is_relative() && !source.cwd.empty()) p = std::filesystem::path(source.cwd) / p;
-    return p.lexically_normal().generic_native_encoded_string();
+    return p.lexically_normal().generic_string<char>();
   };
   // The region's number for the file, and the token at the offset: the last whose site in that
   // file starts at or before it (a macro's tokens all sit at its name).

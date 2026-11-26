@@ -603,7 +603,7 @@ def check_conflict_and_cycle_comparison(ycxx, scope, env, journal, before):
 
 
 def check_edits(ycxx, scope, env, journal, before):
-    legacy = {key: value for key, value in before.items() if key != 'module_graph'}
+    legacy = {key: value for key, value in before.items() if key not in ('module_graph', 'dependency_graph')}
     saved = scope.parent / 'old-schema-1.json'
     saved.write_text(json.dumps(legacy), encoding='utf-8')
     current_snapshot = scope.parent / 'with-module-graph.json'

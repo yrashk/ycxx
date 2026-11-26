@@ -1,0 +1,10 @@
+use plugin("rules/package") as tools
+
+tools.runner "runner" {}
+
+tools.header "config" {}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

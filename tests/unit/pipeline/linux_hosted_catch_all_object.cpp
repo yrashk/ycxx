@@ -123,7 +123,7 @@ enum class Order { handler_first, plain_first };
 
 void emit_object(const std::filesystem::path& output, Order order, bool cleanup_only = false) {
   obj::object o;
-  o.name = output.filename().display_string();
+  o.name = output.filename().native();
   o.arch = obj::target::x86_64_linux;
   const auto text = o.add_section(obj::standard_section::text);
   const auto eh = o.add_section(obj::standard_section::eh_frame);

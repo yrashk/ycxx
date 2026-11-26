@@ -26,6 +26,11 @@ using ast::u64;
 using ast::u8;
 using i64 = std::int64_t;
 
+// [dcl.link]: the draft distinguishes function types by language linkage.
+constexpr LangLinkage function_type_linkage(LangLinkage lang, ast::Compatibility mode) {
+  return mode == ast::Compatibility::spec ? lang : LangLinkage::cxx;
+}
+
 // Width in bits and signedness of an integral type on the target.
 struct IntShape {
   u32 bits;
@@ -70,6 +75,7 @@ struct TypeRec {
   bool fn_noexcept = false;
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
+  ConstId written_index = ConstId::none;  // an index whose written expression affects type identity
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   ast::DepNameForm dep_form = ast::DepNameForm::plain;  // a dependent member's: with `args`, or a template
   u16 depth = 0;                     // a template parameter's position ([temp.param])
@@ -140,9 +146,11 @@ public:
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
   // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type;
   // with `elems`, that pack is bound to them and `index` is the dependent part.
-  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0}); }
-  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems) {
-    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1});
+  QualType pack_index(QualType pack, ConstId index, ConstId written = ConstId::none) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0, written});
+  }
+  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems, ConstId written = ConstId::none) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1, written});
   }
   // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
@@ -267,6 +275,7 @@ public:
       r.kind = TypeKind::pack_index;
       r.inner = x.pack;
       r.bound_value = x.index;
+      r.written_index = x.written;
       r.pack = x.bound != 0;  // the pack is bound to `args`
       r.args = x.elems;
     } else if (t.is<ast::TTemplateParam>(c)) {
@@ -511,8 +520,8 @@ public:
     for (u32 unit : units) text.push_back(static_cast<char>(unit));
     return text;
   }
-  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}) {
-    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset});
+  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}, bool gcc_nested_end = false) {
+    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset, gcc_nested_end});
   }
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).
@@ -848,6 +857,7 @@ struct ClassRec {
   bool member_declarations_valid = false;  // no member declaration was lost to an error
   bool is_final = false;  // the class property's value from the definition ([class.pre])
   u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
+  u8 clang_weak_alignment = 0;  // the reported size and alignment when the peer has no usable layout
   bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
   // Its direct base classes, in declaration order ([class.derived.general]).
   std::vector<BaseRec> bases;
@@ -1424,7 +1434,7 @@ struct World {
   // specification is the target's `<string.h>`'s, so a written declaration or definition of the
   // function is the same entity, with one symbol ([dcl.link]): glibc's `__THROW` is
   // `noexcept(true)` in C++, the macOS SDK's declarations have none.
-  ast::DeclSema string_function(const StringFunction& f) {
+  ast::DeclSema string_function(const StringFunction& f, ast::Compatibility mode) {
     const auto c_type = [&](CType t) {
       const QualType void_type = types.builtin(Builtin::void_);
       const QualType char_type = types.builtin(Builtin::char_);
@@ -1441,7 +1451,7 @@ struct World {
     std::vector<QualType> params;
     for (CType t : std::span(f.params).first(f.arity)) params.push_back(c_type(t));
     const bool nonthrowing = target.operating_system == ast::OperatingSystem::linux_;
-    const QualType type = types.function(c_type(f.result), params, false, LangLinkage::c, Cv::none,
+    const QualType type = types.function(c_type(f.result), params, false, function_type_linkage(LangLinkage::c, mode), Cv::none,
                                          ast::RefQual::none, nonthrowing);
     ast::DeclSema d = implicit_function(
         entities.entity({.kind = EntityKind::function, .name = ins.names.intern(f.name), .type = type, .lang = LangLinkage::c}),

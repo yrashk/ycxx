@@ -5,6 +5,7 @@
 export module ycxx.client;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.build.inspection;
 import ycxx.build.plan;
@@ -64,7 +65,7 @@ void expand(std::string_view a, std::vector<std::string>& out, int depth) {
 
 std::string cwd_now() {
   std::error_code ec;
-  return std::filesystem::current_path(ec).native_encoded_string();
+  return std::filesystem::current_path(ec).native();
 }
 
 constexpr std::string_view target_prefix = "--target=";
@@ -516,7 +517,8 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
     shared.notes.push_back(std::format("ycxx: {}: traced again", why));
   };
   // The stack the daemon gives a request's thread: the compile's own recursion runs on it (#178).
-  std::jthread builder(std::jthread::stack_size_hint(std::size_t{256} << 20), [&] {
+  exec::worker_thread builder;
+  exec::start_worker(builder, std::size_t{256} << 20, [&] {
     if (use != Use::off) {
       auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
         std::lock_guard g(shared.m);
@@ -825,8 +827,11 @@ int build(std::span<const std::string_view> args) {
 int show(std::span<const std::string_view> args) {
   using ycxx::build::InspectionFormat;
   constexpr std::string_view usage =
-      "usage: ycxx show <target> [--target TRIPLE] [--format=text|json|source|html] [--against FILE]";
+      "usage: ycxx show <target> [--target TRIPLE] [--format=text|json|source|html] [--against FILE]\n"
+      "       ycxx show --targets [--format=text|json|html]";
   std::string_view target;
+  bool targets = false;
+  bool source_format = false;
   const ast::Target* native_target = nullptr;
   InspectionFormat format = InspectionFormat::text;
   std::optional<std::filesystem::path> against;
@@ -836,11 +841,16 @@ int show(std::span<const std::string_view> args) {
       std::println("{}", usage);
       return 0;
     }
-    if (arg.starts_with("--format=")) {
+    if (arg == "--targets" && !targets) {
+      targets = true;
+    } else if (arg.starts_with("--format=")) {
       const auto named = arg.substr(9);
       if (named == "text") format = InspectionFormat::text;
       else if (named == "json") format = InspectionFormat::json;
-      else if (named == "source") format = InspectionFormat::source;
+      else if (named == "source") {
+        format = InspectionFormat::source;
+        source_format = true;
+      }
       else if (named == "html") format = InspectionFormat::html;
       else {
         std::println(std::cerr, "ycxx: unknown plan format '{}'", named);
@@ -862,7 +872,11 @@ int show(std::span<const std::string_view> args) {
       return 2;
     }
   }
-  if (target.empty()) {
+  if (targets && (!target.empty() || native_target || against || source_format)) {
+    std::println(std::cerr, "ycxx: --targets accepts only --format=text, --format=json, or --format=html\n{}", usage);
+    return 2;
+  }
+  if (!targets && target.empty()) {
     std::println(std::cerr, "{}", usage);
     return 2;
   }
@@ -871,12 +885,15 @@ int show(std::span<const std::string_view> args) {
     std::println(std::cerr, "ycxx: cannot determine the working directory");
     return 1;
   }
-  std::optional<std::string> tool_path;
-  if (const char* path = std::getenv("PATH")) tool_path = path;
-  const ycxx::build::RuleToolchain toolchain{
-      .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
-  };
-  auto shown = ycxx::build::show_project(cwd, target, format, toolchain, against, native_target);
+  const auto shown = [&] {
+    if (targets) return ycxx::build::show_targets(cwd, format);
+    std::optional<std::string> tool_path;
+    if (const char* path = std::getenv("PATH")) tool_path = path;
+    const ycxx::build::RuleToolchain toolchain{
+        .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
+    };
+    return ycxx::build::show_project(cwd, target, format, toolchain, against, native_target);
+  }();
   if (!shown) {
     std::println(std::cerr, "ycxx: {}", shown.error());
     return 1;

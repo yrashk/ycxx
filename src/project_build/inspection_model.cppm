@@ -81,18 +81,69 @@ struct ModuleGraphInspection {
   std::vector<std::vector<std::size_t>> cycles = {};
 };
 
+struct ManifestLocation {
+  std::string path = "build.ycxx";
+  std::size_t line;
+  std::size_t column;
+};
+
+struct PlanDependencyEdge {
+  std::string consumer;
+  std::string producer;
+  std::string usage;
+  std::optional<std::string> output;
+  std::optional<std::string> binding;
+  ManifestLocation location;
+};
+
+struct PlanValueDependencyEdge {
+  std::string consumer;
+  std::string producer;
+  std::string usage;
+  std::string binding;
+  std::string export_name;
+  ManifestLocation location;
+};
+
+struct DependencyGraphInspection {
+  bool complete = true;
+  std::vector<PlanDependencyEdge> edges = {};
+  std::optional<std::vector<PlanValueDependencyEdge>> value_edges = std::nullopt;
+};
+
+template<class Edge>
+struct OccurrenceChange {
+  std::vector<Edge> before;
+  std::vector<Edge> after;
+};
+
+using DependencyOccurrenceChange = OccurrenceChange<PlanDependencyEdge>;
+using ValueBindingOccurrenceChange = OccurrenceChange<PlanValueDependencyEdge>;
+
 struct PlanInspection {
   int schema = 1;
   std::string target;
   std::string definition;
   std::vector<PlanFact> facts;
   std::optional<ModuleGraphInspection> module_graph = std::nullopt;
+  std::optional<DependencyGraphInspection> dependency_graph = std::nullopt;
 };
 
 struct PlanChange {
   std::string change;  // added, removed, changed
   std::optional<PlanFact> before;
   std::optional<PlanFact> after;
+};
+
+struct TargetCatalogEntry {
+  std::string name;
+  std::string kind;
+  ManifestLocation location;
+};
+
+struct TargetCatalog {
+  int schema = 1;
+  std::vector<TargetCatalogEntry> targets = {};
 };
 
 }  // namespace ycxx::build

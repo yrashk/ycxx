@@ -53,7 +53,7 @@ namespace fs = std::filesystem;
 
 namespace publication_detail {
 
-std::string display(const fs::path& path) { return path.display_string(); }
+std::string display(const fs::path& path) { return path.native(); }
 std::error_code posix_error() { return {errno, std::system_category()}; }
 
 std::string failed(std::string_view action, const fs::path& path, std::error_code ec) {
@@ -82,7 +82,7 @@ struct Temporary {
 };
 
 std::expected<Temporary, std::string> temporary_directory(const fs::path& parent) {
-  auto path = (parent / ".publish-XXXXXX").native_encoded_string();
+  auto path = (parent / ".publish-XXXXXX").native();
   if (!::mkdtemp(path.data())) return std::unexpected(failed("stage a build output in", parent, posix_error()));
   return Temporary(fs::path(path));
 }
@@ -127,7 +127,7 @@ std::expected<std::optional<Ownership>, std::string> find_ownership(
   std::optional<Ownership> active;
   for (const auto& entry : entries) {
     const auto filename = entry.filename();
-    if (!filename.native_encoded_string().starts_with(marker_prefix)) continue;
+    if (!filename.native().starts_with(marker_prefix)) continue;
     const auto manifest = manifests / filename;
     struct stat a{}, b{};
     if (::lstat(manifest.c_str(), &a) != 0) {
@@ -161,7 +161,7 @@ std::expected<Temporary, std::string> stage_ownership(const fs::path& candidate,
   const auto text = lsp::dump(lsp::to_json(OwnershipFile{1, std::vector<std::string>(std::from_range, names)}));
   if (text.size() > manifest_limit) return std::unexpected("runtime asset ownership record exceeds 8 MiB");
   for (;;) {
-    auto path = (manifests / ".owners-XXXXXX").native_encoded_string();
+    auto path = (manifests / ".owners-XXXXXX").native();
     const auto fd = ::mkstemp(path.data());
     if (fd < 0) return std::unexpected(failed("stage asset ownership record in", manifests, posix_error()));
     Temporary record{fs::path(path)};
@@ -242,7 +242,7 @@ std::optional<FileIdentity> identity(const fs::path& path) {
 
 Names observed_names(const fs::path& live, const std::vector<fs::path>& entries, const Names& claimed) {
   Names actual;
-  for (const auto& entry : entries) actual.insert(entry.filename().native_encoded_string());
+  for (const auto& entry : entries) actual.insert(entry.filename().native());
   Names resolved;
   for (const auto& name : claimed) {
     if (actual.contains(name)) {
@@ -262,7 +262,7 @@ Names observed_names(const fs::path& live, const std::vector<fs::path>& entries,
       }
       match = entry.filename();
     }
-    if (!match.empty()) resolved.insert(match.native_encoded_string());
+    if (!match.empty()) resolved.insert(match.native());
   }
   return resolved;
 }
@@ -351,7 +351,7 @@ std::expected<std::optional<AssetStage>, std::string> stage_assets(const fs::pat
   auto claimed = observed_names(live, *entries, *ownership ? (*ownership)->names : names);
   for (const auto& entry : *entries) {
     if (*ownership && entry == (*ownership)->marker) continue;
-    const auto name = entry.filename().native_encoded_string();
+    const auto name = entry.filename().native();
     std::error_code ec;
     const auto status = fs::symlink_status(entry, ec);
     if (ec) return std::unexpected(failed("inspect asset entry", entry, ec));
@@ -410,7 +410,7 @@ void retire_assets(AssetStage& assets) {
     const auto status = it->symlink_status(ec);
     if (ec) break;
     const bool marker = assets.old_manifest && name == assets.old_manifest->filename();
-    if (marker || (assets.previous_names.contains(name.native_encoded_string()) && !fs::is_directory(status)))
+    if (marker || (assets.previous_names.contains(name.native()) && !fs::is_directory(status)))
       fs::remove(it->path(), ec);
     else
       retire_shared_entry(it->path(), assets.live / name);

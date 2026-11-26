@@ -58,19 +58,24 @@ public:
     if (r->fixed) return interp::EnumLayout{*r->underlying, std::nullopt};
 
     // [dcl.enum]: the hypothetical integer type with the minimum width that holds the enumerators.
-    i64 low = 0;
-    u64 high = 0;
+    ast::Bits128 low{}, high{};
+    const bool is_signed = ast::is_signed(w_->target, *w_->types.builtin_of(*r->underlying));
     for (const EnumeratorRec& enumerator : r->enumerators) {
       if (enumerator.value == ConstId::none) return std::nullopt;
       auto bits = w_->ins.values.get<ast::VInt>(enumerator.value).bits;
-      if (ast::is_negative(bits)) low = std::min(low, i64(bits.lo));
-      else high = std::max(high, bits.lo);
+      if (is_signed && ast::is_negative(bits)) {
+        if (ast::wide::slt(bits, low)) low = bits;
+      } else if (ast::wide::ult(high, bits)) {
+        high = bits;
+      }
     }
-    const auto magnitude_bits = low < 0 ? std::max(std::bit_width(~u64(low)), std::bit_width(high))
-                                        : std::max(1, std::bit_width(high));
-    const u64 maximum = magnitude_bits == 64 ? ~u64{0} : (u64{1} << magnitude_bits) - 1;
-    if (low < 0 && !std::in_range<i64>(maximum)) return std::nullopt;
-    const i64 minimum = low < 0 ? -i64(maximum) - 1 : 0;
+    const bool negative = ast::is_negative(low);
+    auto magnitude_bits = ast::wide::bit_width(high);
+    if (negative) magnitude_bits = std::max(magnitude_bits, ast::wide::bit_width(ast::wide::bit_not(low)));
+    else magnitude_bits = std::max(1u, magnitude_bits);
+    constexpr ast::Bits128 ones{~u64{0}, ~u64{0}};
+    const auto maximum = magnitude_bits == 128 ? ones : ast::wide::bit_not(ast::wide::shl(ones, magnitude_bits));
+    const auto minimum = negative ? ast::wide::bit_not(maximum) : ast::Bits128{};
     return interp::EnumLayout{*r->underlying, interp::EnumRange{minimum, maximum}};
   }
 
@@ -303,6 +308,14 @@ private:
   }
 
 public:
+  // L1 can materialize this array shape as a field of a constant record.
+  static bool constant_record_char_array(Types& types, QualType type) {
+    if (!types.is_array(type)) return false;
+    const TypeRec array = types.rec(type);
+    const QualType element = types.canonical(array.inner);
+    return array.bound_value != ConstId::none && !Types::is_volatile(element) && types.is(element, Builtin::char_);
+  }
+
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
   Evaluated evaluate_initializer(Ex e, bool zero_default = true) {
     return evaluate_initializer(e, zero_default, {});
@@ -311,6 +324,9 @@ public:
 private:
   Evaluated evaluate_initializer(Ex e, bool zero_default, irgen::FunctionInput::InitializedFields initialized_fields) {
     if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
+    if (const auto literal = s_->as<ast::Literal>(e);
+        literal && s_->types().is_array(e.type()) && s_->ins().values.is<ast::VAggregate>(literal->value))
+      return {literal->value, 0, true};
     if (s_->as<ast::InitList>(e)) {
       const auto clauses = s_->list_elements(e);
       EntityId owner = EntityId::none;
@@ -578,12 +594,15 @@ private:
   bool constant_record_field(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
-    if (Types::is_volatile(type)) return false;
-    if (types.is_array(type)) {
-      const TypeRec array = types.rec(type);
-      const QualType element = types.canonical(array.inner);
-      return array.bound_value != ConstId::none && !Types::is_volatile(element) && types.is(element, Builtin::char_);
+    if (s_->compatibility() == ast::Compatibility::gcc) {
+      while (types.is_array(type)) {
+        const auto array = types.rec(type);
+        if (array.bound_value == ConstId::none) return false;
+        type = types.canonical(array.inner);
+      }
     }
+    if (Types::is_volatile(type)) return false;
+    if (types.is_array(type)) return constant_record_char_array(types, type);
     if (types.is_pointer(type)) return true;
     if (types.is_enum(type)) {
       const EnumRec* enumeration = s_->enum_rec(types.enum_of(type));
@@ -615,9 +634,12 @@ private:
       if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value)) {
         // Block-scope statics also have stored initializers. Const qualification alone does
         // not make a class variable potentially constant ([expr.const]).
-        if (Types::is_const(e->s_->types().canonical(value->type)) &&
-            e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
-          value->record = e->constant_record_layout(value->type);
+        Types& types = e->s_->types();
+        const QualType type = types.canonical(value->type);
+        const QualType leaf = types.innermost_array_element(type);
+        if (Types::is_const(leaf) && e->s_->world().entities.rec(v).linkage != ast::Linkage::none &&
+            (leaf == type || e->s_->is_aggregate(leaf)))
+          value->record = e->constant_record_layout(leaf);
       }
       return {std::move(value)};
     }
@@ -662,7 +684,7 @@ private:
           path.push_back(step.index);
         }
       }
-      return {vs.address(r.type, base, r.offset, path), 0, true};
+      return {vs.address(r.type, base, r.offset, path, r.gcc_nested_end), 0, true};
     }
     }
     return {};
