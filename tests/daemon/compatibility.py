@@ -1942,6 +1942,7 @@ int main() {
 
 def mixed_abstract_result(world, gxx):
     scope = world.scope
+    (scope / 'abstract-results.cpp').write_text(ABSTRACT_RESULTS)
     # The ABI symbol for an ordinary function does not encode its result type. A concrete
     # provider with the same result layout can exercise the hidden pointer at this boundary.
     (scope / 'abstract-result-peer.cpp').write_text('''\
@@ -2002,6 +2003,7 @@ def wide_enumerations(world, gxx):
 
 def wide_array_allocations(world, gxx):
     scope = world.scope
+    (scope / 'wide-array.cpp').write_text(WIDE_ARRAY)
     (scope / 'wide-array-peer.cpp').write_text('''\
 using Count = decltype(sizeof(0));
 static Count seen;
@@ -2359,6 +2361,7 @@ int use() { return gather(array); }
 
 def mixed_source_location(world, gxx):
     scope = world.scope
+    (scope / 'descriptor.cpp').write_text(DESCRIPTOR)
     (scope / 'descriptor-peer.cpp').write_text('''\
 #include <source_location>
 extern "C" const std::source_location recorded_location;
@@ -3579,12 +3582,13 @@ int main() {
   Huge h{0x100000002ULL, 5};
   if (read_big(h) != 0x100000007ULL || h.first != 0x123456789abcdef0ULL || h.byte != 5) return 1;
   Derived d{{0x100000002ULL, 5}, 31};
-  if (replace_tail(d) != 31 || d.last != 77 || d.first != 0x100000002ULL || d.byte != 5) return 1;
+  if (replace_tail(d) != 31 || d.last != 77 || d.first != 0x100000002ULL || d.byte != 5) return 2;
   Wide upper{7, 11};
   WideShort half{13, 21};
   WideChar byte{29, 31};
-  return read_small(upper, half, byte) != 49 || upper.first != 17 || half.first != 19 || byte.first != 23 ||
-         upper.byte != 11 || half.byte != 21 || byte.byte != 31;
+  if (read_small(upper, half, byte) != 49 || upper.first != 17 || half.first != 19 || byte.first != 23 ||
+      upper.byte != 11 || half.byte != 21 || byte.byte != 31) return 3;
+  return 0;
 }
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
@@ -3604,9 +3608,11 @@ int main() {
             peer = clang if mode == 'clang' else gxx
             native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
             if peer and native:
-                subprocess.run([peer, '-std=c++26', *macros, 'bit-fields-peer.cpp', 'bit-fields.o', '-o', 'wide-fields'],
-                               cwd=scope, check=True, capture_output=True, timeout=40)
-                subprocess.run([scope / 'wide-fields'], cwd=scope, check=True, timeout=20)
+                linked = subprocess.run([peer, '-std=c++26', *macros, 'bit-fields-peer.cpp', 'bit-fields.o',
+                                         '-o', 'wide-fields'], cwd=scope, capture_output=True, timeout=40)
+                assert linked.returncode == 0, (mode, target, linked)
+                executed = subprocess.run([scope / 'wide-fields'], cwd=scope, capture_output=True, timeout=20)
+                assert executed.returncode == 0, (mode, target, executed)
 
 
 def over_width_bit_field_diagnostics(world):
@@ -4227,7 +4233,10 @@ struct Empty {};
 int ycxx_empty(int, Empty, int);
 int ycxx_calls_empty();
 int peer_empty(int a, Empty, int b) { return a * 10 + b; }
-int main() { return ycxx_empty(3, Empty{}, 4) != 34 || ycxx_calls_empty() != 12; }
+int main() {
+  if (ycxx_empty(3, Empty{}, 4) != 34) return 1;
+  return ycxx_calls_empty() == 12 ? 0 : 2;
+}
 ''')
     clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
     for mode in MODES:
@@ -4242,9 +4251,11 @@ int main() { return ycxx_empty(3, Empty{}, 4) != 34 || ycxx_calls_empty() != 12;
             peer = gxx if mode == 'gcc' or (mode == 'spec' and target == LINUX) else clang
             native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
             if peer and native:
-                subprocess.run([peer, '-std=c++26', 'empty-class-caller.cpp', 'empty-class.o', '-o', 'empty-class'],
-                               cwd=scope, check=True, capture_output=True, timeout=40)
-                subprocess.run([scope / 'empty-class'], cwd=scope, check=True, timeout=20)
+                linked = subprocess.run([peer, '-std=c++26', 'empty-class-caller.cpp', 'empty-class.o', '-o',
+                                         'empty-class'], cwd=scope, capture_output=True, timeout=40)
+                assert linked.returncode == 0, (mode, target, linked)
+                executed = subprocess.run([scope / 'empty-class'], cwd=scope, capture_output=True, timeout=20)
+                assert executed.returncode == 0, (mode, target, executed)
 
 
 def historical_syntax_modes(world, gxx):
@@ -4427,29 +4438,11 @@ def general_mode_tests(world, gxx):
     static_lambda_conversion(world, gxx)
     lambda_conversion_symbols(world, gxx)
     floating_underflow_warnings(world)
-    # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
-    if NATIVE_LINUX:
-        mixed_class_calls(world, gxx)
-        mixed_large_class_calls(world, gxx)
-        # PARITY: by design: native array new is currently available on Linux x86-64.
-        wide_array_allocations(world, gxx)
-    mixed_darwin_class_calls(world, gxx)
-    mixed_empty_class_arguments(world, gxx)
-    mixed_class_alignment(world, gxx)
-    mixed_tail_padding(world, gxx)
-    overlapping_member_layout(world, gxx)
-    over_width_bit_fields(world, gxx)
     over_width_bit_field_diagnostics(world)
-    late_defaulted_special_members(world, gxx)
-    function_language_linkage(world, gxx)
-    mixed_abstract_result(world, gxx)
-    wide_enumerations(world, gxx)
-    empty_union(world, gxx)
     pack_index_symbols(world, gxx)
     bound_pack_index_symbols(world, gxx)
     template_argument_prefixes(world, gxx)
     placeholder_template_prefixes(world, gxx)
-    mixed_source_location(world, gxx)
     concrete_transform_signatures(world)
     immediate_template_escalation(world)
     historical_syntax_modes(world, gxx)
@@ -4458,11 +4451,38 @@ def general_mode_tests(world, gxx):
     world.same_daemon('compatibility modes', pid)
 
 
-def constraint_mode_tests(world, gxx):
-    (world.scope / 'constraint-start.cpp').write_text('int value;\n')
-    result = world.cxx([LINUX, '-fsyntax-only', 'constraint-start.cpp'], world.scope, world.daemon, timeout=40)
+def start_compatibility_daemon(world):
+    (world.scope / 'compatibility-start.cpp').write_text('int value;\n')
+    result = world.cxx([LINUX, '-fsyntax-only', 'compatibility-start.cpp'], world.scope, world.daemon, timeout=40)
     assert result == (0, b'', b''), result
-    pid = world.pid()
+    return world.pid()
+
+
+def abi_mode_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    mixed_empty_class_arguments(world, gxx)
+    over_width_bit_fields(world, gxx)
+    # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
+    if NATIVE_LINUX:
+        mixed_class_calls(world, gxx)
+        mixed_large_class_calls(world, gxx)
+        # PARITY: by design: native array new is currently available on Linux x86-64.
+        wide_array_allocations(world, gxx)
+    mixed_darwin_class_calls(world, gxx)
+    mixed_class_alignment(world, gxx)
+    mixed_tail_padding(world, gxx)
+    overlapping_member_layout(world, gxx)
+    late_defaulted_special_members(world, gxx)
+    function_language_linkage(world, gxx)
+    mixed_abstract_result(world, gxx)
+    wide_enumerations(world, gxx)
+    empty_union(world, gxx)
+    mixed_source_location(world, gxx)
+    world.same_daemon('compatibility ABI modes', pid)
+
+
+def constraint_mode_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
     constrained_lambda_conversions(world, gxx)
     nested_template_symbols(world, gxx)
     lambda_constraint_expression_symbols(world, gxx)
@@ -4489,7 +4509,7 @@ def constraint_mode_tests(world, gxx):
 def main():
     ycxx, gxx, *groups = sys.argv[1:]
     group, = groups or ['all']
-    if group not in ('all', 'general', 'constraints'):
+    if group not in ('all', 'general', 'abi', 'constraints'):
         raise ValueError(f'unknown compatibility test group {group}')
     world = Env(str(Path(ycxx).resolve()))
     for env in (world.base, world.cold, world.daemon):
@@ -4497,6 +4517,8 @@ def main():
     try:
         if group in ('all', 'general'):
             general_mode_tests(world, gxx)
+        if group in ('all', 'abi'):
+            abi_mode_tests(world, gxx)
         if group in ('all', 'constraints'):
             constraint_mode_tests(world, gxx)
     finally:
