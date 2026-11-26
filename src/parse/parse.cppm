@@ -7790,14 +7790,15 @@ private:
   bool plain_virtual_signature(const items::Item& source, u32 type_end, u32 name_at, bool check_exception) {
     const auto& region = p_->region();
     const auto tokens = std::span(region.tokens);
+    const u32 begin = source.declaration_begin();
     const u32 end = source.has_body() ? source.body_begin : source.end;
-    if (type_end <= source.begin || name_at + 1 >= end || tokens[name_at].kind != Tk::identifier ||
+    if (type_end <= begin || name_at + 1 >= end || tokens[name_at].kind != Tk::identifier ||
         tokens[name_at + 1].kind != Tk::l_paren ||
         layout_attribute(region, source.begin, end, LayoutAttributes::any)) return false;
     const auto scalar_specifier = [](Tk kind) {
       return Parser::simple_type_keyword(kind) || kind == Tk::kw_const || kind == Tk::kw_volatile;
     };
-    const auto result = tokens.subspan(source.begin, type_end - source.begin);
+    const auto result = tokens.subspan(begin, type_end - begin);
     if (!std::ranges::all_of(result, [&](const lex::Tok& token) {
           return scalar_specifier(token.kind) || token.kind == Tk::kw_virtual;
         })) return false;
@@ -7836,19 +7837,21 @@ private:
     const bool key_function = *slot == 0;
     if (key_function && !derived && !borrowed_key && !sema::native_virtual_table_slots(record)) return false;
     const auto& region = p_->region();
+    const u32 qualifier_at = it_->begin + d.qualifier_at;
+    const u32 name_at = it_->begin + d.name_at;
     if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
-        !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
-                                 /*check_exception=*/true)) return false;
+        !plain_virtual_signature(*it_, qualifier_at, name_at, /*check_exception=*/true)) return false;
     // The automatic derived layout certifies one written int() override. Its out-of-class
     // definition must also use exactly that prototype, without aliases, attributes or suffixes.
-    if (derived && (!key_function || region.tokens[it_->begin].kind != Tk::kw_int || d.qualifier_at != 1 ||
-                    it_->body_begin != it_->begin + d.name_at + 3)) return false;
+    const u32 begin = it_->declaration_begin();
+    if (derived && (!key_function || region.tokens[begin].kind != Tk::kw_int || qualifier_at != begin + 1 ||
+                    it_->body_begin != name_at + 3)) return false;
 
     const auto& entity = s_.world().entities.rec(cls);
     auto defining = p_->class_items_.find(std::to_underlying(cls));
     if (entity.linkage != ast::Linkage::external || defining == p_->class_items_.end()) return false;
     const auto& head = p_->items().items[defining->second];
-    const auto key = region.tokens[head.begin].kind;
+    const auto key = region.tokens[head.declaration_begin()].kind;
     if (key != Tk::kw_struct && key != Tk::kw_class) return false;
     if (key_function) {
       if (region.first_visibility_pragma && *region.first_visibility_pragma < it_->body_begin) return false;
@@ -7866,7 +7869,7 @@ private:
     full += s_.ins().names.spelling(entity.name);
     full += "::";
     std::string written;
-    for (u32 at = it_->begin + d.qualifier_at; at < it_->begin + d.name_at; ++at) {
+    for (u32 at = qualifier_at; at < name_at; ++at) {
       const auto token = region.tokens[at];
       if (token.kind == Tk::identifier) written += region.name(token);
       else if (token.kind == Tk::coloncolon) written += "::";
@@ -9582,7 +9585,7 @@ sema::PeerVirtualLayout Program::peer_virtual_layout(u32 item, EntityId cls, con
     return decl_sema(*decl);
   };
   if (derived) {
-    const auto key = r_->tokens[head.begin].kind;
+    const auto key = r_->tokens[head.declaration_begin()].kind;
     if ((key != lex::Tk::kw_struct && key != lex::Tk::kw_class) || entity.linkage != ast::Linkage::external ||
         !rec.friends.empty() || !sema::native_virtual_derived_declarations(rec, classes_, w_->types, written_member))
       return none;
@@ -9664,10 +9667,10 @@ EntityId Program::peer_automatic_primary_base(u32 item, EntityId cls, const sema
 
   const auto class_key = [](lex::Tk k) { return k == kw_struct || k == kw_class; };
   const auto& base_source = items_->items[base_item];
-  const auto base_head = tokens(base_source.begin, base_source.brace_begin);
+  const auto base_head = tokens(base_source.declaration_begin(), base_source.brace_begin);
   if (base_head.size() != 2 || !class_key(base_head[0].kind) || !names(base_head[1], edge.cls)) return EntityId::none;
   const auto& derived_source = items_->items[item];
-  const auto head = tokens(derived_source.begin, derived_source.brace_begin);
+  const auto head = tokens(derived_source.declaration_begin(), derived_source.brace_begin);
   if ((head.size() != 4 && head.size() != 5) || !class_key(head[0].kind) || !names(head[1], cls) ||
       head[2].kind != colon || (head.size() == 5 && head[3].kind != kw_public) || !names(head.back(), edge.cls))
     return EntityId::none;
@@ -9897,7 +9900,7 @@ bool Program::peer_pure_dispatch(EntityId cls) const {
       !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
       w_->ins.names.spelling(owner.name).empty() || definition == class_items_.end()) return false;
   const auto& head = items_->items[definition->second];
-  const auto key = r_->tokens[head.begin].kind;
+  const auto key = r_->tokens[head.declaration_begin()].kind;
   if ((key != kw_struct && key != kw_class) || head.template_depth || head.specialization ||
       layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) || !peer_root_vtable_visible(cls)) return false;
 
@@ -9983,7 +9986,7 @@ std::optional<EntityId> Program::peer_root_destructor_key(EntityId cls) const {
       !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
       w_->ins.names.spelling(owner.name).empty() || definition == class_items_.end()) return std::nullopt;
   const auto& head = items_->items[definition->second];
-  const auto class_key = r_->tokens[head.begin].kind;
+  const auto class_key = r_->tokens[head.declaration_begin()].kind;
   if ((class_key != kw_struct && class_key != kw_class) || head.template_depth || head.specialization ||
       layout_may_be_packed(*r_, head.begin, head.brace_end) ||
       layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) ||
@@ -10331,7 +10334,7 @@ std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destru
         unnamed(namespace_path(entity.scope)) || w_->ins.names.spelling(entity.name).empty() ||
         definition == class_items_.end() || !peer_root_vtable_visible(owner)) return nullptr;
     const auto& head = items_->items[definition->second];
-    const auto key = r_->tokens[head.begin].kind;
+    const auto key = r_->tokens[head.declaration_begin()].kind;
     if ((key != kw_class && key != kw_struct) || head.template_depth || head.specialization ||
         layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) ||
         std::ranges::count_if(head.members, [&](u32 k) {
@@ -10445,7 +10448,8 @@ bool Program::peer_root_destructor_observer(EntityId function, EntityId cls) con
         in_attributed_namespace(item) || decl.hidden_visibility) return false;
     for (u32 parent = source.parent; parent != items::none; parent = items_->items[parent].parent)
       if (items_->items[parent].kind != ItemKind::namespace_def) return false;
-    const auto tokens = std::span(r_->tokens).subspan(source.begin, source.end - source.begin);
+    const u32 begin = source.declaration_begin();
+    const auto tokens = std::span(r_->tokens).subspan(begin, source.end - begin);
     std::size_t at = 0;
     const auto accept = [&](lex::Tk kind) {
       if (at == tokens.size() || tokens[at].kind != kind) return false;
