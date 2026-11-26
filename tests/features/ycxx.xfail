@@ -9,7 +9,6 @@ draft/basic/basic.contract.eval-3.accept.cpp 'contract_assert' not supported yet
 draft/basic/basic.def.odr-2.reject.cpp errors elsewhere: '&' not supported yet
 draft/basic/basic.def.odr-3.reject.cpp errors elsewhere: '[' not supported yet
 draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'auto' is not supported yet
-draft/basic/basic.def.odr-5.accept.cpp 'auto' not supported yet
 draft/basic/basic.def.odr-8.accept.cpp '[' not supported yet
 draft/basic/basic.fundamental-2.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.life-2.accept.cpp preprocessing directives are not supported yet
@@ -34,7 +33,6 @@ draft/basic/class.member.lookup-3.reject.cpp errors elsewhere: 'struct' not supp
 draft/basic/class.member.lookup-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.member.lookup-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.temporary-5.accept.cpp preprocessing directives are not supported yet
-draft/basic/intro.execution-3.accept.cpp 'union' not supported yet
 draft/basic/intro.memory-1.accept.cpp 'struct' not supported yet
 draft/basic/intro.object-2.accept.cpp preprocessing directives are not supported yet
 draft/basic/intro.object-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
@@ -90,7 +88,6 @@ draft/class/class.pre-1.accept.cpp 'namespace' not supported yet
 draft/class/class.prop-1.accept.cpp 'struct' not supported yet
 draft/class/class.protected-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.union.anon-1.accept.cpp 'union' not supported yet
-draft/class/class.union.anon-2.reject.cpp errors elsewhere: 'union' not supported yet
 draft/class/class.union.anon-3.reject.cpp errors elsewhere: 'union' not supported yet
 draft/class/class.union.general-1.accept.cpp preprocessing directives are not supported yet
 draft/class/class.virtual-1.accept.cpp 'struct' not supported yet
@@ -254,7 +251,6 @@ draft/expr/expr.prim.req.general-2.reject.cpp errors elsewhere: 'template' not s
 draft/expr/expr.prim.req.type-1.accept.cpp 'template' not supported yet
 draft/expr/expr.prim.splice-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.prim.this-1.accept.cpp 'struct' not supported yet
-draft/expr/expr.prim.this-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/expr/expr.ref-1.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.ref-2.accept.cpp 'struct' not supported yet
 draft/expr/expr.reflect-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
