@@ -79,8 +79,7 @@ as independent components.
   it at a checkout with the portable provider and shared-mode contract handler.
 
 ```sh
-cmake -S . -B build-system -G Ninja -DYCXXC_STDLIB=system \
-  -DYCXXC_LIBYCXX_SOURCE_DIR=/path/to/libycxx
+cmake -S . -B build-system -G Ninja -DYCXXC_STDLIB=system
 cmake --build build-system --target ycxxc
 ```
 
