@@ -11,6 +11,7 @@ out of the checkout and build it there.
 | [Staged tool](staged-tool/README.md) | [build.ycxx](staged-tool/build.ycxx) | Run a generated executable to produce a C++ header, then edit the executable under watch. |
 | [Native host tool](native-host-tool/README.md) | [build.ycxx](native-host-tool/build.ycxx) | Compile a host scanner to generate a C++ header and reuse it across native targets. |
 | [Native host witness](native-host-witness/README.md) | [build.ycxx](native-host-witness/build.ycxx) | Classify a host scanner's exit status and watch an included header change the typed score. |
+| [Host producer witness](host-producer-witness/README.md) | [build.ycxx](host-producer-witness/build.ycxx) | Build a host scanner, generate a witness executable through two actions, and trace its score into a cross-target app. |
 | [Staged witness](staged-witness/README.md) | [build.ycxx](staged-witness/build.ycxx) | Run a generated analyzer and watch helper edits that preserve or change its typed result. |
 | [Module discovery](module-discovery/README.md) | [build.ycxx](module-discovery/build.ycxx) | Inspect named module providers and compare the imports selected for Linux and macOS. |
 | [Module providers](module-providers/README.md) | [build.ycxx](module-providers/build.ycxx) | Resolve a shared module through two import paths and compare its provider on Linux and macOS. |

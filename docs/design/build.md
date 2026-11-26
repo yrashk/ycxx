@@ -245,8 +245,9 @@ The coordinator verifies the engine revision before launching an action
 that depends on a host build and again before admitting its receipt. Watch
 observes the source and include reads through the same file table as native
 compilation. Host executables are available to ordinary generator recipes
-and direct witness tools. Planning inputs and transitive witness producer
-chains with host dependencies remain in #1259.
+and staged witness tools, including generator chains that use a host
+executable upstream. Host executable support for rule planning inputs
+remains in #1259.
 [Native host tool example](../../examples/project-build/native-host-tool/README.md)
 
 Project generators and rule witnesses accept `target_triple()` (#1347)
@@ -731,7 +732,8 @@ An input has a single logical name and cannot share a name with an ordinary
 the selected receipt's bytes. The artifact is available to planning before
 the rule emits its declarations. The same generator and receipt serve any
 ordinary artifact consumers. The planner rejects cycles across planning,
-artifact and value edges.
+artifact and value edges. Planning input producer chains must be independent
+of host executable artifacts (#1259).
 
 The worker's request depends on the named input bytes. When a generator
 runs and produces equal bytes, the existing worker result stays reusable.
@@ -902,6 +904,29 @@ while the witness runs. [Native host witness example](../../examples/project-bui
 The same staged analyzer can call a helper at an absolute host path. Declare
 the path in `tool_inputs` to track helper changes as witness inputs. Equal
 classified scores still reuse the app. [Helper walkthrough](../../examples/project-build/staged-witness/README.md#track-a-helper-executable)
+
+### Witnesses with host producers (#1571)
+
+A staged witness can select an ordinary generator output whose producer
+chain consumes native host executables. The example runs the host
+`scanner` in `analyzer_source` to write an executable script. The
+`analyzer` action copies that script and preserves its mode. The emitted
+`observed` witness selects it through `tool = input("analyzer")` and
+`inputs = { analyzer = artifact("analyzer", "executable") }`.
+The `config` rule consumes the classified score with
+`facts = { score = value("observed", "score") }`.
+
+The coordinator collects the linked images and source and include
+observations of all reachable host tools in one current engine revision
+before staging the producers. It revalidates the recipe and staged inputs
+when files change during generation or classification. Generator and
+witness action keys use the concrete staged bytes and executable mode.
+Equal selected outputs can therefore reuse the witness receipt, which
+stores the exit status, stdout, and stderr. The classifier publishes a
+separate typed value. Equal values preserve reuse for downstream consumers
+such as the header generator. Read-only inspection and watch reobserve
+the reachable host tool inputs.
+[Host producer witness example](../../examples/project-build/host-producer-witness/README.md)
 
 ### Structured shader reflection
 

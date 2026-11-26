@@ -3715,6 +3715,15 @@ observations. The witness receipt uses the staged image, so an edit that
 preserves the linked bytes refreshes the observations and reuses the
 witness. [Native host witness example](examples/project-build/native-host-witness/README.md)
 
+An ordinary generator chain can stage a host executable upstream of a typed
+witness (#1571). The coordinator captures the reachable host images and
+file observations together. Staged bytes and executable mode enter the
+action keys. The witness receipt stores raw evidence, and the classifier
+supplies the typed value. Equivalent artifacts or equal classified results
+allow downstream reuse. Rule planning inputs still require a producer chain
+independent of host executable artifacts (#1259).
+[Host producer witness example](examples/project-build/host-producer-witness/README.md)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
