@@ -1942,6 +1942,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
   The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
   initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
+- Named `const_cast` changes cv-qualification on ordinary pointers with matching shapes,
+  including cv `void*`, and on scalar lvalues and xvalues ([expr.const.cast],
+  [#1424](https://github.com/yrashk/ycxx/issues/1424)). It keeps the original address and
+  gives a reference cast the requested value category. In a constant expression, an access
+  still respects the qualifiers of the underlying object. Pointer-to-member casts and class or
+  array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
 - Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
   and pointer-width integral types. A too-narrow integer destination is ill-formed, and
   an evaluated cast is disallowed in a core constant expression. Smaller integer sources

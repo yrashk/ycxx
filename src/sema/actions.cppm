@@ -10146,6 +10146,63 @@ public:
     return false;
   }
 
+  // [expr.const.cast]/3: the qualification decompositions have identical constructors
+  // and terminal types. Either direction can change cv at any level.
+  bool const_cast_similar(QualType from, QualType to) {
+    if (same_unqualified(from, to)) return true;
+    const TypeRec a = types().rec(from), b = types().rec(to);
+    if (a.kind != b.kind) return false;
+    if (a.kind == TypeKind::pointer) return const_cast_similar(a.inner, b.inner);
+    if (a.kind == TypeKind::array && a.bound_value == b.bound_value)
+      return const_cast_similar(a.inner, b.inner);
+    return false;
+  }
+
+  Ex const_cast_to(Ex e, QualType to, u32 at_) {
+    if (!e.ok()) return e;
+    const Ex fail{NodeId::none, e.begin, e.end};
+    const TypeRec destination = types().rec(to);
+    const bool reference = destination.kind == TypeKind::reference;
+    const QualType target = reference ? destination.inner : Types::unqualified(types().canonical(to));
+    const ValueCategory category = !reference ? ValueCategory::prvalue :
+        destination.rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue;
+    if (dependent(e) || types().is_dependent(to))
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(target), category);
+    const auto invalid = [&] {
+      diag(at_, Diag::no_conversion, e.type(), to);
+      return fail;
+    };
+    const auto unsupported = [&] {
+      diag(at_, Diag::not_supported, lex::Tk::kw_const_cast);
+      return fail;
+    };
+
+    // [expr.const.cast]/4: retain the object and change only its glvalue's type/category.
+    if (reference) {
+      if (!types().is_object(target) || !const_cast_similar(e.type(), target)) return invalid();
+      if (e.info.bit_width) {
+        diag(at_, Diag::const_cast_bit_field);
+        return fail;
+      }
+      if (!destination.rvalue_ref && e.cat() != ValueCategory::lvalue) return invalid();
+      if (!e.glvalue())
+        return types().is_class(target) || types().is_array(target) ? unsupported() : invalid();
+      if (!types().is_scalar(target) || types().is_member_pointer(target)) return unsupported();
+      return convert_node(e, ast::ConversionKind::qualification, target, category);
+    }
+
+    // [expr.const.cast]/1,3: the operand of a pointer cast undergoes the value conversions.
+    if (types().is_member_pointer(target) && types().is_member_pointer(e.type())) return unsupported();
+    if (!types().is_pointer(target) || types().is_function(types().pointee(target))) return invalid();
+    if (types().is_array(e.type()) && !e.glvalue())
+      return const_cast_similar(types().rec(e.type()).inner, types().pointee(target)) ? unsupported() : invalid();
+    if (!types().is_pointer(e.type()) && !types().is_array(e.type())) return invalid();
+    Ex value = rvalue(e);
+    if (!value.ok()) return fail;
+    if (!const_cast_similar(value.type(), target)) return invalid();
+    return convert_node(value, ast::ConversionKind::qualification, target);
+  }
+
   // [expr.reinterpret.cast]: the supported object-pointer/integer conversions.
   Ex reinterpret_cast_to(Ex e, QualType to, u32 at_) {
     if (!e.ok()) return e;

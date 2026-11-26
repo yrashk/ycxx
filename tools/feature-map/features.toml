@@ -737,7 +737,7 @@ std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
 issues = [199, 59, 216, 697]
-note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
+note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, remaining named `const_cast` and `reinterpret_cast` forms, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''

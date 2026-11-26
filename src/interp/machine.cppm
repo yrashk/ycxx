@@ -249,6 +249,7 @@ private:
     u64 leaves = 0;    // cells of an object of this type
     u64 size = 0;      // bytes ([basic.types.general]); 0 for a function type
     bool is_const = false;
+    bool is_volatile = false;
   };
   struct Frame {
     const ir::Function* fn = nullptr;
@@ -416,7 +417,9 @@ const Machine::Shape& Machine::shape(QualType q) {
   u32 key = std::to_underlying(c);
   if (auto it = shapes_.find(key); it != shapes_.end()) return it->second;
   Shape s;
-  s.is_const = (std::to_underlying(ast::cv_of(c)) & 1) != 0;
+  const auto cv = std::to_underlying(ast::cv_of(c));
+  s.is_const = (cv & std::to_underlying(ast::Cv::const_)) != 0;
+  s.is_volatile = (cv & std::to_underlying(ast::Cv::volatile_)) != 0;
   auto b = ast::builtin_of(*in_, c);
   if (config_.enum_layout && in_->types.is<ast::TEnum>(c)) {
     if (auto layout = config_.enum_layout(in_->types.get<ast::TEnum>(c).entity)) {
@@ -456,6 +459,7 @@ const Machine::Shape& Machine::shape(QualType q) {
     // An array's elements carry its cv ([basic.type.qualifier]); `canonical` pushed it there.
     Shape e = shape(a.elem);
     s.is_const = e.is_const;
+    s.is_volatile = e.is_volatile;
     s.leaves = e.leaves * s.bound;
     s.size = e.size * s.bound;
   } else if (in_->types.is<ast::TFunction>(c)) {
@@ -676,7 +680,6 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
                               Place& out) {
   if (p.kind == VKind::null) return fail(Reason::null_access);
   if (p.kind != VKind::object) return fail(p.kind == VKind::function ? Reason::access_type : Reason::ill_formed);
-  if (volatile_ && config_.mode == Mode::constant) return fail(Reason::volatile_access);
   const Object& ob = objects_[p.ref];
   if (!ob.storage) return fail(Reason::storage_ended);
   bool past = false;
@@ -695,22 +698,23 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     Life life = cells_[c].life;
     if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
   }
+  const Life life = pl->ncells == 0 ? record_life : cells_[pl->cell0].life;
   const bool writing = use == Use::write || use == Use::callee_write;
+  // The initializing store comes before `obj.begin` and does not access a live object.
+  const bool initializing = use == Use::write && life == Life::before;
+  const bool constant = config_.mode == Mode::constant;
+  if (constant && volatile_ && !initializing) return fail(Reason::volatile_access);
+  // A cast changes the glvalue's qualifiers, and the object retains its own ([dcl.type.cv]).
+  if (use == Use::callee_write || (constant && !initializing)) {
+    if (shape(pl->type).is_volatile || shape(ob.type).is_volatile)
+      return fail(Reason::volatile_object_access);
+  }
   if (writing) {
     if (ob.read_only) return fail(Reason::modify_const);
-    // The initializing store comes before `obj.begin`; a const object is not modified after it.
-    const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
-    if (shape(pl->type).is_const && life == Life::alive)
+    if (life == Life::alive && (shape(pl->type).is_const || (shape(ob.type).is_const && !pl->mutable_field)))
       return fail(Reason::modify_const);
-    if (use == Use::callee_write) {
-      // A cast can remove the destination's volatile qualification but does not change the
-      // object it designates, including a subobject of a volatile object ([dcl.type.cv]).
-      const auto cv = [&](QualType type) { return std::to_underlying(ast::cv_of(in_->canonical(type))); };
-      if ((cv(pl->type) | cv(ob.type)) & std::to_underlying(ast::Cv::volatile_))
-        return fail(Reason::volatile_object_access);
-    }
-    if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
-  } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
+    if (constant && ob.outside) return fail(Reason::modify_outside);
+  } else if (constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
     return fail(Reason::not_usable, 0, global);
   }

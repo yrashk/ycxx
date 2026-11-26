@@ -120,6 +120,7 @@ enum class Diag : std::uint32_t {
   bit_field_declaration [[=message{Severity::error, "only named, unqualified int and unsigned int bit-fields in ordinary records are supported"}]],
   bit_field_initializer [[=message{Severity::error, "a default member initializer on a bit-field is not supported yet"}]],
   bit_field_address [[=message{Severity::error, "a bit-field has no address"}]],
+  const_cast_bit_field [[=message{Severity::error, "const_cast cannot cast a bit-field to a reference"}]],
   bit_field_size [[=message{Severity::error, "sizeof cannot be applied to a bit-field"}]],
   bit_field_reference [[=message{Severity::error, "binding a reference to a bit-field is not supported yet"}]],
   volatile_bit_field [[=message{Severity::error, "access to a volatile bit-field is not supported yet"}]],
