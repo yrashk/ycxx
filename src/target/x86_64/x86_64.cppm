@@ -4,6 +4,7 @@ export module ycxx.target.x86_64;
 
 import :encode;
 import std;
+import ycxx.execution;
 import ycxx.ir;
 import ycxx.ir.l2;
 import ycxx.ir.lower;
@@ -61,7 +62,7 @@ export struct DivisionSite {
 export bool compatible_division_pair(const l2::Function& body, DivisionPair pair);
 // Each group has identical operands and contains both quotients and remainders in block order.
 export std::expected<std::vector<std::vector<DivisionSite>>, std::string>
-group_divisions(const l2::Function& body, std::inplace_stop_token stop);
+group_divisions(const l2::Function& body, ycxx::exec::inplace_stop_token stop);
 
 // Compile well-formed L2 with INTEGER ABI values and direct scalar SSE values.
 // The producer checks original signatures and ellipsis types and flattens INTEGER records.
@@ -189,7 +190,7 @@ bool unsigned_division(const l2::Function& body, NodeId id) {
 }
 
 template <bool Poll = false>
-std::expected<Frame, std::string> layout(const l2::Function& body, std::inplace_stop_token stop = {}) {
+std::expected<Frame, std::string> layout(const l2::Function& body, ycxx::exec::inplace_stop_token stop = {}) {
   // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
   // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
   constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
@@ -914,7 +915,7 @@ bool compatible_division_pair(const l2::Function& body, DivisionPair pair) {
 }
 
 std::expected<std::vector<std::vector<DivisionSite>>, std::string>
-group_divisions(const l2::Function& body, std::inplace_stop_token stop) {
+group_divisions(const l2::Function& body, ycxx::exec::inplace_stop_token stop) {
   using Operands = std::pair<DivisionOperand, DivisionOperand>;
   std::vector<std::vector<DivisionSite>> groups;
   for (const auto block : body.block_ids()) {

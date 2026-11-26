@@ -4,6 +4,7 @@ module;
 export module ycxx.cm;
 
 import std;
+import ycxx.execution;
 
 export namespace ycxx::cm {
 
@@ -85,7 +86,7 @@ Model prefix_model(std::span<const PrefixChoice> choices);
 // Exact selection under nested prefix constraints. The budget counts candidate visits, and
 // equal benefits favor earlier candidates. Return the selected indices in input order.
 std::expected<std::vector<std::size_t>, PrefixFailure> solve_prefix_choices(
-    std::span<const PrefixChoice> choices, std::size_t budget, std::inplace_stop_token stop = {});
+    std::span<const PrefixChoice> choices, std::size_t budget, ycxx::exec::inplace_stop_token stop = {});
 
 }  // namespace ycxx::cm
 
@@ -105,7 +106,7 @@ Model prefix_model(std::span<const PrefixChoice> choices) {
 }
 
 std::expected<std::vector<std::size_t>, PrefixFailure> solve_prefix_choices(
-    std::span<const PrefixChoice> choices, std::size_t budget, std::inplace_stop_token stop) {
+    std::span<const PrefixChoice> choices, std::size_t budget, ycxx::exec::inplace_stop_token stop) {
   if (stop.stop_requested()) return std::unexpected(PrefixFailure::stopped);
   if (choices.size() > budget) return std::unexpected(PrefixFailure::budget_exhausted);
 

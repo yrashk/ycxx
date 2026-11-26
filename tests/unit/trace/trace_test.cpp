@@ -7,6 +7,7 @@
 //   unit_trace <golden> --update   rewrites the golden file
 import std;
 import ycxx.engine;
+import ycxx.execution;
 import ycxx.pipeline;
 import ycxx.pp;
 import ycxx.trace;
@@ -151,7 +152,7 @@ struct CancellationProbe {
 };
 
 struct CancelAtStart : engine::Tracer {
-  std::inplace_stop_source stop;
+  ycxx::exec::inplace_stop_source stop;
   trace::Live live;
   bool cancel = true;
 
@@ -165,13 +166,13 @@ struct CancelAtStart : engine::Tracer {
 };
 
 void cancellation() {
-  namespace ex = std::execution;
+  namespace ex = ycxx::exec;
   engine::Pool pool(1);
   engine::Db db(pool);
   auto cancel_query = [&](CancelAtStart& capture) {
-    return std::this_thread::sync_wait(ex::write_env(
+    return ex::sync_wait(ex::write_env(
         db.request<CancellationProbe>(0, engine::Priority::interactive, nullptr, &capture),
-        ex::prop(std::get_stop_token, capture.stop.get_token())));
+        ex::prop(ex::get_stop_token, capture.stop.get_token())));
   };
   db.set<CancellationInput>(0, 7);
   CancelAtStart cold;
@@ -198,7 +199,7 @@ void cancellation() {
 
   capture.cancel = false;
   try {
-    (void)std::this_thread::sync_wait(db.request<CancellationProbe>(1, engine::Priority::interactive, nullptr, &capture));
+    (void)ex::sync_wait(db.request<CancellationProbe>(1, engine::Priority::interactive, nullptr, &capture));
     check(false, "the failing query must throw");
   } catch (const std::runtime_error&) {
     check(std::ranges::any_of(capture.live.take(), [](const Event& e) { return !e.running && e.outcome == Outcome::failed; }),
