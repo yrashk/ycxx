@@ -1257,7 +1257,7 @@ std::expected<void, std::string> prepare_project(
           prepared.rules.pending_host_files.insert_or_assign(demand.target, hosts->files);
           prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
         }
-        return current_witness_recipe();
+        return current_witness_recipe() && (hosts->error.empty() || current_host_files(hosts->files));
       };
       const auto stage_witness = [&]() -> std::expected<StagedProducers, std::string> {
         for (;;) {
@@ -1289,27 +1289,39 @@ std::expected<void, std::string> prepare_project(
       auto invocation = plan.witness;
       invocation.inputs = staged_inputs(*compiled);
       const auto witness_action = action_key(invocation);
+      std::optional<std::string> staging_error;
       const auto current_witness = [&] {
         if (!current_witness_recipe()) return false;
         if (closure.hosts.empty() || current_host_files(hosts->files)) return true;
         // Restage only here, outside the producer guard. Equal selected output can
         // preserve the witness even when its upstream receipts have changed.
         auto staged = stage_witness();
-        if (!staged || action_key(plan.witness, staged_inputs(*staged)) != witness_action) return false;
+        if (!staged) {
+          if (!superseded) staging_error = std::move(staged.error());
+          return false;
+        }
+        if (action_key(plan.witness, staged_inputs(*staged)) != witness_action) return false;
         compiled = std::move(staged);
         return true;
       };
-      if (!current_witness()) return changed_witness();
+      const auto witness_failure = [&](std::string diagnostic) {
+        if (!staging_error) return std::unexpected(std::move(diagnostic));
+        // The runner rejected admission. Report the validated producer failure
+        // without retrying the same failed action as if inputs had changed again.
+        superseded = false;
+        return std::unexpected(std::move(*staging_error));
+      };
+      if (!current_witness()) return witness_failure(changed_witness().error());
       auto evidence = run_witness(label, invocation, witness_action, current_witness);
-      if (!evidence) return std::unexpected(std::move(evidence.error()));
+      if (!evidence) return witness_failure(std::move(evidence.error()));
       observation->request.witness = RuleWitnessReport{
           field, evidence->exit_status, std::move(evidence->out), std::move(evidence->err), plan.schema};
       const auto classification_key = observation_key(*observation, toolchain.executable_build);
       const auto value_receipt = fingerprint(std::tie(library_key, witness_action, classification_key));
       auto classified = invoke_rule_worker(run, toolchain, "RuleClassifier", label, library,
                                            std::move(*observation), current_witness);
-      if (!classified) return std::unexpected(std::move(classified.error()));
-      if (!current_witness()) return changed_witness();
+      if (!classified) return witness_failure(std::move(classified.error()));
+      if (!current_witness()) return witness_failure(changed_witness().error());
       auto value = classify_value(*classified, field, plan.schema);
       if (!value) return std::unexpected(std::format("invalid classification for '{}'", label));
       auto origin = std::format("{} via {} · {} · witness exit {} · receipt {:016x}{:016x}", label,
@@ -1739,6 +1751,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     apply(AdmitRuleInput<RuleWitnessReceipt>{id, evidence});
     return evidence;
   };
+  const std::function<void()> check_revision = [] {};
   const BuildWitnessTools build_witness_tools = [&](const ProjectPlan& plan, std::span<const std::size_t> needed)
       -> std::optional<BuiltWitnessTools> {
     std::vector<pipeline::RequestId> requests;
@@ -1768,7 +1781,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           batch.error = std::format("host executable '{}': {}", plan.host_executables[i].name, tool->second.error);
       }
       for (const auto& [path, contents] : observed) batch.files.push_back({path, contents});
-      if (consistent && publish(before, [] {}) && current_host_files(batch.files)) return batch;
+      if (consistent && publish(before, check_revision) && current_host_files(batch.files)) return batch;
     }
     return std::nullopt;
   };
