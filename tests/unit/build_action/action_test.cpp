@@ -103,6 +103,35 @@ void rejects_bad_declarations(const fs::path& root) {
   check(fs::is_empty(root), "invalid actions and failed spawn leave scratch clean");
 }
 
+void runs_staged_executable(const fs::path& root) {
+  const std::string script = "#!/bin/sh\n/bin/cat \"$1\" > \"$2\"\nprintf ran\n";
+  std::array inputs{ActionInput{"runner", "pkg/runner tool", {{script.begin(), script.end()}, true}},
+                    ActionInput{"data", "pkg/data", {{'A', 0, 'B'}}}};
+  Action action{.tool = "inputs/pkg/runner tool",
+                .args = {{ActionArg::Kind::input, "data"}, {ActionArg::Kind::output, "result"}},
+                .environment = {},
+                .outputs = {{"result", "result.bin"}}};
+
+  auto ran = execute(action, inputs, root);
+  check(ran.exit_status == 0, ran.err);
+  check(ran.out == "ran", "captures staged tool stdout");
+  check(ran.outputs.size() == 1 && ran.outputs.front().contents.bytes == inputs[1].contents.bytes,
+        "staged executable reads its input and writes the named output");
+
+  action.tool = "inputs/pkg//runner tool";
+  auto alias = execute(action, inputs, root);
+  check(alias.completion == ActionCompletion::setup_failed && alias.err.contains("not a declared input"),
+        "a staged tool must exactly match the normalized declared path");
+
+  action.tool = "inputs/pkg/runner tool";
+  inputs[0].contents.executable = false;
+  auto non_executable = execute(action, inputs, root);
+  check(non_executable.completion == ActionCompletion::setup_failed && non_executable.err.contains("not executable"),
+        "a staged tool needs an executable artifact");
+  check(non_executable.out.empty() && non_executable.outputs.empty(), "invalid staged tool exposes no outputs");
+  check(fs::is_empty(root), "staged tool actions leave scratch clean");
+}
+
 void cancels_foreground_process(const fs::path& root) {
   const auto started = root / "started";
   Action action = shell("printf started > \"$1\"; while :; do :; done");
@@ -133,6 +162,7 @@ int main() {
   const fs::path root(directory);
   stages_named_outputs(root);
   rejects_bad_declarations(root);
+  runs_staged_executable(root);
   cancels_foreground_process(root);
   fs::remove_all(root);
   return result("build action");
