@@ -142,7 +142,6 @@ draft/dcl/dcl.fct.default-2.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.default-4.reject.cpp errors elsewhere: 'class' not supported yet
 draft/dcl/dcl.fct.default-5.reject.cpp errors elsewhere: 'extern' not supported yet
 draft/dcl/dcl.fct.default-8.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.fct.spec-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-10.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-11.reject.cpp reference-member initializer recursion is tracked in #118
@@ -323,7 +322,6 @@ draft/temp/temp.arg.nontype-4.reject.cpp errors elsewhere: 'template' not suppor
 draft/temp/temp.arg.template-2.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.template-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.type-1.accept.cpp 'template' not supported yet
-draft/temp/temp.class.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.concept-1.accept.cpp preprocessing directives are not supported yet
 draft/temp/temp.constr.atomic-1.accept.cpp 'template' not supported yet
 draft/temp/temp.constr.concept-1.accept.cpp 'template' not supported yet
