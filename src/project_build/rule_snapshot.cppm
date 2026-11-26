@@ -25,6 +25,12 @@ struct RuleProbeSnapshot {
   std::vector<PlanFact> facts;
 };
 
+struct HostFileObservation {
+  std::string path;
+  std::optional<Fp128> contents;
+  bool operator==(const HostFileObservation&) const = default;
+};
+
 struct RuleObservation {
   RuleDemand demand;
   Fp128 package;
@@ -32,6 +38,7 @@ struct RuleObservation {
   std::vector<RuleProbeSnapshot> projections = {};
   std::optional<Fp128> witness = std::nullopt;
   std::optional<Fp128> planning = std::nullopt;  // producer graph of the generated planning inputs
+  std::optional<std::vector<HostFileObservation>> host_files = std::nullopt;
 };
 
 struct RuleSnapshot {
@@ -41,6 +48,7 @@ struct RuleSnapshot {
   // A witness can defer to another rule. Keep both rules' observed inputs until each resolves.
   std::map<std::string, std::vector<RuleProbeSnapshot>> pending_projections = {};
   std::vector<RuleExpansion> pending_witnesses = {};  // in-memory watch state for deferred or failed witnesses
+  std::map<std::string, std::vector<HostFileObservation>> pending_host_files = {};
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
@@ -164,6 +172,11 @@ struct StoredProbe {
   std::optional<std::uint8_t> package_kind = std::nullopt;
 };
 
+struct StoredHostFile {
+  std::string path;
+  std::optional<std::string> contents;
+};
+
 struct StoredRule {
   std::string target;
   std::string rule;
@@ -184,6 +197,7 @@ struct StoredRule {
   std::optional<std::vector<RuleFactReference>> facts = std::nullopt;
   std::optional<std::vector<RulePlanInput>> plan_inputs = std::nullopt;
   std::optional<std::string> planning = std::nullopt;
+  std::optional<std::vector<StoredHostFile>> host_files = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -274,7 +288,19 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     if ((compiler_bindings && projections.empty()) ||
         (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
       return std::nullopt;
-    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness, planning});
+    std::optional<std::vector<HostFileObservation>> host_files;
+    if (item.host_files) {
+      if (!witness || item.host_files->empty()) return std::nullopt;
+      host_files.emplace();
+      for (auto& file : *item.host_files) {
+        const auto contents = file.contents ? decode_fp(*file.contents) : std::nullopt;
+        if (!file.path.starts_with('/') || file.path.contains('\0') ||
+            file.contents.has_value() != contents.has_value()) return std::nullopt;
+        host_files->push_back({std::move(file.path), contents});
+      }
+    }
+    result.observations.push_back(
+        {demand, *package, *invocation, std::move(projections), witness, planning, std::move(host_files)});
     result.expansions.push_back({std::move(demand), std::move(item.definition),
                                  item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
@@ -312,6 +338,11 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     if (observed.planning) {
       rule.plan_inputs = demand.plan_inputs;
       rule.planning = hex(*observed.planning);
+    }
+    if (observed.host_files) {
+      auto& files = rule.host_files.emplace();
+      for (const auto& file : *observed.host_files)
+        files.push_back({file.path, file.contents ? std::optional{hex(*file.contents)} : std::nullopt});
     }
     saved.rules.push_back(std::move(rule));
   }

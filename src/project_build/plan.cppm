@@ -1063,7 +1063,10 @@ class Planner {
           return path;
         };
         const auto target = artifact_target(ref->target, value.location, decl.name);
-        if (target.kind == Primitive::host_executable && !observer) {
+        if (target.kind == Primitive::host_executable) {
+          if (observer && (!staged_tool || staged_tool->name != name))
+            fail(value.location, std::format("host executable witness input {:?} must be selected with tool = input({:?})",
+                                             name, name));
           if (ref->output != host_executable_output)
             fail(value.location, std::format("host executable '{}' has no output '{}'", target.declaration.name,
                                              ref->output));
@@ -1150,6 +1153,9 @@ class Planner {
       }
     }
     if (!observer && artifact_inputs_allowed) std::ranges::sort(plan.inputs, {}, &ActionInput::name);
+    plan.host_dependent = !plan.host_inputs.empty() || std::ranges::any_of(plan.artifact_inputs, [&](const auto& input) {
+      return plan_.generators[input.producer].host_dependent;
+    });
     return plan;
   }
 
@@ -1164,9 +1170,6 @@ class Planner {
     auto gen = generator(decl);
     active_generators_.erase(decl.name);
     const auto index = plan_.generators.size();
-    gen.host_dependent = !gen.host_inputs.empty() || std::ranges::any_of(gen.artifact_inputs, [&](const auto& input) {
-      return plan_.generators[input.producer].host_dependent;
-    });
     plan_.generators.push_back(std::move(gen));
     generators_.emplace(decl.name, index);
     return index;
@@ -1182,7 +1185,8 @@ class Planner {
   }
 
   ArtifactOutputPlan generator_artifact(ResolvedTarget target, std::string_view name, SourceLocation at, bool early) {
-    constexpr auto early_error = "host executable artifacts are not available in rule planning inputs or witnesses";
+    constexpr auto early_error = "host executable artifacts are not available in rule planning inputs or witnesses "
+                                 "except as a directly selected witness tool";
     const auto [decl, kind] = target;
     if (kind == Primitive::host_executable)
       fail(at, early ? early_error : "host executable artifacts are only available in ordinary generator inputs");

@@ -3747,6 +3747,13 @@ analyzer's stdout into a typed score and generates a C++ constant from it.
 An analyzer edit with the same score updates the witness evidence and
 reuses the header and native build.
 
+A typed witness can select a `cpp.host_executable` artifact directly as
+its tool (#1566). The resident host build records source and include
+lookups, including misses. Read-only inspection and watch check those
+observations. The witness receipt uses the staged image, so an edit that
+preserves the linked bytes refreshes the observations and reuses the
+witness. [Native host witness example](examples/project-build/native-host-witness/README.md)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
