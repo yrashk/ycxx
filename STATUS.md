@@ -3392,6 +3392,11 @@ producer, and export (#1493). JSON records before and after occurrences in
 `value_binding_changes`. HTML shows counts and source sites under
 **Value binding changes**, with links for sites in the current manifest.
 
+The **Target dependencies** panel in standalone HTML plans and comparisons
+starts at the selected target (#1499). Artifact and value uses link to the
+producer's card and to their sites in `build.ycxx`. Shared producers have
+one card, and incomplete plans show the links resolved so far.
+
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
 with their declared rule kinds and source locations. JSON includes the same

@@ -444,6 +444,36 @@ The binding comparison requires complete graphs with `value_edges` in both
 snapshots. Older schema-1 baselines still support the comparisons for which
 they have data.
 
+### Target dependency navigation (#1499)
+
+From `examples/project-build/generated-archive`, build the example and
+save its HTML plan.
+
+```sh
+ycxx build app
+ycxx show app --format=html > plan.html
+```
+
+Open **Target dependencies** and start at `app`. Follow `score`, `bonus`,
+and `bonus_archive` to see how the generated archive reaches the executable.
+The `public_link_inputs` reference on `bonus` links to both the archive
+producer card and the use site in `build.ycxx`.
+
+The same navigation follows typed bindings in the shader reflection example.
+From `app`, follow `scene_bindings` and its `facts` binding to
+`fragment_reflection`.
+
+```text
+shaders.bindings "scene_bindings" {
+    facts = { layout = value("fragment_reflection", "layout") }
+}
+```
+
+Each target has one card, so all occurrences of a shared producer lead to
+the same destination. A partial plan shows the resolved paths and marks
+the navigation incomplete. In an HTML comparison, these links navigate
+the current plan. The comparison tables carry the saved occurrence sites.
+
 ### Declared target catalog (#1392)
 
 Run `ycxx show --targets` from the workspace directory to see the target names

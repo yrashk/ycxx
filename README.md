@@ -71,6 +71,8 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
 can be compared with the checkout and rendered as a standalone HTML report.
+In the HTML report, **Target dependencies** lets you follow producers and
+open their use sites in `build.ycxx`.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
