@@ -240,6 +240,9 @@ public:
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
+  // Whether a using-declaration of class `c` names `name` in a dependent base: in its template
+  // definition, a member of an unknown specialization ([namespace.udecl], [temp.dep.type]/7).
+  virtual bool dependent_member_using(EntityId, NameId) { return false; }
   // Whether class `c` is an explicit specialization, which has no template-head of its own
   // ([temp.expl.spec]).
   virtual bool explicit_specialization(EntityId) { return false; }
@@ -274,6 +277,10 @@ public:
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
   // bool, not constant, or not supported): the expression that asked is then invalid.
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
+  // A value-dependent explicit-specifier's condition, atom `c` with its mapping substituted
+  // ([dcl.fct.spec]): whether the specialization is explicit; none when substitution into it
+  // fails, which fails deduction ([temp.deduct.general]).
+  virtual std::optional<bool> explicit_value(ConstId /*c*/) { return false; }
   // A class template's static data member whose initializer is value-dependent; and a use of a
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
   // The declaration of template `t` here: its head and, for an alias template, its type.
@@ -578,6 +585,22 @@ public:
     return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
       auto kind = sema_diag_of(d.id);
       return kind && message_of(*kind).severity == lex::Severity::error;
+    });
+  }
+  // Whether a diagnostic since `begin` says the tokens do not have the grammar's shape (an
+  // expected or unexpected token), as opposed to a well-formedness rule: what decides a tentative
+  // parse ([dcl.ambig.res]/2).
+  bool has_syntax_error_since(std::size_t begin) const {
+    return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
+      switch (sema_diag_of(d.id).value_or(Diag::not_supported)) {
+      case Diag::expected_token: case Diag::expected_expression: case Diag::type_as_expression:
+      case Diag::expected_statement: case Diag::expected_declaration: case Diag::expected_type_specifier:
+      case Diag::expected_declarator: case Diag::expected_unqualified_id: case Diag::unexpected_token:
+      case Diag::unexpected_identifier: case Diag::missing_type_specifier:
+        return true;
+      default:
+        return false;
+      }
     });
   }
   // Drops the diagnostics after the first `n`: a part analysed again where it was diagnosed already.
@@ -2432,34 +2455,41 @@ public:
   }
 
   // Whether a prvalue of pointer or `std::nullptr_t` type `from` converts implicitly to the
-  // non-reference type `to`. Function and multi-level pointers and class targets are not modelled;
-  // `failed` when Derived's instantiation failed, which was diagnosed there.
+  // non-reference type `to`. Class, array and function targets, and pointers whose pointee arrays
+  // or member pointers differ (#1399), are not modelled; `failed` when Derived's instantiation
+  // failed, which was diagnosed there.
   enum class PointerConversion : u8 { no, yes, unmodelled, failed };
   PointerConversion object_pointer_conversion(QualType from, QualType to, engine::Loc loc) {
     using enum PointerConversion;
     const Types& ts = types();
+    from = ts.canonical(from);
+    to = ts.canonical(to);
     // A null pointer value converts to any pointer type; to `bool` only by direct-initialization
     // ([conv.ptr]/1, [conv.bool]).
     if (ts.is(from, Builtin::nullptr_t)) {
-      if (ts.is_pointer(to)) return yes;
+      if (ts.is_pointer(to) || ts.is(to, Builtin::nullptr_t)) return yes;
       return ts.is_arithmetic(to) || ts.is_enum(to) ? no : unmodelled;
     }
     if (ts.is(to, Builtin::bool_)) return yes;  // [conv.bool]
     if (ts.is_arithmetic(to) || ts.is_enum(to) || ts.is(to, Builtin::nullptr_t) || ts.is_member_pointer(to))
       return no;
     if (!ts.is_pointer(to)) return unmodelled;
+    // Similar pointers whose levels add cv-qualifiers ([conv.qual]), or a pointer to a noexcept
+    // function to one to the same function without it ([conv.fctptr]).
+    if (qualification_convertible(from, to) || function_indirection_convertible(from, to)) return yes;
     const QualType source = ts.canonical(ts.pointee(from)), target = ts.canonical(ts.pointee(to));
-    if (ts.is_function(source) || ts.is_function(target) || ts.is_pointer(source) || ts.is_pointer(target) ||
-        ts.is_member_pointer(source) || ts.is_member_pointer(target))
-      return unmodelled;
+    // Only object pointers convert to `cv void*` or a base ([conv.ptr]).
+    if (ts.is_function(source) || ts.is_function(target)) return no;
     // Every conversion here adds cv-qualifiers to the pointee, never removes them ([conv.qual]).
     // An array's are its elements' ([basic.type.qualifier]/3).
     if (!cv_within(object_cv(source), object_cv(target))) return no;
     const QualType s = object_unqualified(source), t = object_unqualified(target);
-    if (s == t || ts.is_void(t)) return yes;  // the same type, or an object type to `cv void*`
-    // A known bound converts to an unknown one, also nested ([conv.qual]).
-    if (ts.is_array(s) || ts.is_array(t)) return unmodelled;
-    if (!ts.is_class(s) || !ts.is_class(t)) return no;
+    if (ts.is_void(t)) return yes;  // an object type to `cv void*`
+    if (!ts.is_class(s) || !ts.is_class(t)) {
+      // Pointers that differ below their pointer levels are unrelated, unless an array of unknown
+      // bound or a member pointer there makes them similar ([conv.qual]).
+      return similar_types(from, to).has_value() ? no : unmodelled;
+    }
     // Derived* to Base* needs a complete Derived whose Base is accessible and unambiguous
     // ([conv.ptr]/3); without one, the pointer types are unrelated.
     const EntityId derived = ts.class_of(s), base = ts.class_of(t);
@@ -2473,6 +2503,50 @@ public:
       case BasePath::unknown: return unmodelled;
     }
     std::unreachable();
+  }
+  // Whether `a` and `b` are similar ([conv.qual]/2), for the pointer levels qualification
+  // conversions walk: none when an array or a member pointer below them may make them so.
+  std::optional<bool> similar_types(QualType a, QualType b) {
+    const Types& ts = types();
+    a = ts.canonical(a);
+    b = ts.canonical(b);
+    while (ts.is_pointer(a) && ts.is_pointer(b)) {
+      a = ts.canonical(ts.pointee(a));
+      b = ts.canonical(ts.pointee(b));
+    }
+    if (same_unqualified(a, b)) return true;
+    if ((ts.is_array(a) && ts.is_array(b)) || (ts.is_member_pointer(a) && ts.is_member_pointer(b))) return std::nullopt;
+    return false;
+  }
+  // Whether a prvalue of the arithmetic, pointer or `std::nullptr_t` type `from` converts
+  // implicitly to the type `to` of the same kinds ([conv]). `from` comes from `declval`, never a
+  // null pointer constant ([conv.ptr]/1).
+  PointerConversion scalar_conversion(QualType from, QualType to, engine::Loc loc) {
+    const Types& ts = types();
+    if (ts.is_pointer(from) || ts.is(from, Builtin::nullptr_t)) return object_pointer_conversion(from, to, loc);
+    return ts.is_arithmetic(to) ? PointerConversion::yes : PointerConversion::no;
+  }
+  // Whether the reference type `reference` to an arithmetic, pointer or `std::nullptr_t` type
+  // binds to an lvalue (else xvalue) of such a type `source` ([dcl.init.ref]/5).
+  PointerConversion scalar_reference_binding(QualType source, bool lvalue, QualType reference, engine::Loc loc) {
+    using enum PointerConversion;
+    Types& ts = types();
+    const TypeRec r = ts.rec(reference);
+    const QualType target = ts.canonical(r.inner);
+    // cv1 T1 is reference-compatible with cv2 T2 when a pointer to cv2 T2 converts to a pointer to
+    // cv1 T1 by a standard conversion sequence ([dcl.init.ref]/4); for these types, by a
+    // qualification conversion.
+    const QualType from_pointer = ts.pointer(source), to_pointer = ts.pointer(target);
+    const bool compatible = qualification_convertible(from_pointer, to_pointer);
+    if (!r.rvalue_ref && lvalue && compatible) return yes;           // /5.1
+    if (!r.rvalue_ref && object_cv(target) != Cv::const_) return no;  // /5.2
+    if (!lvalue && compatible) return yes;                            // /5.3
+    // /5.4: otherwise T1 shall not be reference-related to T2 (similar, for these types; CWG2352),
+    // and the source is converted to a prvalue of T1 and materialized.
+    const auto related = similar_types(from_pointer, to_pointer);
+    if (!related) return unmodelled;
+    if (*related) return no;
+    return scalar_conversion(object_unqualified(source), object_unqualified(target), loc);
   }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
   Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {
@@ -2497,20 +2571,21 @@ public:
     const bool source_lvalue = ts.is_reference(from) && !ts.rec(from).rvalue_ref;
     const bool target_reference = ts.is_reference(to);
     const bool rvalue_target = target_reference && ts.rec(to).rvalue_ref;
-    const bool binds_rvalue = rvalue_target || Types::cv(to_object) == Cv::const_;
-    const auto binds_directly = [&] {
-      return cv_within(Types::cv(from_object), Types::cv(to_object)) && (source_lvalue ? !rvalue_target : binds_rvalue);
-    };
-    // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
-    // throw ([conv.ptr], [conv.qual], [conv.bool]).
-    if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t))) {
-      switch (object_pointer_conversion(from_object, to, loc)) {
+    const auto answer = [&](PointerConversion c) -> Ex {
+      switch (c) {
         case PointerConversion::no: return bool_literal(false, begin, end);
         case PointerConversion::yes: return bool_literal(true, begin, end);
         case PointerConversion::failed: return {NodeId::none, begin, end};
         case PointerConversion::unmodelled: return unsupported();
       }
-    }
+      std::unreachable();
+    };
+    // Only `void` converts to `void` ([meta.rel]).
+    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
+    // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
+    // throw ([conv.ptr], [conv.qual], [conv.bool]).
+    if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t)))
+      return answer(object_pointer_conversion(from_object, to, loc));
     if (op == ast::DepOp::is_convertible && ts.is_class(from_object) && ts.is_class(to_object)) {
       const EntityId derived = ts.class_of(from_object), base = ts.class_of(to_object);
       if (derived == base || is_union_type(from_object) != false || is_union_type(to_object) != false)
@@ -2526,20 +2601,23 @@ public:
       if (!base_record) return unsupported();
       // The classes are reference-related, so an invalid direct binding cannot fall back to
       // a user-defined conversion or a converted temporary ([dcl.init.ref]).
-      if (target_reference) return bool_literal(binds_directly(), begin, end);
+      if (target_reference) {
+        const bool binds_rvalue = rvalue_target || Types::cv(to_object) == Cv::const_;
+        return bool_literal(cv_within(Types::cv(from_object), Types::cv(to_object)) &&
+                                (source_lvalue ? !rvalue_target : binds_rvalue),
+                            begin, end);
+      }
       if (supports_base_value_conversion(*base_record, from_object, source_lvalue))
         return bool_literal(true, begin, end);
       return unsupported();
     }
-    if ((!from_void && !ts.is_arithmetic(from_object)) || (!to_void && !ts.is_arithmetic(to_object))) return unsupported();
-    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
-    if (!target_reference) return bool_literal(true, begin, end);
-
-    // Different arithmetic types require conversion to a temporary of the target type.
-    if (Types::unqualified(from_object) != Types::unqualified(to_object))
-      return bool_literal(binds_rvalue, begin, end);
-
-    return bool_literal(binds_directly(), begin, end);
+    const auto scalar = [&](QualType t) {
+      return ts.is_arithmetic(t) || ts.is_pointer(t) || ts.is(t, Builtin::nullptr_t);
+    };
+    if (!scalar(from_object) || !scalar(to_object)) return unsupported();
+    // These conversions and bindings do not throw either.
+    if (!target_reference) return answer(scalar_conversion(from_object, to_object, loc));
+    return answer(scalar_reference_binding(from_object, source_lvalue, to, loc));
   }
   // `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
   // ([meta.unary.prop]): T is a reference and `T t = VAL<U>;` (or `T t(VAL<U>)`) binds t to a temporary,
@@ -3184,7 +3262,8 @@ public:
     }
     if (s.type && types().is_class(*s.type))
       if (const ClassRec* c = class_rec(types().class_of(*s.type)))
-        return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
+        return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; }) ||
+               std::ranges::contains(c->introduced, n, &MemberDeclRec::name);
     return false;
   }
   // The ordinary lookup result can hide an inherited type from a template argument.
@@ -3679,7 +3758,8 @@ public:
     }
     if (!types().is_class(t)) return false;
     const ClassRec* c = class_rec(types().class_of(t));
-    return c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+    return c && std::ranges::any_of(std::array{std::span(c->members), std::span(c->introduced)} | std::views::join,
+                                    [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
   }
   // Explicit template arguments for the function templates `e` names, a member or an overload set
   // ([temp.arg.explicit]).
@@ -3694,7 +3774,8 @@ public:
       q_->earlier_member(name, /*type_only=*/false, &functions);
       return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     }
-    return r && std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+    return r && std::ranges::any_of(std::array{std::span(r->members), std::span(r->introduced)} | std::views::join,
+                                    [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
   }
   // Whether `S::name` names a function template ([temp.names]/3): a member template of class S,
   // or a function template of namespace S.
@@ -6702,6 +6783,9 @@ public:
           classes().layout_requires_virtual_support(types().rec(m.type).inner)) continue;
       return Found{nullptr, 0, &m, c};
     }
+    // A base member a using-declaration of `c` introduced is found as a member of `c` ([namespace.udecl]/1).
+    for (const MemberDeclRec& m : cr.introduced)
+      if (m.name == name) return Found{nullptr, 0, &m, c};
     for (const NestedType& nested : cr.types) {
       // A type alias does not introduce the enumerators of the enumeration it names.
       if (!types().is_enum(nested.type) || types().enum_of(nested.type) != nested.entity) continue;
@@ -6750,13 +6834,22 @@ public:
     return false;
   }
 
-  // The member functions of `c` named `name`: an overload set ([over.match.funcs]).
+  // The member functions of `c` named `name`: an overload set ([over.match.funcs]), with the
+  // base members its using-declarations introduce ([namespace.udecl]/1).
   std::vector<const MemberDeclRec*> member_functions(EntityId c, NameId name) {
     std::vector<const MemberDeclRec*> r;
-    if (const ClassRec* cr = class_rec(c))
+    if (const ClassRec* cr = class_rec(c)) {
       for (const MemberDeclRec& m : cr->members)
         if (m.name == name && m.is_function && !m.is_ctor && !m.is_dtor) r.push_back(&m);
+      for (const MemberDeclRec& m : cr->introduced)
+        if (m.name == name) r.push_back(&m);
+    }
     return r;
+  }
+  // Whether `m` is a member of `c` that one of its using-declarations introduced.
+  bool introduced_member(EntityId c, const MemberDeclRec* m) {
+    const ClassRec* cr = class_rec(c);
+    return cr && std::ranges::any_of(cr->introduced, [&](const MemberDeclRec& r) { return &r == m; });
   }
   const MemberDeclRec* member_decl(EntityId f) {
     EntityId c = w_->entities.rec(f).scope;
@@ -7212,6 +7305,11 @@ public:
                           /*defer_no_viable=*/false, /*scalar_list_arguments=*/objectless_prefix);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
+    // A base member a using-declaration introduced: overload resolution took the implicit object
+    // parameter as the naming class's ([over.match.funcs.general]/4); the call's object is the
+    // base subobject that declares it, `object_cls`.
+    const bool introduced = introduced_member(bound.cls, d);
+    const EntityId object_cls = introduced ? w_->entities.rec(d->entity).scope : bound.cls;
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
     if (objectless_prefix && !d->is_static) {
@@ -7245,10 +7343,10 @@ public:
           }
         }
       } else if (d->is_virtual) {
-        const auto* record = virtual_consumer(bound.cls);
+        const auto* record = virtual_consumer(object_cls);
         // The pure interface has a known call shape independently of its object layout.
         if (!record && d->is_pure && bound.explicit_receiver && !bound.qualified && bound.naming == bound.cls &&
-            q_->peer_pure_dispatch(bound.cls)) record = class_rec(bound.cls);
+            q_->peer_pure_dispatch(object_cls)) record = class_rec(object_cls);
         if (!record || !object || assignment_notation ||
             (!m.arrow && (object->cat() != ValueCategory::lvalue ||
                           (record->peer_virtual_layout == PeerVirtualLayout::primary_base && !peer_object_lvalue(*object))))) {
@@ -7264,13 +7362,13 @@ public:
             return fail;
           }
         }
-      } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(bound.cls), paren_at)) {
+      } else if (!d->is_static && !require_supported_virtual_layout(types().class_type(object_cls), paren_at)) {
         return fail;
       }
     }
     const auto copy_assignment = d->copy_assignment;
     if (copy_assignment != CopyAssignment::none) {
-      QualType ct = types().class_type(bound.cls);
+      QualType ct = types().class_type(object_cls);
       if (!usable_copy_assignment(copy_assignment, ct, paren_at)) return fail;
       if (copy_assignment == CopyAssignment::memberwise && !d->explicit_defaulted_assignment &&
           (!lvalue_assignment || args[0].cat() != ValueCategory::lvalue || !same_unqualified(args[0].type(), ct))) {
@@ -7325,6 +7423,12 @@ public:
       return fail;
     }
     Ex o = *object;
+    // The using-declaration's access governs ([namespace.udecl]/16), not the base's.
+    if (introduced) {
+      if (!m.arrow && !o.glvalue()) o = materialize(o, o.type(), false);
+      o = to_base(o, object_cls, paren_at, false, /*check_access=*/false);
+      if (!o.ok()) return fail;
+    }
     if (assignment_notation && copy_assignment == CopyAssignment::trivial) {
       // The chosen reference argument already designates the source object. Assignment does not
       // initialize a new class value, even when the copy constructor is deleted.
@@ -7622,6 +7726,17 @@ public:
     return {};
   }
 
+  // Whether the specialization of constructor template `td` for `args` is explicit, its
+  // value-dependent explicit-specifier substituted; none when that substitution fails
+  // ([temp.deduct.general]).
+  std::optional<bool> explicit_specialization(const ast::DeclSema& td, std::span<const TemplateArg> args) {
+    std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+    auto atom = templates().substitute_constraint(td.explicit_condition, Bindings::of(ps.empty() ? 0 : ps[0].depth, args));
+    // An invalid mapping is a substitution failure.
+    if (!atom || !ins().values.is<ast::VAtom>(*atom)) return std::nullopt;
+    return q_->explicit_value(*atom);
+  }
+
   // [over.best.ics]: viability uses the parameter conversions of ordinary constructors. Access,
   // deletion, and the copy-list restriction on an explicit winner are checked after selection.
   std::optional<Ics> constructor_ics(std::span<const Ex> args, QualType t, Construction form) {
@@ -7898,11 +8013,27 @@ public:
         Templates t = templates();
         auto targs = t.deduce_call(td, shapes, {}, m.defaults);
         if (!targs) continue;
+        // Unsatisfied associated constraints fail deduction ([temp.deduct.general]/5), before the
+        // explicit-specifier is substituted.
+        if (td.constraints != ConstId::none) {
+          std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+          auto nf = t.substitute_constraint(td.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, *targs));
+          auto sat = nf ? q_->satisfied(*nf) : std::optional<bool>(false);
+          if (sat && !*sat) continue;
+        }
         auto st = t.specialization_type(td, *targs);
         if (!st) continue;
-        Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults};
+        Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults, m.is_explicit || td.is_explicit};
         k.is_consteval = (td.flags & decl_flag::consteval_) != 0;
-        if (copy_init && (types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
+        // A value-dependent explicit-specifier is substituted after deduction, and the
+        // specialization leaves a context that admits only converting constructors
+        // ([over.match.funcs.general]/8).
+        if (td.explicit_condition != ConstId::none) {
+          auto is_explicit = explicit_specialization(td, *targs);
+          if (!is_explicit) continue;
+          k.is_explicit = *is_explicit;
+        }
+        if (copy_init && (k.is_explicit || types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
         // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
         if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
         k.entity = specialization(td, *targs, *st);
@@ -8533,6 +8664,8 @@ public:
       return enumerator_in_list(*declaration, begin, end);
     // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
+      // A name a using-declaration takes from a dependent base is type-dependent ([temp.dep.expr]/3).
+      if (q_->dependent_member_using(current_class, name)) return dependent_node({}, begin, end);
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class))
         if (auto r = incomplete_class_member(name, begin, end, begin, /*unqualified=*/true, callee)) return *r;
@@ -11385,11 +11518,13 @@ public:
     return p && paths == 1 ? int(p->size()) : 0;
   }
   // Check ambiguity before looking at the access of any edge ([class.access.base]/4).
-  bool check_base_path(QualType ct, EntityId b, const std::optional<std::vector<EntityId>>& path, int paths, u32 at_) {
+  bool check_base_path(QualType ct, EntityId b, const std::optional<std::vector<EntityId>>& path, int paths, u32 at_,
+                       bool check_access = true) {
     if (!path || paths != 1) {
       diag(at_, Diag::ambiguous_base, types().class_type(b), Types::unqualified(ct));
       return false;
     }
+    if (!check_access) return true;
     EntityId from = types().class_of(ct);
     for (EntityId step : *path) {
       const ClassRec* r = class_rec(from);
@@ -11406,14 +11541,16 @@ public:
   // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
   // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
   // direct base on the way, the cv-qualifiers kept.
-  Ex to_base(Ex e, EntityId b, u32 at_, bool binding_lvalue_reference = false) {
+  // Without `check_access`, the edges' access is not checked: a conversion the language makes
+  // whatever their access.
+  Ex to_base(Ex e, EntityId b, u32 at_, bool binding_lvalue_reference = false, bool check_access = true) {
     if (!e.ok()) return e;
     bool pointer = types().is_pointer(e.type());
     QualType ct = pointer ? types().pointee(e.type()) : e.type();
     Cv cv = Types::cv(ct);
     int paths = 0;
     auto path = base_path(types().class_of(ct), b, paths);
-    if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
+    if (!check_base_path(ct, b, path, paths, at_, check_access)) return {NodeId::none, e.begin, e.end};
     if (unevaluated == 0) {
       const auto* from = class_rec(types().class_of(ct));
       // A marked automatic object's primary-base edge is available for direct reference binding.
@@ -11695,7 +11832,8 @@ public:
     }
     if (types().is_class(lt) && !unary_friends && !compound_choice)
       if (const ClassRec* c = class_rec(types().class_of(lt));
-          c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
+          c && std::ranges::any_of(std::array{std::span(c->members), std::span(c->introduced)} | std::views::join,
+                                   [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
         Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
         Ex r = m.ok() ? call(m, std::vector<Ex>(operands.begin() + 1, operands.end()), end, op_at) : m;
         if (r.ok()) {
@@ -13216,11 +13354,26 @@ public:
       EntityId c = types().class_of(callee.type());
       if (!require_complete(callee.type(), paren_at)) return {NodeId::none, begin, end};
       NameId op = ins().names.intern("operator()");
-      if (member_functions(c, op).empty()) {
+      // Found by class member lookup in the object's class ([over.call.object]/1,
+      // [class.member.lookup]): its own, or a base's, named through that base subobject.
+      const auto found = find_member(c, op);
+      if (!found || !found->member || !found->member->is_function) {
         diag(paren_at, Diag::not_callable, callee.type());
         return {NodeId::none, begin, end};
       }
-      Ex bound = bound_member(c, op, callee, false, begin, callee.end, paren_at);
+      if (found->ambiguous) {
+        diag(paren_at, Diag::ambiguous_member, op, Types::unqualified(callee.type()));
+        return {NodeId::none, begin, end};
+      }
+      Ex object = callee;
+      // A static operator() needs no base subobject ([over.call.object], [expr.ref]); a prvalue
+      // object is materialized before the derived-to-base conversion ([class.temporary]/2).
+      if (found->owner != c && !std::ranges::all_of(member_functions(found->owner, op), &MemberDeclRec::is_static)) {
+        if (!object.glvalue()) object = materialize(object, object.type(), false);
+        object = to_base(object, found->owner, paren_at);
+        if (!object.ok()) return {NodeId::none, begin, end};
+      }
+      Ex bound = bound_member(found->owner, op, object, false, begin, callee.end, paren_at, c);
       return member_call(bound, std::move(args), end, paren_at);
     }
     EntityId function = EntityId::none;
@@ -13684,8 +13837,7 @@ private:
     }
     const bool assertion = in_class_assertion();
     std::vector<ast::DeclSema> functions;
-    if (auto m = q_->earlier_member(name, /*type_only=*/false,
-                                    (nested_enum_members_begin || assertion || unevaluated || in_function_body) ? &functions : nullptr)) {
+    if (auto m = q_->earlier_member(name, /*type_only=*/false, &functions)) {
       if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
       // Rank mixed overloads before checking whether the selected member needs an object.
       if (m->kind == ast::DeclKind::function) {

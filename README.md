@@ -21,7 +21,7 @@ executable passes its self-check.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-24). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-26). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -114,6 +114,10 @@ move operations.
 [#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828) [#218](https://github.com/yrashk/ycxx/issues/218)
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
+Constructors and constructor templates, in classes and class templates, can be `explicit` or
+`explicit(condition)`. A condition that depends on a constructor template's own parameters is
+evaluated after deduction. Constructor templates check their `requires` constraints.
+[#715](https://github.com/yrashk/ycxx/issues/715) [#1398](https://github.com/yrashk/ycxx/issues/1398)
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
@@ -184,6 +188,11 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+A template argument is a type-id only when it parses as one. Functional casts such as `B<U(3)>`
+(with a typedef-name `U`), `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>` and `B<int((n))>`
+are constant expressions, while `F<int(int)>`, `F<U (&)[3]>` and `F<typename T::type(T)>` stay
+types. [#1190](https://github.com/yrashk/ycxx/issues/1190) · [#810](https://github.com/yrashk/ycxx/issues/810)
+
 Fixed reference and single-pointer arguments can deduce through a unique most-derived
 base that matches a named class-template parameter.
 [#1144](https://github.com/yrashk/ycxx/issues/1144)
@@ -194,6 +203,11 @@ parentheses or braces, including through namespace aliases. [#697](https://githu
 Class templates at namespace scope can delete their copy assignment on its first in-class
 declaration, including with an lvalue or rvalue ref-qualifier. Specializations retain the deleted
 overload. [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+
+Member functions and member templates of class templates can carry `&` and `&&` ref-qualifiers,
+as in `T base() &&` next to `const T& base() const&`. Calls choose the overload by the object's
+value category, and members defined outside the class keep their qualifier.
+[#311](https://github.com/yrashk/ycxx/issues/311)
 
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
@@ -659,6 +673,10 @@ written default member initializer are value-initialized.
   lookup through bases, derived-to-base conversions and base initializers. Unqualified
   injected class names respect base access in ordinary member bodies. Those bodies and ordinary
   in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
+  A class, class template or partial specialization can bring a base's member functions into its
+  own overload set with a using-declaration, including from a dependent base
+  (`template<class Fn> struct D : Fn { using Fn::operator(); };`). Its own functions with the same
+  parameters hide the base's. [#1150](https://github.com/yrashk/ycxx/issues/1150)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
@@ -737,8 +755,8 @@ written default member initializer are value-initialized.
   operands, including dependent operands in supported class-template bases and variable-template
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
-  cv `void` and object pointers (derived-to-base, `void*`, added qualifiers, `bool`), including
-  dependent operands in the same template contexts.
+  cv `void`, object and multi-level pointers (derived-to-base, `void*`, qualification conversions,
+  `bool`) and references to pointers, including dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)

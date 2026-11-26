@@ -525,6 +525,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
                               [this](u32 n) { return is_value_trait(r_, n); });
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
+  bool trailing_requires = false;  // the declarator's trailing requires-clause began
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
   bool base_clause = false;  // a `:` after the class-key, before any parameter list
   bool typedef_ = false;
@@ -604,11 +605,18 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       ++j;
       continue;
-    case Tk::kw_requires:
+    case Tk::kw_requires: {
+      // After a parameter list and before a trailing requires-clause, a `&&` ends a ref-qualifier
+      // (`f() && requires C<T>`) or a trailing return type: this `requires` begins the
+      // requires-clause ([dcl.decl.general]), whose `(…)` and the body that follows are no
+      // requires-expression's.
+      const bool declarator_clause = params && !initializer && !trailing_requires;
+      if (declarator_clause) trailing_requires = true;
       // A requires-expression, after an operator or another `requires`: its parameter list and
       // its requirement braces are no declarator and no body.
-      if (prev == Tk::kw_requires || prev == Tk::ampamp || prev == Tk::pipepipe || prev == Tk::exclaim ||
-          prev == Tk::l_paren || prev == Tk::equal || prev == Tk::comma) {
+      if (!(declarator_clause && prev == Tk::ampamp) &&
+          (prev == Tk::kw_requires || prev == Tk::ampamp || prev == Tk::pipepipe || prev == Tk::exclaim ||
+           prev == Tk::l_paren || prev == Tk::equal || prev == Tk::comma)) {
         ++j;
         if (kind(j) == Tk::l_paren) j = match(j);
         if (kind(j) == Tk::l_brace) j = match(j);
@@ -616,6 +624,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       ++j;
       continue;
+    }
     case Tk::kw_class:
     case Tk::kw_struct:
     case Tk::kw_union:
@@ -678,6 +687,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         class_key = none;
         base_clause = false;
         params = false;
+        trailing_requires = false;
         continue;
       }
       if (params) {
@@ -915,10 +925,14 @@ private:
           last = j;
           spelled = name(j);
         } else if (kind(j) == Tk::kw_operator) {
+          last = j;
           if (auto id = literal_operator_id(r_, j, limit)) {
-            last = j;
             spelled = lex::literal_operator_name(id->suffix);
             j = id->end - 1;
+          } else {
+            // An operator-function-id or conversion-function-id ([class.conv.fct]).
+            spelled = "operator";
+            j = operator_spelling(j + 1, limit, spelled, /*comma_ends=*/true) - 1;
           }
         } else if (kind(j) == Tk::less) {
           j = match_angle(j, limit) - 1;
@@ -1018,6 +1032,26 @@ private:
     }
   }
 
+  // The rest of an operator-function-id or conversion-function-id after `operator`, from `n`,
+  // appended to `spelled` as declarators spell it; the first token after it: a `(`, `to`, or
+  // with `comma_ends` a `,` past its first token (a using-declarator's end).
+  u32 operator_spelling(u32 n, u32 to, std::string& spelled, bool comma_ends) {
+    const u32 first = n;
+    if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
+        (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
+      spelled += kind(n) == Tk::l_paren ? "()" : "[]";
+      n += 2;
+    }
+    for (; n < to && kind(n) != Tk::l_paren && !(comma_ends && n > first && kind(n) == Tk::comma); ++n) {
+      Tk o = kind(n);
+      bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
+      if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';
+      if (word && spelled == "operator" && o != Tk::string_lit) spelled += ' ';
+      spelled += r_.spelling(r_.tokens[n]);
+    }
+    return n;
+  }
+
   void declarator(u32 k, u32 from, u32 to, Flags f, bool first) {
     u32 cand = none;
     u32 cand_end = none;
@@ -1083,20 +1117,7 @@ private:
           n = cand_end = id->end;
           continue;
         }
-        ++n;
-        if ((kind(n) == Tk::l_paren && kind(n + 1) == Tk::r_paren) ||
-            (kind(n) == Tk::l_square && kind(n + 1) == Tk::r_square)) {
-          spelled += kind(n) == Tk::l_paren ? "()" : "[]";
-          n += 2;
-        }
-        while (n < to && kind(n) != Tk::l_paren) {
-          Tk o = kind(n);
-          bool word = o == Tk::identifier || lex::is_keyword(o) || lex::is_literal(o);
-          if (word && spelled.back() != 'r' && spelled != "operator") spelled += ' ';
-          if (word && spelled == "operator" && o != Tk::string_lit) spelled += ' ';
-          spelled += r_.spelling(r_.tokens[n]);
-          ++n;
-        }
+        n = operator_spelling(n + 1, to, spelled, /*comma_ends=*/false);
         cand_end = n;
       } else if (t == Tk::l_paren) {
         // A ptr-operator after `(` starts a grouped declarator, including `T (C::*p)(…)`.
