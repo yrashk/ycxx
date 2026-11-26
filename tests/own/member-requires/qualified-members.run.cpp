@@ -2,7 +2,6 @@
 // const-qualified and ref-qualified member functions with trailing requires-clauses; the
 // requires-clause follows the cv- and ref-qualifiers, and an unsatisfied overload is skipped
 // even when its qualifiers would match the object better.
-// XFAIL: ycxx ref-qualified members of class templates are not supported yet (#311)
 template<class T> concept Wide = sizeof(T) >= 4;
 
 template<class T>

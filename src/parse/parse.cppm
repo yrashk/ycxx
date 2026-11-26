@@ -5125,11 +5125,7 @@ private:
     const bool substitute = inst_ && !member_template_;
     sema::Bindings bound;
     if (substitute) bound = std::exchange(s_.template_args, sema::Bindings{});
-    s_.push_scope();
-    for (const parse::Param& prm : params)
-      if (prm.name != s_.no_name()) s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, prm.at, false);
-    trailing_requires_clause();
-    s_.pop_scope();
+    trailing_requires_clause(params);
     if (substitute) {
       s_.template_args = bound;
       const auto normal = s_.templates().substitute_constraint(trailing_requires_, bound);

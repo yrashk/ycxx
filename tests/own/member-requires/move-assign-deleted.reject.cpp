@@ -1,7 +1,6 @@
 // #1417 [class.copy.assign], [dcl.fct.def.delete], [over.match.viable]: a constrained
 // `= delete` move assignment operator that is satisfied is selected for an rvalue and makes
 // the assignment ill-formed, although a satisfied copy assignment operator exists.
-// XFAIL: ycxx a deleted move assignment in a class template is not supported yet (#157)
 template<class T> concept Small = sizeof(T) <= 2;
 
 template<class T>

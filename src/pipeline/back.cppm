@@ -2917,7 +2917,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       return std::nullopt;
     return FunctionName{
         {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt,
-         fn.trailing_constraint},
+         false, false, fn.trailing_constraint},
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {

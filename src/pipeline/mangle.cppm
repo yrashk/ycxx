@@ -628,7 +628,7 @@ class Mangler {
     }
     auto sig = signature(f, false);
     if (!sig) return sig;
-    return out + *sig + constraint_suffix(trailing);
+    return out + *sig + constraint_suffix(trailing, false);
   }
   // A function template specialization's <encoding>, without `_Z` (§5.1.2).
   // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
