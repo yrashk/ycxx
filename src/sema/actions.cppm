@@ -13063,7 +13063,9 @@ public:
             visit(arg.type);
           } else if (ordinary_call && arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
             // [basic.lookup.argdep]/3: associate the type template itself, not a specialization.
-            EntityId scope = w_->entities.rec(arg.templ).scope;
+            const EntityRec& declaration = w_->entities.rec(arg.templ);
+            if (compatibility() == ast::Compatibility::clang && declaration.kind == EntityKind::alias_template) return;
+            const EntityId scope = declaration.scope;
             if (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_)
               add_namespace(arg.templ);
           }
