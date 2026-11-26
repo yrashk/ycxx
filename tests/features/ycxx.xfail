@@ -82,7 +82,6 @@ draft/class/class.local-1.reject.cpp errors elsewhere: 'static' not supported ye
 draft/class/class.mem.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.mem.general-4.accept.cpp 'struct' not supported yet
 draft/class/class.mfct-2.accept.cpp 'typedef' not supported yet
-draft/class/class.name-3.accept.cpp 'struct' not supported yet
 draft/class/class.paths-1.accept.cpp 'class' not supported yet
 draft/class/class.pre-1.accept.cpp 'namespace' not supported yet
 draft/class/class.prop-1.accept.cpp 'struct' not supported yet
