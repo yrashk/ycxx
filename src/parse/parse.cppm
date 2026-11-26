@@ -6006,8 +6006,11 @@ private:
       auto exception = class_member;
       if (p_->defaulted_body(k_)) exception = defaulted_assignment;
       else if (member_template_) exception = member_template;
+      const bool replay_array_bounds = !spec.is_static && !member_template_ && !conversion &&
+                                       s_.templated() && p_->named_nested_class(it_->parent);
       parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                                          /*defer_ref_check=*/true);
+                                          /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false,
+                                          replay_array_bounds);
       if (!d.ok || !d.named) return bad();
       if (conversion && !d.function) {
         s_.diag(d.name_at, Diag::conversion_parameters);
@@ -8164,9 +8167,9 @@ private:
           at = ps_.pos();
           init = ps_.member_initializer(d.type, true, form);
         } else {
-          using Replay = Parser::InitializerReplay;
-          const Parser::InitializerReplayScope replay(ps_, s_.templated() && !early &&
-              (spec.is_inline || spec.is_constexpr) ? Replay::static_member : Replay::none);
+          using Replay = Parser::TemplateArgumentReplay;
+          const Parser::TemplateArgumentReplayScope replay(ps_, s_.templated() && !early &&
+              (spec.is_inline || spec.is_constexpr) ? Replay::static_initializer : Replay::none);
           const auto layout_arguments = ps_.dependent_layout_arguments();
           Ex e = early ? *early : ps_.assignment_expression();
           if (!inst_)
@@ -8481,8 +8484,8 @@ private:
       const bool replay = template_ && !var_ && !explicit_ && !d.qualified && !d.template_args &&
                           types.is_scalar(d.type) && !types.is_dependent(d.type) && !types.has_placeholder(d.type) &&
                           fixed_scalar_array_initializer(name);
-      using Replay = Parser::InitializerReplay;
-      const Parser::InitializerReplayScope initializer(ps_, replay ? Replay::variable_template : Replay::none);
+      using Replay = Parser::TemplateArgumentReplay;
+      const Parser::TemplateArgumentReplayScope initializer(ps_, replay ? Replay::variable_initializer : Replay::none);
       const sema::Sema::ClosureOwnerScope closures(s_, initializer_owner());
       early = ps_.braced_init_list();
       u64 n = s_.deduce_bound(d.type, *early);
@@ -8504,9 +8507,9 @@ private:
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
     const bool pattern = template_ && !var_ && !fn;
-    using Replay = Parser::InitializerReplay;
-    const Parser::InitializerReplayScope initializer(ps_, (pattern || var_) && !(d.qualified && d.scope.type)
-        ? Replay::variable_template : Replay::none);
+    using Replay = Parser::TemplateArgumentReplay;
+    const Parser::TemplateArgumentReplayScope initializer(ps_, (pattern || var_) && !(d.qualified && d.scope.type)
+        ? Replay::variable_initializer : Replay::none);
     AtItem::RestoreTypeTraitPattern restore{q_};
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;

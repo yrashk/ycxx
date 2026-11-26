@@ -119,7 +119,7 @@ struct Declarator {
 
 class Parser {
 public:
-  enum class InitializerReplay { none, variable_template, static_member };
+  enum class TemplateArgumentReplay { none, variable_initializer, static_initializer, member_array_bound };
 
   using TypeAliasChecks = std::vector<std::pair<ast::EntityId, std::vector<ast::TemplateArg>>>;
 
@@ -1101,7 +1101,7 @@ public:
     bool deferred_exception = false;
     u64 bound = 0;
     bool unknown_bound = false;  // an array suffix with an omitted bound ([dcl.array])
-    // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
+    // A value-dependent bound ([temp.dep.constexpr]), kept for the type's pattern.
     std::optional<sema::ConstId> dependent_bound;
     std::optional<QualType> trailing;  // `-> T`: the trailing return type ([dcl.fct]/2)
   };
@@ -1138,7 +1138,7 @@ public:
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
                         NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false,
-                        bool reject_parameter_defaults = false) {
+                        bool reject_parameter_defaults = false, bool replay_member_array_bounds = false) {
     Declarator d;
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
@@ -1149,7 +1149,7 @@ public:
                                  (s_->templated() && !typedef_ &&
                                   (named_exception == NamedExceptionSpec::class_member ||
                                    named_exception == NamedExceptionSpec::ordinary));
-    Level top = level(abstract, d.ok, conversion, defer_exception);
+    Level top = level(abstract, d.ok, conversion, defer_exception, replay_member_array_bounds);
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -1556,7 +1556,8 @@ public:
     return sema::allocation_name(f, array);
   }
 
-  Level level(bool abstract, bool& ok, bool conversion = false, bool defer_exception = false) {
+  Level level(bool abstract, bool& ok, bool conversion = false, bool defer_exception = false,
+              bool replay_member_array_bounds = false) {
     Level l;
     pointer_operators(l, ok);
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
@@ -1708,7 +1709,11 @@ public:
           continue;
         }
         Suffix s;
-        // [dcl.array]: a converted constant expression of integral type.
+        // [dcl.array]: a converted constant expression of integral type. A nested class
+        // specialization reads this member's declared type when the class must be complete.
+        const auto replay = replay_member_array_bounds && l.named ? TemplateArgumentReplay::member_array_bound
+                                                                 : TemplateArgumentReplay::none;
+        const TemplateArgumentReplayScope bound(*this, replay);
         Ex e = s_->promote(constant_expression());
         sema::Evaluated ev = sema::Evaluator(*s_, questions()).evaluate(e);
         auto v = ev.value;
@@ -2883,7 +2888,7 @@ public:
   // A placeholder is allowed only where `placeholder_ok` says (a trailing return type,
   // [dcl.spec.auto.general]/3): not in a template argument, a cast or an alias ([dcl.spec.auto.general]/6).
   std::optional<QualType> type_id(bool placeholder_ok = false, bool retain_alias_checks = false) {
-    const InitializerReplayScope initializer(*this, InitializerReplay::none);
+    const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     TypeAliasCheckScope aliases{*this, retain_alias_checks, !type_alias_checks_ || type_alias_checks_->type_default};
     DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
     if (!spec.ok) return std::nullopt;
@@ -3050,7 +3055,7 @@ public:
                                                                      bool* took_closer = nullptr, bool expand_empty = false,
                                                                      VariableArgumentReplay* replay = nullptr) {
     // Any nested template-id must supply canonical arguments to its enclosing argument.
-    const InitializerReplayScope initializer(*this, InitializerReplay::none);
+    const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
@@ -4579,14 +4584,16 @@ public:
       bump();
       if (is(Tk::less) && s_->is_template_name(n)) {
         // A template-id ([temp.names]): `f<args>`.
-        VariableArgumentReplay replay{{}, initializer_replay_ == InitializerReplay::variable_template};
-        const bool replay_values = initializer_replay_ != InitializerReplay::none && !s_->unevaluated &&
+        VariableArgumentReplay replay{{}, template_argument_replay_ == TemplateArgumentReplay::variable_initializer};
+        const bool replay_values = template_argument_replay_ != TemplateArgumentReplay::none && !s_->unevaluated &&
                                    s_->variable_template(n, std::nullopt, /*initializer=*/true);
         auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &replay : nullptr);
         if (!args) return {NodeId::none, begin, pos()};
         if (!replay.deferred.empty()) {
           auto v = s_->variable_template(n, begin, /*initializer=*/true);
           if (!v) return {NodeId::none, begin, pos()};
+          if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
+            return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->replayed_variable_template_id(*v, *args, replay.deferred, begin, pos());
         }
         // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
@@ -4988,8 +4995,8 @@ public:
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns && !immediate_template)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
-          VariableArgumentReplay replay{{}, initializer_replay_ == InitializerReplay::variable_template};
-          const bool replay_values = initializer_replay_ != InitializerReplay::none && !s_->unevaluated;
+          VariableArgumentReplay replay{{}, template_argument_replay_ == TemplateArgumentReplay::variable_initializer};
+          const bool replay_values = template_argument_replay_ != TemplateArgumentReplay::none && !s_->unevaluated;
           auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &replay : nullptr);
           if (!args) return {NodeId::none, begin, pos()};
           if (!replay.deferred.empty()) {
@@ -4999,6 +5006,8 @@ public:
             }
             auto known = s_->namespace_template(*s->ns, n, ast::DeclKind::variable, name_at);
             if (!known) return {NodeId::none, begin, pos()};
+            if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
+              return s_->dependent_variable_template_id(*known, *args, begin, pos());
             return s_->replayed_variable_template_id(*known, *args, replay.deferred, begin, pos());
           }
           if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
@@ -5126,7 +5135,7 @@ public:
   // lambda-expression ([expr.prim.lambda]): its introducer and declarator, read in the enclosing
   // context, then its compound-statement as the body of the closure's function call operator.
   Ex lambda_expression() {
-    const InitializerReplayScope initializer(*this, InitializerReplay::none);
+    const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     DisableDependentDecayCopy disable{dependent_decay_copy_body};
     using K = sema::Sema::CaptureSpec::Kind;
     sema::Sema::LambdaSpec spec;
@@ -6958,7 +6967,7 @@ private:
   bool in_type_requirement_ = false;
   std::optional<u32> layout_argument_at_;  // written operator at the start of a replayable argument
   u32 dependent_layout_arguments_ = 0;
-  InitializerReplay initializer_replay_ = InitializerReplay::none;
+  TemplateArgumentReplay template_argument_replay_ = TemplateArgumentReplay::none;
   bool in_template_id_lookahead_ = false;
   bool alias_constraints_enabled_ = true;
   u32 alias_constraint_failures_ = 0;
@@ -6973,12 +6982,12 @@ private:
   TypeAliasCheckScope* type_alias_checks_ = nullptr;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
-  struct InitializerReplayScope {
+  struct TemplateArgumentReplayScope {
     Parser& parser;
-    InitializerReplay saved;
-    InitializerReplayScope(Parser& parser, InitializerReplay mode)
-        : parser(parser), saved(std::exchange(parser.initializer_replay_, mode)) {}
-    ~InitializerReplayScope() { parser.initializer_replay_ = saved; }
+    TemplateArgumentReplay saved;
+    TemplateArgumentReplayScope(Parser& parser, TemplateArgumentReplay mode)
+        : parser(parser), saved(std::exchange(parser.template_argument_replay_, mode)) {}
+    ~TemplateArgumentReplayScope() { parser.template_argument_replay_ = saved; }
   };
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay

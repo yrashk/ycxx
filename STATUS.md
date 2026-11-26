@@ -2351,8 +2351,10 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   template can take `alignof(type-id)` and `sizeof(type-id)` in a variable template initializer or
   a class template's fixed-type inline static member initializer. Replay checks layout at demand,
   converts the target `size_t` result to the declared parameter type and expands the whole query
-  in pack order, including repeated elements and empty packs. General dependent alias arguments
-  remain in #209 and placeholder non-type parameters in #1244.
+  in pack order, including repeated elements and empty packs. The same arguments in a direct
+  array bound of a non-static field in an in-class nested record replay when that record needs
+  to be complete. General dependent alias arguments remain in #209 and placeholder non-type
+  parameters in #1244.
 - **Integral arithmetic in variable template initializers** (#1091): a direct variable template-id
   such as `extent<T, I - 1>` in a namespace variable template initializer evaluates its argument
   and checks its conversion when the initializer is instantiated with the selected definition's
