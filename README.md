@@ -41,8 +41,8 @@ when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
 **Embed the query engine or compiler.** Build the components as static or shared libraries
-with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the engine and
-compiler examples in [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the component
+APIs and examples in the [embedder guide](docs/EMBEDDING.md).
 
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 Use `ycxx show --targets` to list the workspace's declared target names and rule
