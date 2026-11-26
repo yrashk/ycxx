@@ -935,6 +935,19 @@ class Planner {
     artifact.bytes.assign(contents.begin(), contents.end());
   }
 
+  static std::optional<ActionArg::Kind> triple_selector_kind(const Value& value) {
+    if (std::holds_alternative<HostTriple>(value.data)) return ActionArg::Kind::host_triple;
+    if (std::holds_alternative<TargetTriple>(value.data)) return ActionArg::Kind::target_triple;
+    return std::nullopt;
+  }
+
+  std::string_view resolve_action_triple(ActionArg::Kind kind, SourceLocation at) const {
+    const bool use_host = kind == ActionArg::Kind::host_triple || native_triple_.empty();
+    const auto* host = pp::native_target;
+    if (use_host && !host) fail(at, "no default native target for this host");
+    return use_host ? host->triple : native_triple_;
+  }
+
   GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt,
                           std::span<const EmbeddedInput> embedded = {}, bool observer = false) {
     if (sdk_header)
@@ -963,11 +976,15 @@ class Planner {
 
     if (const auto* entries = field(decl, "environment")) {
       for (const auto& [name, value] : as<Record>(*entries, "a record of environment variables")) {
-        const auto& text = as<std::string>(value, "an environment value");
+        const auto kind = sdk_header ? std::nullopt : triple_selector_kind(value);
+        const std::string_view text = kind ? resolve_action_triple(*kind, value.location)
+                                           : as<std::string>(value, "an environment value");
         if (name.empty() || name.contains('=') || name.contains('\0') || text.contains('\0'))
           fail(value.location, "invalid action environment entry");
         plan.action.environment.emplace_back(name, text);
-        if (inspection_) fact("environment", decl, name, text, "declared in environment", value.location);
+        if (inspection_)
+          fact("environment", decl, name, text, kind ? triple_arg_selector(*kind) : "declared in environment",
+               value.location);
       }
     }
 
@@ -1061,17 +1078,12 @@ class Planner {
         if (const auto* text = std::get_if<std::string>(&value.data)) {
           if (inspection_) argv_fact(*text, "declared in args");
           plan.action.args.push_back({literal, *text});
-        } else if (const bool for_host = std::holds_alternative<HostTriple>(value.data);
-                   for_host || std::holds_alternative<TargetTriple>(value.data)) {
-          const auto kind = for_host ? host_triple : target_triple;
-          const auto selector = triple_arg_selector(kind);
+        } else if (const auto kind = triple_selector_kind(value)) {
+          const auto selector = triple_arg_selector(*kind);
           if (sdk_header) fail(value.location, std::format("{} is only available in project action arguments", selector));
-          const bool use_host = for_host || native_triple_.empty();
-          const auto* host = pp::native_target;
-          if (use_host && !host) fail(value.location, "no default native target for this host");
-          const auto triple = use_host ? host->triple : native_triple_;
+          const auto triple = resolve_action_triple(*kind, value.location);
           if (inspection_) argv_fact(triple, selector);
-          plan.action.args.push_back({kind, std::string(triple)});
+          plan.action.args.push_back({*kind, std::string(triple)});
         } else if (const auto* input_name = std::get_if<InputArg>(&value.data)) {
           const auto binding = std::ranges::find(plan.inputs, input_name->name, &ActionInput::name);
           if (binding != plan.inputs.end()) {
