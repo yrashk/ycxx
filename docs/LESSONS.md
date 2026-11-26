@@ -230,6 +230,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     gates of #1294 and #1306, one of them started at load 5. #1295's and #1304's gates passed on the
     same Mac the same day. #1123 measured about 10 s for the first launch of a new executable; why
     is not established.
+- **Search open PRs for a feature before implementing it, even inside a broader batch.** #1416
+  implemented placeholder constant template parameters for #1244, with a comment on #286. Twelve
+  hours later, #1533 implemented bare `auto` parameters a second way as part of a compatibility
+  batch: it kept the `auto` placeholder as the parameter's type, while #1416 gave the parameter
+  its own position as its type. #1533 merged first. Merging `main` into #1416 then meant choosing
+  one representation, moving #1533's GCC array-bound rule onto it, and deleting #1533's code
+  paths. Those paths could no longer match a parameter, though the merge itself was clean.
+  - Do: before writing code for a language feature, run `gh pr list -R yrashk/ycxx --search
+    '<feature>'` and read the feature's issue comments. If another PR has it, build on that PR
+    or leave the feature to it. On a merge that brings in a second implementation, keep one
+    representation and move the other's mode-specific rules onto it. Delete the paths that no
+    longer apply, and say so in the PR.
+  - Learned on #1244.
 
 ## Working with Fable subagents
 
