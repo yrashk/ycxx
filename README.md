@@ -471,7 +471,9 @@ bare `explicit`. Eligible inline constructors link across separate objects on bo
 A class or class template can explicitly default its default, copy and move constructors, its
 copy and move assignment operators and its nonvirtual destructor as their first declarations in
 the class. Nontrivial ones run each base's and member's own operation, and work in constant
-evaluation. Local classes and defaulting outside the class are not done.
+evaluation. Outside the class, a non-union class with no bases, no virtual functions and only
+scalar members can default its default constructor, destructor and copy assignment. Local
+classes and other defaulting outside the class are not done.
 [#157](https://github.com/yrashk/ycxx/issues/157) · [#1096](https://github.com/yrashk/ycxx/issues/1096)
 
 An explicit class return can select a written move constructor for an eligible named local
