@@ -6416,8 +6416,13 @@ public:
             }
             auto constraint_concept = questions().template_decl(placeholder.entity);
             if (!constraint_concept) return fail();
-            std::vector<ast::TemplateArg> args{s_->templates().type_arg(inv.type)};
-            args.append_range(s_->ins().seqs.elements(placeholder.args));
+            // BOOTSTRAP: GCC 16.2 at -O3 reports array bounds when appending to the
+            // one-element initializer-list vector. Reserve the full argument count first.
+            const auto explicit_args = s_->ins().seqs.elements(placeholder.args);
+            std::vector<ast::TemplateArg> args;
+            args.reserve(explicit_args.size() + 1);
+            args.push_back(s_->templates().type_arg(inv.type));
+            for (const auto& arg : explicit_args) args.push_back(arg);
             auto normal = s_->concept_constraint(*constraint_concept, args, p.at);
             if (!normal) return fail();
             parameter_constraints.push_back(*normal);
