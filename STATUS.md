@@ -1568,9 +1568,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
     analysis for a specialization is at the end of the unit.
   - The implicit exception specification is decided where `noexcept` asks for it
     (`Program::defaulted_nonthrowing`); it does not include subobject destructors ([except.spec]).
-  - A class is POD for layout by the target ABI's definition, where defaulted and deleted
-    constructors are not user-provided: C++11's on arm64 macOS, C++03's on x86-64 Linux (public
-    members, no bases). Tests compare both with Clang.
+  - A class is POD for layout by the `-fcompat` mode's definition, where defaulted and deleted
+    constructors are not user-provided: C++11's in Clang mode on arm64 macOS, C++03's otherwise
+    (public members, no bases).
   - Not yet: local classes, defaulting outside the class, a virtual assignment operator, member
     pointers in assignment.
   [Design](docs/design/defaulted-special-members.md) · [#157](https://github.com/yrashk/ycxx/issues/157)

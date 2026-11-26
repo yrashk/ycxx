@@ -1,13 +1,10 @@
-// #157 [class.prop], [class.temporary]: ycxx and Clang agree on the layout of classes with defaulted
-// special members and on how they are passed and returned.
+// #157 [class.temporary]: ycxx and Clang agree on how classes with defaulted special members are
+// passed and returned. cross-object-layout.run.cpp compares their layouts.
 // PEER: cross-object-peer.cpp
-// XFAIL: gcc its layout of these classes is not the one Clang gives them on this target
 // EXIT: 0
 #include "cross-object.hpp"
 
 int main() {
-  for (int i = 0; i < layouts; ++i)
-    if (layout(i) != peer_layout(i)) return 1 + i;
   Triple t{};
   t.a = 3;
   t.b = 4;
