@@ -101,6 +101,11 @@ struct DependencyGraphInspection {
   std::vector<PlanDependencyEdge> edges = {};
 };
 
+struct DependencyOccurrenceChange {
+  std::vector<PlanDependencyEdge> before;
+  std::vector<PlanDependencyEdge> after;
+};
+
 struct PlanInspection {
   int schema = 1;
   std::string target;
