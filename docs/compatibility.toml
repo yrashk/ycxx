@@ -654,3 +654,17 @@ clang_observed = "Clang 23.1.6 returns true for `__atomic_always_lock_free(0, nu
 limits = "Native parity for size zero is outside the first 32-bit slice."
 probe = 'constexpr bool zero_is_lock_free = __atomic_always_lock_free(0, nullptr);'
 evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]
+
+[[divergence]]
+id = "gnu-atomic-compare-exchange-expected-signedness"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "GNU __atomic_compare_exchange_n, #1293, #328"
+prior = "GNU compare-exchange was unsupported."
+spec = "Require the expected pointer to point to the same unqualified integer type as the atomic object's pointer."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 accepts an unsigned int expected pointer for a signed int atomic object's pointer."
+clang_observed = "Clang 23.1.6 rejects the unsigned int expected pointer when the atomic object's pointer is int*."
+probe = 'bool f(int* p, unsigned* expected) { return __atomic_compare_exchange_n(p, expected, 1, false, 0, 0); }'
+evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]

@@ -907,7 +907,7 @@ class Lowering {
         T st[] = {T::state};
         ValueId ops[] = {in(n, 0), p, v};
         std::uint64_t im[] = {imms[0]};
-        out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags, {}, o)));
+        out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags & bit(Flag::volatile_), {}, o)));
         return {};
       }
       case Op::atomic__load:
