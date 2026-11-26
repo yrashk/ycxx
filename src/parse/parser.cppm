@@ -6204,7 +6204,7 @@ public:
         DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
         Declarator d = declarator(spec.type, /*abstract=*/true, /*typedef_=*/false, /*conversion=*/false,
                                   NamedExceptionSpec::ordinary, /*defer_ref_check=*/false,
-                                  /*reject_parameter_defaults=*/true);
+                                  /*reject_parameter_defaults=*/s_->compatibility() != ast::Compatibility::clang);
         if (spec.ok && d.ok) {
           type = d.type;
           if (s_->types().is_array(type)) type = s_->types().pointer(s_->types().rec(type).inner);
@@ -6763,6 +6763,8 @@ public:
     }
     // [stmt.dcl]/2: the switch jumps here, so no initialization may be bypassed.
     if (sw && sema::Sema::bypasses(sw->initialized, s_->initialized_in_scope())) s_->diag(begin, Diag::jump_past_init);
+    if (is(Tk::r_brace) && s_->compatibility() == ast::Compatibility::gcc)
+      s_->diag(pos(), Diag::expected_expression);
     Ex st = labeled_statement();
     if (!sw) return st;
     if (dflt) return s_->node(ast::Default{sema::Sema::at(st, begin)}, begin, pos());
@@ -7089,9 +7091,18 @@ public:
     } else if (auto member = s_->as<ast::MemberCall>(call)) {
       function = member->function;
     } else if (auto sequence = s_->as<ast::OrderedBinary>(call); sequence && sequence->op == ast::OrderedOp::comma) {
-      // Sema represents a static call through an object by discarding the receiver,
-      // then calling the selected function. The complete invocation includes both.
-      if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) function = invocation->function;
+      // Sema sequences the discarded receiver before a static call. GCC evaluates the call
+      // by itself and preserves the receiver's effects in the containing expression.
+      if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) {
+        function = invocation->function;
+        if (s_->compatibility() == ast::Compatibility::gcc && !call.glvalue() &&
+            s_->ordinary_immediate_member(function, call.type())) {
+          Ex result = s_->immediate_invocation({sequence->rhs.id, call.begin + sequence->rhs.at, call.end, invocation->info});
+          if (!result.ok()) return result;
+          return s_->node(ast::OrderedBinary{call.info, ast::OrderedOp::comma, sequence->lhs,
+                                            sema::Sema::at(result, call.begin)}, call.begin, call.end, call.info);
+        }
+      }
     }
     if (!call.glvalue() && s_->ordinary_immediate_member(function, call.type())) return s_->immediate_invocation(call);
     if (direct && function != ast::EntityId::none && s_->is_consteval(function))

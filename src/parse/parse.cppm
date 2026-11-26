@@ -4713,8 +4713,22 @@ private:
     }
     std::vector<ast::TemplateArg> primary = t.own_args(params);
     if (!t.more_specialized_partial(head, *full, params, primary, partial_constraints_, tmpl.constraints)) {
-      s_.diag(at, Diag::partial_not_more_specialized, name);
-      return std::nullopt;
+      // GCC accepts a direct permutation of type parameters even though it does not specialize
+      // the primary. An unchanged argument list was already checked above.
+      const bool gcc_permutation = s_.compatibility() == ast::Compatibility::gcc &&
+          full->size() == head.size() && head.size() == params.size() &&
+          std::ranges::all_of(params, [](const auto& p) { return p.kind == ast::TemplateArgKind::type && !p.pack; }) &&
+          std::ranges::all_of(*full, [&](const auto& a) {
+            if (a.kind != ast::TemplateArgKind::type) return false;
+            const auto r = s_.types().rec(a.type);
+            return r.kind == sema::TypeKind::template_param && r.index < head.size() &&
+                   head[r.index].kind == a.kind && head[r.index].depth == r.depth && !head[r.index].pack &&
+                   sema::Types::cv(s_.types().canonical(a.type)) == sema::Cv::none;
+          });
+      if (!gcc_permutation) {
+        s_.diag(at, Diag::partial_not_more_specialized, name);
+        return std::nullopt;
+      }
     }
     return full;
   }
@@ -9381,7 +9395,8 @@ private:
     // namespaces. Apply [basic.def.odr] to their shared entity before publishing the definition.
     if (fn && definition && sem.linkage == ast::Linkage::external &&
         (sem.flags & (sema::decl_flag::lang_c | sema::decl_flag::member | sema::decl_flag::template_)) ==
-            sema::decl_flag::lang_c && p_->function_defined_before(sem.entity, k_)) {
+            sema::decl_flag::lang_c && s_.compatibility() != ast::Compatibility::gcc &&
+        p_->function_defined_before(sem.entity, k_)) {
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
     }
@@ -14202,6 +14217,9 @@ void Program::instantiate_all() {
     if (const auto at = member_decl(record.dynamic->key_function)) require_table(c, at->item);
   }
   for (const auto& [e, k] : explicit_specs_) {
+    const auto& entity = w_->entities.rec(EntityId(e));
+    if (entity.kind == sema::EntityKind::destructor && compatibility() == ast::Compatibility::clang)
+      continue;
     // Instantiated in a constant evaluation before it: an instance exists, since none is made
     // once the explicit specialization precedes the point.
     auto c = class_points_.find(e);
@@ -14220,12 +14238,12 @@ void Program::instantiate_all() {
     }
     // Cleanup references in ordinary bodies and variable definitions are first collected above.
     // A template body added later to the worklist can be instantiated after its source item.
-    if (!used && w_->entities.rec(EntityId(e)).kind == sema::EntityKind::destructor)
+    if (!used && entity.kind == sema::EntityKind::destructor)
       used = std::ranges::any_of(work, [&](const sema::Demand& demand) {
         return std::to_underlying(demand.spec) == e && index(demand.at.item) < k;
       });
     if (!used) continue;
-    ast::NameId name = w_->entities.rec(EntityId(e)).name;
+    ast::NameId name = entity.name;
     auto at = spec_names_.find(e);
     end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), at == spec_names_.end() ? 0 : at->second},
                           sema::diag_id(sema::Diag::specialized_after_use),

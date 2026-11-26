@@ -947,10 +947,13 @@ public:
           }
           first = hits.begin();
         }
-        auto allowed = [this, naming, before_parameter](const Hit& h) {
-          return accessible(h.owner, h.access, naming) && std::ranges::all_of(h.path, [&](const Edge& edge) {
-            return accessible(edge.derived, edge.access, before_parameter ? naming : EntityId::none);
-          });
+        const bool clang_elaborated = type_only && lookup == ClassBodyLookup::qualified &&
+                                      compatibility() == ast::Compatibility::clang;
+        auto allowed = [this, naming, before_parameter, clang_elaborated](const Hit& h) {
+          return accessible(h.owner, h.access, naming) &&
+                 ((clang_elaborated && h.injected) || std::ranges::all_of(h.path, [&](const Edge& edge) {
+                    return accessible(edge.derived, edge.access, before_parameter ? naming : EntityId::none);
+                  }));
         };
         if (!std::ranges::any_of(hits, allowed)) {
           QualType type = *first->type;
@@ -4368,7 +4371,8 @@ public:
       const QualType type = types().innermost_array_element(element.type);
       const ClassRec* record = types().is_class(type) && !types().is_dependent(type)
                                  ? class_rec(types().class_of(type)) : nullptr;
-      if ((union_ || (record && record->declared_destructor != EntityId::none && record->destructor == EntityId::none)) &&
+      if ((union_ || (compatibility() != ast::Compatibility::gcc && record &&
+                     record->declared_destructor != EntityId::none && record->destructor == EntityId::none)) &&
           !check_destructor_access(type, begin)) return fail;
     }
     const auto omitted = [&](const Element& element, u32 at) {
@@ -9852,7 +9856,22 @@ public:
     // has an object, destroyed with the full-expression.
     if (e.ok() && !e.glvalue() && !dependent(e) && types().is_class(e.type()) && !as<ast::Materialize>(e))
       return materialize(e, Types::unqualified(e.type()), false);
-    return e;
+    return discard_gcc_reinterpretation(e);
+  }
+
+  // GCC drops a discarded pointer/integer reinterpretation while evaluating its operand.
+  Ex discard_gcc_reinterpretation(Ex e) {
+    if (compatibility() != ast::Compatibility::gcc || !e.ok()) return e;
+    Ex operand = e;
+    while (auto p = as<ast::Paren>(operand)) {
+      operand.begin += p->operand.at;
+      operand.id = p->operand.id;
+    }
+    const auto cast = as<ast::Conversion>(operand);
+    if (!cast || (cast->conversion != ast::ConversionKind::integral_to_pointer &&
+                  cast->conversion != ast::ConversionKind::pointer_to_integral))
+      return e;
+    return {cast->operand.id, operand.begin + cast->operand.at, operand.end, expression_info(cast->operand.id)};
   }
 
   Ex paren(Ex e, u32 begin, u32 end) {
@@ -10452,7 +10471,7 @@ public:
         return {NodeId::none, e.begin, e.end};
       // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
       if (is_defaulted_tag_initializer(e)) e = discarded(e);
-      return convert_node(e, ast::ConversionKind::to_void, target);  // /6
+      return convert_node(discard_gcc_reinterpretation(e), ast::ConversionKind::to_void, target);  // /6
     }
     if (types().is_reference(to)) {
       const TypeRec ref = types().rec(to);
@@ -12559,7 +12578,7 @@ public:
       // [expr.comma]: the left operand is discarded. Only the right produces the result.
       if (!l.glvalue() && (!require_concrete_call_result(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
         return {NodeId::none, begin, end};
-      return ordered(ast::OrderedOp::comma, l, r, r.info);
+      return ordered(ast::OrderedOp::comma, discard_gcc_reinterpretation(l), r, r.info);
     case shl:
     case shr: {
       Ex a = promote(l), c = promote(r);
@@ -13175,6 +13194,9 @@ public:
         return fail;
       }
     } else {
+      if (compatibility() == ast::Compatibility::gcc && types().is_array(value.type()) &&
+          !require_complete(value.type(), value.begin))
+        return fail;
       value = rvalue(value);
       if (!value.ok() || !require_complete(value.type(), value.begin)) return fail;
       if (types().is_pointer(value.type())) {
@@ -13264,7 +13286,16 @@ public:
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
     auto throws = [&](Ex arm) {
-      while (auto p = as<ast::Paren>(arm)) arm = Ex{p->operand.id};
+      for (;;) {
+        if (auto p = as<ast::Paren>(arm)) {
+          arm = Ex{p->operand.id};
+        } else if (auto c = as<ast::Conversion>(arm); c && c->conversion == ast::ConversionKind::to_void &&
+                   compatibility() == ast::Compatibility::gcc) {
+          arm = Ex{c->operand.id};
+        } else {
+          break;
+        }
+      }
       return as<ast::Throw>(arm).has_value();
     };
     const bool throws_then = throws(t);
