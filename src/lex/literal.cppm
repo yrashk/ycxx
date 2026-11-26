@@ -9,9 +9,6 @@
 // - an inexact floating value is rounded to nearest, ties to even, and a nonzero value smaller
 //   than the type's least subnormal becomes zero; a value beyond the type's finite range is an
 //   infinity, which [lex.fcon]/4 allows (its example), with a warning, as Clang and GCC give.
-module;
-// libycxx's target-format converter is an implementation entry point outside `import std`.
-#include <ycxx/core/charconv.hpp>
 export module ycxx.lex:literal;
 
 import std;
@@ -19,6 +16,7 @@ import :tok;
 import :diag;
 import :unicode;
 import :lexer;
+import :extended_float;
 
 export namespace ycxx::lex {
 
@@ -453,13 +451,8 @@ Tk classify_number(Literal& l, Tables& names, R&& report) {
       auto bits = l.float_suffix == FloatSuffix::f ? float_bits<float>(text, fmt, at_least_one, overflow)
                                                     : float_bits<double>(text, fmt, at_least_one, overflow);
       if (l.float_suffix == FloatSuffix::l) {
-        using __ycxx::__detail::__fp_from_chars;
-        using __ycxx::__detail::__fp_kind;
-        __ycxx::__detail::__fp_raw x87;
-        const auto parsed = __fp_from_chars(text.data(), text.data() + text.size(), __fp_kind::__x87_extended,
-                                            x87, static_cast<int>(fmt));
-        l.x87_overflow = parsed.ec == std::errc::result_out_of_range && at_least_one;
-        l.x87 = l.x87_overflow ? decltype(l.x87){0x8000000000000000ULL, 0x7FFF} : decltype(l.x87){x87.__lo, x87.__hi};
+        l.x87 = x87_literal(digits, fraction, exponent, hex);
+        l.x87_overflow = l.x87[1] == 0x7fff;
         l.overflow = overflow;
       }
       if (overflow) {

@@ -684,11 +684,21 @@ static_assert(__builtin_memchr(&left, 0x31, sizeof(left)) == &left);
 constexpr long double one = 1.0L;
 #ifdef X87
 constexpr long double slight = 1.0000000000000000001084202172485504434007L;
+constexpr long double midpoint = 1.0000000000000000000542101086242752217003726400434970855712890625L;
 constexpr long double full = 0x1.fffffffffffffffep-1000L;
 constexpr long double huge = 1.0e4000L;
+constexpr long double zero = 0.0L, least = 0x1p-16445L;
+constexpr long double half_least = 0x1p-16446L;
+constexpr long double above_half_least = 0x1.0000000000000002p-16446L;
+constexpr long double first_normal = 0x1p-16382L;
+constexpr long double tie_to_normal = 0x0.ffffffffffffffffp-16382L;
 static_assert(sizeof(one) == 16 && sizeof(huge) == 16);
 #ifndef CONTROL
 static_assert(__builtin_memcmp(&one, &slight, sizeof one) < 0);
+static_assert(__builtin_memcmp(&one, &midpoint, sizeof one) == 0);
+static_assert(__builtin_memcmp(&zero, &half_least, sizeof zero) == 0);
+static_assert(__builtin_memcmp(&least, &above_half_least, sizeof least) == 0);
+static_assert(__builtin_memcmp(&first_normal, &tie_to_normal, sizeof first_normal) == 0);
 static_assert(__builtin_memchr(&one, 0xff, 10) != nullptr);
 static_assert(__builtin_memchr(&full, 0, 10) == nullptr);
 static_assert(__builtin_memchr(&full, 0, sizeof full) != nullptr);
