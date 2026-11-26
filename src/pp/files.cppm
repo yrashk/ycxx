@@ -128,13 +128,19 @@ struct Config {
   // An ABI option the unit's front end reads: `-fclass-call-abi=itanium|apple`, which classes pass
   // in registers (DECISIONS §1.6). None: the target's default.
   std::optional<ast::CallTriviality> call_triviality;
+  ast::Compatibility compatibility = ast::Compatibility::spec;
   // The PIC level `-fpic` (1) and `-fPIC` (2) ask for, which `__PIC__` and `__pic__` name; `-fno-pic`
   // is 0. A target that is always PIC ignores it (`Target::always_pic`).
   u8 pic = 0;
   // Setup options consumed by with_system_dirs. Queries use the effective directory lists.
   bool nostdinc = false;
   bool nostdincxx = false;
-  ast::CallTriviality calls() const { return call_triviality.value_or(target->call_triviality); }
+  ast::CallTriviality calls() const {
+    if (call_triviality) return *call_triviality;
+    if (compatibility == ast::Compatibility::gcc && target->operating_system == ast::OperatingSystem::linux_)
+      return ast::CallTriviality::gcc;
+    return target->call_triviality;
+  }
 
   // Whether a file found in directory `found` (an index into quote then angle directories, as
   // `Resolved::dir`) is a system header: found in a system directory, or included by a system
@@ -159,7 +165,7 @@ struct Config {
     if (!exceptions_enabled) h.uint(u8(5));
     if (!rtti_enabled) h.uint(u8(6));
     if (pic != 0 && !target->always_pic) h.uint(u8(7)).uint(pic);  // always PIC: the options change nothing
-    return h.finish();
+    return h.uint(u8(8)).uint(std::to_underlying(compatibility)).finish();
   }
 };
 
