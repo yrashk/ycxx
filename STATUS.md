@@ -2158,8 +2158,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
-  calls follows the published Itanium rule by default. On x86-64 Linux, GCC mode passes
+  rest unused (C.11). Spec and Clang modes omit the tested empty-class arguments on Darwin.
+  GCC mode transports a naturally aligned one-byte empty argument in direct calls on Darwin.
+  The published Itanium rule selects which classes are trivial for calls by default. On x86-64 Linux, GCC mode passes
   supported classes whose copy is implicitly deleted by a class subobject in stack slots.
   The explicit
   `-fclass-call-abi=itanium` and `-fclass-call-abi=apple` flags override that choice (DECISIONS §1.6).

@@ -885,8 +885,8 @@ evidence = ["tests/own/builtins/layout-compatible-member-alignment.accept.cpp", 
 
 [[divergence]]
 id = "reference-related-pointer-xvalue"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[meta.rel], [dcl.init.ref]/4, [dcl.init.ref]/5.3–5.4, [conv.qual], CWG2352, #1396"
 prior = "The two reference-related pointer xvalues could bind through converted temporaries."
 spec = "Return false for __is_convertible(int*, const int*&&) and __is_convertible(int**, const int* const*&&). The source and target types are reference-related and fail the direct reference-compatibility check. The same rule applies to __is_nothrow_convertible."
@@ -1297,19 +1297,19 @@ evidence = ["tests/daemon/compatibility.py"]
 [[divergence]]
 id = "empty-class-argument-transport"
 status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "Apple arm64 calling convention, AAPCS64 §6.8.2, AMD64 psABI §3.2.3, Itanium C++ ABI §3.1.2.3, #116, #641"
 prior = "Omit a trivial empty class argument on both targets, as observed with Clang. The GCC Darwin mixed-object fixture is expected to fail."
 spec = "Omit the call-trivial empty argument per the Apple arm64 convention and the AMD64 NO_CLASS classification."
 gcc = "Omit the tested one-byte empty argument on x86-64 Linux. On arm64 Darwin, the recorded GCC behavior is to pass the byte, consuming a parameter register."
 clang = "Same as spec."
-limits = "Covers fixed direct calls using naturally aligned one-byte classes with trivial call operations, with adjacent scalar arguments. The Darwin GCC rule still needs a new native mixed-object result."
+limits = "Covers fixed direct calls using naturally aligned one-byte classes with trivial call operations, with adjacent scalar arguments. Cold and resident objects agree for both targets. Native Linux interoperation is verified. The Darwin GCC rule still needs an updated native mixed-object result."
 evidence = ["tests/own/abi/empty-classes.run.cpp", "tests/daemon/compatibility.py", "https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms", "https://github.com/yrashk/ycxx/commit/41b46a11c2aa34dc5fb6daebf1812b93a01e8955"]
 
 [[divergence]]
 id = "c-linkage-cross-namespace-duplicate-definition"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.link], [basic.def.odr], #446"
 prior = "Diagnose two definitions of the same C-linkage function during semantic analysis, including across namespaces."
 spec = "Reject repeated definitions in the translation unit."
@@ -1319,8 +1319,8 @@ evidence = ["tests/own/namespaces/c-linkage-duplicate-definition.reject.cpp", "t
 
 [[divergence]]
 id = "nonspecializing-permuted-class-template-arguments"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.spec.partial.general], [temp.spec.partial.order], #88"
 prior = "Reject the unconstrained partial specialization because it is no more specialized than its primary."
 spec = "Require a partial specialization to be more specialized than its primary."
@@ -1330,8 +1330,8 @@ evidence = ["tests/own/templates/s3-review-partial-not-more-specialized.reject.c
 
 [[divergence]]
 id = "destructor-specialization-after-cleanup-use"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.expl.spec], [temp.inst], [class.dtor]"
 prior = "Diagnose an explicit destructor specialization after a cleanup that used the primary."
 spec = "Diagnose the tested specialization after use. The draft permits an implementation to omit this diagnostic."
@@ -1353,8 +1353,8 @@ evidence = ["tests/own/array-allocation-syntax/void-delete.reject.cpp", "tests/d
 
 [[divergence]]
 id = "discarded-constexpr-reinterpretation"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [expr.context], [expr.reinterpret.cast], #199"
 prior = "A reached reinterpret_cast prevents evaluation even when the result is discarded."
 spec = "Reject the reached reinterpret_cast in constant evaluation."
@@ -1364,8 +1364,8 @@ evidence = ["tests/own/casts/reinterpret-pointer-integral-discarded.reject.cpp",
 
 [[divergence]]
 id = "elaborated-injected-base-access"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[basic.lookup.elab], [class.access.general], [class.access.base]"
 prior = "Check the accessibility of an injected class name through the inheritance path, including in an elaborated type specifier."
 spec = "Use type-only lookup and enforce base access."
@@ -1375,8 +1375,8 @@ evidence = ["tests/own/inherit/elaborated-injected-base-access.reject.cpp", "tes
 
 [[divergence]]
 id = "aggregate-element-private-destructor"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.init.aggr], [class.dtor], #157"
 prior = "Require access to the aggregate element's written destructor at the initializer even when its cleanup is trivial."
 spec = "Check the tested element's destructor at the point of aggregate initialization."
@@ -1387,8 +1387,8 @@ evidence = ["tests/own/classes/defaulted-destructor/private-aggregate-member.rej
 
 [[divergence]]
 id = "constexpr-expired-member-receiver"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[basic.life], [expr.const], #975"
 prior = "Reject a nonstatic call after the object lifetime ends even when the body ignores the object."
 spec = "Diagnose a call on the expired object."
@@ -1398,8 +1398,8 @@ evidence = ["tests/own/consteval/named-result-expired-member.reject.cpp", "tests
 
 [[divergence]]
 id = "immediate-static-member-runtime-receiver"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const.imm], [expr.call], [expr.ref]"
 prior = "Evaluate the discarded receiver as part of the static member's immediate invocation."
 spec = "Require the complete invocation, including the receiver expression, to be constant."
@@ -1410,8 +1410,8 @@ evidence = ["tests/own/consteval/nonvirtual-member-invocation-static-runtime-obj
 
 [[divergence]]
 id = "throw-unknown-bound-array-decay"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.throw], [except.throw]"
 prior = "Decay the array before determining the exception object type."
 spec = "Decay the expression of incomplete array type to a pointer to its complete element type."
@@ -1421,8 +1421,8 @@ evidence = ["tests/own/throw-expression/unknown-bound-array.accept.cpp", "tests/
 
 [[divergence]]
 id = "conditional-void-cast-of-throw"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.cond], [expr.throw]"
 prior = "Recognize only a throw-expression with optional surrounding parentheses as the exceptional void operand."
 spec = "A void cast of a throw-expression does not give the conditional expression the other operand's type."
@@ -1432,8 +1432,8 @@ evidence = ["tests/own/throw-expression/conditional-cast-throw.reject.cpp", "tes
 
 [[divergence]]
 id = "terminal-switch-label"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[stmt.label], [stmt.block], P2324, #337"
 prior = "A case or default label can end a compound statement without a following statement."
 spec = "Permit the trailing label and treat it as followed by a null statement."
@@ -1443,8 +1443,8 @@ evidence = ["tests/own/stmt/label-end-of-block.run.cpp", "tests/daemon/compatibi
 
 [[divergence]]
 id = "constexpr-switch-dispatch-vacuous-local"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[stmt.dcl], [basic.life], [expr.const], #341"
 prior = "Begin the vacuously initialized object's lifetime on the dispatch edge and permit its later assignment."
 spec = "Permit assignment to the vacuously initialized local during constant evaluation."
@@ -1454,8 +1454,8 @@ evidence = ["tests/own/stmt/switch-constexpr-past-vacuous.accept.cpp", "tests/da
 
 [[divergence]]
 id = "catch-function-pointer-parameter-default"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.fct.default], [except.handle]"
 prior = "Reject a parameter default written in the exception declaration's function-pointer type."
 spec = "Require the default argument to be written in the parameter list of a function declaration or another permitted context."
@@ -1465,8 +1465,8 @@ evidence = ["tests/own/block-try-catch/named-function-pointer-default.reject.cpp
 
 [[divergence]]
 id = "equivalent-inherited-type-aliases"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[class.member.lookup], [basic.scope.scope]"
 prior = "Merge inherited type aliases that designate the same type."
 spec = "Merge the two inherited aliases based on the type they designate."
@@ -1477,8 +1477,8 @@ evidence = ["tests/own/classes/inherited-alias-equal-types.accept.cpp", "tests/o
 
 [[divergence]]
 id = "member-function-pointer-type-alias-ref-qualifier"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.mptr], [dcl.fct], #238"
 prior = "Preserve the ref qualifier of a function type supplied by an alias for a member pointer."
 spec = "Preserve the aliased function type, including its ref qualifier."
@@ -1488,8 +1488,8 @@ evidence = ["tests/own/member-pointer/qualified-function-alias.accept.cpp", "tes
 
 [[divergence]]
 id = "friend-template-contained-namespace-lookup"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.type.elab], [namespace.udir], [namespace.def], [temp.friend]"
 prior = "Find existing templates in contained namespaces nominated by using-directives and by inline namespace declarations."
 spec = "Include the existing template at the innermost lookup level, including via the tested using-directive and inline namespace."
@@ -1499,8 +1499,8 @@ evidence = ["tests/own/template-friends/friend-class-template-contained-namespac
 
 [[divergence]]
 id = "scoped-member-enum-definition-timing"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.inst], [dcl.enum]"
 prior = "Keep the scoped enumeration's fixed type when instantiating its enclosing class and defer enumerator values."
 spec = "Instantiate the declaration but defer enumerator values until a use requires their definitions."
@@ -1510,8 +1510,8 @@ evidence = ["tests/own/templates/dependent-scoped-enum/type-only.accept.cpp", "t
 
 [[divergence]]
 id = "layout-compatible-overlapping-structure-member"
-status = "partial"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[class.mem.general], [meta.rel], #1141"
 prior = "Diagnose the trait as unsupported for distinct structure types with potentially overlapping members."
 spec = "The common initial sequence ends before a field declared with no_unique_address when the attribute is supported. The distinct tested structure types are incompatible."
@@ -1522,8 +1522,8 @@ evidence = ["tests/own/builtins/layout-compatible-no-unique-address.accept.cpp",
 
 [[divergence]]
 id = "constexpr-written-memory-library-declarations"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const], [constexpr.functions], docs/EXTENSIONS.md"
 prior = "Constant evaluation recognizes the explicit builtins, and ordinary written library declarations stay non-constexpr."
 spec = "Reject a constant call to the tested ordinary declarations."
@@ -1534,8 +1534,8 @@ evidence = ["tests/own/builtins/memchr-written-declaration.reject.cpp", "tests/d
 
 [[divergence]]
 id = "declaration-annotation-syntax"
-status = "partial"
-mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.attr.grammar], [dcl.attr.annotation]"
 prior = "Support the pinned declaration-annotation syntax in the modeled contexts."
 spec = "Accept the tested declaration annotations with scalar or structural constant operands."
@@ -1545,8 +1545,8 @@ evidence = ["tests/own/decls/annotations.accept.cpp", "tests/daemon/compatibilit
 
 [[divergence]]
 id = "unmatched-quote-in-skipped-preprocessor-group"
-status = "partial"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[lex.phases], [lex.pptoken], [cpp.cond]"
 prior = "The lexer diagnoses a missing terminating quote even in an excluded conditional group."
 spec = "Diagnose an unmatched single or double quote in skipped source as an error."
