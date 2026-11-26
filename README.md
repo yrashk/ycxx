@@ -701,6 +701,8 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
   through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
+- Namespace aliases can use dependent `sizeof(type-id)` as a `size_t` argument to a class-template
+  qualifier such as `typename Rep<sizeof(T)>::type`. [#1469](https://github.com/yrashk/ycxx/issues/1469)
 - Dependent `alignof(type-id)` and `sizeof(type-id)` arguments to namespace variable templates
   replay when an initializer or a nested record's direct field array bound needs them. This
   includes pack expansions. [#1371](https://github.com/yrashk/ycxx/issues/1371)

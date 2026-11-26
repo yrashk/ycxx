@@ -2510,6 +2510,12 @@ session's.*
   body even when the result discards them. Forwarded aliases retain the check while its bindings
   are dependent. Type requirements and function-template return deduction use the same
   definition-point lookup ([temp.alias], #1311).
+- A namespace alias can use a whole dependent `sizeof(type-id)` as a `size_t` argument in a
+  namespace class-template qualifier such as `typename Rep<sizeof(T)>::type`. Alias substitution
+  checks the operand's layout at the use and selects the corresponding specialization. Forwarding
+  aliases preserve the check even when their result discards the argument. An invalid operand
+  or a missing member type makes a dependent type requirement false. General dependent
+  signature substitution remains in #209 ([expr.sizeof], [temp.alias], #1469).
 - Direct uses of namespace alias-template IDs in non-template code outside requires-expressions
   check the alias template's associated constraints before expanding its type when every argument
   is an explicit non-dependent type. Type-constraints and the template-head's requires-clause
