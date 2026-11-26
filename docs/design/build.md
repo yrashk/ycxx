@@ -340,7 +340,8 @@ tools and reports generator inputs and tools by their planned paths.
 
 Run `ycxx show --targets` from the workspace directory to see the target names
 you can pass to a per-target command. The catalog parses `build.ycxx` in
-that directory. Names are sorted in byte order and retain any embedded slashes.
+that directory. It accepts a regular UTF-8 file or a symlink to one (#1441).
+Names are sorted in byte order and retain any embedded slashes.
 The catalog shows rule kinds as declared, including custom rule aliases.
 The read-only command works before the first build and runs independently of
 the planner, build cache, and daemon.
