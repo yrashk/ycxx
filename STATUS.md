@@ -3714,6 +3714,14 @@ same declaration can also serve the selected target app. Inspection shows
 the shared declaration and each authored dependency edge.
 [Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
 
+A `cpp.host_executable` can consume `generated_headers` through ordinary
+action producers (#1579). The resident host compile sees a virtual include
+directory with the producer's output names and bytes. Equal header bytes
+preserve the host compile, and real disk lookup observations continue to
+drive watch. Normal builds, planning inputs, and witnesses share the
+header producer receipts.
+[Generated host header example](examples/project-build/host-generated-headers/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.

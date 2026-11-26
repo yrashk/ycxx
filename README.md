@@ -66,6 +66,8 @@ as an input. ycxx builds the tool for the host even when the app targets
 another platform. [Native host tool example](examples/project-build/native-host-tool/README.md)
 Host tools and target apps can share disk-backed C++ libraries through `deps`.
 [Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
+Host executables can declare `generated_headers` from ordinary generators
+that run before the host compile. [Generated host header example](examples/project-build/host-generated-headers/README.md)
 A typed witness can select the native artifact directly with
 `tool = input("name")` or use an executable generated from it.
 [Native host witness](examples/project-build/native-host-witness/README.md) ·
