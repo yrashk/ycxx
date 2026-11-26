@@ -381,6 +381,8 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       }
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
         for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
+      if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.explicit_alignment != 0; }))
+        for (const sema::FieldRec& f : fields) shape.field_alignments.push_back(f.explicit_alignment);
       shape.union_ = record.union_;
       const bool plain_destruction = record.destructor == EntityId::none ||
           (record.destructor_noexcept.value_or(false) && implicit_destructors.contains(record.destructor));

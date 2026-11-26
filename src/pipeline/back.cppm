@@ -206,6 +206,7 @@ struct ClassShape {
   bool plain_ownership_record = false;
   EntityId ownership_destructor = EntityId::none;
   EntityId nonthrowing_destructor = EntityId::none;
+  std::vector<std::uint8_t> field_alignments{};  // parallel to fields when a member strengthens alignment
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -897,7 +898,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.copy_abi_unknown = it->copy_abi_unknown;
     l.calls_abi_uncertain = it->calls_abi_uncertain;
     l.layout_uncertain = it->layout_uncertain;
-    l.contains_explicit_alignment = it->explicit_alignment != 0;
+    l.contains_explicit_alignment = it->explicit_alignment != 0 || !it->field_alignments.empty();
     if (target.triple == ast::x86_64_linux.triple) {
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it, *r);
       l.sysv_empty_record = l.empty && l.size == 1 && l.align == 1 && l.trivial_calls &&
@@ -991,7 +992,7 @@ bool QueryLayout::contains_mutable_field(QualType type) const {
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   // Only a 128-bit integer member raises the alignment above 8: an alignment-specifier is refused.
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
-      l.fields.empty() || l.size > 16 || (l.align > 8 && shape.explicit_alignment)) return 0;
+      l.fields.empty() || l.size > 16 || (l.align > 8 && (shape.explicit_alignment || !shape.field_alignments.empty()))) return 0;
   const ast::Interners& in = *universe().in;
   std::uint64_t end = 0;
   std::uint8_t mask = 0;
@@ -1033,6 +1034,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   for (std::size_t i = 0; i < it->fields.size(); ++i) {
     ast::Placed f = placed(in.canonical(it->fields[i]));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
+    if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
   }
   const ast::Target* root = it->peer_virtual_layout == sema::PeerVirtualLayout::root || it->dynamic_root ? target_ : nullptr;

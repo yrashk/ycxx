@@ -1620,7 +1620,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## Nested classes of ordinary classes (#306)
 
 - A class defined in a class with no template-head and no specialization, at any depth, is a
-  member class ([class.nest]): `Program::ordinary_nested_class` selects its item, and
+  member class ([class.nest]): `Program::named_nested_class` selects its item, and
   `class_definition` gives it the entity `{class_, name, scope = enclosing class}`. Its declarators
   after the braces are members of the enclosing class (`member_class_definition`).
 - `class-key identifier;` in such a class declares a member class (`member_class_declaration`),
@@ -1649,10 +1649,21 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/classes/nested` (47, including three independent #1216 controls), 5 draft
   examples, and `unit.darwin_nested_classes` / `unit.linux_nested_classes` (two units sharing a
   nested class; on Linux also every run test).
-- Not yet: nested classes of class templates, their partial and explicit specializations, and
-  member class templates (#1187, #340); a class head qualified by a namespace
+- Not yet: member class templates (#340) and a class head qualified by a namespace
   (`class N::X { … }`, #1188). Found on the way: #1201 (members declared after a body), #1202
   (hiding in the class's own scope), #124 (`static inline` members are strong).
+
+## Nested classes of class templates (#1187)
+
+- Named non-template member classes can be declared and defined inside a primary class template
+  or its partial or explicit specializations. Each member class belongs to the selected
+  specialization. An implicit instantiation declares its member classes and replays a definition
+  with the enclosing arguments bound when the member must be complete ([temp.inst]/3).
+- Unqualified lookup inside the nested class searches the enclosing classes and their nondependent
+  bases before the enclosing template parameter scope ([temp.local]/7).
+- Out-of-class definitions remain in [#1187](https://github.com/yrashk/ycxx/issues/1187), member
+  class templates in [#340](https://github.com/yrashk/ycxx/issues/340), and virtual members in
+  [#1153](https://github.com/yrashk/ycxx/issues/1153).
 
 ## Ordinary destructor access (#259)
 
@@ -2325,7 +2336,7 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   #25), aggregate initialization of reference members (#157), and namespace-scope references
   (#367). 11 more draft examples pass. In a daemon session that compiles unrelated programs
   defining one class template differently, the first one's template record wins (#115).
-- Not yet (#88): member templates, nested classes in class templates, static data members of
+- Not yet (#88): member templates, static data members of
   class templates, explicit and partial specializations, alias templates, packs, concepts,
   qualified names whose nested-name-specifier is a member template, and members found through a
   dependent base.
@@ -2554,9 +2565,11 @@ session's.*
   diagnostics. The supported class-template base and variable-template initializer replay paths
   accept dependent operands. Replay expands packs in place among the arguments, checks newly
   concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
-  pack contributes zero arguments. The target must be a separately written type-id. General
-  dependent queries, including function-template uses, and class construction remain in
-  [#218](https://github.com/yrashk/ycxx/issues/218).
+  pack contributes zero arguments. The target must be a separately written type-id.
+  `__is_nothrow_constructible(C, C&&)` can use a written exact move constructor and the
+  effective destructor facts of a complete ordinary class without bases. A query during class
+  completion gets an unsupported-operand diagnostic if the constructor's specification is pending.
+  General dependent queries and broader class construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
@@ -2564,9 +2577,10 @@ session's.*
   fold to the same Boolean when both underlying types are supported arithmetic types. A non-const
   lvalue reference destination is assignable, including a volatile referent. The source may be
   cv-qualified or a reference. Supported class-template base and variable-template initializer
-  replay paths evaluate dependent operands at instantiation. Other operand types and dependent
-  queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
-  predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
+  replay paths evaluate dependent operands at instantiation. `__is_nothrow_assignable(C&, C&&)` can
+  use a written exact move assignment returning `C&` in a complete ordinary class without bases.
+  `__has_builtin` answers 0 for the three predicates while support is partial
+  ([meta.unary.prop], [expr.assign], #218).
 - `__is_convertible(From, To)` and `__is_nothrow_convertible(From, To)` share a Boolean result
   for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
   give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
@@ -3013,8 +3027,7 @@ template names (`Sema::template_param`). A member template's own parameters are 
 first; a dependent base is not searched. Redeclaring a hidden parameter's name is still an error
 ([temp.local]/6, `Sema::declared_template_param`).
 - Tests: `tests/own/temp-local/` (one run test, two reject tests).
-- Not yet: the enclosing classes of a nested class are not searched before the outer head,
-  since nested classes of class templates are not supported (#1187).
+- The same rule applies through enclosing classes of an in-class member-class definition (#1187).
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
@@ -3240,8 +3253,12 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   definition checks annotated forwards, natural member and base alignment, and layout attributes
   whose effect is unresolved. Both layout consumers apply the validated value to object size,
   array stride, containing records and storage. Darwin diagnoses by-value use when the class or
-  a contained value has strengthened alignment. Variable and member alignment, wider requests,
-  and further ABI cases remain in [#303](https://github.com/yrashk/ycxx/issues/303).
+  a contained value has strengthened alignment.
+- A leading `alignas` on a non-static object member accepts requests up to 16 bytes, including
+  dependent operands replayed with the class's template arguments. An alignment request applies
+  to the field offset and containing record without changing the field's type or array bound.
+  Other placements, packs, wider requests and further ABI cases remain in
+  [#303](https://github.com/yrashk/ycxx/issues/303).
 - Tests: `tests/own/classes/s7-sizeof-class.accept.cpp` (padding, nesting, arrays, unions,
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
@@ -4178,7 +4195,19 @@ member templates already had (#713, `replay_member_exception`); an explicit spec
 its own specification. An invalid condition of a specialization that is never needed is no error.
 In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
 In a template's definition, `noexcept` on a call of such a function is value-dependent.
-- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- A function template's exception specification can combine dependent `__is_nothrow_constructible`
+  and `__is_nothrow_assignable` with `&&`, as in libycxx's move-swap overload in
+  `include/ycxx/core/concepts.hpp`. After overload selection, replay forms both written type-ids
+  with the selected arguments and checks class completeness at the demand. A failing substitution
+  in that specification is a hard error. A nested requirement's replay skips semantic analysis of
+  discarded operands that were parsed successfully in the template definition, including logical
+  expressions in complete parenthesized groups. An enclosing equality, negation, call, cast,
+  conditional, assignment or comma keeps its expression atomic
+  ([#1314](https://github.com/yrashk/ycxx/issues/1314)). The trait evaluators cover the arithmetic
+  cases and the written exact move operations above. Broader class queries remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
+  [#1303](https://github.com/yrashk/ycxx/issues/1303).
+- Tests: `tests/own/template-noexcept/`.
 - Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
   in the address of a class template member (#838).
 

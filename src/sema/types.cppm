@@ -732,6 +732,7 @@ struct FieldRec {
   u8 bit_width = 0;
   bool mutable_ = false;
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
+  u8 explicit_alignment = 0;
 };
 
 // What a complete class makes of a special member explicitly defaulted on its first declaration,
@@ -905,6 +906,9 @@ struct ClassRec {
   }
 
   TrivialCopyability trivial_copyability;
+  bool has_explicit_alignment() const {
+    return explicit_alignment || std::ranges::any_of(fields, [](const FieldRec& f) { return f.explicit_alignment != 0; });
+  }
   std::optional<bool> trivially_copyable() const {
     return defined ? trivial_copyability.result() : std::nullopt;
   }
@@ -1383,8 +1387,13 @@ struct World {
     };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
     types.class_dependent = [this](EntityId e) {
-      const EntityRec& r = entities.rec(e);
-      return r.closure_pattern || std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return arg_dependent(a); });
+      for (EntityId cls = e; cls != EntityId::none;) {
+        const EntityRec& r = entities.rec(cls);
+        if (r.kind != EntityKind::class_) break;
+        if (r.closure_pattern || std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return arg_dependent(a); })) return true;
+        cls = r.scope;
+      }
+      return false;
     };
   }
   World(const World&) = delete;
