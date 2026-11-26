@@ -587,14 +587,14 @@ evidence = ["docs/design/ast.md", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constrained-function-symbol"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.over.link], https://github.com/itanium-cxx-abi/cxx-abi/issues/24, #236"
 prior = "Omit constraints from symbols, matching the Darwin Clang oracle recorded in the original design."
 spec = "Use the current Itanium proposal for supported template-head and trailing Q constraints and the Tk prefix for a constrained parameter."
 gcc = "Use the current primary encoding. Qualified concept expressions use unqualified names and converted arguments. A bare boolean template-parameter constraint is omitted as in GCC 16.2."
 clang = "Use the Q and Tk encodings tested against upstream Clang 23.1.6, with qualified concept names and written arguments."
-limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, and the operator, call, and requires-expression forms recorded below. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. GCC mode emits the primary symbols used by current GCC callers."
+limits = "The Itanium proposal is open. The interoperable cases are the concept names, literals, parameters, logical combinations, and written expression forms specified in this table. The vendor encoding keeps other retained clauses distinct. Builtin emission diagnostics and nested-name rules have their own entries."
 evidence = ["docs/design/ast.md", "tests/own/templates/c6-overloads.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
@@ -687,8 +687,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6
 
 [[divergence]]
 id = "constraint-literal-expression-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.6.3, [lex.fcon], [lex.string]"
 prior = "Use the opaque constraint encoding for the tested floating-point, string and nullptr literals."
 spec = "Encode floating-point values as fixed-width, high-byte-first hexadecimal, nullptr as LDnE, and strings by their array type. Preserve a written unary minus."
