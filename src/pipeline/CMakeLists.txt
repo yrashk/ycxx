@@ -74,7 +74,7 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   session.cppm
   pipeline.cppm)
 target_sources(ycxxc_pipeline PRIVATE groups.cpp)
-target_link_libraries(ycxxc_pipeline PUBLIC ycxxc_parse ycxxc_irgen ycxxc_aarch64 ycxxc_x86_64 ycxxc_link)
+target_link_libraries(ycxxc_pipeline PUBLIC ycxxc_parse ycxxc_irgen ycxxc_aarch64 ycxxc_x86_64 ycxxc_link ycxxc_cm)
 # The programs ycxx links on arm64 macOS need the runtime archives built (see above).
 if(YCXXC_DARWIN_RUNTIME_ARCHIVES)
   add_dependencies(ycxxc_pipeline ycxx ycxx_abi)

@@ -340,8 +340,9 @@ std::uint64_t heap_footprint(const T& v) {
 // `Db::note`. `cutoff` is an execution whose value did not change; `input` an input read for the
 // first time (counted nowhere; later reads are `reused`); `recomputed` a cheap cell computed
 // privately while another frame owned it; `waited` a fetch that found it owned and waited;
-// `failed` a frame that left without publishing (an internal error, or a stop; counted nowhere).
-enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed };
+// `failed` and `stopped` leave without publishing because of an error or cancellation (counted
+// nowhere).
+enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed, stopped };
 
 // Where in the source a cell is (#638): a file, and the part of it from `line`:`column` to
 // `end_line`:`end_column`, where its last token starts (1-based; columns in bytes). `line` 0: the
@@ -2344,7 +2345,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       co_await settle_group(f, group);
       memory::exchange_target(&f.mem);
       if (f.error || f.stopped) {
-        db.note(Outcome::failed, &f, c, &f.span);
+        db.note(f.error ? Outcome::failed : Outcome::stopped, &f, c, &f.span);
         db.abort(c, restore, f.error);
         db.finish(f);
         co_return;
@@ -2405,7 +2406,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       }
     }
   }
-  db.note(Outcome::failed, &f, c, &f.span);
+  db.note(f.error ? Outcome::failed : Outcome::stopped, &f, c, &f.span);
   db.abort(c, restore, f.error);
   db.finish(f);
 }
@@ -2586,7 +2587,8 @@ void Db::note(Outcome what, const Frame* by, CellId c, const Span* span, Tracer*
     case Outcome::recomputed: counts[n++] = Counter::recomputed; break;
     case Outcome::waited: counts[n++] = Counter::contended; break;
     case Outcome::input:
-    case Outcome::failed: break;
+    case Outcome::failed:
+    case Outcome::stopped: break;
   }
   if (n > 0) {
     const std::size_t stripe = pool_ ? pool_->worker_index().value_or(pool_->size()) : 0;
@@ -2637,13 +2639,15 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
   ev.alloc_bytes = run.allocated;
   ev.allocs = run.count;
   ev.peak_bytes = run.peak;
-  if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) ev.retained_bytes = e.retained;
+  // Only a cell with a settled value can expose it. An abandoned run may be replacing old data.
+  const bool settled = o != Outcome::failed && o != Outcome::stopped &&
+                       o != Outcome::waited && o != Outcome::recomputed && e.has_value;
+  if (settled) ev.retained_bytes = e.retained;
   try {
     ev.key = describe(c);
     ev.cell = e.key_fp.lo ^ e.key_fp.hi;
     ev.span = table.span(*this, e.slot);
-    // Only a cell that is done (not one another frame is computing) is read.
-    if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) {
+    if (settled) {
       if (t->values()) ev.value = table.show(e.slot);
       ev.errors = table.errors(e.slot, e.diags);  // the kind's say: its diagnostics may be warnings
     }

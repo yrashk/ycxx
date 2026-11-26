@@ -69,9 +69,73 @@ enum class FlatZincError { domain_out_of_range, row_out_of_range, objective_out_
 // are signed 64-bit. Export can fail when a row needs wider solver arithmetic.
 std::expected<std::string, FlatZincError> write_flatzinc(const Model& model);
 
+// A Boolean variable's benefit and the maximum number selected in the prefix ending there.
+// Prefix capacities must be nondecreasing and no greater than their prefix lengths.
+struct PrefixChoice {
+  std::uint32_t capacity;
+  std::uint32_t benefit;
+  bool operator==(const PrefixChoice&) const = default;
+};
+
+enum class PrefixFailure { unsupported, budget_exhausted, stopped };
+
+// The same prefix constraints in the portable linear representation, for offline validation.
+Model prefix_model(std::span<const PrefixChoice> choices);
+
+// Exact selection under nested prefix constraints. The budget counts candidate visits, and
+// equal benefits favor earlier candidates. Return the selected indices in input order.
+std::expected<std::vector<std::size_t>, PrefixFailure> solve_prefix_choices(
+    std::span<const PrefixChoice> choices, std::size_t budget, std::inplace_stop_token stop = {});
+
 }  // namespace ycxx::cm
 
 namespace ycxx::cm {
+
+Model prefix_model(std::span<const PrefixChoice> choices) {
+  Model model;
+  std::vector<Term> prefix, objective;
+  for (const auto choice : choices) {
+    const auto var = model.bool_var().integer;
+    prefix.push_back({1, var});
+    model.linear(prefix, Rel::le, choice.capacity);
+    objective.push_back({-std::int64_t(choice.benefit), var});
+  }
+  model.minimize(objective);
+  return model;
+}
+
+std::expected<std::vector<std::size_t>, PrefixFailure> solve_prefix_choices(
+    std::span<const PrefixChoice> choices, std::size_t budget, std::inplace_stop_token stop) {
+  if (stop.stop_requested()) return std::unexpected(PrefixFailure::stopped);
+  if (choices.size() > budget) return std::unexpected(PrefixFailure::budget_exhausted);
+
+  const auto worse_first = [choices](std::size_t a, std::size_t b) {
+    if (choices[a].benefit != choices[b].benefit) return choices[a].benefit > choices[b].benefit;
+    return a < b;
+  };
+  std::vector<std::size_t> accepted;
+  std::uint32_t capacity = 0;
+  for (std::size_t i = 0; i < choices.size(); ++i) {
+    if (stop.stop_requested()) return std::unexpected(PrefixFailure::stopped);
+    const auto choice = choices[i];
+    if (choice.capacity < capacity || choice.capacity > i + 1)
+      return std::unexpected(PrefixFailure::unsupported);
+    capacity = choice.capacity;
+    if (choice.benefit == 0) continue;
+    accepted.push_back(i);
+    std::ranges::push_heap(accepted, worse_first);
+    // Inserting this choice can only violate the current prefix's bound. Dropping the
+    // least beneficial choice restores feasibility and is the optimal exchange on a chain.
+    if (accepted.size() > capacity) {
+      std::ranges::pop_heap(accepted, worse_first);
+      accepted.pop_back();
+    }
+  }
+  std::ranges::sort(accepted);
+  if (stop.stop_requested()) return std::unexpected(PrefixFailure::stopped);
+  return accepted;
+}
+
 namespace {
 
 // Chuffed reserves ±500,000,000 as domain sentinels. Leave room for them, as well

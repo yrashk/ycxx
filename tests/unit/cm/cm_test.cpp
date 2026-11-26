@@ -7,6 +7,25 @@ using ycxx::unit::check;
 
 namespace {
 
+constexpr PrefixChoice fusion_choices[]{{0, 13}, {1, 16}, {1, 19}, {2, 16}};
+
+void test_prefix_solver() {
+  check(solve_prefix_choices(fusion_choices, 4) == std::vector<std::size_t>{2, 3},
+        "the byte-weighted solver skips an earlier feasible endpoint to save more bytes");
+  check(solve_prefix_choices(fusion_choices, 3) == std::unexpected(PrefixFailure::budget_exhausted),
+        "an exhausted deterministic budget returns no solution");
+  std::inplace_stop_source stop;
+  stop.request_stop();
+  check(solve_prefix_choices(fusion_choices, 4, stop.get_token()) == std::unexpected(PrefixFailure::stopped),
+        "a stopped solve returns no solution");
+  const PrefixChoice tie[]{{0, 0}, {1, 7}, {1, 7}};
+  check(solve_prefix_choices(tie, 3) == std::vector<std::size_t>{1},
+        "ties retain the earliest endpoint");
+  const PrefixChoice non_nested[]{{1, 1}, {0, 2}};
+  check(solve_prefix_choices(non_nested, 2) == std::unexpected(PrefixFailure::unsupported),
+        "a shrinking prefix capacity is outside the backend's supported model");
+}
+
 Model minimize_example() {
   Model model;
   const auto pick = model.bool_var();
@@ -101,6 +120,7 @@ int main(int argc, char** argv) {
     else if (example == "unsat") model = unsat_example();
     else if (example == "constant") model = constant_example();
     else if (example == "satisfy") model = satisfy_example();
+    else if (example == "fusion") model = prefix_model(fusion_choices);
     else return 2;
     const auto text = write_flatzinc(model);
     if (!text) return 1;
@@ -109,5 +129,6 @@ int main(int argc, char** argv) {
   }
   if (argc != 1) return 2;
   test_export();
+  test_prefix_solver();
   return ycxx::unit::result("cm");
 }

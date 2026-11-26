@@ -143,6 +143,56 @@ VERBOSE=1 build-solver-deps/egraph-spike random 10 30 300
 The optimizer design specifies how these experiments relate to corpus measurements.
 [Measurement process](design/optimization.md#91-evidence-for-an-optimizer-change).
 
+### Benchmark emitted division code
+
+The Linux x86-64 division spike builds the same workload with the heuristic and
+solver modes. The paired runner checks boundary values and 100,000 generated
+inputs per case before timing. The two RSS runners link each version separately.
+Use the installed [YCXX Bench package](../packages/ycxx-bench/README.md) and its
+matching libycxx. Choose an idle logical CPU available to the process.
+Pass `--deep` to the paired runner for a longer follow-up with the same inputs.
+Pass `--console` for the terminal comparison.
+
+```sh
+cmake -S spikes/optimization/division -B build-division -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-16 \
+  -DYCXX_COMPILER="$PWD/build/bin/ycxx" \
+  -DCMAKE_PREFIX_PATH='<bench-prefix>;<libycxx-prefix>'
+cmake --build build-division
+cpu=4
+for run in 1 2 3; do
+  taskset -c "$cpu" build-division/division_compare > "build-division/compare-$run.ndjson"
+done
+taskset -c "$cpu" build-division/division_heuristic_rss > build-division/heuristic-rss.ndjson
+taskset -c "$cpu" build-division/division_solver_rss > build-division/solver-rss.ndjson
+nm -S --defined-only build-division/{heuristic,solver}.raw.o
+```
+
+Capture modeling, solving and validation on the same pinned workload.
+
+```sh
+YCXX_NO_DAEMON=1 YCXX_THREADS=4 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu \
+  -fycxx-optimize=solver --trace-engine=json -c spikes/optimization/division/workload.cpp \
+  -o build-division/traced.o 2>build-division/trace.ndjson
+python3 spikes/optimization/division/check-workers.py build/bin/ycxx build-division/worker-replay
+```
+
+The replay saves objects and traces from one worker and three fresh four-worker
+compiles. It checks byte equality and looks for overlapping solves on distinct workers.
+
+Measure cold compiles and incremental compiles after changing the shard-index
+function. Each incremental object is checked against an independent cold compile.
+
+```sh
+taskset -c "$cpu" python3 spikes/optimization/division/compile-timings.py build/bin/ycxx \
+  > build-division/compile-timings.ndjson
+```
+
+The [original observations](../spikes/optimization/division/ycxx-division-evidence.tar.gz)
+include all timing and RSS samples, compile pairs, worker traces, FlatZinc checks,
+and prototype non-wins. The archive records the capture's source and binary
+digests, workload, host and run policy.
+
 ## Sanitizer builds
 
 `-DYCXXC_SANITIZE=<list>` (`address`, `undefined`, `thread`, comma-separated) instruments ycxx's

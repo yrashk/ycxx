@@ -1052,6 +1052,9 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   reproducible solver builds. The [optimizer experiments](docs/BUILDING.md#optimizer-experiments)
   cover a solver round trip, extraction comparisons, and export timing. Other C++26 projects
   can install or vendor the [YCXX Bench package](packages/ycxx-bench/README.md).
+- On x86-64 Linux, `-fycxx-optimize=heuristic` enables unsigned power-of-two division
+  rewrites. `-fycxx-optimize=solver` also enables quotient/remainder fusion.
+  [Model, validation and tracing](docs/design/optimization.md#93-unsigned-division-on-x86-64).
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
   The pinned library work includes scalar type traits in class-template bases and variable
   templates, including triviality and POD queries for non-record types, narrow-character object

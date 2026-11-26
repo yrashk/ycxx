@@ -73,6 +73,7 @@ struct ProgramInputs {
   std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
   bool check_policies = false;
   std::optional<std::string> shared_soname = std::nullopt;
+  OptimizationMode optimization = OptimizationMode::none;
 };
 
 EffectVerification effect_link_verification(const ProgramInputs& in) {
@@ -376,7 +377,9 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     out.errors.push_back("checked ownership links require explicit objects and source inputs");
     co_return out;
   }
-  const auto compile_keys = in.tus | std::views::transform([&](TuId tu) { return Tu::Key{tu, in.check_policies}; });
+  const auto compile_keys = in.tus | std::views::transform([&](TuId tu) {
+    return Tu::Key{tu, in.check_policies, in.optimization};
+  });
   const auto tus = co_await cx.par_map<Tu>(compile_keys);
   for (std::size_t i = 0; i < in.tus.size(); ++i) {
     if (!tus[i].get().object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));
