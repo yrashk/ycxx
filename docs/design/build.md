@@ -336,6 +336,50 @@ read observations. A rule with no current expansion appears as unresolved.
 Source output always reads the authored definition directly. Inspection runs no
 tools and reports generator inputs and tools by their planned paths.
 
+### Resolved dependencies (#1453)
+
+`ycxx show app --format=json` includes `dependency_graph` in its schema-1
+snapshot. Each entry in `edges` records a `consumer` and its `producer`. The
+`usage` is the field that uses the dependency. A `deps` edge names a library.
+The fields `sources`, `generated_headers`, `link_inputs`,
+`public_link_inputs`, `runtime_assets`, `inputs`, and `plan_inputs` bind
+to an artifact's named `output`. The `inputs` and `plan_inputs` edges also
+record the consumer's input name as `binding`.
+
+The `location` identifies the use in `build.ycxx` by path, one-based line, and
+one-based byte column. A use emitted by a rule points to its workspace
+declaration when the rule introduced the value. The report orders edges by
+consumer and source location. If a rule needs a current expansion, the graph
+reports `complete: false` with the edges resolved so far. A complete plan can
+have an empty edge list.
+
+`ycxx show app --format=html > plan.html` displays those edges in **Dependencies**
+with links to their use sites in the displayed manifest. An HTML comparison
+also shows the current plan's dependencies. **Plan changes** compares
+semantic facts. The `link-input` facts describe the executable's effective
+archive order. The read-only report can identify an artifact before its
+bytes exist.
+
+### Declared target catalog (#1392)
+
+Run `ycxx show --targets` from the workspace directory to see the target names
+you can pass to a per-target command. The catalog parses `build.ycxx` in
+that directory. It accepts a regular UTF-8 file or a symlink to one (#1441).
+Names are sorted in byte order and retain any embedded slashes.
+The catalog shows rule kinds as declared, including custom rule aliases.
+The read-only command works before the first build and runs independently of
+the planner, build cache, and daemon.
+
+Text is the default. With `--format=json`, the object has `schema` set to `1`
+and a `targets` array. Each record has `name`, `kind`, and a `location` with
+`path` set to `build.ycxx` and a one-based `line` and byte `column` for the
+declaration. With `--format=html`, the catalog links each entry to that line
+in the displayed manifest.
+
+Catalog mode accepts one `--targets` flag and a text, JSON, or HTML format.
+A positional target name, `--target`, `--against`, or `--format=source` is a
+usage error in this mode.
+
 ### Structured named-module graph (#1363)
 
 `ycxx show app --format=json` includes `module_graph` for a resolved plan under

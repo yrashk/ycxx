@@ -564,6 +564,7 @@ public:
     case ast::DepOp::has_virtual_destructor:
     case ast::DepOp::is_standard_layout:
     case ast::DepOp::alignof_type:
+    case ast::DepOp::sizeof_type:
     case ast::DepOp::array_rank:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
@@ -651,6 +652,8 @@ public:
         if (!types().is_class(*q)) return std::nullopt;
         auto templ = member_template_of(types().class_of(*q), r.name);
         if (!templ) return std::nullopt;
+        if (compatibility == ast::Compatibility::gcc && template_decl)
+          if (auto decl = template_decl(*templ)) *templ = template_argument_entity(*decl);
         return TemplateArg{TemplateArgKind::template_, QualType{}, ConstId::none, {}, *templ};
       }
       if (a.templ != EntityId::none || types().kind(a.type) != TypeKind::template_param) return a;
@@ -759,7 +762,8 @@ public:
         if (!operand) return std::nullopt;
         return array_rank_value(operand->type);
       }
-      case ast::DepOp::alignof_type: {
+      case ast::DepOp::alignof_type:
+      case ast::DepOp::sizeof_type: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand || !types().is_dependent(operand->type)) return std::nullopt;
         const std::array operands{*operand};
@@ -1824,6 +1828,34 @@ public:
     return true;
   }
 
+  // GCC uses the target's identity for an unconstrained alias that forwards its complete
+  // parameter list unchanged. An alias with different defaults still denotes its own template.
+  EntityId template_argument_entity(const ast::DeclSema& decl) {
+    if (compatibility != ast::Compatibility::gcc || decl.kind != ast::DeclKind::type_alias ||
+        decl.constraints != ConstId::none || !types().is_class(decl.type) || !template_decl)
+      return decl.entity;
+    const EntityRec& result = w_->entities.rec(types().class_of(decl.type));
+    if (result.templ == EntityId::none) return decl.entity;
+    const auto target = template_decl(result.templ);
+    if (!target || target->kind != ast::DeclKind::class_) return decl.entity;
+    const auto params = ins().seqs.elements(decl.template_params);
+    const auto target_params = ins().seqs.elements(target->template_params);
+    if (target_params.empty() || !heads_equivalent(params, target_params)) return decl.entity;
+    const auto own = own_args(params);
+    if (result.args != own) return decl.entity;
+    const auto renamed = Bindings::of(target_params[0].depth, own);
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      const auto& source = params[i];
+      const auto& target = target_params[i];
+      if (source.has_default != target.has_default) return decl.entity;
+      if (source.has_default && source.default_ != target.default_) {
+        const auto target_default = substitute_arg(target.default_, renamed, /*default_argument=*/true);
+        if (!target_default || *target_default != source.default_) return decl.entity;
+      }
+    }
+    return result.templ;
+  }
+
   // The type template `templ` names with `args`, as a template-id says it ([temp.names]): a class
   // template's specialization, an alias template's type with the arguments substituted
   // ([temp.alias]/2); none when the arguments do not fit ([temp.deduct.general]/8).
@@ -2543,6 +2575,7 @@ private:
   const Classes* classes_;
 
 public:
+  ast::Compatibility compatibility = ast::Compatibility::spec;
   // The definition of a class if it is complete at the deduction's point of use.
   std::function<const ClassRec*(EntityId)> class_definition;
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at

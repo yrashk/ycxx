@@ -70,6 +70,12 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 include(cmake/ycxx-policy.cmake)
 
+block(SCOPE_FOR VARIABLES)
+  # The package and its consumers import the same std module as the rest of ycxx.
+  set(YCXX_BENCH_OPTIONS_TARGET ycxxc_options)
+  add_subdirectory(packages/ycxx-bench)
+endblock()
+
 add_subdirectory(src)
 enable_testing()
 if(YCXXC_BOOTSTRAP_SMOKE)

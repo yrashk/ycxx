@@ -281,7 +281,7 @@ public:
   virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
-  virtual bool use_static_member(EntityId /*v*/) { return true; }
+  virtual bool use_static_member(EntityId /*v*/, bool /*unevaluated*/ = false) { return true; }
   // A static local declared ([stmt.dcl]/3), for constant evaluation's questions about it
   // (`global`): its type, and its constant if constant-initialized.
   virtual void static_local(EntityId /*v*/, QualType /*type*/, std::optional<ConstId> /*value*/) {}
@@ -2604,9 +2604,9 @@ public:
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
   // `__builtin_is_virtual_base_of(Base, Derived)` and `__is_pointer_interconvertible_base_of(Base,
-  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false, and the same class
-  // gives `same`, complete or not. Distinct classes need a complete Derived: their entities then,
-  // or the result after a diagnostic.
+  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false. Only pointer
+  // interconvertibility returns true for the same incomplete nonunion class. Other nonunion
+  // class queries need a complete Derived.
   std::expected<std::pair<EntityId, EntityId>, Ex> class_relation_operands(NameId name, QualType base_type,
                                                                            QualType derived_type, bool same,
                                                                            u32 begin, u32 end) {
@@ -2622,12 +2622,13 @@ public:
       return std::unexpected(Ex{NodeId::none, begin, end});
     }
     const EntityId b = ts.class_of(base), d = ts.class_of(derived);
-    if (b == d) return std::unexpected(bool_literal(same, begin, end));
+    if (b == d && same) return std::unexpected(bool_literal(true, begin, end));
     const auto complete_at_demand = q_->type_trait_at_demand(d, loc);
     if (!(complete_at_demand ? *complete_at_demand : q_->is_complete_at_source(d))) {
       if (!q_->type_trait_instantiation_failed(d)) diag_at(loc, Diag::class_relation_incomplete, derived_type, name);
       return std::unexpected(Ex{NodeId::none, begin, end});
     }
+    if (b == d) return std::unexpected(bool_literal(false, begin, end));
     return std::pair{b, d};
   }
   // A class is not its own virtual base. The graph has no virtual edges until #310.
@@ -2742,6 +2743,10 @@ public:
       if (f.bit_width != g.bit_width) return false;
       const auto same = layout_compatible(f.type, g.type);
       if (same != true) return same;
+      if (compatibility() == ast::Compatibility::clang) {
+        if (f.written_alignment != g.written_alignment) return false;
+        continue;
+      }
       const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
       if (!fa || !ga) return std::nullopt;
       if (std::max(*fa, u64(f.explicit_alignment)) != std::max(*ga, u64(g.explicit_alignment))) return false;
@@ -4611,13 +4616,17 @@ public:
   // `C::M` or `Q::template M` as a template template argument ([temp.arg.template]/1,
   // [temp.names]/4): C's member alias template; with Q dependent, Q's member template once Q is
   // known, which needs the keyword.
-  std::optional<TemplateArg> member_template_name_arg(const Scope& s, NameId name, bool keyword) {
+  std::optional<TemplateArg> member_template_name_arg(const Scope& s, NameId name, bool keyword,
+                                                      std::optional<u32> access_at) {
     if (!s.type) return std::nullopt;
     const QualType q = *s.type;
     const bool dependent = types().is_dependent(q);
     if (types().is_class(q) && (!dependent || types().class_of(q) == current_class))
-      if (auto d = member_alias_template(types().class_of(q), name))
-        return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, d->entity};
+      if (auto d = member_alias_template(types().class_of(q), name)) {
+        if (access_at) member_template_access(q, d->entity, name, *access_at);
+        return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {},
+                           templates().template_argument_entity(*d)};
+      }
     if (!dependent || !keyword) return std::nullopt;
     return TemplateArg{ast::TemplateArgKind::template_, types().dep_template(q, name, ast::DepNameForm::template_name),
                        ConstId::none};
@@ -4683,7 +4692,8 @@ public:
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
     if (!ns && at) unqualified_type_template_access(*t, name, *at);
-    return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
+    return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {},
+                       templates().template_argument_entity(*t)};
   }
   // The argument a template parameter named here stands for: its argument, or for a pack the
   // element of the innermost expansion naming it ([temp.variadic]/5). A pack outside every
@@ -4876,6 +4886,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
+    t.compatibility = compatibility();
     t.class_definition = [this](EntityId c) { return class_rec(c); };
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
@@ -6280,7 +6291,8 @@ public:
   // ([expr.const.const]); a reference variable is not itself such an object.
   void permit_constant_initializer(u32 declaration, QualType target, ConstId value) {
     if (!has_immediate_addresses_ || value == ConstId::none) return;
-    if (types().is_reference(target) || !immediate_result_entity(value)) constant_immediate_initializers_.insert(declaration);
+    if ((compatibility() == ast::Compatibility::spec && types().is_reference(target)) || !immediate_result_entity(value))
+      constant_immediate_initializers_.insert(declaration);
   }
 
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
@@ -6335,6 +6347,14 @@ public:
         if (auto entity = immediate_result_entity(element)) return entity;
     }
     return std::nullopt;
+  }
+
+  bool check_immediate_initializer(ConstId value, u32 at) {
+    if (auto entity = immediate_result_entity(value)) {
+      diag(at, Diag::immediate_address, w_->entities.rec(*entity).name);
+      return false;
+    }
+    return true;
   }
 
   // An immediate function may be named within an immediate invocation ([expr.const]). Wait
@@ -6812,7 +6832,8 @@ public:
   // specialization, naming it instantiates its initializer ([temp.inst]/3).
   Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
     bool dep = types().is_dependent(types().class_type(c)) && q_->value_dependent_member(v);
-    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v)) return {NodeId::none, begin, end};
+    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v, unevaluated != 0))
+      return {NodeId::none, begin, end};
     ExprInfo info{t, ValueCategory::lvalue, dep ? expr_flag::dependent : u8(0)};
     return node(ast::DeclRef{info, v}, begin, end, info);
   }
@@ -8458,7 +8479,7 @@ public:
   // are copy-initialized parameters as in any call ([expr.call]/7). The call carries the
   // function's `constant`, so that constant evaluation reads the bytes itself (`ir::BuiltinFn`).
   Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
-    const ast::DeclSema d = w_->string_function(f);
+    const ast::DeclSema d = w_->string_function(f, compatibility());
     const auto& signature = types().rec(d.type);
     if (!builtin_arity(signature.params.size(), args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -10666,14 +10687,15 @@ public:
     ~ClassAlignmentOperand() { checking = saved; }
   };
 
-  // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
-  // after a diagnostic.
-  Ex dependent_base_alignment(QualType operand, u32 begin, u32 end) {
+  // A dependent layout query whose enclosing construct reparses the written operand.
+  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
     const std::array args{templates().type_arg(operand)};
-    const auto value = ins().intern_value(ast::VDepOp{ast::DepOp::alignof_type, ins().intern_seq(std::span<const TemplateArg>(args))});
+    const auto op = align ? ast::DepOp::alignof_type : ast::DepOp::sizeof_type;
+    const auto value = ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
     return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
   }
 
+  // [expr.sizeof], [expr.alignof]: a `size_t` prvalue.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
@@ -10996,7 +11018,7 @@ public:
   }
 
   // [dcl.struct.bind]/1, /2, /6: the hidden entity is an array copy or an ordinary
-  // deduced reference to the initializer. The copy takes its cv from the declaration.
+  // deduced reference to the initializer. The draft gives the copy its declared cv.
   std::optional<std::pair<QualType, Ex>> array_binding(QualType declared, Ex source, u64 names, u32 at_) {
     if (!source.ok()) return std::nullopt;
     QualType array = source.type();
@@ -11022,7 +11044,8 @@ public:
       if (!init.ok()) return std::nullopt;
       return std::pair{*ref, init};
     }
-    QualType type = types().add_cv(object_unqualified(array), Types::cv(declared));
+    const auto original = compatibility() == ast::Compatibility::spec ? object_unqualified(array) : array;
+    QualType type = types().add_cv(original, Types::cv(declared));
     if (!source.glvalue()) source = materialize(source, array, false);
     return std::pair{type, convert_node(source, ast::ConversionKind::array_copy, type)};
   }
@@ -13113,7 +13136,9 @@ public:
             visit(arg.type);
           } else if (ordinary_call && arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
             // [basic.lookup.argdep]/3: associate the type template itself, not a specialization.
-            EntityId scope = w_->entities.rec(arg.templ).scope;
+            const EntityRec& declaration = w_->entities.rec(arg.templ);
+            if (compatibility() == ast::Compatibility::clang && declaration.kind == EntityKind::alias_template) return;
+            const EntityId scope = declaration.scope;
             if (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_)
               add_namespace(arg.templ);
           }
