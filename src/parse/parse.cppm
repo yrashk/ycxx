@@ -1660,6 +1660,8 @@ public:
   void complete_virtual_members(u32 item, EntityId cls, sema::ClassRec& rec, std::span<const ast::MemberRec> members,
                                 bool member_declarations_valid);
   void pure_final_overriders(sema::ClassRec& rec, EntityId cls);
+  void diagnose_abstract_static_self_members(const sema::ClassRec& rec, EntityId cls,
+                                             std::vector<engine::Diagnostic>& diags);
   std::optional<ast::DeclSema> member_declaration(EntityId member);
   EntityId synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source);
   void validate_dynamic_constructors(sema::ClassRec& rec);
@@ -2110,6 +2112,7 @@ private:
 
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
+  std::set<u32> static_template_id_items_;  // class template members whose written type is a template-id
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
   std::set<u32> templated_friend_items_;  // the item of each friend function a class template defines
   std::set<EntityId> unapplied_declaration_attributes_;
@@ -6080,6 +6083,9 @@ private:
       else bad();
       return;
     }
+    if (s_.compatibility() == ast::Compatibility::clang && spec.is_static && spec.written_type_template_id &&
+        (!s_.template_scopes.empty() || p_->items().items[it_->parent].specialization))
+      p_->static_template_id_items_.insert(k_);
     member_declarators(spec, c, /*fields_only=*/false, alignment);
     commit_introduction();
   }
@@ -10647,6 +10653,34 @@ void Program::validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& r
   if (alignment.value > alignment.natural) record.explicit_alignment = alignment.value;
 }
 
+void Program::diagnose_abstract_static_self_members(const sema::ClassRec& rec, EntityId cls,
+                                                    std::vector<engine::Diagnostic>& diags) {
+  if (compatibility() != ast::Compatibility::clang) return;
+  auto& types = w_->types;
+  // A directly declared pure member is enough evidence for this check in a template pattern.
+  // Inherited abstractness is decided only after replay completes the specialization.
+  if (!rec.is_abstract() &&
+      !(types.is_dependent(types.class_type(cls)) && std::ranges::any_of(rec.members, &sema::MemberDeclRec::is_pure)))
+    return;
+
+  // A nondefining static declaration can name its own class while the class is incomplete.
+  for (const sema::MemberDeclRec& member : rec.members) {
+    if (!member.is_static || member.is_function) continue;
+    const QualType element = types.innermost_array_element(member.type);
+    if (!types.is_class(element) || types.class_of(element) != cls) continue;
+    const auto declaration = member_decl(member.entity);
+    if (!declaration) continue;
+    const u32 item = index(declaration->item);
+    // Clang accepts a template-id written directly in the static declaration, even for its own type.
+    if (static_template_id_items_.contains(item)) continue;
+    const auto& source = items_->items[item];
+    const auto name = std::ranges::find(source.names, w_->ins.names.spelling(member.name), &items::DeclName::name);
+    const u32 at = name == source.names.end() ? 0 : name->offset;
+    diags.push_back({{std::to_underlying(declaration->item), at}, sema::diag_id(Diag::abstract_object),
+                     {{std::to_underlying(element), types.fp(element)}}});
+  }
+}
+
 const Result<ast::ClassDef>& Program::class_def(u32 item) {
   if (class_cells_[item]) return *class_cells_[item];
   u32 key = class_def_key(item);  // apart from item_sema(item), which may be running and ask for it
@@ -10692,21 +10726,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     if (can_complete && member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     const bool implicit_move = can_complete && special_members(item, *cls, rec, &out.diags);
     pure_final_overriders(rec, *cls);
-    if (can_complete && rec.is_abstract() && compatibility() == ast::Compatibility::clang) {
-      // A nondefining static declaration can name its own class while the class is incomplete.
-      for (const sema::MemberDeclRec& member : rec.members) {
-        if (!member.is_static || member.is_function) continue;
-        const QualType element = w_->types.innermost_array_element(member.type);
-        if (!w_->types.is_class(element) || w_->types.class_of(element) != *cls) continue;
-        const auto declaration = member_decl(member.entity);
-        if (!declaration) continue;
-        const auto& source = items_->items[index(declaration->item)];
-        const auto name = std::ranges::find(source.names, w_->ins.names.spelling(member.name), &items::DeclName::name);
-        const u32 at = name == source.names.end() ? 0 : name->offset;
-        out.diags.push_back({{std::to_underlying(declaration->item), at}, sema::diag_id(Diag::abstract_object),
-                             {{std::to_underlying(element), w_->types.fp(element)}}});
-      }
-    }
+    if (can_complete) diagnose_abstract_static_self_members(rec, *cls, out.diags);
     if (can_complete) classify_defaulted_default_ctor(rec, out.diags);
     if (can_complete) {
       complete_virtual_members(item, *cls, rec, members, member_declarations_valid);
@@ -13160,6 +13180,7 @@ const sema::ClassRec* Program::replay_class(EntityId spec, u32 k, u32 point,
   for (engine::Diagnostic& d : diags)
     if (built.union_ || !std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
   pure_final_overriders(built, spec);
+  diagnose_abstract_static_self_members(built, spec, end_diags_);
   complete_virtual_members(k, spec, built, c.members, member_declarations_valid);
   built.defined = true;
   return &classes_.publish(spec, std::move(built), [&](sema::ClassRec& fresh) { validate_dynamic_constructors(fresh); });
