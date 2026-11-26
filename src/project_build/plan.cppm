@@ -946,15 +946,18 @@ class Planner {
     GeneratorPlan plan;
     plan.name = decl.name;
     const auto& tool = require_field(decl, "tool");
+    const bool accepts_staged_tool = !sdk_header && !observer;
+    const auto* staged_tool = accepts_staged_tool ? std::get_if<InputArg>(&tool.data) : nullptr;
     if (const auto* spelling = std::get_if<std::string>(&tool.data)) {
       if (spelling->contains('\0') || !fs::path(*spelling).is_absolute())
         fail(tool.location, "expected an absolute tool path");
       plan.action.tool = *spelling;
       if (inspection_) fact("tool", decl, "tool", display_path(*spelling), "declared in tool", tool.location);
       else observe(*spelling);
-    } else if (!sdk_header || !std::holds_alternative<CxxTool>(tool.data)) {
-      fail(tool.location, sdk_header ? "expected an absolute tool path or cxx() selector"
-                                     : "expected an absolute tool path");
+    } else if (!staged_tool && (!sdk_header || !std::holds_alternative<CxxTool>(tool.data))) {
+      if (sdk_header) fail(tool.location, "expected an absolute tool path or cxx() selector");
+      fail(tool.location, accepts_staged_tool ? "expected an absolute tool path or input(name) selector"
+                                              : "expected an absolute tool path");
     }
 
     if (const auto* entries = field(decl, "environment")) {
@@ -1024,6 +1027,14 @@ class Planner {
         if (inspection_) fact("input", decl, name, path, artifact_origin(*ref), value.location);
         plan.artifact_inputs.push_back({name, std::move(path), producer, output});
       }
+    }
+    if (staged_tool) {
+      const auto binding = std::ranges::find(plan.artifact_inputs, staged_tool->name, &ArtifactInputPlan::name);
+      if (binding == plan.artifact_inputs.end())
+        fail(tool.location, std::format("tool input '{}' must name an artifact-backed input", staged_tool->name));
+      plan.action.tool = "inputs/" + binding->path;
+      if (inspection_)
+        fact("tool", decl, "tool", plan.action.tool, std::format("input({:?})", binding->name), tool.location);
     }
 
     if (!observer) {

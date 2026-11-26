@@ -144,6 +144,31 @@ verification rechecks queries using receipts without launching tools.
 Publication uses a completed request's generation and can restore removed
 output files from cached values.
 
+### Staged action tools (#1505)
+
+A rule package can emit an `action.generate` whose tool is a named input
+selected from a producer's artifact. In the staged tool example, the
+`runner` action copies an executable script while preserving its mode.
+The consumer runs the staged copy to write a generated header.
+
+```text
+action.generate "config" {
+    tool = input("runner")
+    args = [output("header")]
+    inputs = { runner = artifact("runner", "runner") }
+    outputs = { header = "generated_config.hh" }
+}
+```
+
+The selector must name an artifact-backed input with the executable bit
+set. The coordinator uses the ordinary producer receipt to stage that input,
+and the consumer action identity includes the staged path, bytes, and
+executable mode. When the producer runs again and returns an equivalent
+selected output, the consumer can reuse its receipt. Watch follows the
+producer's declared inputs. In `ycxx show app --format=html`, the tool
+fact shows the planned staged path and selector, and **Target dependencies**
+links the consumer to its producer. [Runnable example](../../examples/project-build/staged-tool/README.md)
+
 ## Compiler and trace
 
 Native compilation should run as a descendant of the workspace root in the
