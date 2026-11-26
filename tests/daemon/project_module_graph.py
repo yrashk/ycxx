@@ -789,6 +789,7 @@ cpp.executable "app" {{ sources = ["main.cc"] deps = ["again", "left", "right"] 
     assert legacy_diff['changes'] == diff['changes'], legacy_diff
     check_module_changes(legacy_diff, metadata={'unavailable': 'ambiguous_legacy_configuration'})
     compare_html(ycxx, scope, env, journal, LINUX, legacy, reordered_plan, legacy_diff)
+    check_invalid_graph(ycxx, scope, env, journal, legacy)
 
     replace_source(scope, 'build.ycxx', reordered.replace('"left-include"', '"left-include/"'))
     build(ycxx, scope, env, LINUX, 'add a trailing separator to an include directory')
