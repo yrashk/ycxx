@@ -736,8 +736,9 @@ struct FieldRec {
   u8 written_alignment = 0;
 };
 
-// Classification of a defaulted copy affected by an explicit in-class definition. Deletion
-// takes precedence over an unsupported or nontrivial subobject operation.
+// What a complete class makes of a special member explicitly defaulted on its first declaration,
+// or of an implicit copy affected by one ([dcl.fct.def.default]). Deletion takes precedence over
+// an unsupported or nontrivial subobject operation. `ordinary`: not defaulted there.
 enum class CopyState : u8 { ordinary, trivial, nontrivial, unsupported, deleted };
 
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
@@ -764,6 +765,10 @@ struct MemberDeclRec {
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
   CopyAssignment copy_assignment = CopyAssignment::none;
   bool explicit_defaulted_assignment = false;
+  CopyState defaulted = CopyState::ordinary;  // a constructor defaulted on its first declaration
+  // A trivial defaulted member that is called, not lowered to a representation copy: its exception
+  // specification, or that of an operation its definition calls, is potentially-throwing.
+  bool trivial_call = false;
   bool is_virtual = false;
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
@@ -879,11 +884,9 @@ struct ClassRec {
   // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
   bool closure = false;
   bool default_deleted = false;
-  // Written zero-parameter defaulting, with the completed class's supported no-op proof.
+  // The default constructor defaulted on its first declaration, and whether it is trivial.
   EntityId defaulted_default_ctor = EntityId::none;
   bool trivial_defaulted_default_ctor = false;
-  // The supported nonempty defaulted constructor initializes one pointer to null.
-  bool null_pointer_defaulted_default_ctor = false;
   EntityId declared_destructor = EntityId::none;  // retains the access of a written trivial destructor
   EntityId destructor = EntityId::none;
   EntityId destructor_declaration() const {
@@ -892,7 +895,6 @@ struct ClassRec {
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
   bool copy_deleted_by_class_subobject = false;
-  std::vector<EntityId> defaulted_copy_declarations;
   CopyState defaulted_copy = CopyState::ordinary;
   bool defaulted_copy_const = true;  // the implicit parameter when it depends on a defaulted copy
   // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
@@ -1216,6 +1218,35 @@ public:
     if (!c) return false;
     return c->move_usable ? c->move_nontrivial : c->copy_nontrivial();
   }
+  // Whether a non-static member of `r` is a volatile class object, or an array of them.
+  bool has_volatile_class_member(const ClassRec& r) const {
+    return std::ranges::any_of(r.fields, [&](const FieldRec& f) {
+      QualType t = types_->canonical(f.type);
+      while (types_->is_array(t)) t = types_->canonical(types_->add_cv(types_->rec(t).inner, Types::cv(t)));
+      return types_->is_class(t) && Types::is_volatile(t);
+    });
+  }
+  // Whether the implicit move constructor of `c` is not the copy that ycxx uses for it: a subobject
+  // is moved by a constructor of its own (#244). False when `c` declares a move constructor. With
+  // `defaulted`, only by one defaulted on its first declaration.
+  bool implicit_move_differs(EntityId c, bool defaulted = false) const {
+    const ClassRec* r = find(c);
+    if (!r || !r->move_usable || declared_move(c, *r)) return false;
+    const auto moved = [&](QualType t) {
+      t = types_->canonical(t);
+      while (types_->is_array(t)) t = types_->canonical(types_->add_cv(types_->rec(t).inner, Types::cv(t)));
+      if (Types::is_const(t)) return false;  // a const source binds no move constructor of its class
+      const TypeRec type = types_->rec(t);
+      const ClassRec* sub = type.kind == TypeKind::class_ ? find(type.entity) : nullptr;
+      if (!sub) return false;
+      if (const MemberDeclRec* m = declared_move(type.entity, *sub))
+        return !m->is_deleted && !(m->defaulted == CopyState::trivial && !sub->copy_nontrivial()) &&
+               !(defaulted && m->defaulted == CopyState::ordinary);
+      return implicit_move_differs(type.entity, defaulted);
+    };
+    return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return moved(types_->class_type(b.cls)); }) ||
+           std::ranges::any_of(r->fields, [&](const FieldRec& f) { return moved(f.type); });
+  }
   // Whether a `t` can be neither copied nor moved: its copy constructor deleted and no move
   // constructor usable; for an array, its elements'.
   bool unmovable(QualType t) const {
@@ -1237,6 +1268,21 @@ public:
     // GCC passes classes with implicitly deleted subobject copies directly in this case.
     if (rule == ast::CallTriviality::gcc && c->copy_deleted_by_class_subobject && !c->move_nontrivial) return true;
     return !c->copy_deleted || c->move_usable;
+  }
+
+  // The move constructor class `c` declares, not a template's; none if it declares none.
+  const MemberDeclRec* declared_move(EntityId c, const ClassRec& r) const {
+    const auto m = std::ranges::find_if(r.members, [&](const MemberDeclRec& m) {
+      if (!m.is_ctor || m.is_template) return false;
+      const auto params = types_->rec(m.type).params;
+      if (params.empty() || !types_->is_reference(params.front())) return false;
+      // [class.copy.ctor]/2: every parameter after the first has a default argument.
+      for (std::size_t i = 1; i < params.size(); ++i)
+        if (i >= m.defaults.size() || m.defaults[i] == ast::NodeId::none) return false;
+      return types_->rec(params.front()).rvalue_ref &&
+             Types::unqualified(types_->canonical(types_->referee(params.front()))) == types_->class_type(c);
+    });
+    return m == r.members.end() ? nullptr : &*m;
   }
 
 private:

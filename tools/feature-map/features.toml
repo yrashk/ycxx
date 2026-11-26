@@ -1414,7 +1414,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Namespace-scope class templates also support first-declaration deleted copy assignment, including with an lvalue or rvalue ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
+note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Namespace-scope class templates also support first-declaration deleted copy assignment, including with an lvalue or rvalue ref-qualifier. Defaulting outside the class, in local classes and with a requires-clause remains open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1624,7 +1624,7 @@ std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
 issues = [244, 360, 309, 157, 747]
-note = 'Memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations remain open.'
+note = 'Memberwise implicit copy assignment for ordinary classes without bases. Copy and move operations defaulted on their first declaration, with base, member and array subobjects. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Other implicit moves, implicit assignment with nontrivial base and array subobjects and virtual assignment remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S&) = default; };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }

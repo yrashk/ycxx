@@ -1299,7 +1299,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
     // A constructor, destructor or ordinary class-template member binds locally when its
     // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
-    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+    // So does an implicit or defaulted assignment operator, which any unit can emit.
+    const bool synthesized_assignment = r.kind == sema::EntityKind::function && program.synthesized_assignment(e);
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || synthesized_assignment ||
+         ordinary_class_template_member(r)) &&
         linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     return linkage;
@@ -1908,11 +1911,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
-                                          s.kind == default_constructor ||
-                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
-                                         !internal_class(cls);
-    return dynamic_member(tu.functions.size() - 1);
+    // Implicit and defaulted special members are inline ([class.copy.ctor], [dcl.fct.def.default]).
+    else tu.functions.back().coalesced = !internal_class(cls) && !names_tu_local(program, cls, /*include_value_types=*/true);
+    const std::size_t function = tu.functions.size() - 1;
+    // The lambdas of default member initializers that a constructor runs.
+    closures_of(tu.functions.back().body.closures, program.id(s.item), 0);
+    return dynamic_member(function);
   };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];

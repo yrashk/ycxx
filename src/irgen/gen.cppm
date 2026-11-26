@@ -1072,7 +1072,7 @@ class Gen {
     Position here(*this, e.offset);
     if (!is<ast::CtorCall>(e)) unsupported(e, "as a constructor target");
     auto c = get<ast::CtorCall>(e);
-    if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
+    if (c.zero_first && !zeroed) zero_fill({object, info(e).type});
     std::vector<ValueId> args{object};
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
@@ -1255,8 +1255,8 @@ class Gen {
     if (is<ast::DefaultInit>(e)) return;
     if (is<ast::ValueInit>(e)) {
       if (zeroed) return;
-      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) unsupported(e, "of an aggregate");
-      store(p, zero(p.type));
+      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) zero_fill(p);
+      else store(p, zero(p.type));
       return;
     }
     if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) {
@@ -1312,6 +1312,17 @@ class Gen {
     ValueId ops[] = {dst.ptr, src.ptr};
     std::uint64_t imms[] = {word(ty(dst.type))};
     stateful(ir::Op::copy, {}, ops, imms);
+  }
+  // Zero-initializes ([dcl.init.general]) an object whose storage was not allocated zero: copies
+  // the representation of one that is.
+  void zero_fill(const Place& p) {
+    const Place zeros = begin_object(p.type, ir::Init::zero, ir::Storage::temporary);
+    begin_lifetime(zeros);
+    copy(p, zeros);
+    ValueId ops[] = {zeros.ptr};
+    stateful(ir::Op::obj__end, {}, ops);
+    std::uint64_t imms[] = {std::to_underlying(ir::Storage::temporary)};
+    stateful(ir::Op::dealloc, {}, ops, imms);
   }
   ValueId zero(ast::QualType t) {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) throw Unsupported{"value-initializing a pointer to member"};
@@ -2897,7 +2908,8 @@ class Gen {
   // promoted type); the left is loaded once, converted to it, and the result converted back.
   Place assign(At a) {
     auto s = get<ast::Assign>(a);
-    if (cls(s.info.type) == TypeClass::record) return assign_class(a);
+    // An array is assigned as a whole only in a defaulted or implicit assignment operator's definition.
+    if (cls(s.info.type) == TypeClass::record || s.op == ast::AssignOp::trivial_class_copy) return assign_class(a);
     ValueId v = rvalue(child(a, s.rhs));
     At rhs = child(a, s.rhs);
     Place p = lvalue(child(a, s.lhs));

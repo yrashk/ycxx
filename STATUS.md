@@ -1563,21 +1563,28 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([dcl.inline], [basic.def.odr]). Translation-unit-local classes retain local constructor
   symbols, and non-inline out-of-class definitions retain strong symbols.
   [#1096](https://github.com/yrashk/ycxx/issues/1096)
-- A first-declaration in-class `C() = default` is supported for non-template, nonunion tag
-  classes at namespace scope without fields, bases, virtual functions, or a nontrivial or deleted destructor.
-  The constructor participates in overload selection and access checks, including bare `explicit`.
-  Default-initialization is vacuous and value-initialization zero-initializes without a callable
-  constructor body. An `inline constexpr C tag{}` uses the existing empty record constant
-  representation while the class has a user-declared constructor ([dcl.fct.def.default],
-  [class.default.ctor], [dcl.init.general], #157).
-- A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
-  constructor, including with `constexpr` or a concrete `noexcept` specification. It participates in overload
-  selection, access checking and deletion. For ordinary namespace-scope records without
-  bases, copies proven trivial use the existing representation copy and the usual by-value
-  ABI. This includes supported scalar fields, lvalue references, arrays, and class members
-  with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
-  is diagnosed at use. Native by-value boundaries require a known copy classification.
-  [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
+- A default, copy or move constructor, a copy or move assignment operator and a nonvirtual
+  destructor can be defaulted on their first declaration in a class or class template
+  ([dcl.fct.def.default], #157). The member stays declared: it takes part in overload
+  resolution, access checks and aggregate rules, and is not user-provided.
+  - When its class is complete, or its specialization is instantiated,
+    `Program::classify_special_member` runs overload resolution for each base and member from
+    the class's context and finds the function deleted, trivial, nontrivial, or beyond ycxx
+    (diagnosed at use). A type that the implicit declaration cannot have deletes it, and a deleted
+    move is no candidate ([over.match.funcs.general]). A class whose implicit copy depends on a
+    defaulted one is classified the same way.
+  - A trivial operation is a representation copy, `DefaultInit` or `ValueInit`. A nontrivial one
+    is defined where something uses it: initialization or assignment of the bases, then the
+    members, with an array element by element. The definition is `constexpr` and weak, and its
+    analysis for a specialization is at the end of the unit.
+  - The implicit exception specification is decided where `noexcept` asks for it
+    (`Program::defaulted_nonthrowing`); it does not include subobject destructors ([except.spec]).
+  - A class is POD for layout by the `-fcompat` mode's definition, where defaulted and deleted
+    constructors are not user-provided: C++11's in Clang mode on arm64 macOS, C++03's otherwise
+    (public members, no bases).
+  - Not yet: local classes, defaulting outside the class, a virtual assignment operator, member
+    pointers in assignment.
+  [Design](docs/design/defaulted-special-members.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
 - An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
   available implicit move constructor for scalar fields and class fields with proven nonthrowing
   initialization and destruction. The fields initialize in declaration order from the source
@@ -1622,7 +1629,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, conditional
+  member subobject whose class has an implicit or defaulted nontrivial constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
 - Ordinary explicit class returns copy-initialize from an eligible named local or
@@ -3750,12 +3757,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - A user-declared copy or move assignment suppresses the implicit move constructor. A move
   assignment also deletes an otherwise implicit copy constructor. The resulting constructor
   availability determines call triviality. [#244](https://github.com/yrashk/ycxx/issues/244)
-- Ordinary namespace-scope non-template classes without bases support copy assignment defaulted
-  on its first in-class declaration. The selected operator preserves its access, source type and
-  any written exception specification. The memberwise body is built on demand, assigns fields
-  in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
-  [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
-  [#244](https://github.com/yrashk/ycxx/issues/244)
+- Copy and move assignment defaulted on its first in-class declaration is described with the
+  other defaulted special members above (#157). Deleted copy assignments participate in overload
+  resolution. [#244](https://github.com/yrashk/ycxx/issues/244)
 - Namespace-scope class templates accept a deleted copy assignment on the first in-class
   declaration, including with an lvalue or rvalue ref-qualifier. Specializations preserve
   deletion and diagnose a selected deleted overload.

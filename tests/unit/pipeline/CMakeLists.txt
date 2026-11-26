@@ -68,6 +68,11 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.darwin_lambda_declarations
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/lambda_declarations.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
+  # Two units sharing defaulted special members (#157); unit.linux_defaulted_members checks the same
+  # on Linux.
+  add_test(NAME unit.darwin_defaulted_members
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/defaulted_members.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${YCXXC_NM} darwin)
   # The Darwin counterpart of unit.linux_archive (#842), checked against the system linker.
   add_test(NAME unit.darwin_archive
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
@@ -118,6 +123,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_lambda_declarations
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/lambda_declarations.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} linux)
+  # The Darwin runs of the same sources are tests/own/classes/defaulted-special-members in the core
+  # suite (#157).
+  add_test(NAME unit.linux_defaulted_members
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/defaulted_members.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_NM} linux)
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
       COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_fixed_array_new.py
