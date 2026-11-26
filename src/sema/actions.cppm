@@ -576,6 +576,22 @@ public:
       return kind && message_of(*kind).severity == lex::Severity::error;
     });
   }
+  // Whether a diagnostic since `begin` says the tokens do not have the grammar's shape (an
+  // expected or unexpected token), as opposed to a well-formedness rule: what decides a tentative
+  // parse ([dcl.ambig.res]/2).
+  bool has_syntax_error_since(std::size_t begin) const {
+    return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
+      switch (sema_diag_of(d.id).value_or(Diag::not_supported)) {
+      case Diag::expected_token: case Diag::expected_expression: case Diag::type_as_expression:
+      case Diag::expected_statement: case Diag::expected_declaration: case Diag::expected_type_specifier:
+      case Diag::expected_declarator: case Diag::expected_unqualified_id: case Diag::unexpected_token:
+      case Diag::unexpected_identifier: case Diag::missing_type_specifier:
+        return true;
+      default:
+        return false;
+      }
+    });
+  }
   // Drops the diagnostics after the first `n`: a part analysed again where it was diagnosed already.
   void truncate_diags(std::size_t n) { diags_->resize(n); }
   // Drops the diagnostics after the first `n` but those that `survives_substitution` keeps: a

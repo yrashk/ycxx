@@ -48,8 +48,18 @@ static_assert(IC<typename ns::I(2)>::value == 2);
 static_assert(IC<typename ns::I{1}>::value == 1);
 static_assert(IC<typename ns::P::J(6)>::value == 6);
 template<class T> struct D : IC<typename T::type(3)> {};
-template<class T> struct DB : IC<typename T::type{4}> {};
-static_assert(D<H>::value == 3 && DB<H>::value == 4);
+template<class T> constexpr int db() { return IC<typename T::type{4}>::value; }
+template<class T> constexpr int dp() { return IC<typename T::type(5)>::value; }
+static_assert(D<H>::value == 3 && db<H>() == 4 && dp<H>() == 5);
+
+// Class names, class template-ids, `->` after the parentheses, `>>` and pack expansions.
+template<class T> struct W { int v = 3; constexpr W(int) {} };
+struct M { int m = 9; };
+using MP = const M*;
+constexpr M mo{};
+static_assert(IC<W<int>(3).v>::value == 3);
+static_assert(IC<MP(MP(&mo))->m>::value == 9);
+static_assert(IC<U(Ty<IC<1>>::type::value)>::value == 1);
 
 // Type-ids keep their precedence.
 static_assert(__is_same(Ty<int(int)>::type, int(int)));
@@ -64,6 +74,13 @@ static_assert(__is_same(Ty<U (&)[3]>::type, int (&)[3]));
 static_assert(__is_same(Ty<U(S, U, ...)>::type, int(S, int, ...)));
 static_assert(__is_same(Ty<ns::I (*)(U)>::type, int (*)(int)));
 static_assert(__is_same(Ty<ns::P::J()>::type, int()));
+static_assert(__is_same(Ty<S (&)[2]>::type, S (&)[2]) && __is_same(Ty<S(S)>::type, S(S)));
+static_assert(__is_same(Ty<W<int>(int)>::type, W<int>(int)));
+static_assert(__is_same(Ty<W<W<int>> (&)[2]>::type, W<W<int>> (&)[2]));
+static_assert(__is_same(Ty<Ty<int (&)[3]>>::type, Ty<int (&)[3]>));
+template<class...> struct TL {};
+template<class... Ts> struct Fns { using type = TL<U (*)(Ts)..., U(Ts)...>; };
+static_assert(__is_same(Fns<char, S>::type, TL<int (*)(char), int (*)(S), int(char), int(S)>));
 template<class T> struct Z : Ty<U(T)> {};
 static_assert(__is_same(Z<S>::type, int(S)));
 static_assert(__is_same(Ty<typename ns::I(int)>::type, int(int)));

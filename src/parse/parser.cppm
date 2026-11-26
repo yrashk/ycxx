@@ -3123,6 +3123,7 @@ public:
         // A brace or an integer literal in the initializer rules out an abstract declarator.
         // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
         std::optional<QualType> trial_type;
+        std::vector<engine::Diagnostic> trial_diags;  // a failed type-id's, if the expression fails too
         const bool decay_copy = is(Tk::kw_auto) &&
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (auto end = template_name_end_ahead()) {
@@ -3132,12 +3133,18 @@ public:
             ok = false;
           }
         } else if (bool trial = false; !decay_copy && starts_type_id(/*template_argument=*/true, &trial) &&
-                   (!trial || (trial_type = tentative_type_argument()))) {
+                   (!trial || tentative_type_argument(trial_type, trial_diags))) {
           auto t = trial ? trial_type : template_type_argument();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
+          const std::size_t expression_diags = s_->diag_count();
           Ex e = template_argument_expression(replay != nullptr);
+          // Neither reading works: report the one the grammar prefers ([temp.arg.general]/2).
+          if (!e.ok() && !trial_diags.empty()) {
+            s_->truncate_diags(expression_diags);
+            std::ranges::move(trial_diags, std::back_inserter(s_->diagnostics()));
+          }
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
@@ -3298,9 +3305,11 @@ public:
   }
 
   // [dcl.ambig.res]/2: a template argument that may be a type-id or an expression is a type-id
-  // if it parses as one up to the argument's end. Otherwise nothing is read and no diagnostic
-  // is kept: `bool(&g)`, `int((n))`, `bool(S{})` and `U(3)` are expressions ([expr.type.conv]).
-  std::optional<QualType> tentative_type_argument() {
+  // if it parses as one up to the argument's end, with no syntax error. The choice is syntactic:
+  // an ill-formed type-id such as `P(P(p))[1]` (a function returning an array) stays one, with
+  // its diagnostics, in `t`. Otherwise nothing is read, and the diagnostics move to `failed`:
+  // `bool(&g)`, `int((n))`, `bool(S{})` and `U(3)` are expressions ([expr.type.conv]).
+  bool tentative_type_argument(std::optional<QualType>& t, std::vector<engine::Diagnostic>& failed) {
     const u32 back = i_;
     const std::size_t diags = s_->diag_count();
     const int saved_angle = angle_;
@@ -3311,8 +3320,11 @@ public:
     std::array<u32, counters.size()> counts;
     std::ranges::transform(counters, counts.begin(), [](const u32* c) { return *c; });
     const std::size_t alias_checks = type_alias_checks_ ? type_alias_checks_->checks.size() : 0;
-    auto t = template_type_argument();
-    if (t && !s_->has_error_since(diags) && ends_template_argument(kind())) return t;
+    t = template_type_argument();
+    if (ends_template_argument(kind()) && !s_->has_syntax_error_since(diags)) return true;
+    t.reset();
+    auto& all = s_->diagnostics();
+    failed.assign(std::make_move_iterator(all.begin() + diags), std::make_move_iterator(all.end()));
     s_->truncate_diags(diags);
     i_ = back;
     angle_ = saved_angle;
@@ -3320,7 +3332,7 @@ public:
     qualified_half_ = saved_qualified_half;
     for (std::size_t c = 0; c < counters.size(); ++c) *counters[c] = counts[c];
     if (type_alias_checks_) type_alias_checks_->checks.resize(alias_checks);
-    return std::nullopt;
+    return false;
   }
   std::optional<QualType> template_type_argument() {
     const bool saved_type_argument = std::exchange(in_template_type_argument_, true);
