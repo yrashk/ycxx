@@ -183,6 +183,8 @@ public:
   // Whether function (or function template) `f` has a noexcept condition kept for its
   // specializations' replays.
   virtual bool deferred_exception(EntityId) { return false; }
+  // Whether a special member's provisional type still lacks its completed specification.
+  virtual bool unresolved_special_member_exception(EntityId) { return false; }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   // Whether a class's layout, or a base's or stored member's, depends on attributes or packing
@@ -266,6 +268,8 @@ public:
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
+  virtual void record_nested_constraint_operand(u32 /*begin*/, u32 /*end*/) {}
+  virtual std::optional<u32> nested_constraint_operand_end(u32 /*begin*/) { return std::nullopt; }
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
   // bool, not constant, or not supported): the expression that asked is then invalid.
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
@@ -638,10 +642,16 @@ public:
     }
     // One the class's scope hides ([temp.local]/7): what it declares, a type or not.
     if (declared_template_param(name)) {
-      const ClassRec* cr = class_rec(current_class);
-      return class_body_type(current_class, cr && cr->defined ? *cr : ClassRec{}, name, type_at,
-                             ClassBodyLookup::before_template_parameter, elaborated)
-          .type;
+      for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls)) {
+        const ClassRec* cr = class_rec(cls);
+        if ((!cr || !cr->defined) && cls != current_class)
+          if (auto m = q_->enclosing_earlier_member(cls, name, elaborated))
+            return is_type(m->kind) && !(m->flags & decl_flag::template_) ? std::optional(m->type) : std::nullopt;
+        auto hit = class_body_type(cls, cr && cr->defined ? *cr : ClassRec{}, name, type_at,
+                                   ClassBodyLookup::before_template_parameter, elaborated);
+        if (hit.found) return hit.type;
+      }
+      return std::nullopt;
     }
     if (!elaborated && earlier_nested_enumerator(name)) return std::nullopt;
     // In a class template, its name without arguments is the injected-class-name: the current
@@ -663,6 +673,7 @@ public:
           if (hit.found) return hit.type;
         }
         if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
+        if (c.name == name && enclosing_class(current_class) != EntityId::none) return types().class_type(current_class);
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
         const auto prefix_bases = class_prefix_bases(current_class);
@@ -748,14 +759,13 @@ public:
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
-  // The class that class `c` is a member of ([class.nest]), none at namespace scope. A class
-  // template's members are not nested classes of this kind (#306).
+  // The class that class `c` is a member of ([class.nest]), none at namespace scope.
   EntityId enclosing_class(EntityId c) const {
     if (c == EntityId::none) return EntityId::none;
     const EntityRec& r = w_->entities.rec(c);
     if (r.kind != EntityKind::class_ || r.templ != EntityId::none || r.scope == EntityId::none) return EntityId::none;
     const EntityRec& s = w_->entities.rec(r.scope);
-    return s.kind == EntityKind::class_ && s.templ == EntityId::none ? r.scope : EntityId::none;
+    return s.kind == EntityKind::class_ ? r.scope : EntityId::none;
   }
   // Whether class `c` encloses the class whose member is being analysed ([class.nest]).
   bool encloses_current_class(EntityId c) const {
@@ -838,7 +848,7 @@ public:
     auto collect = [&](this auto&& visit, EntityId cls, const ClassRec& cr) -> void {
       const EntityRec& c = w_->entities.rec(cls);
       if (c.kind == EntityKind::class_ && c.name == name &&
-          (c.templ == EntityId::none || (before_parameter && cls != naming))) {
+          (c.templ == EntityId::none || class_prefix || (before_parameter && cls != naming))) {
         hits.push_back({types().class_type(cls), cls, cls, ast::Access::public_, true, path});
         return;
       }
@@ -2091,6 +2101,69 @@ public:
     QualType type;
     u32 at;
   };
+
+  enum class ExceptionTypeTraits { ordinary, checking_pattern, dependent };
+  ExceptionTypeTraits exception_type_traits = ExceptionTypeTraits::ordinary;
+  bool in_discarded_constraint_operand = false;
+
+  bool defer_exception_type_trait(ast::DepOp op) {
+    if (exception_type_traits == ExceptionTypeTraits::ordinary ||
+        (op != ast::DepOp::is_nothrow_constructible && op != ast::DepOp::is_nothrow_assignable))
+      return false;
+    exception_type_traits = ExceptionTypeTraits::dependent;
+    return true;
+  }
+
+  // A written exact move beats a copy taking an lvalue reference. Require that proof from
+  // the recorded declarations before reading the winner's exception specification. Other
+  // overload sets or implicit/defaulted moves need more object-model facts ([meta.unary.prop]).
+  std::optional<bool> written_move_nothrow(QualType owner, bool constructing) {
+    Types& ts = types();
+    const EntityId cls = ts.class_of(owner);
+    const ClassRec* record = classes().find(cls);
+    if (!record || !record->defined || !record->member_declarations_valid || record->union_ ||
+        record->polymorphic || !record->bases.empty() || w_->entities.rec(cls).templ != EntityId::none)
+      return std::nullopt;
+
+    const MemberDeclRec* move = nullptr;
+    for (const MemberDeclRec& member : record->members) {
+      const bool assignment = member.is_function && ins().names.spelling(member.name) == "operator=";
+      if (constructing ? !member.is_ctor : !assignment) continue;
+      const TypeRec function = ts.rec(member.type);
+      if (constructing && !function.variadic && function.params.empty()) continue;
+      if (function.variadic || function.params.size() != 1 || member.is_static || member.is_template ||
+          function.fn_cv != Cv::none)
+        return std::nullopt;
+
+      const TypeRec parameter = ts.rec(function.params.front());
+      if (parameter.kind != TypeKind::reference || Types::unqualified(ts.canonical(parameter.inner)) != owner)
+        return std::nullopt;
+      if (!parameter.rvalue_ref) {
+        // A ref-qualified copy assignment could change the ordering of the object bindings.
+        if (function.fn_ref != ast::RefQual::none) return std::nullopt;
+        continue;
+      }
+      if (move || ts.canonical(parameter.inner) != owner || function.fn_ref == ast::RefQual::rvalue ||
+          (!constructing && (member.explicit_defaulted_assignment || ts.canonical(function.inner) != ts.lvalue_ref(owner))))
+        return std::nullopt;
+      move = &member;
+    }
+    if (!move) return std::nullopt;
+    // The traits check access as if from a context unrelated to the class.
+    if (move->is_deleted || record->access_of(move->entity) != ast::Access::public_) return false;
+    const auto declaration = q_->written_member(move->entity);
+    if (!declaration || q_->deferred_exception(move->entity) || q_->unresolved_special_member_exception(move->entity))
+      return std::nullopt;
+    if (!ts.rec(declaration->type).fn_noexcept) return false;
+    if (!constructing) return true;
+    const EntityId destructor = record->destructor_declaration();
+    if (record->access_of(destructor) != ast::Access::public_) return false;
+    const auto written_destructor = std::ranges::find(record->members, destructor, &MemberDeclRec::entity);
+    if (written_destructor != record->members.end() && written_destructor->is_deleted) return false;
+    if (!record->destructor_usable || q_->unresolved_special_member_exception(destructor)) return std::nullopt;
+    return record->destructor_noexcept;
+  }
+
   // The owning replay supplies packs in written order and the demand point for their elements.
   // Validate every concrete operand's domain before deciding the predicate ([meta.unary.prop]).
   Ex constructibility_expr(lex::TypeTrait trait, NameId name, std::span<const ConstructibilityOperand> written, u32 begin, u32 end)
@@ -2168,7 +2241,7 @@ public:
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
       }
-      if (in_constraint_atom_) {
+      if (in_constraint_atom_ || defer_exception_type_trait(op)) {
         for (const ConstructibilityOperand& operand : args)
           if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
         return dependent_node({}, begin, end, builtin(Builtin::bool_));
@@ -2191,6 +2264,11 @@ public:
           return ts.is_arithmetic(ts.referee(ts.canonical(arg.type)));
         }))
       return bool_literal(args.size() == 2, begin, end);
+    if (op == ast::DepOp::is_nothrow_constructible && ts.is_class(target) && Types::cv(target) == Cv::none && args.size() == 2) {
+      const TypeRec source = ts.rec(args[1].type);
+      if (source.kind == TypeKind::reference && source.rvalue_ref && ts.canonical(source.inner) == target)
+        if (auto answer = written_move_nothrow(target, /*constructing=*/true)) return bool_literal(*answer, begin, end);
+    }
     return fail(unsupported, args.front().type);
   }
   std::optional<Ex> replayed_binary_type_trait(ast::DepOp op, QualType first, QualType second, u32 begin, u32 end) {
@@ -2207,18 +2285,34 @@ public:
   Ex assignability_expr(ast::DepOp op, NameId name, QualType left, QualType right, u32 begin, u32 end) {
     const Types& ts = types();
     const QualType lhs = ts.canonical(left), rhs = ts.canonical(right);
+    const engine::Loc loc = type_trait_loc(begin);
     if (ts.is_dependent(lhs) || ts.is_dependent(rhs)) {
       if (auto pattern = replayed_binary_type_trait(op, lhs, rhs, begin, end)) return *pattern;
-      if (auto at_satisfaction = trait_at_satisfaction(type_trait_loc(begin), begin, end)) return *at_satisfaction;
-      diag_at(type_trait_loc(begin), Diag::assignability_dependent, name);
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
+      if (defer_exception_type_trait(op)) {
+        q_->record_dependent_type_trait_operand(loc);
+        return dependent_node({}, begin, end, builtin(Builtin::bool_));
+      }
+      diag_at(loc, Diag::assignability_dependent, name);
       return {NodeId::none, begin, end};
     }
     const QualType destination = ts.canonical(ts.referee(lhs));
+    const bool lvalue = ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref;
+    if (op == ast::DepOp::is_nothrow_assignable && ts.is_class(destination) && Types::cv(destination) == Cv::none &&
+        lvalue && ts.is_reference(rhs) && ts.rec(rhs).rvalue_ref && ts.canonical(ts.referee(rhs)) == destination) {
+      const EntityId cls = ts.class_of(destination);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (demand ? *demand : q_->is_complete_at_source(cls)) {
+        if (auto answer = written_move_nothrow(destination, /*constructing=*/false)) return bool_literal(*answer, begin, end);
+      } else if (q_->type_trait_instantiation_failed(cls)) {
+        return {NodeId::none, begin, end};
+      }
+    }
     if (!ts.is_arithmetic(destination) || !ts.is_arithmetic(ts.referee(rhs))) {
-      diag_at(type_trait_loc(begin), Diag::assignability_unsupported, name, left, right);
+      diag_at(loc, Diag::assignability_unsupported, name, left, right);
       return {NodeId::none, begin, end};
     }
-    return bool_literal(ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref && !Types::is_const(destination), begin, end);
+    return bool_literal(lvalue && !Types::is_const(destination), begin, end);
   }
   // Whether `base` is a base of `derived` along exactly one path, and that path public: an
   // unambiguous, accessible base from outside both classes ([class.derived], [class.access.base]).
@@ -2646,7 +2740,7 @@ public:
       if (same != true) return same;
       const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
       if (!fa || !ga) return std::nullopt;
-      if (*fa != *ga) return false;
+      if (std::max(*fa, u64(f.explicit_alignment)) != std::max(*ga, u64(g.explicit_alignment))) return false;
     }
     return true;
   }
@@ -2970,6 +3064,8 @@ public:
     }
     if (c == current_class)
       if (auto m = q_->earlier_member(n, /*type_only=*/true); m && !(m->flags & decl_flag::template_)) return m->type;
+    for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls))
+      if (enclosing_class(cls) == c && w_->entities.rec(cls).name == n) return types().class_type(cls);
     if (encloses_current_class(c)) return enclosing_prefix_type(c, n, std::nullopt, /*type_only=*/true).type;
     return std::nullopt;
   }
@@ -2987,8 +3083,11 @@ public:
     // A member type of the current instantiation is found where it is declared ([temp.dep.type]).
     // A type-only context can assume a dependent name denotes a type until instantiation
     // ([temp.res.general]).
-    if (s.type && types().is_class(*s.type) && (!types().is_dependent(*s.type) || types().class_of(*s.type) == current_class))
-      if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
+    if (s.type && types().is_class(*s.type)) {
+      const auto cls = types().class_of(*s.type);
+      if (!types().is_dependent(*s.type) || cls == current_class || encloses_current_class(cls))
+        if (auto t = member_type(cls, n)) return Scope{std::nullopt, *t};
+    }
     if (assume_dependent_type && s.type && types().is_dependent(*s.type))
       return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
@@ -4424,14 +4523,22 @@ public:
     }
     return n;
   }
-  // Whether the class whose scope this is declares `name`, or one of its nondependent bases does,
-  // or names a base so ([class.member.lookup], [class.pre]/2: a base's injected-class-name).
+  // Whether a class scope before the template parameter scope declares `name`, including
+  // each enclosing class's nondependent bases ([temp.local]/7).
   bool class_scope_declares(NameId name) {
-    const ClassRec* cr = class_rec(current_class);
-    const bool defined = cr && cr->defined;
-    if (defined ? direct_member(current_class, *cr, name).has_value() : q_->earlier_member(name).has_value()) return true;
-    std::span<const BaseRec> bases = defined ? std::span<const BaseRec>(cr->bases) : q_->defining_base_records(current_class);
-    return std::ranges::any_of(bases, [&](const BaseRec& b) { return !b.dependent_in_pattern && base_declares(b.cls, name); });
+    for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls)) {
+      const ClassRec* cr = class_rec(cls);
+      if (cr && cr->defined) {
+        if (direct_member(cls, *cr, name)) return true;
+      } else if (cls == current_class ? q_->earlier_member(name).has_value()
+                                     : q_->enclosing_earlier_member(cls, name, /*type_only=*/false).has_value()) {
+        return true;
+      }
+      const auto bases = cr && cr->defined ? std::span<const BaseRec>(cr->bases) : q_->defining_base_records(cls);
+      if (std::ranges::any_of(bases, [&](const BaseRec& b) { return !b.dependent_in_pattern && base_declares(b.cls, name); }))
+        return true;
+    }
+    return false;
   }
   bool base_declares(EntityId c, NameId name) {
     if (w_->entities.rec(c).name == name) return true;
@@ -10009,7 +10116,7 @@ public:
     // establishes no other object layout or virtual emission support.
     const auto& entity = w_->entities.rec(cls);
     if (w_->target.triple != ast::x86_64_linux.triple || entity.linkage != ast::Linkage::external ||
-        record->explicit_alignment || q_->class_layout_uncertain(cls) ||
+        record->has_explicit_alignment() || q_->class_layout_uncertain(cls) ||
         (record->peer_virtual_layout != PeerVirtualLayout::root && !q_->peer_pure_dispatch(cls))) {
       diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
       return fail;
@@ -10741,6 +10848,7 @@ public:
       auto m = place_of(f.type);
       if (!m) return std::nullopt;
       m->bit_width = f.bit_width;
+      m->align = std::max(m->align, u64(f.explicit_alignment));
       places.push_back(*m);
     }
     const bool dynamic_root = c.dynamic && !c.dynamic->primary_base;
@@ -12435,7 +12543,7 @@ public:
 
     const auto* record = class_rec(cls);
     if (!record || !record->member_declarations_valid || record->union_ || record->closure ||
-        record->layout_requires_virtual_support || record->explicit_alignment || record->unapplied_layout ||
+        record->layout_requires_virtual_support || record->has_explicit_alignment() || record->unapplied_layout ||
         !record->bases.empty() || record->fields.size() != 1 || record->user_ctors ||
         record->destructor_declaration() != EntityId::none || !record->destructor_usable) return false;
     // [except.throw]: construction from const T& in an unrelated context must also work.
