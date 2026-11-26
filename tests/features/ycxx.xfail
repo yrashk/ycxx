@@ -130,9 +130,7 @@ draft/dcl/dcl.fct-4.reject.cpp errors elsewhere: preprocessing directives are no
 draft/dcl/dcl.fct-5.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/dcl/dcl.fct.def.coroutine-2.accept.cpp preprocessing directives are not supported yet
 draft/dcl/dcl.fct.def.default-1.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/dcl/dcl.fct.def.default-2.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.fct.def.delete-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/dcl/dcl.fct.def.delete-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.def.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.fct.default-2.reject.cpp errors elsewhere: '=' not supported yet
 draft/dcl/dcl.fct.default-4.reject.cpp errors elsewhere: 'class' not supported yet

@@ -176,6 +176,9 @@ public:
   virtual bool plain_class_template_type(EntityId) { return false; }
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
+  // [except.spec]: whether the implicit exception specification of `f`, a special member defaulted
+  // on its first declaration without a noexcept-specifier, is non-throwing; nothing for another function.
+  virtual std::optional<bool> defaulted_nonthrowing(EntityId) { return std::nullopt; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f, bool& diagnosed_failure) = 0;
@@ -4203,7 +4206,8 @@ public:
     while (auto paren = as<ast::Paren>(init)) init.id = paren->operand.id;
     if (!(as<ast::ValueInit>(init) || as<ast::DefaultInit>(init)) || !types().is_class(init.type())) return false;
     const ClassRec* rec = class_rec(types().class_of(init.type()));
-    return rec && rec->trivial_defaulted_default_ctor && rec->fields.empty();
+    return rec && rec->trivial_defaulted_default_ctor && rec->fields.empty() && rec->bases.empty() &&
+           rec->destructor == EntityId::none;
   }
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
@@ -6858,6 +6862,8 @@ public:
     }
   };
 
+  // The bases of `current_class` while its complete record is not published yet.
+  std::span<const BaseRec> completing_bases;
   std::span<const BaseRec> class_prefix_bases(EntityId owner) {
     if (owner == class_prefix_owner_ || encloses_current_class(owner)) return q_->defining_base_records(owner);
     return {};
@@ -6910,7 +6916,7 @@ public:
       int paths = 0;
       if (a == ast::Access::protected_) {
         if (base_path(k, c, paths)) return true;
-        for (const BaseRec& base : class_prefix_bases(k))
+        for (const BaseRec& base : k == current_class && !completing_bases.empty() ? completing_bases : class_prefix_bases(k))
           if (base.cls == c || base_path(base.cls, c, paths)) return true;
       }
     }
@@ -7448,6 +7454,10 @@ public:
       }
       if (!c->is_template) {
         if (ex != explicit_args_.end()) continue;
+        // [over.match.funcs.general]/8: a defaulted move assignment operator defined as deleted is
+        // no candidate.
+        if (c->explicit_defaulted_assignment && types().rec(types().rec(c->type).params.front()).rvalue_ref &&
+            (c->copy_assignment == CopyAssignment::deleted || c->copy_assignment == CopyAssignment::const_member)) continue;
         cands.push_back({c->entity, c->type, c->is_static, c->is_deleted, nullptr, c->defaults});
         recs.push_back(c);
         deduced.emplace_back();
@@ -7573,6 +7583,7 @@ public:
       }
     }
     const auto copy_assignment = d->copy_assignment;
+    const bool representation_copy = copy_assignment == CopyAssignment::trivial && !d->trivial_call;
     if (copy_assignment != CopyAssignment::none) {
       QualType ct = types().class_type(object_cls);
       if (!usable_copy_assignment(copy_assignment, ct, paren_at)) return fail;
@@ -7581,7 +7592,7 @@ public:
         diag(paren_at, Diag::unsupported_copy_assignment, ct);
         return fail;
       }
-      if ((copy_assignment != CopyAssignment::trivial || !assignment_notation) &&
+      if ((!representation_copy || !assignment_notation) &&
           !usable_copy_assignment(q_->require_copy_assignment(d->entity), ct, paren_at)) return fail;
     }
     EntityId fe = k.entity;
@@ -7635,7 +7646,7 @@ public:
       o = to_base(o, object_cls, paren_at, false, /*check_access=*/false);
       if (!o.ok()) return fail;
     }
-    if (assignment_notation && copy_assignment == CopyAssignment::trivial) {
+    if (assignment_notation && representation_copy) {
       // The chosen reference argument already designates the source object. Assignment does not
       // initialize a new class value, even when the copy constructor is deleted.
       return node(ast::Assign{info, ast::AssignOp::trivial_class_copy, at(o, begin), children->front(), info.type},
@@ -8246,6 +8257,9 @@ public:
         cands.push_back(std::move(k));
       } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
+        // [over.match.funcs.general]/8: a defaulted move constructor defined as deleted is no candidate.
+        if (m.is_deleted && m.defaulted == CopyState::deleted && !fr.params.empty() &&
+            types().rec(fr.params.front()).rvalue_ref) continue;
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
         k.is_consteval = m.is_consteval;
         user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
@@ -8260,7 +8274,7 @@ public:
       cands.push_back({cr->copy_ctor, types().function(void_, std::span(&p, 1), false, LangLinkage::cxx), true, cr->copy_deleted});
       // [class.copy.ctor]: a class whose implicit copy is deleted can still use a trivial
       // implicit move and transfer its representation. General implicit move is tracked in #244.
-      if (cr->copy_deleted && cr->move_usable && !cr->move_nontrivial && args.size() == 1 &&
+      if (cr->copy_deleted && cr->move_usable && !cr->move_nontrivial && !classes().declared_move(c, *cr) && args.size() == 1 &&
           args[0].cat() == ValueCategory::xvalue && same_unqualified(args[0].type(), ut) &&
           object_cv(args[0].type()) == Cv::none) {
         QualType move = types().rvalue_ref(ut);
@@ -8291,12 +8305,31 @@ public:
       }
     }
     const bool paren_aggregate = form == Construction::direct_paren_aggregate;
+    const auto unresolved = diag_count();
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut, {}, false, paren_aggregate);
     if (!chosen) {
+      // The deleted implicit copy stands in for an implicit move that a volatile member's own move
+      // constructor makes usable (#244).
+      if (!user_copy && cr->copy_deleted && cr->move_usable && cr->move_nontrivial && !classes().declared_move(c, *cr) &&
+          args.size() == 1 && args[0].cat() == ValueCategory::xvalue && same_unqualified(args[0].type(), ut) &&
+          object_cv(args[0].type()) == Cv::none && classes().has_volatile_class_member(*cr) &&
+          diag_count() == unresolved + 1 && diags_->back().id == diag_id(Diag::deleted_constructor)) {
+        truncate_diags(unresolved);
+        diag(begin, Diag::defaulted_copy_unsupported, ut);
+        return fail;
+      }
       if (chosen.error() == OverloadFailure::no_viable) return parenthesized_aggregate(t, args, begin, end);
       return fail;
     }
     const Candidate& k = cands[*chosen];
+    // The state of the selected constructor when it is defaulted on its first declaration.
+    const MemberDeclRec* selected_member = nullptr;
+    if (k.entity != EntityId::none && !k.pattern)
+      if (const auto m = std::ranges::find(cr->members, k.entity, &MemberDeclRec::entity); m != cr->members.end())
+        selected_member = &*m;
+    const CopyState defaulted = selected_member ? selected_member->defaulted : CopyState::ordinary;
+    const bool defaulted_copy = defaulted != CopyState::ordinary && k.entity != cr->defaulted_default_ctor;
+    const bool trivial_call = selected_member && selected_member->trivial_call;
     if (destination == ConstructorDestination::delegation) {
       if (k.entity == current_function) {
         diag(begin, Diag::delegating_constructor_cycle);
@@ -8306,7 +8339,7 @@ public:
         diag(begin, Diag::not_supported, lex::Tk::colon);
         return fail;
       }
-      if (k.entity == EntityId::none || std::ranges::contains(cr->defaulted_copy_declarations, k.entity)) {
+      if (k.entity == EntityId::none || defaulted_copy) {
         diag(begin, Diag::delegating_copy_unsupported);
         return fail;
       }
@@ -8326,8 +8359,10 @@ public:
       if (destructor != EntityId::none && !check_access(c, destructor, w_->entities.rec(destructor).name, begin)) return fail;
     }
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
-      if (!cr->trivial_defaulted_default_ctor && !cr->null_pointer_defaulted_default_ctor)
-        return fail;  // diagnosed at its declaration
+      if (defaulted == CopyState::unsupported) {
+        diag(begin, Diag::defaulted_default_constructor, ut);
+        return fail;
+      }
       if (form == Construction::default_init && Types::is_const(types().canonical(t)) && !const_default_constructible(t)) {
         diag(begin, Diag::defaulted_const_uninitialized, t);
         return fail;
@@ -8336,31 +8371,32 @@ public:
         diag(begin, Diag::defaulted_default_delegation);
         return fail;
       }
-      if (cr->null_pointer_defaulted_default_ctor) {
-        const auto& field = cr->fields.front();
-        Ex init = literal(Types::unqualified(field.type), field.init, ValueCategory::prvalue, begin, end);
-        return list_of(ut, {init}, begin, end);
+      if (defaulted == CopyState::trivial && !trivial_call) {
+        ExprInfo info{ut, ValueCategory::prvalue, 0};
+        // [dcl.init.general]: value-initialization zero-initializes before the trivial constructor.
+        if (form == Construction::default_init) return node(ast::DefaultInit{info}, begin, end, info);
+        return node(ast::ValueInit{info}, begin, end, info);
       }
-      ExprInfo info{ut, ValueCategory::prvalue, 0};
-      // [dcl.init.general]: value-initialization zero-initializes before the trivial constructor.
-      if (form == Construction::default_init) return node(ast::DefaultInit{info}, begin, end, info);
-      return node(ast::ValueInit{info}, begin, end, info);
     }
     // A specialization called is one whose definition the program requires ([temp.inst]/8).
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
     if (!require_concrete_parameters(fr, begin)) return fail;
-    if (cr->defaulted_copy != CopyState::ordinary) {
-      const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() && !types().rec(fr.params[0]).rvalue_ref :
-          std::ranges::contains(cr->defaulted_copy_declarations, k.entity);
-      if (defaulted) {
-        if (cr->defaulted_copy != CopyState::trivial) {
-          diag(begin, Diag::defaulted_copy_unsupported, ut);
-          return fail;
-        }
-        Ex src = bind_reference(args[0], fr.params[0], args[0].begin);
-        return src.ok() ? convert_node(src, ast::ConversionKind::lvalue_to_rvalue, ut) : fail;
-      }
+    const bool implicit_copy = k.entity == EntityId::none && !fr.params.empty() && !types().rec(fr.params[0]).rvalue_ref;
+    const CopyState copy = defaulted_copy ? defaulted : implicit_copy ? cr->defaulted_copy : CopyState::ordinary;
+    // The implicit copy of an rvalue stands in for an implicit move that would call a subobject's
+    // own move constructor (#244).
+    const bool stands_for_move = (implicit_copy || (k.entity == cr->copy_ctor && !selected_member)) &&
+        (cr->defaulted_copy != CopyState::ordinary ? classes().implicit_move_differs(c)
+                                                   : classes().implicit_move_differs(c, /*defaulted=*/true)) &&
+        args[0].cat() != ValueCategory::lvalue && object_cv(args[0].type()) == Cv::none;
+    if (copy == CopyState::unsupported || stands_for_move) {
+      diag(begin, Diag::defaulted_copy_unsupported, ut);
+      return fail;
+    }
+    if (copy == CopyState::trivial && !trivial_call) {
+      Ex src = bind_reference(args[0], fr.params[0], args[0].begin);
+      return src.ok() ? convert_node(src, ast::ConversionKind::lvalue_to_rvalue, ut) : fail;
     }
     if (k.entity == EntityId::none) {
       // Trivial: a copy of the argument's object, or nothing to construct.
@@ -8416,7 +8452,8 @@ public:
     ExprInfo info{ut, ValueCategory::prvalue, 0};
     // [dcl.init.general]/9: value-initialization zero-initializes before a constructor that is
     // not user-provided.
-    const u32 zero_first = k.entity == cr->implicit_default_ctor && form != Construction::default_init ? 1 : 0;
+    const bool not_user_provided = k.entity == cr->implicit_default_ctor || k.entity == cr->defaulted_default_ctor;
+    const u32 zero_first = not_user_provided && form != Construction::default_init ? 1 : 0;
     Ex construction = node(ast::CtorCall{info, k.entity, zero_first, b_->list(cs)}, begin, end, info);
     if (!k.is_consteval) return construction;
     consteval_.insert(std::to_underlying(k.entity));
@@ -8538,7 +8575,9 @@ public:
 
   // [expr.unary.noexcept], [except.spec]: inspect the selected operations and their operands
   // without interpreting the expression or requiring the bodies of its callees.
-  Ex unary_noexcept(Ex operand, u32 begin, u32 end) {
+  // Without `result_destroyed`, the destruction of a prvalue's result object is not included: a
+  // constructor's exception specification ([except.spec]) does not depend on its subobjects' destructors.
+  Ex unary_noexcept(Ex operand, u32 begin, u32 end, bool result_destroyed = true) {
     Ex fail{NodeId::none, begin, end};
     if (!operand.ok()) return fail;
     if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
@@ -8557,7 +8596,7 @@ public:
       }
       return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
     };
-    bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
+    bool result_throws = result_destroyed && !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
 
     auto expression_info = [&](NodeId id) {
       ExprInfo info{};
@@ -8575,6 +8614,7 @@ public:
     // definition, makes the result value-dependent ([temp.dep.constexpr]).
     bool value_dependent = false;
     auto function_throwing = [&](EntityId function) {
+      if (const auto nonthrowing = q_->defaulted_nonthrowing(function)) return !*nonthrowing;
       if (dependent_noexcept_calls_.contains(std::to_underlying(function))) value_dependent = true;
       auto written = q_->written_member(function);
       if (!written) written = q_->class_friend(function);
@@ -10294,14 +10334,14 @@ public:
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
       const ClassRec* cr = class_rec(types().class_of(target));
       // A copy through a constructor that is not trivial, or one converting another type
-      // ([class.conv.ctor]).
-      if (cr && (cr->user_ctors || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
+      // ([class.conv.ctor]). An implicit copy constructor does not take a volatile object.
+      if (cr && (cr->user_ctors || (initializes(target, e) && Types::is_volatile(types().canonical(e.type()))) || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
                  cr->defaulted_copy != CopyState::ordinary))
         return construct(target, {e}, e.begin, e.end, Construction::copy);
       if (!initializes(target, e)) {
         // A base class object copied from a derived class's ([dcl.init.general]/17.6.2): from its
         // base class subobject.
-        if (base_depth(e.type(), target)) {
+        if (base_depth(e.type(), target) && !Types::is_volatile(types().canonical(e.type()))) {
           if (!e.glvalue()) e = materialize(e, Types::unqualified(e.type()), false);
           Ex b = to_base(e, types().class_of(target), at_);
           if (!b.ok()) return b;
