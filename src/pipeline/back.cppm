@@ -279,6 +279,7 @@ struct TranslationUnit {
   bool has_raw_linkage_names = false;  // written asm labels or attributes with raw names
   // The declared heads of class templates whose own arguments may appear in symbols.
   std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
+  std::map<EntityId, std::pair<ast::Loc, ast::SeqId<ast::TemplateArg>>> class_template_spellings{};
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1082,6 +1083,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   }
   for (std::size_t i = 0; i < it->fields.size(); ++i) {
     ast::Placed f = placed(in.canonical(it->fields[i]));
+    f.potentially_overlapping = std::ranges::binary_search(it->overlapping_fields, std::uint32_t(i));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
     if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
@@ -2945,6 +2947,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     if (n.is_class && r.templ != EntityId::none) {
       auto params = tu.class_template_parameters.find(r.templ);
       if (params != tu.class_template_parameters.end()) n.template_params = params->second;
+      auto spelling = tu.class_template_spellings.find(c);
+      if (spelling != tu.class_template_spellings.end()) n.args = in.seqs.elements(spelling->second.second);
     }
     if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
       auto f = by_id.find(ir::raw(r.scope));

@@ -133,6 +133,42 @@ public:
   Evaluated evaluate(Ex e) { return evaluate(e, false); }
   Evaluated evaluate_reference_initializer(Ex e) { return evaluate(e, true); }
 
+  // [expr.const.init]: test the destructor on the initialized object. Its mutable
+  // subobjects' lifetimes are external to the hypothetical destruction expression.
+  bool check_constant_destruction(QualType type, ConstId value, u32 at) {
+    const EntityId destructor = s_->destructor_of(type);
+    if (destructor == EntityId::none) return true;
+    type = Types::unqualified(type);
+    const auto fail = [&](u64 reason) {
+      s_->diag(at, Diag::not_constant, reason);
+      return false;
+    };
+    if (!q_->is_constexpr(destructor)) return fail(reason_arg({interp::Reason::not_constexpr, 0, {}}));
+    if (!s_->ins().values.is<ast::VAggregate>(value)) return fail(reason_unsupported);
+    const auto contents = s_->ins().seqs.elements(s_->ins().values.get<ast::VAggregate>(value).elems);
+    if (s_->types().is_array(type)) {
+      const auto element = s_->types().rec(type).inner;
+      for (ConstId item : contents)
+        if (!check_constant_destruction(element, item, at)) return false;
+      return true;
+    }
+    Ex initializer = s_->literal(type, value, ValueCategory::prvalue, at, at);
+    if (s_->is_union(type)) {
+      std::vector<Ex> initializers;
+      const auto variants = s_->elements(type);
+      if (variants.size() != contents.size()) return fail(reason_unsupported);
+      if (!contents.empty())
+        initializers.push_back(s_->literal(variants.front().type, contents.front(), ValueCategory::prvalue, at, at));
+      initializer = s_->list_of(type, std::move(initializers), at, at);
+    }
+    Ex object = s_->materialize(initializer, type, /*extended=*/false);
+    if (!object.ok()) return false;
+    Ex discard = s_->convert_node(object, ast::ConversionKind::to_void, s_->builtin(Builtin::void_));
+    const auto checked = evaluate(discard, false, {}, nullptr, destructor);
+    if (checked.constant) return true;
+    return checked.diagnosed_failure() ? false : fail(checked.reason);
+  }
+
   // The two accessors see the same receiver, including its original cv and value category.
   std::optional<std::string> evaluate_bytes(Ex receiver) {
     if (!receiver.ok()) return std::nullopt;
@@ -172,7 +208,8 @@ private:
   // Evaluates `e` as a core constant expression, then checks the result is a permitted result
   // ([expr.const]). The result for a reference initializer is a pointer to the bound object.
   Evaluated evaluate(Ex e, bool reference_initializer,
-                     irgen::FunctionInput::InitializedFields initialized_fields = {}, ByteEvaluation* bytes = nullptr) {
+                     irgen::FunctionInput::InitializedFields initialized_fields = {}, ByteEvaluation* bytes = nullptr,
+                     EntityId constant_destructor = EntityId::none) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     if (!reference_initializer)
@@ -271,7 +308,8 @@ private:
         .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
         .virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic, bool immediate) {
           return virtual_target(selected, receiver, dynamic, immediate);
-        }};
+        },
+        .constant_destructor = constant_destructor};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
     if (out.status != interp::Outcome::Status::value) {
@@ -489,7 +527,7 @@ private:
     if (!record || (!aggregate && !record->closure && (!record->user_ctors || record->polymorphic)) ||
         (record->union_ && !aggregate) ||
         !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
-        !record->destructor_usable || record->destructor != EntityId::none)
+        !record->destructor_usable || (record->destructor != EntityId::none && !q_->is_constexpr(record->destructor)))
       return std::nullopt;
     const auto layout = s_->class_layout(entity);
     if (!layout) return std::nullopt;

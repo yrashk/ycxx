@@ -312,6 +312,8 @@ public:
       if (!a) return std::nullopt;
       auto x = transform(lex::TypeTrait(r.trait), *a);
       if (!x) return std::nullopt;
+      if (retain_gcc_concrete_transforms && !types().is_dependent(*a))
+        return types().add_cv(types().transform(r.trait, *a), cv);
       return types().add_cv(*x, cv);
     }
     }
@@ -2640,6 +2642,7 @@ private:
 
 public:
   ast::Compatibility compatibility = ast::Compatibility::spec;
+  bool retain_gcc_concrete_transforms = false;  // substitution into a still-dependent alias-id
   // The definition of a class if it is complete at the deduction's point of use.
   std::function<const ClassRec*(EntityId)> class_definition;
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at

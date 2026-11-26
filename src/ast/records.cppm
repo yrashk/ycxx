@@ -229,6 +229,14 @@ struct ClosureDef {
   constexpr bool operator==(const ClosureDef&) const = default;
 };
 
+// The written arguments of a dependent class type for Clang-compatible mangling.
+struct TemplateTypeSpelling {
+  EntityId specialization;
+  SeqId<TemplateArg> arguments;
+  u32 at;
+  constexpr bool operator==(const TemplateTypeSpelling&) const = default;
+};
+
 // A declaration part keeps its pack expansions (§6.4) and completed lambdas.
 struct ItemSema {
   NodeId tree;
@@ -237,6 +245,7 @@ struct ItemSema {
   SeqId<ClosureDef> closures{};
   NameId asm_hidden_symbol{~u32{0}};
   u32 asm_directive_at = 0;
+  SeqId<TemplateTypeSpelling> template_type_spellings{};
   constexpr bool operator==(const ItemSema&) const = default;
 };
 
@@ -253,6 +262,7 @@ struct BodySema {
   u8 deduced = 0;
   // Its lambdas' closures, in the order their bodies end (docs/design/closures.md).
   SeqId<ClosureDef> closures{};
+  SeqId<TemplateTypeSpelling> template_type_spellings{};
   constexpr bool operator==(const BodySema&) const = default;
 };
 
@@ -270,7 +280,8 @@ struct WrittenRequirement {
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
-                                ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection, WrittenRequirement>;
+                                ExpansionRec, ClosureDef, AnnotationSema, VirtualMemberSelection, WrittenRequirement,
+                                TemplateTypeSpelling>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);

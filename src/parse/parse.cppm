@@ -38,7 +38,7 @@ enum class LayoutAttributes { affecting_layout, leading_affecting_layout, traili
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
                       std::span<const std::pair<u32, u32>> applied = {},
-                      std::string_view standard_attribute = {}) {
+                      std::string_view standard_attribute = {}, bool applied_overlap = false) {
   using enum lex::Tk;
   for (std::uint32_t i = begin; i < end; ++i) {
     while (!applied.empty() && applied.front().second <= i) applied = applied.subspan(1);
@@ -59,7 +59,7 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
     // An annotation payload does not participate in layout, even if it names packed or aligned.
     const bool annotation = bracket && i + 2 < end && region.tokens[i + 2].kind == equal;
     if (mode == LayoutAttributes::any && !annotation) return true;
-    const bool unscoped = !standard_attribute.empty() && bracket && i + 2 < end &&
+    const bool unscoped = (!standard_attribute.empty() || applied_overlap) && bracket && i + 2 < end &&
                           region.tokens[i + 2].kind != kw_using;
     if (gnu) ++i;
     const auto open = bracket ? l_square : l_paren;
@@ -74,14 +74,17 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       else if (unscoped && part.kind == r_paren && parentheses) --parentheses;
       else if (part.kind == identifier && !annotation) {
         auto name = region.name(part);
-        if (!standard_attribute.empty()) {
+        if (unscoped) {
           const auto previous = region.tokens[i - 1].kind;
           const auto following = i + 1 < end ? region.tokens[i + 1].kind : eof;
-          if (unscoped && depth == 2 && parentheses == 0 &&
+          if (depth == 2 && parentheses == 0 &&
               (previous == l_square || previous == comma) &&
-              (following == r_square || following == comma) && name == standard_attribute) return true;
-          continue;
+              (following == r_square || following == comma)) {
+            if (name == standard_attribute) return true;
+            if (applied_overlap && name == "no_unique_address") continue;
+          }
         }
+        if (!standard_attribute.empty()) continue;
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
         if (mode == LayoutAttributes::trailing_definition && gnu && depth == 2 &&
@@ -101,13 +104,21 @@ bool layout_may_be_packed(const pp::Region& region, u32 begin, u32 end) {
   return pack != ranges.end() && pack->first < end;
 }
 
-bool record_layout_attribute(const pp::Region& region, const items::Item& item, std::span<const std::pair<u32, u32>> applied) {
+bool record_layout_attribute(const pp::Region& region, const items::Item& item, std::span<const std::pair<u32, u32>> applied,
+                             bool applied_overlap = false) {
   using enum LayoutAttributes;
   // An enum-head's attributes and those right after its closing brace apply to the enumeration.
   if (item.kind != ItemKind::class_def && item.kind != ItemKind::enum_def)
-    return layout_attribute(region, item.begin, item.end, affecting_layout, applied);
+    return layout_attribute(region, item.begin, item.end, affecting_layout, applied, {}, applied_overlap);
   return layout_attribute(region, item.begin, item.brace_begin, affecting_layout, applied) ||
          layout_attribute(region, item.brace_end, item.end, leading_affecting_layout);
+}
+
+bool member_has_overlap(const ast::Interners& in, const ast::DeclSema& declaration) {
+  return declaration.kind == ast::DeclKind::data_member &&
+         std::ranges::any_of(in.seqs.elements(declaration.attributes), [&](NodeId attribute) {
+           return in.names.spelling(in.ast.get<ast::Attribute>(attribute).name) == "no_unique_address";
+         });
 }
 
 // The record of a declaration that failed to be declared; its diagnostic says why.
@@ -1475,6 +1486,7 @@ public:
                        std::vector<engine::Diagnostic>* class_diags = nullptr, sema::Sema* closure_context = nullptr);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move);
   sema::CopyAssignment require_copy_assignment(EntityId f);
+  Ex copy_assignment_body(sema::Sema& sm, EntityId cls, Ex source, bool representation_copy);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
 
   // The type of `this` in a non-static member function ([expr.prim.this]): a pointer to its class,
@@ -2277,13 +2289,21 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
     // The attributes immediately after the type's closing brace can still apply to
     // the type. Those within a following declarator apply to the declared name.
     // An alias can also carry such an attribute, into a declaration or an enum-base.
-    bool type_annotated = record_layout_attribute(region, item, applied_alignment_specifiers(k)) ||
-                          (!definition && uncertain_alias(item, enum_definition ? item.brace_begin : item.end));
-    bool annotated = type_annotated ||
-        ((definition || enum_definition) && layout_attribute(region, item.brace_end, item.end));
+    const bool alias_annotated = !definition && uncertain_alias(item, enum_definition ? item.brace_begin : item.end);
+    bool type_annotated = alias_annotated || record_layout_attribute(region, item, applied_alignment_specifiers(k));
+    const bool trailing = (definition || enum_definition) && layout_attribute(region, item.brace_end, item.end);
+    bool annotated = type_annotated || trailing;
     if (!packed && !annotated) continue;
+    const auto declarations = w_->ins.seqs.elements(analysed->decls);
+    if (type_annotated && !alias_annotated && std::ranges::any_of(declarations, [&](const ast::DeclSema& declaration) {
+          return member_has_overlap(w_->ins, declaration);
+        })) {
+      type_annotated = record_layout_attribute(region, item, applied_alignment_specifiers(k), /*applied_overlap=*/true);
+      annotated = type_annotated || trailing;
+      if (!packed && !annotated) continue;
+    }
     if (definition && (packed || type_annotated)) uncertain_definitions.insert(k);
-    for (auto d : w_->ins.seqs.elements(analysed->decls)) {
+    for (const auto& d : declarations) {
       if (d.entity == EntityId::none) continue;
       if (d.kind == ast::DeclKind::class_ && (packed || type_annotated)) {
         uncertain.insert(d.entity);
@@ -3626,7 +3646,8 @@ public:
     }
     std::vector<sema::Expansion> none;
     ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions),
-                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)), asm_hidden_symbol_, asm_directive_at_};
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)), asm_hidden_symbol_, asm_directive_at_,
+                    b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree);
     if (!s_.closures.empty()) s_.check_labels();
@@ -4635,12 +4656,12 @@ private:
     constraints_fp_ = ast::mix(constraints_fp_, head_constraint_.tokens);
   }
   // A declarator's trailing requires-clause ([dcl.decl]/4).
-  void trailing_requires_clause() {
+  void trailing_requires_clause(std::span<const parse::Param> params) {
     if (!ps_.is(Tk::kw_requires)) return;
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    trailing_requires_ = ps_.constraint_expression(true, &trailing_constraint_.expression);
+    trailing_requires_ = ps_.trailing_function_constraint(params, trailing_constraint_.expression);
     trailing_constraint_.tokens = clause_fp(begin, ps_.pos());
     constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
   }
@@ -7084,11 +7105,8 @@ private:
     bool ctor = !ps_.is(Tk::tilde);
     const bool specialized_destructor = explicit_ && !ctor;
     const bool definition = it_->kind == ItemKind::function;
+    const bool late_defaulted = p_->defaulted_body(k_);
     u32 name_at = ps_.pos();
-    if (!ctor && p_->defaulted_body(k_)) {
-      s_.diag(name_at, Diag::defaulted_destructor_out_of_class);
-      return bad();
-    }
     if (!ctor) ps_.bump();
     ps_.bump();
     EntityId owner = s_.world().entities.rec(c).scope;
@@ -7163,6 +7181,41 @@ private:
     } else if (mem->flags & sema::decl_flag::definition) {
       s_.diag(name_at, Diag::redefinition, m->name);
       return bad();
+    }
+    if (late_defaulted) {
+      if (auto previous = p_->declaration(m->entity, k_); previous && (previous->flags & sema::decl_flag::definition)) {
+        s_.diag(name_at, Diag::redefinition, m->name);
+        return bad();
+      }
+      if (!definition || template_ || explicit_ || inst_ || m->is_template || cr->union_ || cr->polymorphic ||
+          !cr->bases.empty() || !fs.params.empty() || fs.variadic || fs.cv != sema::Cv::none ||
+          fs.ref != ast::RefQual::none ||
+          !Program::encloses(p_->ns_of(k_), p_->enclosing_namespace_path(owner)) ||
+          std::ranges::any_of(cr->fields, [&](const sema::FieldRec& field) {
+            const QualType element = s_.types().innermost_array_element(field.type);
+            return !s_.types().is_scalar(element) || (ctor && !field.dmi && sema::Types::is_const(element));
+          })) {
+        s_.diag(name_at, ctor ? Diag::defaulted_default_constructor : Diag::defaulted_destructor_out_of_class);
+        return bad();
+      }
+      // [dcl.fct.def.default]: a later defaulted definition is user-provided and uses
+      // the earlier declaration's exception specification.
+      if (ctor) {
+        if (nonthrowing != s_.types().rec(m->type).fn_noexcept) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);
+          return bad();
+        }
+      } else {
+        ps_.exception_specifier(fs, ok);
+        if (!ok) return bad();
+        const bool definition_noexcept = !fs.has_noexcept || ps_.noexcept_value(fs.noexcept_condition, ok);
+        if (!ok) return bad();
+        if (cr->destructor_noexcept != definition_noexcept) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);
+          return bad();
+        }
+      }
+      if (!finish_constructor_declarator()) return bad();
     }
     if (m->is_virtual) {
       if (const auto prior = p_->declaration(m->entity, k_); prior && (prior->flags & sema::decl_flag::definition)) {
@@ -8019,6 +8072,25 @@ private:
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
     }
+    if (p_->defaulted_body(k_) && s_.ins().names.spelling(d.name) == "operator=") {
+      auto& types = s_.types();
+      const auto signature = types.rec(matched_type);
+      const auto source = p_->assignment_parameter(*m, *t);
+      const EntityId owner = p_->world().entities.rec(cls).scope;
+      if (template_ || explicit_ || inst_ || cr->union_ || cr->polymorphic || !cr->bases.empty() || !source ||
+          !types.is_reference(*source) || sema::Types::is_volatile(types.canonical(types.referee(*source))) ||
+          signature.fn_cv != sema::Cv::none || signature.fn_ref == ast::RefQual::rvalue || signature.variadic ||
+          types.canonical(signature.inner) != types.lvalue_ref(*t) ||
+          !Program::encloses(p_->ns_of(k_), p_->enclosing_namespace_path(owner)) ||
+          std::ranges::any_of(cr->fields, [&](const sema::FieldRec& field) {
+            const QualType type = types.canonical(field.type);
+            return !types.is_scalar(type) || sema::Types::is_const(type) || sema::Types::is_volatile(type) ||
+                   field.no_unique_address;
+          })) {
+        s_.diag(d.name_at, Diag::defaulted_copy_assignment_declaration);
+        return false;
+      }
+    }
     if (m->is_virtual) {
       if (m->is_consteval != spec.is_consteval) {  // [dcl.constexpr]
         s_.diag(d.name_at, Diag::consteval_redeclared, d.name);
@@ -8342,6 +8414,10 @@ private:
         sema::Evaluated v = list_initialization || aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
           s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
+          declare_member(ConstId::none, {});
+          return false;
+        }
+        if (spec.is_constexpr && !evaluator.check_constant_destruction(d.type, *v.value, at)) {
           declare_member(ConstId::none, {});
           return false;
         }
@@ -8855,13 +8931,7 @@ private:
           }
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
         flags |= sema::decl_flag::template_;
-        if (fn) {  // its parameters are in scope ([basic.scope.param])
-          s_.push_scope();
-          for (const parse::Param& prm : d.params)
-            if (prm.name != s_.no_name()) s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, prm.at, false);
-          trailing_requires_clause();
-          s_.pop_scope();
-        }
+        if (fn) trailing_requires_clause(d.params);
         sem.constraints = associated_constraints();
         sem.head_constraint = head_constraint_;
         sem.trailing_constraint = trailing_constraint_;
@@ -9104,6 +9174,9 @@ private:
         dynamic_ok(at, v.reason);
       }
     };
+    const auto constant_destruction = [&](ConstId initialized, u32 at) {
+      return !spec.is_constexpr || sema::Evaluator(s_, q_).check_constant_destruction(d.type, initialized, at);
+    };
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
@@ -9119,8 +9192,10 @@ private:
         } else {
           const auto v = sema::Evaluator(s_, q_).evaluate_initializer(init);
           if (v.value) {
-            value = *v.value;
-            if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
+            if (constant_destruction(*v.value, b->begin)) {
+              value = *v.value;
+              if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
+            }
           } else if (!v.diagnosed_failure()) {
             dynamic_ok(b->begin, v.reason);
           }
@@ -9151,10 +9226,12 @@ private:
           sema::Evaluated v = lit != ConstId::none ? sema::Evaluated{lit, 0, true}
                                   : s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
           if (v.value) {
-            value = *v.value;
-            if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
-                                      types.is_integral(d.type)))
-              p_->set_constant(sem.entity, *v.value, k_);
+            if (constant_destruction(*v.value, e.begin)) {
+              value = *v.value;
+              if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                                        types.is_integral(d.type)))
+                p_->set_constant(sem.entity, value, k_);
+            }
           } else if (!v.diagnosed_failure()) {
             dynamic_ok(e.begin, v.reason);
           }
@@ -9191,8 +9268,10 @@ private:
         // expression, for a class the evaluator can represent ([basic.start.static]).
         sema::Evaluated v = sema::Evaluator(s_, q_).evaluate_initializer(init);
         if (v.value) {
-          value = *v.value;
-          if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
+          if (constant_destruction(*v.value, open)) {
+            value = *v.value;
+            if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
+          }
         } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }
@@ -9540,15 +9619,15 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       members.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, access});
       if (d.kind == ast::DeclKind::data_member) {
         if (inspect_field_layout) {
+          const bool applied_overlap = std::ranges::any_of(w_->ins.seqs.elements(ms.decls), [&](const ast::DeclSema& declaration) {
+            return member_has_overlap(w_->ins, declaration);
+          });
           out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end, LayoutAttributes::affecting_layout,
-                                                        applied_alignment_specifiers(m));
+                                                        applied_alignment_specifiers(m), {}, applied_overlap);
           inspect_field_layout = false;
         }
-        const bool no_unique_address = std::ranges::any_of(w_->ins.seqs.elements(d.attributes), [&](NodeId attr) {
-          return w_->ins.names.spelling(w_->ins.ast.get<ast::Attribute>(attr).name) == "no_unique_address";
-        });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address,
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, member_has_overlap(w_->ins, d),
                         d.field_alignment, d.written_field_alignment});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
@@ -11417,6 +11496,10 @@ public:
           Ex ret = s_.node(ast::Return{sema::Sema::at(*result, 0)}, 0, 0);
           root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{sema::Sema::at(ret, 0)})}, 0, 0);
         }
+      } else if (defaulted && (ctor || (f->flags & sema::decl_flag::destructor))) {
+        root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{})}, 0, 0);
+      } else if (defaulted && s_.ins().names.spelling(p_->world().entities.rec(f->entity).name) == "operator=") {
+        root = p_->copy_assignment_body(s_, s_.current_class, s_.local_ref(param_locals.front(), 0, 0), false);
       } else if (!ps_.is(lex::Tk::l_brace)) {
         // A failed class keeps its written comparison declaration without completing its body.
         const bool failed_comparison = defaulted && p_->failed_class_assertions_.contains(s_.current_class) &&
@@ -11453,7 +11536,8 @@ public:
     ast::BodySema v{root.id, b_.seq(std::span<const ast::LocalRec>(locals)), expansion_list(b_, keep_expansions ? s_.expansions : none),
                     b_.seq(std::span<const u32>(keeps ? s_.dependent_calls : no_calls)),
                     deduced ? s_.with_return(f->type, s_.return_type()) : s_.builtin(sema::Builtin::void_), u8(deduced),
-                    b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)),
+                    b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree, root.begin);
     p_->generated_invokers(out_.value.closures, k_, begin());
@@ -11835,7 +11919,10 @@ void Program::classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<e
     // Inspect the complete member list, including declarations after the constructor.
     const bool flat = !rec.union_ && !rec.polymorphic && rec.bases.empty() &&
                       rec.destructor_usable && rec.destructor == EntityId::none;
-    rec.trivial_defaulted_default_ctor = flat && rec.fields.empty();
+    rec.trivial_defaulted_default_ctor = flat && std::ranges::all_of(rec.fields, [&](const sema::FieldRec& field) {
+      const QualType element = w_->types.innermost_array_element(field.type);
+      return w_->types.is_scalar(element) && !field.dmi && !sema::Types::is_const(element);
+    });
     if (flat && !rec.unapplied_layout && rec.fields.size() == 1) {
       const auto& field = rec.fields.front();
       rec.null_pointer_defaulted_default_ctor = w_->types.is_pointer(field.type) && !field.no_unique_address &&
@@ -12565,9 +12652,26 @@ sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
   const auto param = w_->ins.seqs.at(s.decl.params, 0);
   sm.push_scope();
   sm.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+  const Ex root = copy_assignment_body(sm, cls, sm.name_expr(param.name, 0, 0), copy.state == CopyAssignment::trivial);
+  copy.checking = false;
+  if (!root.ok() || !diags.empty()) {
+    const bool unsupported = diags.empty() || std::ranges::any_of(diags, [](const engine::Diagnostic& d) {
+      return d.id == sema::diag_id(Diag::unsupported_copy_assignment) || d.id == sema::diag_id(Diag::not_supported);
+    });
+    copy.state = unsupported ? CopyAssignment::unsupported : CopyAssignment::deleted;
+    return copy.state;
+  }
+  copy.body = b.commit(ast::BodySema{root.id, b.seq(sm.locals()), b.seq(std::span<const ast::ExpansionRec>{}),
+                                    b.seq(std::span<const u32>{}), QualType{}, 0,
+                                    b.seq(std::span<const ast::ClosureDef>{})});
+  sm.pop_scope();
+  return copy.state;
+}
+
+Ex Program::copy_assignment_body(sema::Sema& sm, EntityId cls, Ex source, bool representation_copy) {
   const Ex self = sm.this_expr(0, 0);
   const Ex destination = sm.unary(ast::UnaryOp::deref, self, 0, 0, 0);
-  const Ex source = sm.name_expr(param.name, 0, 0);
+  if (!destination.ok() || !source.ok()) return {};
   std::vector<ast::Child> statements;
   const auto append = [&](Ex expr) {
     if (!expr.ok()) return false;
@@ -12577,36 +12681,19 @@ sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
     return true;
   };
 
-  bool ok = true;
-  if (copy.state == CopyAssignment::trivial) {
+  if (representation_copy) {
     const auto info = destination.info;
-    ok = append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy,
-                                   {destination.id, 0}, {source.id, 0}, info.type}, 0, 0, info));
+    if (!append(sm.node(ast::Assign{info, ast::AssignOp::trivial_class_copy,
+                                    {destination.id, 0}, {source.id, 0}, info.type}, 0, 0, info))) return {};
   } else {
     for (const auto& field : classes_.rec(cls).fields) {
       Ex from = sm.member(source, false, field.name, 0, 0, 0);
       Ex to = sm.member(self, true, field.name, 0, 0, 0);
-      if (!append(sm.assign(sema::Sema::AsgOp::assign, to, from, 0))) {
-        ok = false;
-        break;
-      }
+      if (!append(sm.assign(sema::Sema::AsgOp::assign, to, from, 0))) return {};
     }
   }
-  copy.checking = false;
-  if (!ok || !diags.empty()) {
-    const bool unsupported = diags.empty() || std::ranges::any_of(diags, [](const engine::Diagnostic& d) {
-      return d.id == sema::diag_id(Diag::unsupported_copy_assignment) || d.id == sema::diag_id(Diag::not_supported);
-    });
-    copy.state = unsupported ? CopyAssignment::unsupported : CopyAssignment::deleted;
-    return copy.state;
-  }
   statements.push_back({sm.node(ast::Return{{destination.id, 0}}, 0, 0).id, 0});
-  const Ex root = sm.node(ast::Compound{b.list(statements)}, 0, 0);
-  copy.body = b.commit(ast::BodySema{root.id, b.seq(sm.locals()), b.seq(std::span<const ast::ExpansionRec>{}),
-                                    b.seq(std::span<const u32>{}), QualType{}, 0,
-                                    b.seq(std::span<const ast::ClosureDef>{})});
-  sm.pop_scope();
-  return copy.state;
+  return sm.node(ast::Compound{sm.builder().list(statements)}, 0, 0);
 }
 
 // The copy of the object `src` designates as an initializer of type `t` ([class.copy.ctor]/14):
