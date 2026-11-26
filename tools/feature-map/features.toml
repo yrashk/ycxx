@@ -1644,7 +1644,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'Ordinary constructors support bare explicit and direct, copy, and copy-list selection. In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
+note = 'Constructors and constructor templates, in ordinary classes and class templates, support explicit-specifiers and direct, copy, and copy-list selection (#715). In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
 
 [[feature]]
 id = 'class-explicit-bool'
@@ -1654,12 +1654,13 @@ clauses = ['dcl.fct.spec']
 std = 'C++20'
 ftm = '__cpp_conditional_explicit'
 detect = '\bexplicit\s*\('
-status = 'missing'
+status = 'partial'
 probe = '''
 struct S { explicit(false) S(int) {} };
 int main() { S s = 1; (void)s; return 0; }
 '''
-issues = [157]
+issues = [339, 316]
+note = 'Constructors and constructor templates of ordinary classes and class templates, with a condition that is not dependent, dependent on the class template, or value-dependent on the constructor template and evaluated after deduction (#715). Conversion functions (#339) and deduction guides (#316) remain.'
 
 [[feature]]
 id = 'class-delegating-ctor'
@@ -2205,7 +2206,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class's parameters, check their constraints in overload resolution (#1398). Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
