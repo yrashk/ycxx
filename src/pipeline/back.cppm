@@ -1576,15 +1576,15 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
 
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
-  const ast::Target& target = unit_target(cx, k.tu);
+  const auto* source_config = unit_config(cx, k.tu);
+  const ast::Target& target = source_config ? *source_config->target : *universe().target;
   const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
   if (!f.body && !target_is_linux) co_return Lowered{std::nullopt, {}, f.error};
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
-  if (!target_is_linux)
-    if (const auto* pp = unit_config(cx, k.tu))
-      config.darwin_passes_empty_argument = pp->compatibility == ast::Compatibility::gcc;
+  config.darwin_passes_empty_argument =
+      !target_is_linux && source_config && source_config->compatibility == ast::Compatibility::gcc;
   if (f.body) {
     const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
       return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
