@@ -1363,6 +1363,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   array. L1 diagnoses access through an expired local pointer and an ordinary constexpr member
   call on an expired receiver ([stmt.return], [basic.life], [expr.const]).
   [#975](https://github.com/yrashk/ycxx/issues/975)
+- A stored namespace-scope constexpr record can contain fixed one-dimensional arrays of
+  supported integral element types. L1 uses the target field layout and the stored array's typed
+  cells for reads of both array elements and scalar siblings. Array bounds and field mutability
+  still apply ([basic.life], [expr.const], [expr.sub]). [#1429](https://github.com/yrashk/ycxx/issues/1429)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
