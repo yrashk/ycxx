@@ -35,9 +35,11 @@ The [shader rule package](rules/shaders.cc) defines four rules.
 | `shaders.bindings` | Consumes the `layout` value and writes `scene_bindings.hh` as the `header` artifact. |
 
 The table accepts up to 16 descriptors across uniform buffers (`ubos` in the
-witness) and fixed one-dimensional `sampler2D` arrays (`textures`). A descriptor
-name starts with an ASCII letter and may contain ASCII letters, digits, and
-single interior underscores. The fragment has one descriptor of each kind.
+witness) and fixed one-dimensional `sampler2D` arrays (`textures`). Uniform
+buffers may be scalar or have a fixed one-dimensional extent. The classifier
+requires a positive literal size for each projected array. A descriptor name
+starts with an ASCII letter and may contain ASCII letters, digits, and single
+interior underscores. The fragment has one descriptor of each kind.
 
 ```glsl
 layout(set = 0, binding = 1) uniform Material {

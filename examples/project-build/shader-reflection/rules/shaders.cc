@@ -29,7 +29,7 @@ bool identifier(Text name) {
   return true;
 }
 
-enum class DescriptorKind : uint32_t { uniform_buffer = 1, combined_sampler = 2 };
+enum class DescriptorKind : uint32_t { ignored = 0, uniform_buffer = 1, combined_sampler = 2 };
 
 struct Descriptor {
   Text name;
@@ -43,17 +43,17 @@ bool descriptor(Json& json, DescriptorKind kind, Descriptor& result) {
   if (!take(json, '{')) return false;
   result.kind = kind;
   const bool sampler = kind == DescriptorKind::combined_sampler;
-  result.element_count = sampler ? 0u : 1u;
   bool has_name = false;
   bool has_set = false;
   bool has_binding = false;
-  bool has_type = false;
-  bool has_literal_size = false;
+  Text type{};
+  Json array{};
+  Json literal_size{};
   do {
     Text key{};
     if (!string(json, key) || !take(json, ':')) return false;
     if (equal(key, "name")) {
-      if (has_name || !string(json, result.name) || !identifier(result.name)) return false;
+      if (has_name || !string(json, result.name)) return false;
       has_name = true;
     } else if (equal(key, "set")) {
       if (has_set || !u32(json, result.set)) return false;
@@ -62,23 +62,32 @@ bool descriptor(Json& json, DescriptorKind kind, Descriptor& result) {
       if (has_binding || !u32(json, result.binding)) return false;
       has_binding = true;
     } else if (sampler && equal(key, "type")) {
-      Text type{};
-      if (has_type || !string(json, type) || !equal(type, "sampler2D")) return false;
-      has_type = true;
-    } else if (sampler && equal(key, "array")) {
-      if (result.element_count != 0 || !take(json, '[') || !u32(json, result.element_count) ||
-          result.element_count == 0 || !take(json, ']')) return false;
-    } else if (sampler && equal(key, "array_size_is_literal")) {
-      if (has_literal_size || !take(json, '[')) return false;
-      space(json);
-      if (!literal(json, "true") || !take(json, ']')) return false;
-      has_literal_size = true;
+      if (type.data || !string(json, type)) return false;
+    } else if (equal(key, "array")) {
+      if (array.input.data) return false;
+      array = json;
+      if (!skip(json)) return false;
+    } else if (equal(key, "array_size_is_literal")) {
+      if (literal_size.input.data) return false;
+      literal_size = json;
+      if (!skip(json)) return false;
     } else if (!skip(json)) {
       return false;
     }
   } while (take(json, ','));
-  return has_name && has_set && has_binding && take(json, '}') &&
-         (!sampler || (has_type && has_literal_size && result.element_count != 0));
+  if (!take(json, '}')) return false;
+  if (sampler && (!equal(type, "sampler2D") || (!array.input.data && !literal_size.input.data))) {
+    result.kind = DescriptorKind::ignored;
+    return true;
+  }
+  if (!has_name || !identifier(result.name) || !has_set || !has_binding) return false;
+  result.element_count = 1;
+  if (!array.input.data && !literal_size.input.data) return true;
+  if (!array.input.data || !literal_size.input.data ||
+      !take(array, '[') || !u32(array, result.element_count) || result.element_count == 0 ||
+      !take(array, ']') || !take(literal_size, '[')) return false;
+  space(literal_size);
+  return literal(literal_size, "true") && take(literal_size, ']');
 }
 
 bool descriptors(Json& json, Descriptor (&entries)[max_rows], size_t& count) {
@@ -100,8 +109,11 @@ bool descriptors(Json& json, Descriptor (&entries)[max_rows], size_t& count) {
     const auto kind = uniform ? DescriptorKind::uniform_buffer : DescriptorKind::combined_sampler;
     if (take(json, ']')) continue;
     do {
-      if (count == max_rows || !descriptor(json, kind, entries[count])) return false;
-      ++count;
+      Descriptor entry{};
+      if (!descriptor(json, kind, entry)) return false;
+      if (entry.kind == DescriptorKind::ignored) continue;
+      if (count == max_rows) return false;
+      entries[count++] = entry;
     } while (take(json, ','));
     if (!take(json, ']')) return false;
   } while (take(json, ','));
@@ -280,7 +292,7 @@ bool bindings(const ycxx_rule_host_v1* host, Writer& definition) {
     const auto category = static_cast<DescriptorKind>(kind.number);
     const bool uniform = category == DescriptorKind::uniform_buffer;
     if (!uniform && category != DescriptorKind::combined_sampler) return false;
-    if (count.number == 0 || (uniform && count.number != 1)) return false;
+    if (count.number == 0) return false;
     constant(header, name, set);
     constant(header, name, binding);
     constant(header, name, count);
