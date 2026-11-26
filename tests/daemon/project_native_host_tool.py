@@ -3,6 +3,7 @@
 import html
 import json
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 
@@ -195,6 +196,35 @@ def check_builds(ycxx, scope, env, journal, host, other):
     check_watch(ycxx, scope, env, journal, host, other)
 
 
+def check_action_during_source_edit(ycxx, scope, env, host):
+    journal = scope.with_name('edited-source-runs')
+    prepare(scope, journal)
+    main_source = scope / 'main.cc'
+    original = main_source.read_text(encoding='utf-8')
+    sentinel = scope.with_name('edited-source-once')
+    comment = '// Edited during generation.'
+    edit = f'''\
+if [ "$score" = 23 ] && [ ! -e {shlex.quote(str(sentinel))} ]; then
+    printf '%s\\n' {shlex.quote(comment)} >> {shlex.quote(str(main_source))} || exit 1
+    : > {shlex.quote(str(sentinel))} || exit 1
+fi
+'''
+    emitter = scope / 'emit-header.sh'
+    anchor = 'esac\n'
+    assert EMITTER.count(anchor) == 1, EMITTER
+    emitter.write_text(EMITTER.replace(anchor, anchor + edit), encoding='utf-8')
+
+    # Warm the app so its source is already tracked when the generator edits it.
+    build(ycxx, scope, env, None, host, 'warm the source before its in-flight edit')
+    check_binary(scope, None, host, 17, host)
+    replace_source(scope, SCORE_HEADER, header(23))
+    _, events = build(ycxx, scope, env, None, host, 'admit the unchanged action key after a source edit')
+    assert sentinel.exists() and main_source.read_text(encoding='utf-8') == original + comment + '\n'
+    assert journal_contents(journal) == '17\n23\n', ('source edit relaunched the generator', journal_contents(journal))
+    check_external_actions(events, 'scan_config')
+    check_binary(scope, None, host, 23, host)
+
+
 def check_direct(ycxx, scope, env, host, other):
     scope.mkdir()
     write_scanner(scope)
@@ -272,6 +302,11 @@ def main():
             check_builds(ycxx, scope, env, journal, host, other)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
+        edited = root / 'edited-source'
+        try:
+            check_action_during_source_edit(ycxx, edited, env, host)
+        finally:
+            run_client(ycxx, edited, env, 'ctl', 'shutdown')
         direct = root / 'direct'
         try:
             check_direct(ycxx, direct, env, host, other)

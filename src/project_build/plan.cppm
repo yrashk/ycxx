@@ -37,6 +37,7 @@ struct GeneratorPlan {
   std::vector<ArtifactInputPlan> artifact_inputs = {};
   bool native_outputs = false;
   std::vector<HostArtifactInputPlan> host_inputs = {};
+  bool host_dependent = false;
 };
 
 struct SourcePlan {
@@ -1163,9 +1164,9 @@ class Planner {
     auto gen = generator(decl);
     active_generators_.erase(decl.name);
     const auto index = plan_.generators.size();
-    if (!gen.host_inputs.empty() || std::ranges::any_of(gen.artifact_inputs, [&](const auto& input) {
-          return host_dependent_generators_.contains(input.producer);
-        })) host_dependent_generators_.insert(index);
+    gen.host_dependent = !gen.host_inputs.empty() || std::ranges::any_of(gen.artifact_inputs, [&](const auto& input) {
+      return plan_.generators[input.producer].host_dependent;
+    });
     plan_.generators.push_back(std::move(gen));
     generators_.emplace(decl.name, index);
     return index;
@@ -1187,7 +1188,7 @@ class Planner {
       fail(at, early ? early_error : "host executable artifacts are only available in ordinary generator inputs");
     if (kind != Primitive::generator) fail(at, "artifact references require a generate target");
     const auto producer = resolve_generator(decl);
-    if (early && host_dependent_generators_.contains(producer)) fail(at, early_error);
+    if (early && plan_.generators[producer].host_dependent) fail(at, early_error);
     const auto& outputs = plan_.generators[producer].action.outputs;
     const auto output = std::ranges::find(outputs, name, &ActionOutput::name);
     if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, name));
@@ -1419,7 +1420,6 @@ class Planner {
   std::map<std::string, RulePackageRef, std::less<>> prefixes_;
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
-  std::set<std::size_t> host_dependent_generators_;
   std::map<std::string, ExecutableObservation, std::less<>> tools_;
   // The edge count at each active frame distinguishes mixed cycles from value or artifact cycles.
   std::map<std::string, std::size_t, std::less<>> resolving_rules_;

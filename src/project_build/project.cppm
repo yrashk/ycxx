@@ -1838,6 +1838,29 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       };
       if (!demand->actions.pending.empty()) {
         std::set<Fp128> attempted;
+        const auto host_plan = fingerprint(plan.host_executables);
+        const auto current_action = [&](const GeneratorPlan& generator, Fp128 id) {
+          auto revision = before;
+          std::span<const Artifact> images = demand->host_images;
+          std::optional<Demand> rechecked;
+          while (!cancelled()) {
+            const auto observed = observe_project(cwd, target, toolchain, planned);
+            if (!observed || fingerprint(observed->host_executables) != host_plan) return false;
+            const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
+            if (current == observed->generators.end()) return false;
+            if (!current->host_dependent || publish(revision, [] {})) {
+              const auto at = static_cast<std::size_t>(current - observed->generators.begin());
+              return resolve_actions(*observed, receipt, images).keys[at] == id;
+            }
+            // The plan only describes host source paths. Re-demand the images so an
+            // unrelated edit, or one that leaves the staged bytes equal, keeps the receipt.
+            revision = session_.db().revision();
+            rechecked = session_.run<WorkspaceBuild>(key, poll, nullptr, tracer);
+            if (!rechecked || rechecked->host_images.size() != plan.host_executables.size()) return false;
+            images = rechecked->host_images;
+          }
+          return false;
+        };
         for (const auto index : demand->actions.pending) {
           if (cancelled()) return fail("build cancelled");
           const auto& generator = plan.generators[index];
@@ -1851,18 +1874,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             if (!append_generator_inputs(generator, output_at, demand->host_images, staged)) break;
             inputs = staged;
           }
-          // The plan describes source paths. Verify the epoch too, because the
-          // host executable depends on the contents of those files and their includes.
-          if (!plan.host_executables.empty() && !publish(before, [] {})) break;
+          if (generator.host_dependent && !publish(before, [] {})) break;
           auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
-          const auto observed = observe_project(cwd, target, toolchain, planned);
-          if (!observed) break;
-          if (fingerprint(observed->host_executables) != fingerprint(plan.host_executables)) break;
-          const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
-          if (current == observed->generators.end()) break;
-          const auto at = static_cast<std::size_t>(current - observed->generators.begin());
-          if (resolve_actions(*observed, receipt, demand->host_images).keys[at] != id) break;
-          if (!plan.host_executables.empty() && !publish(before, [] {})) break;
+          if (!current_action(generator, id)) break;
           if (result.exit_status != 0) {
             report.status = result.exit_status;
             report.diagnostics.push_back(std::format("generator '{}': {}", generator.name,
@@ -1871,7 +1885,6 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           }
           if (!result.err.empty()) report.diagnostics.push_back(std::move(result.err));
           apply([&](engine::Db& db) { db.set<ActionReceipt>(id, std::move(result.outputs)); });
-          if (!plan.host_executables.empty()) break;  // Refresh the epoch after admitting a receipt.
         }
         break;  // Reobserve disk inputs before admitting a native build.
       }
