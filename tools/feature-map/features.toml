@@ -978,7 +978,8 @@ clauses = ['over.call', 'expr.prim.lambda.closure']
 std = 'C++23'
 ftm = '__cpp_static_call_operator'
 detect = '\bstatic\s+[\w:<>&* ]*operator\s*\(\s*\)\s*\(|\]\s*(?:\([^)]*\))?\s*static\b'
-status = 'missing'
+status = 'partial'
+note = 'Supports captureless static lambda call operators and function-pointer conversions. The class operator probe still needs support for its temporary object.'
 issues = [350]
 probe = '''
 struct F { static int operator()(int x) { return x; } };
@@ -2378,7 +2379,8 @@ group = 'const'
 clauses = ['expr.const.imm']
 std = 'C++23'
 ftm = '__cpp_consteval'
-status = 'missing'
+status = 'partial'
+note = 'Supports immediate escalation for the tested constexpr function templates and direct function-pointer arguments. The compatibility table records the mode differences.'
 issues = [102]
 probe = '''
 consteval int id(int x) { return x; }
