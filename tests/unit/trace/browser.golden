@@ -189,8 +189,8 @@
         w0  ● Tu(a.cpp) executed   in
      w1–w3  idle
 
- █ executed  █ cutoff  █ verified  █ reused  █ durable  █ input  █ recomputed  █ waited  █ failed  █ running
- █▓▒░ shallower to deeper
+ █ executed  █ cutoff  █ verified  █ reused  █ durable  █ input  █ recomputed  █ waited  █ failed  █ stopped
+ █ running  █▓▒░ shallower to deeper
 
 
 

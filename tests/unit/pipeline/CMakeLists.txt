@@ -98,7 +98,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
-            ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            "${YCXXC_LIBYCXX_SOURCE_DIR}")
   # PARITY: by design: checks native x86-64 ELF linkage and symbols. Darwin runs tests/own.
   add_test(NAME unit.linux_deduced_callback
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_deduced_callback.py
@@ -125,7 +125,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   endif()
   add_test(NAME unit.linux_variadic_definitions
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_variadic_definitions.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} "${YCXXC_LIBYCXX_SOURCE_DIR}")
   add_test(NAME unit.linux_defaulted_copy
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_defaulted_copy.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
@@ -145,11 +145,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} "${YCXXC_LIBYCXX_SOURCE_DIR}")
   # PARITY: by design: exercises the System V AMD64 argument convention with native Linux peers.
   add_test(NAME unit.linux_sysv_reference_fields
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_sysv_reference_fields.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} "${YCXXC_LIBYCXX_SOURCE_DIR}")
   # PARITY: by design: own/int128 on x86-64 ELF, with native peers; the driver runs it on macOS.
   add_test(NAME unit.linux_int128
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_int128.py
@@ -187,7 +187,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # with the native Linux driver (#327).
   add_test(NAME unit.linux_source_location_descriptor
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_source_location_descriptor.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} "${YCXXC_LIBYCXX_SOURCE_DIR}"
             ${PROJECT_SOURCE_DIR}/tests/own/headers/source-location-descriptor.run.cpp)
   # PARITY: by design: links and runs x86-64 ELF objects with native peers.
   add_test(NAME unit.linux_virtual_member_final
@@ -203,7 +203,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # is unit.darwin_weak_visibility.
   add_test(NAME unit.linux_namespace_visibility
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF} "${YCXXC_LIBYCXX_SOURCE_DIR}")
   add_test(NAME unit.linux_cleanup_free_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_OBJDUMP})
@@ -263,7 +263,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_inline
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_inline.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
-            ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            "${YCXXC_LIBYCXX_SOURCE_DIR}")
   # PARITY: by design: checks ELF symbols and runs the x86-64 Linux executable.
   add_test(NAME unit.linux_immediate_functions
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_immediate_functions.py
@@ -290,7 +290,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_std_mangling
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_std_mangling.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF}
-            ${PROJECT_SOURCE_DIR}/deps/libycxx)
+            "${YCXXC_LIBYCXX_SOURCE_DIR}")
   add_test(NAME unit.linux_dynamic
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_dynamic.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})

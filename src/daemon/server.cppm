@@ -19,6 +19,7 @@
 export module ycxx.daemon:server;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.build.plan;
 import ycxx.build.project;
@@ -112,7 +113,7 @@ class Server {
     // A relative SDK override is resolved against each request's directory and watched when read.
     const char* sdkroot = std::getenv("SDKROOT");
     for (const std::string& d : pp::all_system_dirs(sdkroot ? sdkroot : ""))
-      system_dirs_.push_back(std::filesystem::path(d).lexically_normal().generic_native_encoded_string());
+      system_dirs_.push_back(std::filesystem::path(d).lexically_normal().generic_string<char>());
     start_watching();
     log(std::format("serving {} on {} (watcher: {})", paths_.root, paths_.socket(), watcher_state_));
     if (o_.ready_fd) {
@@ -190,7 +191,7 @@ class Server {
     if (stat_path(dir)) return;
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    ensure_private_dir(dir);
+    static_cast<void>(ensure_private_dir(dir));  // renewal is best effort
     if (dir.ends_with("/.ycxx-cookies")) create_new_file(dir + "/.gitignore", "*\n");
     if (watcher_) watcher_->renew(dir);
   }
@@ -223,14 +224,23 @@ class Server {
       ++connections_;
     }
     // A request recurses as deep in the daemon as in-process, on a main thread's stack (#178).
-    std::thread(std::thread::stack_size_hint(request_stack), [this, c = std::move(c)]() mutable {
-      serve_connection(c.get());
-      c.reset();
+    exec::worker_thread worker;
+    try {
+      exec::start_worker(worker, request_stack, [this, c = std::move(c)]() mutable {
+        serve_connection(c.get());
+        c.reset();
+        std::lock_guard g(conn_mu_);
+        --connections_;
+        last_activity_ = Clock::now();
+        conn_cv_.notify_all();
+      });
+    } catch (...) {
       std::lock_guard g(conn_mu_);
       --connections_;
-      last_activity_ = Clock::now();
       conn_cv_.notify_all();
-    }).detach();
+      throw;
+    }
+    worker.detach();
   }
 
   void serve_connection(int fd) {
@@ -706,8 +716,8 @@ class Server {
   static std::string canonical(const std::string& path) {
     if (auto r = real_path(path)) return *r;
     const std::filesystem::path p(path);
-    if (auto dir = real_path(p.parent_path().native_encoded_string()))
-      return (std::filesystem::path(*dir) / p.filename()).native_encoded_string();
+    if (auto dir = real_path(p.parent_path().native()))
+      return (std::filesystem::path(*dir) / p.filename()).native();
     return path;
   }
 
@@ -727,7 +737,7 @@ class Server {
   // translation unit ycxx compiles (a header, a C file). The file is read again when it changes
   // (its identity: size and times).
   std::optional<compile::Request> listed_request(const std::string& real) {
-    const std::string path = (std::filesystem::path(paths_.root) / "compile_commands.json").native_encoded_string();
+    const std::string path = (std::filesystem::path(paths_.root) / "compile_commands.json").native();
     std::lock_guard g(listed_mu_);
     if (const std::optional<Identity> id = stat_path(path); id != listed_identity_) {
       listed_identity_ = id;
@@ -782,7 +792,7 @@ class Server {
       args = std::move(expanded);
       std::filesystem::path f(*file->string());
       if (f.is_relative()) f = std::filesystem::path(*dir->string()) / f;
-      listed_.try_emplace(canonical(f.lexically_normal().native_encoded_string()), Listed{std::move(args), *dir->string()});
+      listed_.try_emplace(canonical(f.lexically_normal().native()), Listed{std::move(args), *dir->string()});
     }
   }
 
@@ -795,7 +805,7 @@ class Server {
       if (auto it = commands_.find(real); it != commands_.end()) return compile::check_one(*it->second.request, it->second.source);
     }
     if (auto listed = listed_request(real)) return listed;
-    compile::Request alone{{"-fsyntax-only", real}, std::filesystem::path(real).parent_path().native_encoded_string(), env_, 0};
+    compile::Request alone{{"-fsyntax-only", real}, std::filesystem::path(real).parent_path().native(), env_, 0};
     if (compile::sources_of(alone).empty()) return std::nullopt;
     return alone;
   }
@@ -1119,7 +1129,7 @@ class Server {
       if (open) {
         std::filesystem::path p(path);
         if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
-        if (auto it = open->find(p.lexically_normal().generic_native_encoded_string()); it != open->end()) return it->second;
+        if (auto it = open->find(p.lexically_normal().generic_string<char>()); it != open->end()) return it->second;
       }
       return table_->read(path);
     }

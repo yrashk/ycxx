@@ -97,7 +97,7 @@ void run() {
   const auto directory = std::filesystem::temp_directory_path() /
                          std::format("ycxx-snapshot-{}", std::random_device{}());
   if (!std::filesystem::create_directory(directory)) throw std::runtime_error("snapshot test directory already exists");
-  const auto dir = directory.native_encoded_string();
+  const auto dir = directory.native();
   const std::string path = dir + "/cache";
   round_trip<Length>(path, false);
   round_trip<Length>(path, true);

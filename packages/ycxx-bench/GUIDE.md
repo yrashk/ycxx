@@ -107,9 +107,18 @@ sampling settings used for the run.
   sample sparkline, and optional telemetry help interpret noise. Process and
   thread CPU, resident RSS at both boundaries, peak RSS, page faults, context
   switches, block I/O operations, and observed host CPU load accompany the raw
-  batch. Peak RSS is the process high-water mark. Process CPU can exceed 100%
-  for parallel work. Current RSS is a boundary snapshot and can miss an
-  allocation released within a batch. Unavailable native probes stay empty.
+  batch. Process CPU can exceed 100% for parallel work. Current RSS can miss
+  an allocation released within a batch. Peak RSS is a process-lifetime
+  high-water mark that includes warmup and earlier batches.
+- Each resident snapshot supplies both current and high-water RSS. Linux
+  reads the approximate `VmRSS` and `VmHWM` counters from one
+  `/proc/self/status` read. The Linux counter can fluctuate slightly between
+  samples. macOS uses `MACH_TASK_BASIC_INFO`. Reports identify the RSS source
+  and peak scope. The separate `rusage_max_rss_bytes`
+  counter retains the OS resource-usage reading, which can include pre-exec
+  memory on Linux. If a native snapshot is unavailable, its values stay empty.
+  [Linux procfs accounting](https://docs.kernel.org/filesystems/proc.html)
+  · [Linux resource usage](https://man7.org/linux/man-pages/man2/getrusage.2.html)
 - Paired runs alternate execution order and report the geometric mean of
   reference-to-contender time ratios. Circular-block resampling of paired log
   ratios gives the interval. A speedup above 1 favors the contender. A verdict

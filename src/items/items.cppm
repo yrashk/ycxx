@@ -27,6 +27,36 @@ using lex::Tok;
 using lex::u32;
 using lex::u8;
 
+constexpr Tk attribute_closer(Tk token) {
+  switch (token) {
+  case Tk::l_square: return Tk::r_square;
+  case Tk::l_paren: return Tk::r_paren;
+  case Tk::l_brace: return Tk::r_brace;
+  case Tk::l_splice: return Tk::r_splice;
+  default: return Tk::eof;
+  }
+}
+
+// Find a standard attribute's outer `]]` even when the argument is malformed. The parser
+// checks [dcl.attr.grammar] separately, so delimiter recovery cannot hide the declaration.
+std::optional<u32> standard_attribute_end(const pp::Region& region, u32 open, u32 limit) {
+  std::vector<Tk> closing;
+  for (u32 i = open + 2; i < limit; ++i) {
+    const Tk token = region.tokens[i].kind;
+    if (const Tk close = attribute_closer(token); close != Tk::eof) {
+      closing.push_back(close);
+    } else if (token == Tk::r_square || token == Tk::r_paren || token == Tk::r_brace || token == Tk::r_splice) {
+      const auto matched = std::find(closing.rbegin(), closing.rend(), token);
+      if (matched != closing.rend()) closing.erase(std::prev(matched.base()), closing.end());
+      else if (token == Tk::r_square && i + 1 < limit && region.tokens[i + 1].kind == Tk::r_square) return i + 2;
+      else if (closing.empty() && (token == Tk::r_brace || token == Tk::r_paren)) return std::nullopt;
+    } else if (token == Tk::semi && closing.empty()) {
+      return std::nullopt;
+    }
+  }
+  return std::nullopt;
+}
+
 struct LiteralOperatorId {
   std::string_view suffix;
   u32 end;  // the first token after the id
@@ -202,11 +232,18 @@ private:
   // or at eof. A lookahead for a simple braced initializer also stops at a nested brace or semicolon.
   u32 match(u32 j, bool require_close = false, bool stop_at_nested_brace_or_semi = false) const {
     Tk open = kind(j);
+    if (!require_close && open == Tk::l_square && kind(j + 1) == Tk::l_square)
+      if (auto end = standard_attribute_end(r_, j, u32(r_.tokens.size()))) return *end;
     Tk close = open == Tk::l_paren ? Tk::r_paren : open == Tk::l_square ? Tk::r_square : Tk::r_brace;
     std::vector<Tk> stack{close};
     for (++j; kind(j) != Tk::eof; ++j) {
       Tk k = kind(j);
       if (stop_at_nested_brace_or_semi && (k == Tk::l_brace || k == Tk::semi)) return none;
+      if (!require_close && k == Tk::l_square && kind(j + 1) == Tk::l_square)
+        if (auto end = standard_attribute_end(r_, j, u32(r_.tokens.size()))) {
+          j = *end - 1;
+          continue;
+        }
       if (k == Tk::l_paren) stack.push_back(Tk::r_paren);
       else if (k == Tk::l_square) stack.push_back(Tk::r_square);
       else if (k == Tk::l_brace) stack.push_back(Tk::r_brace);

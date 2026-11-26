@@ -12,8 +12,8 @@ namespace ycxx::bench {
 namespace detail {
 
 std::pair<std::string_view, double> native_clock();
-std::uint64_t rss_bytes(long amount);
-std::optional<std::uint64_t> resident_memory();
+std::optional<std::uint64_t> rusage_max_rss_bytes(long amount);
+std::optional<ResidentMemory> resident_memory();
 
 std::optional<Nanoseconds> thread_cpu_now() {
   timespec time{};
@@ -43,7 +43,7 @@ HostInfo host_info() {
 }
 
 std::optional<ProcessCounters> process_info(bool starting) {
-  std::optional<std::uint64_t> resident;
+  std::optional<ResidentMemory> resident;
   std::optional<HostTicks> host;
   if (starting) {
     resident = resident_memory();
@@ -61,7 +61,7 @@ std::optional<ProcessCounters> process_info(bool starting) {
   };
   const auto count = [](auto value) { return std::uint64_t(std::max(value, decltype(value){0})); };
   return ProcessCounters{
-    time(stats.ru_utime) + time(stats.ru_stime), rss_bytes(stats.ru_maxrss), thread_cpu, resident,
+    time(stats.ru_utime) + time(stats.ru_stime), rusage_max_rss_bytes(stats.ru_maxrss), thread_cpu, resident,
     count(stats.ru_minflt), count(stats.ru_majflt), count(stats.ru_nvcsw), count(stats.ru_nivcsw),
     count(stats.ru_inblock), count(stats.ru_oublock), host};
 }
@@ -77,13 +77,25 @@ ProcessSample process_sample(const ProcessCounters& before, const ProcessCounter
     const auto total = after.host->total - before.host->total;
     busy = double(std::min(after.host->busy - before.host->busy, total)) / double(total);
   }
+  const auto source = after.memory ? after.memory->source
+    : before.memory ? before.memory->source : RssSource::unspecified;
+  const auto rss = [](const ResidentMemory& memory) { return memory.rss_bytes; };
   return {
-    delta(before.cpu_time, after.cpu_time), after.peak_rss_bytes, thread, before.rss_bytes, after.rss_bytes,
-    delta(before.minor_faults, after.minor_faults), delta(before.major_faults, after.major_faults),
-    delta(before.voluntary_switches, after.voluntary_switches),
-    delta(before.involuntary_switches, after.involuntary_switches),
-    delta(before.block_input_operations, after.block_input_operations),
-    delta(before.block_output_operations, after.block_output_operations), busy};
+    .cpu_time = delta(before.cpu_time, after.cpu_time),
+    .peak_rss_bytes = after.memory.transform([](const ResidentMemory& memory) { return memory.peak_bytes; }),
+    .thread_cpu_time = thread,
+    .rss_before_bytes = before.memory.transform(rss),
+    .rss_after_bytes = after.memory.transform(rss),
+    .minor_faults = delta(before.minor_faults, after.minor_faults),
+    .major_faults = delta(before.major_faults, after.major_faults),
+    .voluntary_switches = delta(before.voluntary_switches, after.voluntary_switches),
+    .involuntary_switches = delta(before.involuntary_switches, after.involuntary_switches),
+    .block_input_operations = delta(before.block_input_operations, after.block_input_operations),
+    .block_output_operations = delta(before.block_output_operations, after.block_output_operations),
+    .host_cpu_busy_fraction = busy,
+    .rss_source = source,
+    .rusage_max_rss_bytes = after.rusage_max_rss_bytes,
+  };
 }
 
 void validate(const Configuration& config) {
@@ -457,6 +469,24 @@ std::optional<Nanoseconds::rep> cpu_count(const ProcessSample& data) {
   return {};
 }
 
+std::string_view rss_source_name(RssSource source) {
+  switch (source) {
+    case RssSource::unspecified: return {};
+    case RssSource::linux_proc_status: return "linux_proc_status";
+    case RssSource::mach_task_basic_info: return "mach_task_basic_info";
+  }
+  std::unreachable();
+}
+
+std::string_view rss_peak_scope(const ProcessSample& sample) {
+  if (!sample.peak_rss_bytes || sample.rss_source == RssSource::unspecified) return {};
+  return "process_lifetime";
+}
+
+std::string optional_json_string(std::string_view value) {
+  return value.empty() ? "null" : quote_json(value);
+}
+
 void sample_json(std::ostream& out, const Sample& sample, Nanoseconds timer_cost = {}) {
   std::print(out, "{{\"iterations\":{},\"elapsed_ns\":{},\"ns_per_operation\":{}",
     sample.iterations, sample.elapsed.count(), sample.ns_per_operation(timer_cost));
@@ -465,12 +495,14 @@ void sample_json(std::ostream& out, const Sample& sample, Nanoseconds timer_cost
     std::print(out, ",\"process_cpu_ns\":{},\"peak_rss_bytes\":{},\"thread_cpu_ns\":{},"
       "\"rss_before_bytes\":{},\"rss_after_bytes\":{},\"minor_faults\":{},\"major_faults\":{},"
       "\"voluntary_switches\":{},\"involuntary_switches\":{},\"block_input_operations\":{},"
-      "\"block_output_operations\":{},\"host_cpu_busy_fraction\":{}",
-      process.cpu_time.count(), process.peak_rss_bytes, optional_number(cpu_count(process)),
+      "\"block_output_operations\":{},\"host_cpu_busy_fraction\":{},"
+      "\"rss_source\":{},\"peak_rss_scope\":{},\"rusage_max_rss_bytes\":{}",
+      process.cpu_time.count(), optional_number(process.peak_rss_bytes), optional_number(cpu_count(process)),
       optional_number(process.rss_before_bytes), optional_number(process.rss_after_bytes),
       process.minor_faults, process.major_faults, process.voluntary_switches, process.involuntary_switches,
       process.block_input_operations, process.block_output_operations,
-      optional_number(process.host_cpu_busy_fraction));
+      optional_number(process.host_cpu_busy_fraction), optional_json_string(rss_source_name(process.rss_source)),
+      optional_json_string(rss_peak_scope(process)), optional_number(process.rusage_max_rss_bytes));
   }
   std::print(out, "}}");
 }
@@ -706,7 +738,8 @@ void write_console(std::ostream& out, std::string_view name, const Measurement& 
   std::vector<double> process_rss;
   std::vector<double> thread_cpu;
   std::vector<double> host_cpu;
-  std::uint64_t peak_rss = 0;
+  std::optional<std::uint64_t> peak_rss;
+  RssSource rss_source = RssSource::unspecified;
   std::uint64_t minor_faults = 0;
   std::uint64_t major_faults = 0;
   std::uint64_t switches = 0;
@@ -722,7 +755,9 @@ void write_console(std::ostream& out, std::string_view name, const Measurement& 
       if (process.rss_after_bytes) process_rss.push_back(double(*process.rss_after_bytes));
       if (process.thread_cpu_time) thread_cpu.push_back(double(process.thread_cpu_time->count()) / sample_ns * 100);
       if (process.host_cpu_busy_fraction) host_cpu.push_back(*process.host_cpu_busy_fraction * 100);
-      peak_rss = std::max(peak_rss, process.peak_rss_bytes);
+      if (process.peak_rss_bytes)
+        peak_rss = std::max(peak_rss.value_or(0), *process.peak_rss_bytes);
+      if (process.rss_source != RssSource::unspecified) rss_source = process.rss_source;
       minor_faults += process.minor_faults;
       major_faults += process.major_faults;
       switches += process.voluntary_switches + process.involuntary_switches;
@@ -760,11 +795,18 @@ void write_console(std::ostream& out, std::string_view name, const Measurement& 
     auto cpu = std::format("{}  process {:.1f}%", sparkline(process_cpu, width), mean(process_cpu));
     if (!thread_cpu.empty()) cpu += std::format("  ·  thread {:.1f}%", mean(thread_cpu));
     row(out, "cpu", cpu, style, "\033[36m");
-    auto memory = std::format("peak {:.2f} MiB", double(peak_rss) / (1024 * 1024));
+    std::string memory;
     if (!process_rss.empty())
-      memory = std::format("{}  resident {:.2f} MiB  ·  {}", sparkline(process_rss, width),
-        process_rss.back() / (1024 * 1024), memory);
-    row(out, "memory", memory, style);
+      memory = std::format("{}  resident {:.2f} MiB", sparkline(process_rss, width),
+        process_rss.back() / (1024 * 1024));
+    if (peak_rss) {
+      if (!memory.empty()) memory += "  ·  ";
+      const auto scope = rss_source == RssSource::unspecified ? "high-water" : "process-lifetime high-water";
+      memory += std::format("{} {:.2f} MiB", scope, double(*peak_rss) / (1024 * 1024));
+    }
+    if (rss_source == RssSource::linux_proc_status) memory += "  ·  proc status";
+    else if (rss_source == RssSource::mach_task_basic_info) memory += "  ·  Mach task";
+    if (!memory.empty()) row(out, "memory", memory, style);
     if (!host_cpu.empty())
       row(out, "host load", std::format("{:.1f}% busy  ·  {} observed batches", mean(host_cpu), host_cpu.size()), style);
     if (minor_faults || major_faults || switches || block_operations)
@@ -875,7 +917,8 @@ void write_live_sample(std::ostream& out, std::string_view name, std::size_t rou
 void write_csv(std::ostream& out, std::string_view name, const Measurement& data) {
   std::println(out, "case,sample,iterations,elapsed_ns,ns_per_operation,process_cpu_ns,peak_rss_bytes,metadata_json,properties_json,"
     "thread_cpu_ns,rss_before_bytes,rss_after_bytes,minor_faults,major_faults,voluntary_switches,"
-    "involuntary_switches,block_input_operations,block_output_operations,host_cpu_busy_fraction");
+    "involuntary_switches,block_input_operations,block_output_operations,host_cpu_busy_fraction,"
+    "rss_source,peak_rss_scope,rusage_max_rss_bytes");
   const auto quoted = quote_csv(name);
   const auto metadata = quote_csv(metadata_json(data.metadata));
   const auto properties = quote_csv(properties_text(data.properties, true));
@@ -884,16 +927,17 @@ void write_csv(std::ostream& out, std::string_view name, const Measurement& data
     std::print(out, "{},{},{},{},{},", quoted, i + 1, sample.iterations,
       sample.elapsed.count(), sample.ns_per_operation(data.timer_cost));
     if (!sample.process) {
-      std::println(out, ",,{},{}{}", metadata, properties, std::string(10, ','));
+      std::println(out, ",,{},{}{}", metadata, properties, std::string(13, ','));
       continue;
     }
     const auto& process = *sample.process;
-    std::println(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-      process.cpu_time.count(), process.peak_rss_bytes, metadata, properties,
+    std::println(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+      process.cpu_time.count(), optional_number(process.peak_rss_bytes, ""), metadata, properties,
       optional_number(cpu_count(process), ""), optional_number(process.rss_before_bytes, ""),
       optional_number(process.rss_after_bytes, ""), process.minor_faults, process.major_faults,
       process.voluntary_switches, process.involuntary_switches, process.block_input_operations,
-      process.block_output_operations, optional_number(process.host_cpu_busy_fraction, ""));
+      process.block_output_operations, optional_number(process.host_cpu_busy_fraction, ""),
+      rss_source_name(process.rss_source), rss_peak_scope(process), optional_number(process.rusage_max_rss_bytes, ""));
   }
 }
 
