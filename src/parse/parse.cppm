@@ -5956,7 +5956,9 @@ private:
       alignment = read_alignment(annotations, /*field=*/true);
       if (!alignment) return bad();
     }
-    if (!ps_.conversion_id_ahead() && !Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
+    const bool bare_explicit = ps_.is(Tk::kw_explicit) && ps_.kind(1) != Tk::l_paren;
+    if (!bare_explicit && !ps_.conversion_id_ahead() &&
+        !Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
                              ? Diag::not_supported
                              : Diag::expected_declaration,
@@ -6057,7 +6059,17 @@ private:
     const bool shared_overlap = layout_attribute(p_->region(), it_->begin, ps_.index(),
                                                  LayoutAttributes::leading_affecting_layout, applied, "no_unique_address");
     do {
-      bool conversion = ps_.conversion_id_ahead();
+      const bool conversion = ps_.conversion_id_ahead();
+      if (spec.explicit_at) {
+        if (!conversion) {
+          s_.diag(*spec.explicit_at, Diag::explicit_placement);
+          return bad();
+        }
+        if (member_template_ || !s_.template_scopes.empty() || inst_) {
+          s_.diag(*spec.explicit_at, Diag::not_supported, Tk::kw_explicit);
+          return bad();
+        }
+      }
       if (conversion && spec.has_type) {
         s_.diag(spec.begin, Diag::conversion_decl_type);
         return bad();
@@ -7382,7 +7394,7 @@ private:
       }
       if (kind == Tk::kw_explicit) {
         if (!explicit_at) {
-          s_.diag(ps_.pos(), Diag::explicit_constructor_placement);
+          s_.diag(ps_.pos(), Diag::explicit_placement);
           return std::nullopt;
         }
         if (*explicit_at) {
@@ -8089,6 +8101,7 @@ private:
     sem.linkage = ast::Linkage::external;
     sem.is_virtual = is_virtual;
     sem.is_final = is_final;
+    sem.is_explicit = spec.explicit_at.has_value();
     u16 flags = sema::decl_flag::member;
     if (spec.is_static) flags |= sema::decl_flag::static_;
     if (spec.is_constexpr || defaulted || (comparison && !spec.is_consteval)) flags |= sema::decl_flag::constexpr_;

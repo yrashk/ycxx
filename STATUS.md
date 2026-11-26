@@ -1511,7 +1511,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   value result, checking the implicit object's cv qualifiers and value category. Ordinary
   in-class conversion functions may declare `&` and `&&` qualifiers. Among viable exact-result
   candidates with the same cv qualifiers, an rvalue prefers the `&&` candidate.
-  General conversion selection remains tracked in #339.
+  Ordinary in-class conversion functions accept bare `explicit` in either order with
+  `constexpr`. The exact-result named `static_cast` can call them and copy-initialization
+  excludes them (#1468). General conversion selection remains tracked in #339.
 - Bodies of member functions are complete-class contexts: class member lookup comes before
   namespace lookup, and their class is complete there. `This` and implicit member access
   (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
