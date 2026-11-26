@@ -902,7 +902,7 @@ class Mangler {
       if (count) {
         auto element = type(array.elem);
         if (!element) return element;
-        for (const auto unit : units.first(count)) encoded += std::format("L{}{}E", *element, unit);
+        for (std::size_t i = 0; i < count; ++i) encoded += std::format("L{}{}E", *element, units[i]);
       }
       return encoded + 'E';
     }
