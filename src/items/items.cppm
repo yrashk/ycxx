@@ -490,6 +490,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
   bool params = false;       // a declarator's parameter list was seen
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
   bool base_clause = false;  // a `:` after the class-key, before any parameter list
+  bool try_base_template_ids = true;
   bool typedef_ = false;
   auto finish_body = [&](u32 body_begin, u32 end) {
     at(k).kind = ItemKind::function;
@@ -508,7 +509,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       at(k).end = i_ = j + 1;
       return;
     case Tk::less:
-      if (base_clause && kind(class_key) != Tk::kw_enum && prev == Tk::identifier) {
+      if (base_clause && try_base_template_ids && kind(class_key) != Tk::kw_enum && prev == Tk::identifier) {
         // Keep argument braces within a complete base template-id ([class.derived.general]).
         const u32 end = match_angle(j, /*require_close=*/true);
         const Tk next = kind(end);
@@ -516,6 +517,8 @@ void Splitter::general(u32 k, u32& unnamed_types) {
           j = end;
           continue;
         }
+        // After an ambiguous argument list, resume scanning without rescanning from each comparison.
+        try_base_template_ids = false;
       }
       ++j;
       continue;
@@ -652,6 +655,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         }
         class_key = none;
         base_clause = false;
+        try_base_template_ids = true;
         params = false;
         continue;
       }
