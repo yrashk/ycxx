@@ -372,6 +372,9 @@ Block-scope declarations, lambdas, local classes and bindings are plain data of 
 Those that can be named from outside the body get an `EntityId` (§4.3); tooling locates them by
 `Loc`.
 
+Amended (#117): a local class's definition is an item of its own, owned by the item whose body
+holds it; its id is that of any item, not the body's ([local-classes.md](local-classes.md)).
+
 *Reason:* a `DeclId` inside a body would need the `BodyId` to be unambiguous (one item has as many
 bodies as there are expansions of its macros, §B1.2), and with the `BodyId` it would change on
 every body edit.

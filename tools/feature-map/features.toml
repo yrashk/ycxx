@@ -1754,8 +1754,9 @@ name = 'Local classes'
 group = 'class'
 clauses = ['class.local']
 std = 'C++98'
-status = 'missing'
-issues = [117]
+status = 'partial'
+issues = [1140, 1155, 1442, 1443]
+note = 'Local classes in functions, lambdas and templates, with members, constructors and destructors. Block-scope enumerations (#1442), member classes defined later in the block (#1443), virtual functions (#1155) and constant evaluation of class or array members (#1140) remain.'
 probe = '''
 int main() { struct L { int v; }; L l{0}; return l.v; }
 '''

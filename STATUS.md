@@ -1407,7 +1407,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
 - Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). Further cases are
-  tracked under classes by value (#116), local classes (#117) and records in the interpreter (#25).
+  tracked under classes by value (#116) and records in the interpreter (#25); local classes came with #117.
 - Not yet: unions, bit-fields, constructors, bases (access checking came with #119).
 
 - Ordinary named, non-template records with only scalar fields and no bases or unions can use
@@ -1656,6 +1656,46 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (`class N::X { … }`, #1188). Found on the way: #1201 (members declared after a body), #1202
   (hiding in the class's own scope), #124 (`static inline` members are strong).
 
+## Local classes (#117)
+
+- A class defined in a block ([class.local]) is an item of its own
+  ([design](docs/design/local-classes.md), decided by Fable): the splitter cuts the class-specifier
+  out of the function body, consteval block or declaration (a lambda in an initializer) that holds
+  it (`Splitter::local_classes`, `Item::local_owner`), and its members are member items. The name
+  index puts it on a level of its own (`ns::(local k)`), so no lookup outside its block finds it.
+- The body's analysis defines it where the class-specifier is (`Parser::define_class`,
+  `Program::define_local_class`): an entity local to the function or lambda
+  (`EntityRec::local_class`), numbered among its local classes of that name in token order; its
+  name in the block; and the class itself through `ItemAnalysis` and `class_def`, so constructors,
+  destructors, default member initializers, special members, emission and constant evaluation are
+  those of any class. Unnamed local classes and declarators after the `}` work, as does
+  `struct X* p;` naming no class, which declares a local class a later definition completes
+  ([basic.scope.pdecl]).
+- Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations,
+  `using enum`s, static locals, and constants for their values. An automatic variable is usable
+  only unevaluated ([basic.def.odr]). Lookup reaches the block after the local class and before
+  the function's class ([basic.lookup.unqual]), including a class still being defined around a
+  lambda in a static member's initializer. Access is the function's ([class.local]/1).
+- In a template's definition a local class is dependent; each specialization of the function,
+  including a member function template of a class template, has its own, instantiated from the
+  item with the arguments bound (`replay_class`). Its members are emitted where used.
+- Member templates, static data members and friend function definitions in a local class are
+  diagnosed ([temp.mem], [class.static.data], [class.friend]).
+- Symbols are Itanium `<local-name>`s with discriminators (`_ZZ1hvENK1A3getE_0v`), checked
+  against Clang 23 objects.
+- `#include <iostream>` hello: 2,698 errors before, 2,660 after. libycxx's `resize_and_overwrite`
+  guards and `tuple_cat` plan compile; its ctype and errno tables wait on constant evaluation of
+  class and array subobjects (#1140).
+- Tests: `tests/own/local-classes` (39 spec-only, Clang 23 and GCC 16 agree; 3 for libycxx's
+  shapes), `tests/own/abi/local-class-names.run.cpp` (a Clang peer), `unit.items` (the
+  splitter), and the δ tests `s1-locals-scopes` and `s1-elaborated`.
+- Not yet: block-scope enumerations ([#1442](https://github.com/yrashk/ycxx/issues/1442)), a
+  member class of a local class defined later in the block
+  ([#1443](https://github.com/yrashk/ycxx/issues/1443)), local classes with virtual functions
+  ([#1155](https://github.com/yrashk/ycxx/issues/1155)), and constant evaluation of local
+  aggregates with class or array members ([#1140](https://github.com/yrashk/ycxx/issues/1140)).
+  [[class.local]](https://eel.is/c++draft/class.local) · [#117](https://github.com/yrashk/ycxx/issues/117)
+
 ## Nested classes of class templates (#1187)
 
 - Named non-template member classes can be declared and defined inside a primary class template
@@ -1768,7 +1808,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [#893](https://github.com/yrashk/ycxx/issues/893)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
-  (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
+  (#157). Enumerations in a block are tracked in #1442. Qualified lookup of earlier enumerators
   while the unnamed definition is open is tracked in #879.
 
 ## Direct explicit destructor calls (#722)
@@ -4274,8 +4314,8 @@ or a class template), or a variable template, and in a constraint-expression. Th
   objects), `unit.darwin_lambda_declarations`, `unit.linux_lambda_declarations`, and
   `unit.linux_namespace_lambda` (daemon edits with a cold comparison).
 - Not yet ([#338](https://github.com/yrashk/ycxx/issues/338)): default member initializers, default
-  arguments, `static_assert`, and unevaluated operands (`decltype([]{})`). Local classes in a lambda
-  (#117), captures by reference in constant evaluation (#262), and weak definitions of variable
+  arguments, `static_assert`, and unevaluated operands (`decltype([]{})`). Captures by reference in constant evaluation
+  (#262), and weak definitions of variable
   template specializations, closure objects that are class templates' members and static locals
   of closures (#124) wait on their issues.
 
