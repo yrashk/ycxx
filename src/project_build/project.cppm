@@ -137,6 +137,48 @@ struct RuleWitnessResult {
   }
 };
 
+struct HostWitnessTool {
+  Artifact executable;
+  std::vector<HostFileObservation> files;
+  std::string error;
+};
+
+struct HostWitnessImage {
+  using Key = pipeline::RequestId;
+  using Value = HostWitnessTool;
+
+  static engine::query_task<Value> run(engine::Ctx& cx, Key request) {
+    const auto& built = co_await cx.fetch<pipeline::Build>(request);
+    const auto& build = cx.fetch<pipeline::BuildIn>(request);
+    std::map<std::string, std::optional<Fp128>> observed;
+    for (auto unit : build.units) {
+      const pp::FileId file{unit.n};
+      const auto& source = cx.fetch<pp::SourceOf>(file);
+      auto path = (fs::path(source.cwd) / source.path).lexically_normal().generic_string<char>();
+      const bool exists = pp::source_content(cx, source, source.path).has_value();
+      observed.insert_or_assign(std::move(path),
+          exists ? std::optional{fingerprint128(cx.fetch<pp::FileText>(file))} : std::nullopt);
+      if (!exists) continue;
+
+      (void)co_await cx.fetch<pp::Pp>(file);
+      // A changed include probe can leave preprocessing and the linked image equal.
+      // Observe the raw reads as well so the file evidence still advances.
+      for (const auto input : cx.observed_input_keys<pp::FileContent, pp::Pp>(file)) {
+        const auto& contents = cx.fetch<pp::FileContent>(input);
+        observed.try_emplace(pp::path_of(input), contents ? std::optional{fingerprint128(*contents)} : std::nullopt);
+      }
+    }
+    Value result;
+    for (const auto& [path, contents] : observed) result.files.push_back({path, contents});
+    if (built.linked && !built.linked->image.empty()) result.executable = {built.linked->image, true};
+    else {
+      result.error = pipeline::Build::errors(built);
+      if (result.error.empty()) result.error = "build produced no executable";
+    }
+    co_return result;
+  }
+};
+
 struct RuleValueData {
   ProbeSupport support = ProbeSupport::indeterminate;
   std::optional<RuleFactValue> fact = std::nullopt;
@@ -899,6 +941,7 @@ using RunRulePackage = std::function<std::expected<RulePackageBuild, std::string
     const RulePackageRef&, const RulePackagePlan&, Fp128, std::function_ref<bool()>)>;
 using RunRuleWitness = std::function<std::expected<WitnessEvidence, std::string>(
     std::string_view, const GeneratorPlan&, Fp128, std::function_ref<bool()>)>;
+using BuildWitnessTool = std::function<std::optional<HostWitnessTool>(const HostExecutablePlan&)>;
 using AdmitRuleValue = std::function<void(std::string_view, std::string_view, RuleValueRecord)>;
 using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePackagePlan&, const RulePackageAction&)>;
 using ResolveRuleArguments = std::function<std::expected<ProjectedRuleArguments, std::string>(
@@ -907,8 +950,20 @@ using ResolveRuleArguments = std::function<std::expected<ProjectedRuleArguments,
 bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared);
 
 Fp128 witness_stamp(const RuleWitnessPlan& plan) {
-  if (plan.producers.generators.empty() && !plan.schema) return action_key(plan.witness);
+  if (plan.producers.generators.empty() && plan.producers.host_executables.empty() && !plan.schema)
+    return action_key(plan.witness);
   return fingerprint(std::tie(plan.witness, plan.producers, plan.schema));
+}
+
+std::optional<Fp128> host_file_contents(std::string_view path) {
+  const auto contents = pp::read_disk(pp::path_id(path)).value;
+  return contents ? std::optional{fingerprint128(*contents)} : std::nullopt;
+}
+
+bool current_host_files(std::span<const HostFileObservation> files) {
+  return std::ranges::all_of(files, [](const auto& file) {
+    return host_file_contents(file.path) == file.contents;
+  });
 }
 
 std::optional<RuleValueData> classify_value(std::string_view output, std::string_view field,
@@ -986,7 +1041,7 @@ std::expected<std::string, std::string> invoke_rule_worker(
 std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
     const RunRuleAction& run, const RunRulePackage& run_package, const RunRuleWitness& run_witness,
-    const AdmitRuleValue& admit_value, const UseRuleCompiler& use_compiler,
+    const BuildWitnessTool& build_witness_tool, const AdmitRuleValue& admit_value, const UseRuleCompiler& use_compiler,
     const ResolveRuleArguments& resolve_arguments, PreparedProject& prepared, bool watch, bool& superseded) {
   const auto native_triple = prepared.native_triple;
   std::vector<RuleDemand> deferred;
@@ -1100,6 +1155,7 @@ std::expected<void, std::string> prepare_project(
     if (consumes_values && !current_invocation()) return changed_rule_inputs();
     RuleExpansion expansion{demand, std::move(*lowered), std::move(arguments->facts)};
     std::optional<Fp128> witness_key;
+    std::optional<std::vector<HostFileObservation>> host_files;
     if (demand.value_export) {
       const auto& field = *demand.value_export;
       const auto label = std::format("{}.{}", demand.target, field);
@@ -1126,11 +1182,22 @@ std::expected<void, std::string> prepare_project(
       }
       auto& plan = std::get<RuleWitnessPlan>(*witness_plan);
       witness_key = witness_stamp(plan);
-      const auto current_witness = [&] {
+      const auto* host_input = plan.witness.host_inputs.empty() ? nullptr : &plan.witness.host_inputs.front();
+      const auto* host = host_input ? &plan.producers.host_executables[host_input->executable] : nullptr;
+      std::optional<HostWitnessTool> host_tool;
+      const auto current_witness_recipe = [&] {
         if (!current_invocation()) return false;
         const auto current = plan_rule_witness(cwd, expansion, prepared.rules.expansions, native_triple);
         const auto* recipe = current ? std::get_if<RuleWitnessPlan>(&*current) : nullptr;
         return recipe && witness_stamp(*recipe) == *witness_key;
+      };
+      const auto current_witness = [&] {
+        if (!current_witness_recipe()) return false;
+        if (!host_tool || current_host_files(host_tool->files)) return true;
+        auto updated = build_witness_tool(*host);
+        if (!updated || updated->executable.bytes != host_tool->executable.bytes) return false;
+        host_tool->files = std::move(updated->files);
+        return current_witness_recipe();
       };
       const auto changed_witness = [&] {
         superseded = true;
@@ -1140,7 +1207,21 @@ std::expected<void, std::string> prepare_project(
       auto compiled = stage_producers(plan.producers, plan.witness.artifact_inputs, run, current_witness);
       if (!compiled) return std::unexpected(std::move(compiled.error()));
       const auto output_at = [&](std::size_t i) { return compiled->output_at(i); };
-      if (!plan.witness.artifact_inputs.empty()) (void)append_artifact_inputs(plan.witness, output_at, plan.witness.inputs);
+      if (host_input) {
+        host_tool = build_witness_tool(*host);
+        if (!host_tool) return std::unexpected("build cancelled");
+        if (watch) {
+          prepared.rules.pending_host_files.insert_or_assign(demand.target, host_tool->files);
+          prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
+        }
+        if (!host_tool->error.empty()) {
+          if (!current_witness_recipe() || !current_host_files(host_tool->files)) return changed_witness();
+          return std::unexpected(std::format("host executable '{}': {}", host->name, host_tool->error));
+        }
+        plan.witness.inputs.push_back({host_input->name, host_input->path, host_tool->executable});
+      }
+      if (host_input || !plan.witness.artifact_inputs.empty())
+        (void)append_artifact_inputs(plan.witness, output_at, plan.witness.inputs);
       if (!current_witness()) return changed_witness();
       const auto witness_action = action_key(plan.witness);
       auto evidence = run_witness(label, plan.witness, witness_action, current_witness);
@@ -1165,10 +1246,13 @@ std::expected<void, std::string> prepare_project(
           {"value-export", demand.target, field, describe_rule_value(*value), origin});
       admit_value(demand.target, field, RuleValueRecord{std::move(*value), receipt, std::move(origin)});
       std::erase_if(prepared.rules.pending_witnesses, [&](const auto& entry) { return entry.demand == demand; });
+      prepared.rules.pending_host_files.erase(demand.target);
+      if (host_tool) host_files = std::move(host_tool->files);
     }
     prepared.rules.pending_projections.erase(demand.target);
     prepared.rules.observations.push_back(
-        {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key, planning_stamp});
+        {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key, planning_stamp,
+         std::move(host_files)});
     prepared.rules.expansions.push_back(std::move(expansion));
     if (!deferred.empty()) {
       next = std::move(deferred.back());
@@ -1202,7 +1286,9 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
   if (!record.witness) return true;
   const auto witness = plan_rule_witness(cwd, expansion, upstream, native_triple);
   const auto* recipe = witness ? std::get_if<RuleWitnessPlan>(&*witness) : nullptr;
-  return recipe && witness_stamp(*recipe) == *record.witness;
+  if (!recipe || witness_stamp(*recipe) != *record.witness ||
+      record.host_files.has_value() != !recipe->witness.host_inputs.empty()) return false;
+  return !record.host_files || current_host_files(*record.host_files);
 }
 
 bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared) {
@@ -1309,6 +1395,16 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     observations.push_back(stamp);
     return stamp;
   };
+  const auto observe_host_files = [&](std::span<const HostFileObservation> files) {
+    bool current = true;
+    for (const auto& file : files) {
+      const auto contents = host_file_contents(file.path);
+      observations.push_back(fingerprint(std::tie(file.path, contents)));
+      paths.push_back(file.path);
+      current = current && contents == file.contents;
+    }
+    return current;
+  };
   for (std::size_t i = 0; i < snapshot.observations.size(); ++i) {
     const auto& record = snapshot.observations[i];
     const auto& expansion = snapshot.expansions[i];
@@ -1318,13 +1414,16 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
       if (!observe_probe(probe)) profiles_current = false;
     const bool planning_current = !record.planning || observe_planning(record.demand) == record.planning;
     const bool witness_current = !record.witness || observe_witness(expansion) == record.witness;
-    if (profiles_current && planning_current && witness_current && state == std::pair{record.package, record.invocation})
+    const bool host_current = !record.host_files || observe_host_files(*record.host_files);
+    if (profiles_current && planning_current && witness_current && host_current &&
+        state == std::pair{record.package, record.invocation})
       current.push_back(expansion);
   }
   for (const auto& probe : snapshot.probes) (void)observe_probe(probe);
   for (const auto& [name, profiles] : snapshot.pending_projections)
     for (const auto& probe : profiles) (void)observe_probe(probe);
   for (const auto& witness : snapshot.pending_witnesses) (void)observe_witness(witness);
+  for (const auto& entry : snapshot.pending_host_files) (void)observe_host_files(entry.second);
   auto watch = observed ? *observed : watch_project(cwd, target, current, native_triple);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
         return record.demand == *watch.pending;
@@ -1563,6 +1662,18 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     WitnessEvidence evidence{result.exit_status, std::move(result.out), std::move(result.err)};
     apply(AdmitRuleInput<RuleWitnessReceipt>{id, evidence});
     return evidence;
+  };
+  const BuildWitnessTool build_witness_tool = [&](const HostExecutablePlan& executable)
+      -> std::optional<HostWitnessTool> {
+    const auto request = register_host_executable(session_, workspace_path, executable, host_target);
+    while (!cancelled()) {
+      refresh();
+      const auto before = session_.db().revision();
+      auto tool = session_.run<HostWitnessImage>(request, poll, nullptr, tracer);
+      if (!tool) return std::nullopt;
+      if (publish(before, [] {}) && current_host_files(tool->files)) return tool;
+    }
+    return std::nullopt;
   };
   const AdmitRuleValue admit_value = [&](std::string_view producer, std::string_view field, RuleValueRecord record) {
     const auto id = rule_value_key(value_scope, producer, field);
@@ -1804,7 +1915,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (measured) planned.rules.probes.push_back(std::move(measured->snapshot));
       else if (!cancelled() && !superseded) report.diagnostics.push_back(std::move(measured.error()));
     };
-    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, admit_value,
+    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, build_witness_tool, admit_value,
                                     use_compiler, resolve_arguments, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
     if (superseded || !current_rules(cwd, toolchain, planned)) continue;

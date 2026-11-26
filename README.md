@@ -64,6 +64,8 @@ Generators and witnesses can use `target_triple()` and `host_triple()` in
 A generator can take the executable output of a `cpp.host_executable` rule
 as an input. ycxx builds the tool for the host even when the app targets
 another platform. [Native host tool example](examples/project-build/native-host-tool/README.md)
+A typed witness can select the same native artifact directly with
+`tool = input("name")`. [Native host witness example](examples/project-build/native-host-witness/README.md)
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
