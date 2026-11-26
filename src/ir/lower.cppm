@@ -910,6 +910,41 @@ class Lowering {
         out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags, {}, o)));
         return {};
       }
+      case Op::atomic__load:
+      case Op::atomic__store:
+      case Op::atomic__rmw:
+      case Op::atomic__cmpxchg:
+      case Op::fence: {
+        if (!config_.sysv_amd64) return fail("native atomics require System V AMD64");
+        Op2 op = Op2::fence;
+        switch (nd.op) {
+          case Op::atomic__load: op = Op2::atomic_load; break;
+          case Op::atomic__store: op = Op2::atomic_store; break;
+          case Op::atomic__rmw: op = Op2::atomic_rmw; break;
+          case Op::atomic__cmpxchg: op = Op2::atomic_cmpxchg; break;
+          default: break;
+        }
+        if (op != Op2::fence) {
+          QualType access(std::uint32_t(imms[0]));
+          auto value_type = type_of(access);
+          if (!value_type || *value_type != T::i32 || layout(access).align < 4)
+            return fail("native atomics require a naturally aligned 32-bit integer access");
+        }
+        if (op == Op2::atomic_rmw && imms[1] > std::to_underlying(Rmw::xor_))
+          return fail("unsupported atomic read-modify-write operation");
+        const T result_types[]{T::state, T::i32, T::i1};
+        for (std::uint32_t i = 1; i < nd.nres; ++i) {
+          auto actual = type_of(cxx(f_.results_of(n)[i]));
+          if (!actual || *actual != result_types[i]) return fail("atomic result has the wrong type");
+        }
+        std::array<ValueId, 4> args;
+        for (std::uint32_t i = 0; i < nd.nopnd; ++i) args[i] = in(n, i);
+        auto lowered = b_.emit(op, std::span(result_types).first(nd.nres),
+                              std::span(args).first(nd.nopnd),
+                              op == Op2::fence ? imms : imms.subspan(1), nd.flags, {}, origin());
+        for (std::uint32_t i = 0; i < nd.nres; ++i) out(n, i, b_.peek().result(lowered, i));
+        return {};
+      }
       case Op::va_start:
       case Op::va_arg: {
         auto o = origin();

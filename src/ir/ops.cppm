@@ -68,6 +68,22 @@ export enum class VirtualCallKind : std::uint8_t { ordinary, immediate, qualifie
 export enum class MemOrder : std::uint8_t { relaxed, consume, acquire, release, acq_rel, seq_cst };
 export enum class Rmw : std::uint8_t { xchg, add, sub, and_, or_, xor_, max, min };
 
+export constexpr bool atomic_load_order(MemOrder order) {
+  return order == MemOrder::relaxed || order == MemOrder::consume ||
+         order == MemOrder::acquire || order == MemOrder::seq_cst;
+}
+
+export constexpr bool atomic_store_order(MemOrder order) {
+  return order == MemOrder::relaxed || order == MemOrder::release || order == MemOrder::seq_cst;
+}
+
+// A compare-exchange failure is a load. It cannot be stronger than the read side of success.
+export constexpr bool atomic_failure_order(MemOrder success, MemOrder failure) {
+  if (success == MemOrder::release) success = MemOrder::relaxed;
+  if (success == MemOrder::acq_rel) success = MemOrder::acquire;
+  return atomic_load_order(failure) && failure <= success;
+}
+
 // One step of a typed access path ([basic.lval], [class.mem]): the i-th non-static data member,
 // direct base, virtual base, or array element with a constant index. Union members are fields.
 export enum class Step : std::uint8_t { field, base, vbase, elem };
@@ -225,11 +241,12 @@ export enum class Op : std::uint16_t {
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src
-  atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_})]],
-  atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_})]],
-  atomic__rmw [[=state({S, V, V}, {S, V}).imms({type, rmw, order}).accepts({volatile_})]],
-  atomic__cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({type, order, order}).accepts({volatile_})]],
-  fence [[=state({S}, {S}).imms({order})]],
+  atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_}).with({nonconstant})]],
+  atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_}).with({nonconstant})]],
+  atomic__rmw [[=state({S, V, V}, {S, V}).imms({type, rmw, order}).accepts({volatile_}).with({nonconstant})]],
+  // Address, expected value, desired value. The data results are the prior value and success.
+  atomic__cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({type, order, order}).accepts({volatile_}).with({nonconstant})]],
+  fence [[=state({S}, {S}).imms({order}).with({nonconstant})]],
 
   // Dynamic dispatch and RTTI. The vptr is a typed field holding `vtable_addr(C)`.
   vfunc [[=state({S, V}, {V}).imms({entity, u32})]],  // the function in a class's vtable slot
