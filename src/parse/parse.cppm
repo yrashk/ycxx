@@ -8357,10 +8357,12 @@ private:
               !same_function_parameters(d.type, *function, false, compare_object))
             return false;
         }
-        // An unqualified implicit object corresponds to either ref-qualified form.
-        if (previous.fn_ref != current.fn_ref && previous.fn_ref != ast::RefQual::none &&
-            current.fn_ref != ast::RefQual::none)
-          return false;
+        if (previous.fn_ref != current.fn_ref) {
+          if (previous.fn_ref != ast::RefQual::none && current.fn_ref != ast::RefQual::none) return false;
+          // GCC distinguishes the unqualified and ref-qualified implicit objects too.
+          if (s_.compatibility() == ast::Compatibility::gcc && !is_static && !(d.flags & sema::decl_flag::static_))
+            return false;
+        }
       }
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;
@@ -8795,7 +8797,7 @@ private:
               return false;
             }
         }
-        if (fn) {
+        if (fn && s_.compatibility() == ast::Compatibility::spec) {
           std::vector<std::pair<u16, u16>> deduced;
           for (QualType p : types.rec(sem.type).params) s_.templates().params_in(p, deduced);
           bool after_pack = false;

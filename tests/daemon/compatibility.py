@@ -212,6 +212,56 @@ constexpr int byte =
 static_assert(byte == 255);
 #endif
 ''')
+    (world.scope / 'function-template-pack.cpp').write_text('''\
+#ifndef VALID_ONLY
+template<class... A, class... B> void two_packs() {}
+template<class... A, class B> void missing() {}
+#endif
+template<class... A, class B> void deduce(B) {}
+template<class... A, class B = int> void with_default() {}
+void check() {
+#ifndef VALID_ONLY
+  two_packs();
+  two_packs<int>();
+#endif
+  deduce<int>(42);
+  with_default<int>();
+#ifdef MISSING
+  missing<int>();
+#endif
+}
+''')
+    (world.scope / 'ref-qualified.cpp').write_text('''\
+struct Receiver {
+  int f();
+  int f() &;
+  operator int() { return 3; }
+  operator int() & { return 4; }
+};
+int Receiver::f() { return 1; }
+int Receiver::f() & { return 2; }
+int use(Receiver& receiver) {
+#ifdef LVALUE_CALL
+  return receiver.f();
+#else
+  return Receiver{}.f();
+#endif
+}
+#ifdef STATIC_MEMBER
+struct Static { static int f(); int f() &; };
+#endif
+''')
+    (world.scope / 'addressof-pack.cpp').write_text('''\
+template<class... Ts> int* address(Ts&... args) { return __builtin_addressof(args...); }
+#ifdef TWO_WRITTEN
+template<class... Ts> int* address_twice(int& first, Ts&... rest) {
+  return __builtin_addressof(first, rest...);
+}
+#endif
+#ifdef INSTANTIATE
+int* forward_address(int& value) { return address(value); }
+#endif
+''')
     default = invoke('-E', 'version.cpp')
     assert b'202603L' in default[1], default
     pid = world.pid()
@@ -247,6 +297,17 @@ static_assert(byte == 255);
                 _, _, diagnostic = invoke(*flags, '-DEXPECTED=0', '-DFORCE_DIRECTIVE', '-fsyntax-only',
                                          f'offset-{i}.cpp', status=1)
                 assert b'unsupported embed parameter' in diagnostic, diagnostic
+        invoke(*flags, '-fsyntax-only', 'function-template-pack.cpp', status=mode == 'spec')
+        invoke(*flags, '-DVALID_ONLY', '-fsyntax-only', 'function-template-pack.cpp')
+        if mode != 'spec':
+            invoke(*flags, '-DMISSING', '-fsyntax-only', 'function-template-pack.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'ref-qualified.cpp', status=mode != 'gcc')
+        if mode == 'gcc':
+            invoke(*flags, '-DLVALUE_CALL', '-fsyntax-only', 'ref-qualified.cpp', status=1)
+            invoke(*flags, '-DSTATIC_MEMBER', '-fsyntax-only', 'ref-qualified.cpp', status=1)
+        invoke(*flags, '-fsyntax-only', 'addressof-pack.cpp')
+        invoke(*flags, '-DTWO_WRITTEN', '-fsyntax-only', 'addressof-pack.cpp', status=mode == 'gcc')
+        invoke(*flags, '-DINSTANTIATE', '-fsyntax-only', 'addressof-pack.cpp', status=mode == 'gcc')
         if mode != 'gcc':
             expected_layout = '12' if mode == 'clang' else '8'
             invoke(DARWIN, *flags, '-DEXPECTED=' + expected_layout, '-fsyntax-only', 'layout.cpp')

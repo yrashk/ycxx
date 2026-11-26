@@ -433,16 +433,14 @@ evidence = ["tests/own/decls/member-attribute-splice.reject.cpp"]
 
 [[divergence]]
 id = "function-template-pack-position"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[temp.param]"
 prior = "Enforce the declaration-time constraint in the draft example."
 spec = "Reject the misplaced pack in the declaration."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Accepts the declaration and diagnoses a failed call."
-clang_observed = "Accepts the declaration and diagnoses a failed call."
-evidence = ["tests/own/templates/p4-function-pack-position.reject.cpp", "tests/draft/DISAGREEMENTS.md"]
+gcc = "Accept the declaration. A following pack can be empty. A following required parameter must still be deducible or supplied for a call to succeed."
+clang = "Same as GCC."
+evidence = ["tests/own/templates/p4-function-pack-position.reject.cpp", "tests/draft/DISAGREEMENTS.md", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "function-type-language-linkage"
@@ -472,15 +470,14 @@ evidence = ["docs/EXTENSIONS.md", "tests/own/builtins/dependent-transform-overlo
 
 [[divergence]]
 id = "builtin-addressof-pack"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "#1099"
 prior = "Apply the ordinary pack expansion rules to builtin arguments, including __builtin_addressof, as Clang does."
 spec = "Check the builtin's arity after pack expansion."
-gcc = "Same as spec."
+gcc = "Require one written argument. A single pack operand may be dependent in the definition, but its instantiation is rejected."
 clang = "Same as spec."
-gcc_observed = "Rejects a pack expansion passed to __builtin_addressof."
-evidence = ["tests/own/builtins/pack-arguments-addressof.run.cpp"]
+evidence = ["tests/own/builtins/pack-arguments-addressof.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "empty-union-list"
@@ -509,16 +506,14 @@ evidence = ["tests/own/layout/class-head-alignas/class-repeated.accept.cpp", "te
 
 [[divergence]]
 id = "mixed-ref-qualified-redeclaration"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "unverified" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[basic.scope.scope], [over.load]"
 prior = "Check correspondence when a member has an explicit ref-qualifier and another does not."
 spec = "Diagnose the tested corresponding redeclarations."
-gcc = "Same as spec."
+gcc = "Treat the tested unqualified and ref-qualified nonstatic members and conversions as overloads. A static member still conflicts with the matching ref-qualified declaration."
 clang = "Same as spec."
-gcc_observed = "Accepts the tested member and conversion operator declarations."
-clang_observed = "Rejects both tested declarations."
-evidence = ["tests/own/ref-qualified-members/ref-qualified-mixed-redeclaration.reject.cpp", "tests/own/classes/conversion-ref-qualified-mixed-same-cv.reject.cpp"]
+evidence = ["tests/own/ref-qualified-members/ref-qualified-mixed-redeclaration.reject.cpp", "tests/own/classes/conversion-ref-qualified-mixed-same-cv.reject.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "defaulted-spaceship-result-test"

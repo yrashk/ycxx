@@ -1518,6 +1518,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
   receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
   names encode the ref qualifier for mixed-object calls.
+- GCC mode also permits an unqualified nonstatic member or conversion to overload its
+  ref-qualified counterpart. Spec and Clang modes diagnose the corresponding declarations.
 - Ref-qualified virtual calls and broader template cases remain open.
 
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
@@ -2433,8 +2435,9 @@ session's.*
   `sizeof...(P)` of a template parameter pack.
 - **Declarations:** `class... Ts`, `T... Ns` (a pack of an earlier parameter's type too),
   `Ts... xs`, `Ts&&... xs` (`T...` without a pack is a C ellipsis), `pattern...` in template
-  argument lists. A class or variable template's pack is last; a function template's is followed
-  only by deduced or defaulted parameters ([temp.param]).
+  argument lists. A class or variable template's pack is last. Spec mode requires function
+  template parameters following a pack to be deducible or defaulted ([temp.param]). GCC and
+  Clang modes accept those declarations and check whether a call can determine its arguments.
 - **Substitution and deduction** (`ycxx.sema:templates`): `substitute_expansion` expands an
   expansion in a list (function parameters, template arguments) with each pack bound to its
   element, failing on packs of different lengths ([temp.variadic]/7). Deduction compares lists
@@ -2769,9 +2772,9 @@ fixtures mark the oracle disagreements, and the compatibility test exercises the
 An argument of a builtin with ordinary expression arguments (`src/lex/builtins.cppm`'s
 `builtin_functions`) may be a pack expansion, as a call's may (`__builtin_strlen(a...)`,
 `__builtin_memcmp(a..., n)`). The parser reads it through the same `expandable` path as call
-arguments. While a pack is unexpanded the call is one dependent operand and its arity is not
-checked; the instantiation checks arity and conversions on the expanded arguments, as Clang and
-GCC do. GCC rejects `__builtin_addressof(a...)`; ycxx accepts it, as Clang does. Fixtures:
+arguments. While a pack is unexpanded the call is one dependent operand. Instantiation checks
+arity and conversions on the expanded arguments. In GCC mode, `__builtin_addressof` requires a
+single written operand and diagnoses an instantiated expansion. Fixtures:
 `tests/own/builtins/pack-arguments*`.
 
 ## GNU constantness probe (#1065)
