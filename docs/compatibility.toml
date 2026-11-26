@@ -609,3 +609,16 @@ template<class... Ts> int enu(Ts...[N::first]) { return 2; }
 int call() { return var<int>(0) + enu<int>(0); }
 '''
 evidence = ["STATUS.md"]
+
+[[divergence]]
+id = "trivially-copyable-no-eligible-copy"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[class.prop]/1.1, [special]/6, #1417"
+prior = "Special members with unsatisfied trailing requires-clauses were not supported."
+spec = "A class whose copy and move constructors and assignment operators are all ineligible (unsatisfied constraints) is not trivially copyable. Type-trait built-ins do not classify class template specializations yet (#218)."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Reports such a class as trivially copyable."
+clang_observed = "Reports such a class as not trivially copyable, as the draft says."
+evidence = ["tests/own/member-requires/no-eligible-copy.accept.cpp"]
