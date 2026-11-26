@@ -1067,3 +1067,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`
   (`find_program(... clang++)`), not `${CMAKE_CXX_COMPILER}`.
   - Learned on #650.
+- **A tentative parse decides on syntax diagnostics, not on errors or on where it stopped.** The
+  first #1190 version took a template argument as a type-id only if its parse gave no error. That
+  accepted the ill-formed type-id `IC<P(P(p))[1]>` as an expression and hid type errors behind
+  expression diagnostics. The second version took "the parse reached `>`" instead. But the
+  declarator parser reports `unexpected identifier` and then keeps going to the argument's end,
+  so `bool(&g)` stayed a type-id.
+  - Do: use `Sema::has_syntax_error_since` (expected or unexpected tokens) together with the end
+    position. When both readings fail, report the diagnostics of the reading the grammar prefers.
+  - Learned on #1190.
