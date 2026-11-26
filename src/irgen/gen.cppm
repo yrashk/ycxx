@@ -1848,6 +1848,7 @@ class Gen {
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
+    if (is<ast::AtomicCall>(a)) return atomic_builtin(a);
     if (is<ast::Throw>(a)) {
       if (selecting_initializer_) unsupported(a, "inside a class initializer selection");
       auto expr = get<ast::Throw>(a);
@@ -1924,6 +1925,66 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  std::optional<ValueId> atomic_builtin(At a) {
+    const auto operation = get<ast::AtomicCall>(a);
+    const auto args = ast_.children(operation.args);
+    std::array<ValueId, 6> values;
+    for (std::size_t i = 0; i < args.size(); ++i) values[i] = rvalue(child(a, args[i]));
+    const std::uint64_t order[]{operation.order};
+    if (operation.op == ast::AtomicOp::fence) {
+      stateful(ir::Op::fence, {}, {}, order);
+      return std::nullopt;
+    }
+
+    const ast::QualType object = facts_.pointee(info(child(a, args[0])).type);
+    const auto integer = ast::without_cv(ty(object));
+    const ir::Flags flags = access_flags(object);
+    const ir::Ty word_result[]{vty(integer)};
+    const std::uint64_t access[]{word(integer), operation.order};
+    switch (operation.op) {
+      case ast::AtomicOp::load:
+        return b_.result(stateful(ir::Op::atomic__load, word_result, std::span(values).first(1), access, flags), 1);
+      case ast::AtomicOp::store:
+        stateful(ir::Op::atomic__store, {}, std::span(values).first(2), access, flags);
+        return std::nullopt;
+      case ast::AtomicOp::compare_exchange: {
+        const Place expected{values[1], facts_.pointee(info(child(a, args[1])).type)};
+        const ValueId compare = load(expected, ir::bit(ir::Flag::call_body));
+        const ValueId operands[]{values[0], compare, values[2]};
+        const ir::Ty results[]{vty(integer), vty(facts_.bool_type())};
+        const std::uint64_t orders[]{word(integer), operation.order, operation.failure_order};
+        const auto cas = stateful(ir::Op::atomic__cmpxchg, results, operands, orders, flags);
+        const auto success = b_.result(cas, 2);
+        const auto miss = new_block(), done = new_block();
+        cond_br(success, edge(done), edge(miss));
+        enter(miss);
+        store(expected, b_.result(cas, 1), ir::bit(ir::Flag::call_body));
+        br(done);
+        enter(done);
+        return success;
+      }
+      case ast::AtomicOp::rmw: {
+        const std::uint64_t update[]{word(integer), operation.update, operation.order};
+        const auto n = stateful(ir::Op::atomic__rmw, word_result, std::span(values).first(2), update, flags);
+        const auto old = b_.result(n, 1);
+        if (!operation.returns_new) return old;
+        ir::Op arithmetic;
+        switch (ir::Rmw(operation.update)) {
+          case ir::Rmw::add: arithmetic = ir::Op::add; break;
+          case ir::Rmw::sub: arithmetic = ir::Op::sub; break;
+          case ir::Rmw::and_: arithmetic = ir::Op::and_; break;
+          case ir::Rmw::or_: arithmetic = ir::Op::or_; break;
+          case ir::Rmw::xor_: arithmetic = ir::Op::xor_; break;
+          default: std::unreachable();
+        }
+        // The GNU operations use modular arithmetic even for signed operands.
+        return pure(arithmetic, integer, {old, values[1]});
+      }
+      case ast::AtomicOp::fence: std::unreachable();
+    }
+    std::unreachable();
   }
 
   // Sema proved that the fields fill both representations in target byte order. Use
@@ -2379,7 +2440,8 @@ class Gen {
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
-          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) || is<ast::BitCast>(a) ||
+          is<ast::BuiltinCall>(a) || is<ast::AtomicCall>(a) || is<ast::VariadicBuiltin>(a) ||
+          is<ast::ThreeWay>(a) || is<ast::BitCast>(a) ||
           is<ast::SourceLine>(a) || is<ast::SourceLocation>(a) || is<ast::DefaultSourceContext>(a)))
       return false;
     bool proven = true;

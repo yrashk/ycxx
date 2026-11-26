@@ -178,6 +178,18 @@ struct BuiltinCall {
   [[=indeterminately_sequenced]] ChildList args;
 };
 
+// GNU atomic operations. Orders and the update operation use ir::MemOrder and ir::Rmw values.
+enum class AtomicOp : u8 { load, store, rmw, compare_exchange, fence };
+struct AtomicCall {
+  ExprInfo info;
+  AtomicOp op;
+  u8 order;
+  u8 failure_order;
+  u8 update;
+  bool returns_new;
+  [[=indeterminately_sequenced]] ChildList args;
+};
+
 // The written destination type and source expression of __builtin_bit_cast.
 struct BitCast {
   ExprInfo info;
@@ -660,7 +672,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
                           ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation,
-                          ImmediateVirtualCall, BitCast>;
+                          ImmediateVirtualCall, BitCast, AtomicCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

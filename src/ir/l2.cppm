@@ -77,6 +77,8 @@ export enum class Imm : std::uint8_t {
   u32,     // a size, an alignment, an ordinal
   pred,    // a Pred
   alias,   // the alias tag: the L1 access type (a QualType), ignored by equivalence
+  order,   // an ir::MemOrder
+  rmw,     // an ir::Rmw
 };
 
 export enum class Arg : std::uint8_t { state, value, values };
@@ -178,6 +180,12 @@ export enum class Op : std::uint16_t {
   // Memory: the result's or the stored value's type is the access width.
   load [[=state({S, V}, {V}).imms({alias}).accepts({volatile_})]],
   store [[=state({S, V, V}, {S}).imms({alias}).accepts({volatile_})]],
+  // The first native atomic slice accesses naturally aligned i32 objects.
+  atomic_load [[=state({S, V}, {S, V}).imms({order}).accepts({volatile_})]],
+  atomic_store [[=state({S, V, V}, {S}).imms({order}).accepts({volatile_})]],
+  atomic_rmw [[=state({S, V, V}, {S, V}).imms({rmw, order}).accepts({volatile_})]],
+  atomic_cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({order, order}).accepts({volatile_})]],
+  fence [[=state({S}, {S}).imms({order})]],
   // Calls. The first u32 is a mask of the arguments that are signed: an argument narrower than
   // the slot the calling convention gives it is extended to it, sign-extended where its bit is
   // set. The second is how many of the last arguments the callee's ellipsis matches (L1's). The
@@ -443,6 +451,13 @@ std::expected<void, std::string> verify(const Function& f) {
       if (auto e = check_sig(f, s.out, res, "result")) return at(*e);
       if (nd.flags & ~s.flags) return at("flag not accepted by this op");
       if (nd.nimm != s.imm.size) return at("wrong number of immediates");
+      auto imms = f.imms_of(n);
+      for (std::size_t i = 0; i < imms.size(); ++i) {
+        if (s.imm.view()[i] == Imm::order && imms[i] > std::to_underlying(ir::MemOrder::seq_cst))
+          return at("bad memory order");
+        if (s.imm.view()[i] == Imm::rmw && imms[i] > std::to_underlying(ir::Rmw::xor_))
+          return at("unsupported atomic read-modify-write operation");
+      }
       if (nd.nsucc != s.succ) return at("wrong number of successors");
       for (ValueId v : f.operands_of(n)) {
         const Value& d = f.value(v);
@@ -522,6 +537,26 @@ std::expected<void, std::string> verify(const Function& f) {
           break;
         case Op::load: case Op::store:
           if (t(1) != Type::ptr) return at("the address must be a ptr");
+          break;
+        case Op::atomic_load:
+          if (t(1) != Type::ptr || f.type(res[1]) != Type::i32)
+            return at("atomic load takes a ptr and yields i32");
+          if (!ir::atomic_load_order(ir::MemOrder(imms[0]))) return at("invalid atomic load order");
+          break;
+        case Op::atomic_store:
+          if (t(1) != Type::ptr || t(2) != Type::i32) return at("atomic store takes a ptr and i32");
+          if (!ir::atomic_store_order(ir::MemOrder(imms[0]))) return at("invalid atomic store order");
+          break;
+        case Op::atomic_rmw:
+          if (t(1) != Type::ptr || t(2) != Type::i32 || f.type(res[1]) != Type::i32)
+            return at("atomic read-modify-write takes a ptr and i32 and yields i32");
+          break;
+        case Op::atomic_cmpxchg:
+          if (t(1) != Type::ptr || t(2) != Type::i32 || t(3) != Type::i32 ||
+              f.type(res[1]) != Type::i32 || f.type(res[2]) != Type::i1)
+            return at("atomic compare-exchange takes a ptr and two i32s and yields i32 and i1");
+          if (!ir::atomic_failure_order(ir::MemOrder(imms[0]), ir::MemOrder(imms[1])))
+            return at("invalid compare-exchange failure order");
           break;
         case Op::va_start: case Op::va_arg:
           if (t(1) != Type::ptr) return at("the variadic cursor must be a ptr");
@@ -664,6 +699,8 @@ void print(std::string& out, EntityId name, const Function& f) {
             case Imm::u32: std::format_to(o, "{}", words[i]); break;
             case Imm::pred: out += ir::name_of(Pred(words[i])); break;
             case Imm::alias: std::format_to(o, "T{}", words[i]); break;
+            case Imm::order: out += ir::name_of(ir::MemOrder(words[i])); break;
+            case Imm::rmw: out += ir::name_of(ir::Rmw(words[i])); break;
           }
         }
         out += ']';
