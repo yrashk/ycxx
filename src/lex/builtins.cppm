@@ -49,7 +49,6 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{.name = "__array_rank", .trait = TypeTrait::array_rank, .arity = 1,
                   .transforms = false, .replay_dependent = true},
     TypeTraitInfo{"__is_same", TypeTrait::is_same, 2, false},
-    TypeTraitInfo{"__is_same_as", TypeTrait::is_same, 2, false},
     TypeTraitInfo{"__is_void", TypeTrait::is_void, 1, false},
     TypeTraitInfo{"__is_integral", TypeTrait::is_integral, 1, false},
     TypeTraitInfo{"__is_floating_point", TypeTrait::is_floating_point, 1, false},

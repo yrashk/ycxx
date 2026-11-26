@@ -3238,7 +3238,7 @@ struct A { int n; };
 #elif CASE == 4
 #define HEAD (__is_class(T) == true)
 #elif CASE == 5
-#define HEAD (__is_same_as(T, A))
+#define HEAD (__is_same(T, A))
 #elif CASE == 6
 #define HEAD (__is_same(T, A) && __is_class(T))
 #elif CASE == 7
@@ -3977,6 +3977,7 @@ int main() {{ return call(Empty{{}}, 19) != 19; }}
 
 def remaining_constraint_symbols(world, gxx):
     scope = world.scope
+    (scope / 'alignof-expression.cpp').write_text('int value; static_assert(alignof(value) == alignof(int));\n')
     (scope / 'constraint-layout.cpp').write_text(r'''
 #if CASE == 0
 #define C (sizeof(int) >= 1 && sizeof(T) > 0)
@@ -4044,6 +4045,9 @@ int call() { return f(7); }
             prefix = '_' if target == DARWIN else ''
             flags = [target, '-fcompat=' + mode]
             native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+            syntax = [*flags, '-fsyntax-only', 'alignof-expression.cpp']
+            cold, warm = (world.cxx(syntax, scope, env, timeout=40) for env in (world.cold, world.daemon))
+            assert cold == warm and warm[0] == 1 and b'type specifier' in warm[2], (mode, target, cold, warm)
             extended = '3fff8000000000000001' if target == LINUX else '3ff0000000000000'
             negative = 'Ld8000000000000000E' if mode == 'gcc' else 'ngLd0000000000000000E'
             string = 'tlA4_KcLS1_97ELS1_98ELS1_99EE' if mode == 'gcc' else 'LA4_KcE'
@@ -4090,75 +4094,6 @@ int main() {{ return f({argument}) != 7; }}
                     assert builtin in warm[2] and b'written constraint' in warm[2], warm[2]
 
 
-def expression_alignof(world, gxx):
-    scope = world.scope
-    (scope / 'expression-alignof.cpp').write_text('''
-struct Record { alignas(32) char aligned; int field : 3; };
-Record record;
-int source;
-#if CASE == 0
-static_assert(alignof(int) == 4);
-#elif CASE == 1
-static_assert(alignof(source) == 4 && alignof source == 4);
-static_assert(alignof(record.aligned) == 32);
-#elif CASE == 2
-static_assert(alignof(record.field) == 4);
-#else
-template<class T> requires (alignof(source) > 0 && sizeof(T) > 0)
-int g(T n) { return n; }
-int call() { return g(7); }
-#endif
-''')
-    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
-    for mode in MODES:
-        for target in (LINUX, DARWIN):
-            flags = [target, '-fcompat=' + mode]
-            controls = {
-                'spec': [((), 1, b'type specifier'), (('-w',), 1, b'type specifier')],
-                'gcc': [((), 0, b''), (('-Werror',), 0, b''), (('-Wpedantic',), 0, b'warning: ISO C++'),
-                        (('-Werror=pedantic',), 1, b'error: ISO C++'),
-                        (('-pedantic-errors',), 1, b'error: ISO C++'),
-                        (('-pedantic-errors', '-Wno-pedantic'), 0, b'')],
-                'clang': [((), 0, b'warning: alignof'), (('-Werror',), 1, b'error: alignof'),
-                          (('-pedantic-errors',), 1, b'error: alignof'),
-                          (('-Wno-gnu-alignof-expression',), 0, b''),
-                          (('-pedantic-errors', '-Wno-gnu-alignof-expression'), 0, b'')],
-            }
-            for case, options, status, text in (
-                (0, (), 0, b''),
-                (2, (), 1, b'type specifier' if mode == 'spec' else b'bit-field'),
-                *((1, options, status, text) for options, status, text in controls[mode]),
-            ):
-                args = [*flags, *options, f'-DCASE={case}', '-fsyntax-only', 'expression-alignof.cpp']
-                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
-                assert cold == warm and warm[0] == status, (mode, target, case, options, cold, warm)
-                assert (text in warm[2] if text else not warm[2]), (mode, target, options, warm)
-            if mode == 'spec':
-                continue
-            args = [*flags, '-w', '-DCASE=3', '-c', 'expression-alignof.cpp', '-o', 'expression-alignof.o']
-            outputs = []
-            for env in (world.cold, world.daemon):
-                result = world.cxx(args, scope, env, timeout=40)
-                assert result == (0, b'', b''), (mode, target, result)
-                outputs.append((scope / 'expression-alignof.o').read_bytes())
-            prefix = '_' if target == DARWIN else ''
-            operand = 'azL_Z6sourceE' if mode == 'gcc' else 'Lm4E'
-            name = f'{prefix}_Z1gIiQaagt{operand}Li0EgtstT_Li0EEiS0_'
-            names = outputs[1].split(b'\0')
-            assert outputs[0] == outputs[1] and name.encode() in names, (
-                mode, target, name, [n for n in names if b'_Z1g' in n])
-            peer = gxx if mode == 'gcc' else clang
-            native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
-            if peer and native:
-                (scope / 'expression-alignof-caller.cpp').write_text(f'''
-extern "C" int g(int) asm("{name}");
-int main() {{ return g(7) != 7; }}
-''')
-                subprocess.run([peer, '-std=c++26', 'expression-alignof-caller.cpp', 'expression-alignof.o',
-                                '-o', 'expression-alignof'], cwd=scope, check=True, capture_output=True, timeout=40)
-                subprocess.run([scope / 'expression-alignof'], cwd=scope, check=True, capture_output=True, timeout=20)
-
-
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -4201,7 +4136,6 @@ def main():
         lambda_constraint_expression_symbols(world, gxx)
         implicit_object_constraint_symbols(world, gxx)
         remaining_constraint_symbols(world, gxx)
-        expression_alignof(world, gxx)
         lambda_conversion_symbols(world, gxx)
         floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.

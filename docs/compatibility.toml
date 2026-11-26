@@ -649,14 +649,15 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream 
 
 [[divergence]]
 id = "alignof-expression-extension"
-status = "pending"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
-reference = "[expr.alignof], Itanium C++ ABI §5.1.6.2"
+status = "shared"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.alignof], DECISIONS §1.2"
 prior = "Require the standard type-id operand in every mode."
 spec = "Require a type-id."
-gcc = "Accept an unevaluated expression operand, including an explicitly aligned field. Diagnose the extension under -Wpedantic. Use az for the tested nondependent expression in a constraint symbol."
-clang = "Accept the same operands and warn by default under -Wgnu-alignof-expression. Fold the tested nondependent expression to a size-type literal in a constraint symbol."
-limits = "Covers ordinary variables, non-static record fields, parenthesized or unary expression operands, and the bit-field rejection. The type-id form stays available in all modes."
+gcc = "Require a type-id under ycxx's shared header-extension policy."
+clang = "Same as GCC."
+gcc_observed = "GCC accepts an expression, diagnoses the extension under -Wpedantic, and retains az in the tested constraint symbol."
+clang_observed = "Clang accepts an expression with -Wgnu-alignof-expression enabled by default and folds the tested nondependent operand."
 probe = 'int value; static_assert(alignof(value) == alignof(int));'
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax, object and warning-flag probes"]
 
@@ -792,7 +793,8 @@ reference = "[temp.over.link], Itanium C++ ABI §5.1.6.2, docs/EXTENSIONS.md"
 prior = "Retain an opaque constraint fingerprint even when the source uses a recognized type predicate."
 spec = "Keep the predicate's source argument types with the vendor expression encoding."
 gcc = "For the tested direct head predicate, omit the constraint from the primary symbol. Diagnose the tested predicates in trailing clauses or inside a compound written expression at emission."
-clang = "Keep the predicate structurally with u and its canonical builtin name in either position. __is_same_as uses the __is_same encoding."
+clang = "Keep the predicate structurally with u and its canonical builtin name in either position."
+clang_observed = "The additional Clang spelling __is_same_as uses the same encoding as __is_same."
 probe = 'template<class T> requires (__is_class(T) && true) int f(T);'
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary symbol probes with -fabi-compat-version=0 and upstream Clang 23.1.6 ELF and Mach-O probes"]
 

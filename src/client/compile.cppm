@@ -147,9 +147,11 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
 namespace ycxx::compile {
 namespace {
 
+// `pedantic` selects no warning: ycxx accepts the extensions it implements (docs/EXTENSIONS.md)
+// silently. Tests pass `-Wno-pedantic` so that the oracles accept them under `-pedantic-errors`.
 enum class WarningFlag : std::uint8_t {
   all, extra, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large,
-  bit_field_width, overflow, literal_range, pedantic, gnu_alignof_expression, count
+  bit_field_width, overflow, literal_range, pedantic, count
 };
 
 struct WarningSelection {
@@ -173,12 +175,10 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
       {"bitfield-width", WarningFlag::bit_field_width},
       {"overflow", WarningFlag::overflow},
       {"literal-range", WarningFlag::literal_range},
-      {"pedantic", WarningFlag::pedantic},
-      {"gnu-alignof-expression", WarningFlag::gnu_alignof_expression}};
+      {"pedantic", WarningFlag::pedantic}};
   for (const auto& [name, flag] : names)
     if (arg == name && (!as_error || flag == WarningFlag::enum_too_large || flag == WarningFlag::overflow ||
-                        flag == WarningFlag::literal_range || flag == WarningFlag::bit_field_width ||
-                        flag == WarningFlag::pedantic || flag == WarningFlag::gnu_alignof_expression))
+                        flag == WarningFlag::literal_range || flag == WarningFlag::bit_field_width))
       return WarningSelection{flag, enabled, as_error};
   return std::nullopt;
 }
@@ -207,8 +207,6 @@ class WarningOptions {
       case lex::Warning::bit_field_width: return promoted(WarningFlag::bit_field_width);
       case lex::Warning::overflow: return promoted(WarningFlag::overflow);
       case lex::Warning::literal_range: return promoted(WarningFlag::literal_range);
-      case lex::Warning::pedantic: return promoted(WarningFlag::pedantic, pedantic_errors_);
-      case lex::Warning::gnu_alignof_expression: return promoted(WarningFlag::gnu_alignof_expression, pedantic_errors_);
       default: return warnings_as_errors_;
     }
   }
@@ -230,8 +228,6 @@ class WarningOptions {
       case lex::Warning::bit_field_width: return selected(WarningFlag::bit_field_width).value_or(true);
       case lex::Warning::overflow: return selected(WarningFlag::overflow).value_or(true);
       case lex::Warning::literal_range: return selected(WarningFlag::literal_range).value_or(true);
-      case lex::Warning::pedantic: return selected(WarningFlag::pedantic).value_or(pedantic_errors_);
-      case lex::Warning::gnu_alignof_expression: return selected(WarningFlag::gnu_alignof_expression).value_or(true);
     }
     std::unreachable();
   }
@@ -291,7 +287,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   Options o;
   o.pp.target = pp::native_target;
   std::vector<std::string_view> other_inputs;
-  std::string_view clang_warning;
+  std::string_view clang_bit_field_warning;
   using Kind = pipeline::LinkOperand::Kind;
   const auto add_operand = [&](Kind kind, std::vector<std::string>& paths, std::string_view path) {
     o.operands.push_back({kind, paths.size()});
@@ -369,16 +365,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     // Reflection and contracts are part of C++26, and ycxx's diagnostics are always plain:
     // what other compilers need these flags for is always on here.
     else if (a == "-pedantic-errors") o.warnings.pedantic_errors();
-    else if (a == "-pedantic") o.warnings.select({WarningFlag::pedantic, true, false});
     else if (a == "-w") o.warnings.suppress_warnings();
     else if (a == "-Werror" || a == "-Wno-error") o.warnings.warnings_as_errors(a == "-Werror");
     else if (a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
              a == "-fno-color-diagnostics")
       continue;
     else if (auto warning = warning_option(a)) {
-      const auto flag = warning->flag;
-      if ((flag == WarningFlag::bit_field_width || flag == WarningFlag::gnu_alignof_expression) &&
-          (warning->as_error || warning->enabled)) clang_warning = a;
+      if (warning->flag == WarningFlag::bit_field_width && (warning->as_error || warning->enabled)) clang_bit_field_warning = a;
       o.warnings.select(*warning);
     }
     else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
@@ -387,8 +380,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (is_source(a)) add_operand(Kind::source, o.sources, a);
     else other_inputs.push_back(a);
   }
-  if (o.pp.compatibility == ast::Compatibility::gcc && !clang_warning.empty())
-    return std::unexpected(std::format("unsupported option '{}'", clang_warning));
+  if (o.pp.compatibility == ast::Compatibility::gcc && !clang_bit_field_warning.empty())
+    return std::unexpected(std::format("unsupported option '{}'", clang_bit_field_warning));
   o.warnings.compatibility(o.pp.compatibility);
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");

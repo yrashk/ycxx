@@ -87,6 +87,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   translation-unit configuration and is read from editor compilation commands. The
   [compatibility table](docs/compatibility.toml) records prior choices, mode behavior and probes. Constrained function
   templates use the current `Q` and `Tk` forms for supported requires-clauses and type constraints.
+  Mode-specific symbols also cover nested and lambda templates, including written folds,
+  member and allocation expressions, casts, and target floating-point literals. The table records
+  the fallback for builtin expressions whose symbols the two compilers cannot emit.
   GCC mode selects the last nonzero class-head alignment and carries a preceding alignment
   into a definition that supplies none. Clang mode checks alignment consistency on opaque
   class declarations. The compatibility table records Clang's underalignment case separately.
@@ -94,7 +97,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   mangled signature. GCC and Clang modes use one type for both. C function names retain their
   C linkage and unmangled symbols in every mode.
   Compiler modes also select the documented wide array bound conversions, constexpr byte
-  comparisons, empty union initializers, and abstract result checks.
+  comparisons, empty union initializers, abstract result checks, and over-width bit-field layout
+  and diagnostics.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
