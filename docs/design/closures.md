@@ -33,7 +33,8 @@ Clang 23 and GCC 16 (the probes at the end) and wrote this document.
 5. **Mangling:** a closure in a function is `<local-name>`: `Z <encoding> E` then
    `Ul <signature> E [<n>] _`, `v` for no parameters; in a variable or data member it is
    `<closure-prefix>`, `<name> M`. Members: `cl` (`K` unless `mutable`), `cv <type>` for the
-   conversion to a function pointer, `8__invoke` for the static invoker.
+   conversion to a function pointer, `8__invoke` for the static invoker (`4_FUN` in GCC
+   compatibility mode).
 6. **The body is analysed inside the enclosing analysis** (`analyze_body` or `item_sema`),
    which records one `ClosureDef` per lambda in completion order: the closure and its members'
    entities, the body tree and its own locals, the conversion and invoker bodies, the lambda's

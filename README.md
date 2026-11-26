@@ -32,6 +32,14 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 
 ### What you can do today
 
+**Select a compatibility mode.** Pass `ycxx cxx -fcompat=spec|gcc|clang` when compiling a
+translation unit, or put the flag in its `compile_commands.json` entry for editor checks.
+The default `spec` mode follows the pinned C++26 draft and published ABI. Documented extensions
+remain available in each mode for system and libycxx headers. The `gcc` and `clang` modes
+select the implemented GCC 16 and upstream Clang 23 behaviors. Use consistent modes
+when exchanging objects that depend on these ABI differences. The
+[compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
+
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 The resident engine builds executable targets from C++ source groups and declared external
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
