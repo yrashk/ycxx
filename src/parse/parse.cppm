@@ -284,7 +284,7 @@ public:
       bool is_inline = false;
       bool after_namespace = false;
       DeclAttributes attributes;
-      for (u32 t = its[k].begin; t < its[k].brace_begin; ++t) {
+      for (u32 t = its[k].declaration_begin(); t < its[k].brace_begin; ++t) {
         // Past attributes, `[[…]]` and `__attribute__((…))`.
         if (r.tokens[t].kind == lex::Tk::l_square || r.tokens[t].kind == lex::Tk::l_paren) {
           const u32 begin = t;
@@ -335,11 +335,13 @@ public:
     }
     for (u32 k = 0; k < its.size(); ++k) {
       if (x.in_class[k] || its[k].kind != ItemKind::declaration) continue;
-      lex::Tk a = r.tokens[its[k].begin].kind;
-      lex::Tk b = its[k].begin + 1 < its[k].end ? r.tokens[its[k].begin + 1].kind : lex::Tk::eof;
+      const u32 begin = its[k].declaration_begin();
+      if (begin + 1 >= its[k].end) continue;
+      lex::Tk a = r.tokens[begin].kind;
+      lex::Tk b = r.tokens[begin + 1].kind;
       if (a == lex::Tk::kw_using && b == lex::Tk::kw_namespace) x.directives.push_back({k, x.ns_of[k], std::nullopt, std::nullopt});
       if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
-        x.directives.push_back({k, x.ns_of[k], w.ins.names.intern(r.name(r.tokens[its[k].begin + 1])), std::nullopt});
+        x.directives.push_back({k, x.ns_of[k], w.ins.names.intern(r.name(r.tokens[begin + 1])), std::nullopt});
     }
     x.name_scoped.assign(items.items.size(), false);
     for (const auto& [k, scopes] : x.name_scopes) x.name_scoped[k] = true;
@@ -3563,6 +3565,8 @@ public:
   }
 
   void analyse() {
+    // Keep token offsets relative to the item's written beginning.
+    ps_.seek(it_->declaration_begin());
     bool member = it_->parent != items::none && p_->items().items[it_->parent].kind == ItemKind::class_def;
     switch (it_->kind) {
     case ItemKind::empty:
@@ -3672,7 +3676,7 @@ private:
     for (u32 j = it_->parent; j != items::none; j = p_->items().items[j].parent) {
       const items::Item& outer = p_->items().items[j];
       if (outer.kind == ItemKind::linkage_block)
-        if (auto l = linkage_named(p_->region(), outer.begin + 1)) return *l;
+        if (auto l = linkage_named(p_->region(), outer.declaration_begin() + 1)) return *l;
     }
     return std::nullopt;
   }
@@ -7311,7 +7315,7 @@ private:
   bool namespace_head_ok() {
     const pp::Region& r = p_->region();
     const u32 end = it_->brace_begin;
-    u32 t = it_->begin;
+    u32 t = it_->declaration_begin();
     auto k = [&](u32 j) { return j < end ? r.tokens[j].kind : Tk::l_brace; };
     auto fail = [&](u32 j, Diag d) {
       s_.diag(std::min(j, end) - it_->begin, d);
