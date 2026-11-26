@@ -10925,6 +10925,10 @@ public:
                const Braced* braces, u32 begin, u32 end) {
     Ex fail{NodeId::none, begin, end};
     if (!bound.ok()) return fail;
+    if (!types().is_object(t)) {
+      diag(begin, Diag::new_requires_object, t);
+      return fail;
+    }
     if (types().has_placeholder(t) || (args && !args->empty()) || (braces && !braces->clauses.empty())) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
@@ -10934,10 +10938,6 @@ public:
       Ex count = convert(bound, builtin(w_->target.size_type), bound.begin);
       if (!count.ok()) return fail;
       return dependent_node({count}, begin, end, types().pointer(t));
-    }
-    if (!types().is_object(t)) {
-      diag(begin, Diag::new_requires_object, t);
-      return fail;
     }
     if (!require_concrete_object(t, begin)) return fail;
     if (!scalar_allocation_type(t)) {

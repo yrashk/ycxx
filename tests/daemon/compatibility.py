@@ -4132,7 +4132,7 @@ int call() { return g(7); }
                 args = [*flags, *options, f'-DCASE={case}', '-fsyntax-only', 'expression-alignof.cpp']
                 cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
                 assert cold == warm and warm[0] == status, (mode, target, case, options, cold, warm)
-                assert (text in warm[2]) if text else not warm[2], (mode, target, options, warm)
+                assert (text in warm[2] if text else not warm[2]), (mode, target, options, warm)
             if mode == 'spec':
                 continue
             args = [*flags, '-w', '-DCASE=3', '-c', 'expression-alignof.cpp', '-o', 'expression-alignof.o']
