@@ -6172,6 +6172,7 @@ private:
       if (!s_.require_complete(d.type, d.name_at)) return bad();
       if (!s_.require_concrete_object(d.type, d.name_at)) return bad();
       u8 field_alignment = 0;
+      u8 written_field_alignment = 0;
       if (alignment && alignment->value && !alignment->dependent && !types.is_dependent(d.type)) {
         const auto natural = s_.layout_of(d.type, /*align=*/true);
         if (!natural) {
@@ -6182,7 +6183,8 @@ private:
           s_.diag(alignment->at, Diag::field_alignment_weak);
           return bad();
         }
-        if (alignment->value > *natural) field_alignment = alignment->value;
+        written_field_alignment = alignment->value;
+        if (written_field_alignment > *natural) field_alignment = written_field_alignment;
       }
       if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
@@ -6194,6 +6196,7 @@ private:
       sem.type = d.type;
       sem.bit_width = bit_width;
       sem.field_alignment = field_alignment;
+      sem.written_field_alignment = written_field_alignment;
       sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
@@ -9397,7 +9400,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address,
-                        d.field_alignment});
+                        d.field_alignment, d.written_field_alignment});
       } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
         out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
