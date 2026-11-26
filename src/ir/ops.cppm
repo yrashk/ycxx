@@ -291,7 +291,7 @@ export enum class Op : std::uint16_t {
   // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
   // ([expr.const]) from falling off the end.
   unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
-  consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
+  consteval_br [[=control({}, {}, 2).accepts({observes_context})]],  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
   invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).imms({u32}).accepts({not_constexpr})]],
