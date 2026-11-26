@@ -946,7 +946,7 @@ class Planner {
     GeneratorPlan plan;
     plan.name = decl.name;
     const auto& tool = require_field(decl, "tool");
-    const bool accepts_staged_tool = !sdk_header && !observer && decl.kind == "action.generate";
+    const bool accepts_staged_tool = !sdk_header && !observer;
     const auto* staged_tool = accepts_staged_tool ? std::get_if<InputArg>(&tool.data) : nullptr;
     if (const auto* spelling = std::get_if<std::string>(&tool.data)) {
       if (spelling->contains('\0') || !fs::path(*spelling).is_absolute())

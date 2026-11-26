@@ -3546,6 +3546,13 @@ Inspection reports current helper identity or availability without launching
 the action. The Make adapter uses these declarations for its C compiler and
 archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
+A rule-emitted generator can select an executable artifact with
+`tool = input("name")` (#1505). The producer's named output is staged using
+its bytes and executable mode, which enter the consumer's ordinary action
+identity. Inspection reports the staged path and selector and links the
+input edge to the producer. The staged tool example watches an executable
+script that writes a generated C++ header.
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
