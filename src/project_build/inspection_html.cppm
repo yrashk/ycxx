@@ -50,6 +50,9 @@ constexpr std::string_view styles = R"HTML(
   .facts th { color: var(--muted); font-size: .76rem; font-weight: 670; }
   .facts th:first-child { width: 22%; }
   .facts th:last-child { width: 38%; }
+  .catalog th:first-child { width: 40%; }
+  .catalog th:last-child { width: 31%; }
+  .catalog code { white-space: pre-wrap; }
   .owner, .fact-name, .location { display: block; }
   .owner, .origin, .fact-name { color: var(--muted); font-size: .86rem; }
   .fact-value, .fact-name, .origin { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -149,6 +152,15 @@ void escaped(std::string& out, std::string_view text) {
   }
 }
 
+void append_manifest_ref(std::string& out, std::string_view path, std::size_t line, std::size_t column, bool link) {
+  auto next = std::back_inserter(out);
+  if (link) std::format_to(next, R"(<a href="#manifest-line-{}">)", line);
+  escaped(out, path);
+  std::format_to(next, ":{}", line);
+  if (column != 0) std::format_to(next, ":{}", column);
+  if (link) out += "</a>";
+}
+
 void append_location(std::string& out, const PlanFact& fact, std::size_t lines) {
   if (!fact.origin.empty()) {
     out += R"(<span class="origin">)";
@@ -157,12 +169,7 @@ void append_location(std::string& out, const PlanFact& fact, std::size_t lines) 
   }
   if (fact.line == 0) return;
   out += R"(<span class="location">)";
-  const bool link = fact.line <= lines;
-  auto next = std::back_inserter(out);
-  if (link) std::format_to(next, R"(<a href="#manifest-line-{}">)", fact.line);
-  std::format_to(next, "build.ycxx:{}", fact.line);
-  if (fact.column != 0) std::format_to(next, ":{}", fact.column);
-  if (link) out += "</a>";
+  append_manifest_ref(out, "build.ycxx", fact.line, fact.column, fact.line <= lines);
   out += "</span>";
 }
 
@@ -556,6 +563,18 @@ void append_manifest(std::string& out, std::string_view text) {
   out += "</code></pre></div></section>\n";
 }
 
+std::string begin_report(std::string_view title) {
+  std::string out = R"(<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>)";
+  escaped(out, title);
+  out += "</title>";
+  out += styles;
+  out += "</head>\n<body><main>";
+  return out;
+}
+
 }  // namespace
 }  // namespace ycxx::build
 
@@ -564,14 +583,8 @@ export namespace ycxx::build {
 std::string render_inspection_html(const PlanInspection& inspection,
                                    const std::vector<PlanChange>* changes = nullptr,
                                    const std::optional<ModuleGraphComparison>& modules = std::nullopt) {
-  std::string out = R"(<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Build plan · )";
-  escaped(out, inspection.target);
-  out += "</title>";
-  out += styles;
-  out += "</head>\n<body><main><h1>Build plan for <code>";
+  auto out = begin_report(std::format("Build plan · {}", inspection.target));
+  out += "<h1>Build plan for <code>";
   escaped(out, inspection.target);
   out += R"(</code></h1><div class="layout"><div class="results">)";
   const std::string_view definition = inspection.definition;
@@ -587,6 +600,33 @@ std::string render_inspection_html(const PlanInspection& inspection,
   }
   append_facts(out, inspection.facts, lines);
   out += "</div>";
+  append_manifest(out, definition);
+  out += "</div></main></body></html>\n";
+  return out;
+}
+
+std::string render_target_catalog_html(const TargetCatalog& catalog, std::string_view definition) {
+  auto out = begin_report("Workspace targets");
+  out += R"(<h1 id="workspace-targets">Workspace targets</h1><div class="layout"><section class="panel" aria-labelledby="workspace-targets">)";
+  if (catalog.targets.empty()) {
+    out += R"(<p class="empty">No target declarations.</p>)";
+  } else {
+    out += R"(<table class="facts catalog" aria-labelledby="workspace-targets">
+<thead><tr><th scope="col">Target</th><th scope="col">Rule</th><th scope="col">Declared at</th></tr></thead><tbody>
+)";
+    for (const auto& entry : catalog.targets) {
+      out += "<tr><td><code>";
+      escaped(out, entry.name);
+      out += "</code></td><td><code>";
+      escaped(out, entry.kind);
+      out += R"(</code></td><td class="location">)";
+      const auto& [path, line, column] = entry.location;
+      append_manifest_ref(out, path, line, column, true);
+      out += "</td></tr>\n";
+    }
+    out += "</tbody></table>";
+  }
+  out += "</section>";
   append_manifest(out, definition);
   out += "</div></main></body></html>\n";
   return out;

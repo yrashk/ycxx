@@ -825,8 +825,10 @@ int build(std::span<const std::string_view> args) {
 int show(std::span<const std::string_view> args) {
   using ycxx::build::InspectionFormat;
   constexpr std::string_view usage =
-      "usage: ycxx show <target> [--target TRIPLE] [--format=text|json|source|html] [--against FILE]";
+      "usage: ycxx show <target> [--target TRIPLE] [--format=text|json|source|html] [--against FILE]\n"
+      "       ycxx show --targets [--format=text|json|html]";
   std::string_view target;
+  bool targets = false;
   const ast::Target* native_target = nullptr;
   InspectionFormat format = InspectionFormat::text;
   std::optional<std::filesystem::path> against;
@@ -836,7 +838,9 @@ int show(std::span<const std::string_view> args) {
       std::println("{}", usage);
       return 0;
     }
-    if (arg.starts_with("--format=")) {
+    if (arg == "--targets" && !targets) {
+      targets = true;
+    } else if (arg.starts_with("--format=")) {
       const auto named = arg.substr(9);
       if (named == "text") format = InspectionFormat::text;
       else if (named == "json") format = InspectionFormat::json;
@@ -862,7 +866,11 @@ int show(std::span<const std::string_view> args) {
       return 2;
     }
   }
-  if (target.empty()) {
+  if (targets && (!target.empty() || native_target || against || format == InspectionFormat::source)) {
+    std::println(std::cerr, "ycxx: --targets accepts only --format=text, --format=json, or --format=html\n{}", usage);
+    return 2;
+  }
+  if (!targets && target.empty()) {
     std::println(std::cerr, "{}", usage);
     return 2;
   }
@@ -871,12 +879,15 @@ int show(std::span<const std::string_view> args) {
     std::println(std::cerr, "ycxx: cannot determine the working directory");
     return 1;
   }
-  std::optional<std::string> tool_path;
-  if (const char* path = std::getenv("PATH")) tool_path = path;
-  const ycxx::build::RuleToolchain toolchain{
-      .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
-  };
-  auto shown = ycxx::build::show_project(cwd, target, format, toolchain, against, native_target);
+  const auto shown = [&] {
+    if (targets) return ycxx::build::show_targets(cwd, format);
+    std::optional<std::string> tool_path;
+    if (const char* path = std::getenv("PATH")) tool_path = path;
+    const ycxx::build::RuleToolchain toolchain{
+        .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
+    };
+    return ycxx::build::show_project(cwd, target, format, toolchain, against, native_target);
+  }();
   if (!shown) {
     std::println(std::cerr, "ycxx: {}", shown.error());
     return 1;
