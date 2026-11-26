@@ -526,7 +526,10 @@ public:
     // body is a complete-class context of every enclosing class ([class.mem.general]/8).
     const bool nested_before_close = item < d && ((own && d <= last_member(item)) || (body && within_outer_class(d, item)));
     if ((item < d && !nested_before_close) || (item == d && !own) || (inside && !body)) return false;
-    if (!classes_.is_defined(c)) class_def(d);
+    if (classes_.is_defined(c)) return true;
+    // Member lookup can reach this query while a class's field types are still being resolved.
+    if (std::ranges::contains(running_, class_def_key(d))) return false;
+    class_def(d);
     return classes_.is_defined(c);
   }
   // The outermost class that encloses item `item`, or none ([class.nest]).
