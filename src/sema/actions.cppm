@@ -1266,6 +1266,15 @@ public:
       // Until signatures can retain the replay, do not form a type that can lose a call check.
       if (pattern.kind == AliasCallPattern::Kind::may_erase) return std::nullopt;
     }
+    if (compatibility() == ast::Compatibility::gcc) {
+      // A dependent alias still carries the written transformations of its concrete
+      // result into a template signature. An already-bound alias uses the folded type.
+      if (!types().is_dependent(tmpl.type) && std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); }))
+        return tmpl.type;
+      auto result = templates_for_use(at).substitute(tmpl.type, bindings);
+      if (result && ins().types.is<ast::SWrittenTransform>(*result)) return types().canonical(*result);
+      return result;
+    }
     return templates_for_use(at).substitute(tmpl.type, bindings);
   }
 
@@ -9131,20 +9140,22 @@ public:
     return call(callee, {integer_literal(arg, begin, end)}, end, begin);
   }
 
-  // [lex.fcon]: `double`, or `float` or `long double` by the suffix. The lexer rounded the value to
-  // binary32 or binary64, the formats of these types on the target; the extended types' suffixes
-  // (`f16`, `bf16`, …) have no values yet (#336).
+  // [lex.fcon]: choose the target's representation of `double`, `float` or `long double`.
+  // The extended types' suffixes (`f16`, `bf16`, …) have no values yet (#336).
   Ex float_literal(const lex::Literal& lit, u32 begin, u32 end) {
     using enum lex::FloatSuffix;
     lex::FloatSuffix suffix = lit.float_suffix;
     Builtin k = suffix == f ? Builtin::float_ : suffix == l ? Builtin::long_double : Builtin::double_;
     ast::FloatFormat want = suffix == f ? ast::FloatFormat::binary32 : ast::FloatFormat::binary64;
-    if ((suffix != none && suffix != f && suffix != l) || w_->target[k].format != want) {
+    const bool x87 = suffix == l && w_->target[k].format == ast::FloatFormat::x87_extended;
+    if ((suffix != none && suffix != f && suffix != l) || (!x87 && w_->target[k].format != want)) {
       diag(begin, Diag::extended_float_not_supported);
       return {NodeId::none, begin, end};
     }
+    if (suffix == l && (x87 ? lit.x87_overflow : lit.overflow)) diag(begin, Diag::float_literal_out_of_range);
     QualType t = builtin(k);
-    return literal(t, ast::float_value(ins(), w_->target, t, ast::Bits128{lit.value, 0}), ValueCategory::prvalue, begin, end);
+    const ast::Bits128 bits = x87 ? ast::Bits128{lit.x87[0], lit.x87[1]} : ast::Bits128{lit.value, 0};
+    return literal(t, ast::float_value(ins(), w_->target, t, bits), ValueCategory::prvalue, begin, end);
   }
 
   static constexpr Builtin literal_character_type(lex::Encoding encoding) {

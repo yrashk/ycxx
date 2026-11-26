@@ -968,6 +968,9 @@ public:
               d.ok = false;
               goto done;
             }
+            if (writing_gcc_template_signature_ && !s_->types().is_dependent(*t) &&
+                tr->name != "__remove_const" && tr->name != "__remove_volatile" && tr->name != "__remove_reference_t")
+              cls = s_->ins().intern_type(ast::SWrittenTransform{*cls, *t, u8(tr->trait)});
             continue;
           }
           if (qualified_ahead()) {
@@ -2842,12 +2845,13 @@ public:
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
     // [temp.param]: a structural type, including the supported flat aggregate profile.
+    const bool deduced_parameter = s_->types().is_plain_auto(t);
     const bool class_parameter = !p.pack && s_->types().is_class(t) && !s_->types().is_dependent(t) &&
                                  s_->is_complete(t) && !questions().class_layout_uncertain(s_->types().class_of(t)) &&
                                  s_->templates().structural_class_parameter(t);
     if (!s_->types().is_integral(t) && !s_->types().is_enum(t) && !s_->types().is_pointer(t) &&
         !s_->types().is_reference(t) && !s_->types().is(t, Builtin::nullptr_t) &&
-        !s_->types().is_dependent(t) && !class_parameter) {
+        !s_->types().is_dependent(t) && !class_parameter && !deduced_parameter) {
       bool later = s_->types().is_class(t) || s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
                s_->types().is_class(t)      ? Tk::kw_class
@@ -2863,14 +2867,17 @@ public:
       const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
       in_integral_template_default_ = saved_default;
+      QualType target = deduced_parameter
+                          ? s_->types().canonical(sema::Types::unqualified(s_->rvalue(e).type()))
+                          : t;
       auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
-      if (!v) v = template_value(e, t);
+      if (!v) v = template_value(e, target);
       if (!v) {
         ok = false;
         return std::nullopt;
       }
       p.has_default = 1;
-      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(t), *v};
+      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(target), *v};
     }
     return p;
   }
@@ -2974,10 +2981,75 @@ public:
 
   DeclSpec function_template_decl_specifiers(TypeAliasChecks& checks) {
     TypeAliasCheckScope aliases{*this, true, /*type_default=*/false};
+    const GccSignatureScope spelling{*this};
     auto spec = decl_specifiers();
     checks = std::move(aliases.checks);
     return spec;
   }
+
+  Declarator function_template_declarator(QualType base, bool typedef_) {
+    const GccSignatureScope spelling{*this};
+    auto declaration = declarator(base, false, typedef_);
+    if (writing_gcc_template_signature_ && declaration.ok && declaration.function && !typedef_)
+      declaration.type = retain_gcc_signature_transforms(declaration.type);
+    return declaration;
+  }
+
+  // GCC keeps these transforms distinct in function template patterns. Their concrete
+  // type is recovered by the same substitution that applies a dependent transform.
+  QualType retain_gcc_signature_transforms(QualType type) {
+    auto& in = s_->ins();
+    const auto cv = ast::cv_of(type);
+    const auto bare = ast::without_cv(type);
+    if (in.types.is<ast::SWrittenTransform>(bare)) {
+      const auto transform = in.types.get<ast::SWrittenTransform>(bare);
+      return in.qualified(s_->types().transform(transform.trait, transform.operand), cv);
+    }
+    if (in.types.is<ast::TFunction>(bare)) {
+      auto fn = in.types.get<ast::TFunction>(bare);
+      fn.ret = retain_gcc_signature_transforms(fn.ret);
+      auto params = in.seqs.elements(fn.params);
+      for (QualType& p : params) p = retain_gcc_signature_transforms(p);
+      fn.params = in.intern_seq(std::span<const QualType>(params));
+      return in.intern_type(fn, cv);
+    }
+    if (in.types.is<ast::TPointer>(bare)) {
+      auto pointer = in.types.get<ast::TPointer>(bare);
+      pointer.pointee = retain_gcc_signature_transforms(pointer.pointee);
+      return in.intern_type(pointer, cv);
+    }
+    if (in.types.is<ast::TLRef>(bare)) {
+      auto reference = in.types.get<ast::TLRef>(bare);
+      reference.referee = retain_gcc_signature_transforms(reference.referee);
+      return in.intern_type(reference, cv);
+    }
+    if (in.types.is<ast::TRRef>(bare)) {
+      auto reference = in.types.get<ast::TRRef>(bare);
+      reference.referee = retain_gcc_signature_transforms(reference.referee);
+      return in.intern_type(reference, cv);
+    }
+    if (in.types.is<ast::TArray>(bare)) {
+      auto array = in.types.get<ast::TArray>(bare);
+      array.elem = retain_gcc_signature_transforms(array.elem);
+      return in.intern_type(array, cv);
+    }
+    if (in.types.is<ast::TMemberPtr>(bare)) {
+      auto member = in.types.get<ast::TMemberPtr>(bare);
+      member.member = retain_gcc_signature_transforms(member.member);
+      return in.intern_type(member, cv);
+    }
+    return type;
+  }
+
+  struct GccSignatureScope {
+    Parser& parser;
+    bool saved;
+    explicit GccSignatureScope(Parser& p, bool enabled = true)
+        : parser(p), saved(std::exchange(p.writing_gcc_template_signature_,
+                                        enabled && p.s_->compatibility() == ast::Compatibility::gcc)) {}
+    ~GccSignatureScope() { parser.writing_gcc_template_signature_ = saved; }
+  };
+  bool writing_gcc_template_signature_ = false;
 
   // Attach the checks after parsing the function's declarator, once its return type is built.
   QualType function_with_return_alias_checks(QualType type, const TypeAliasChecks& checks) {

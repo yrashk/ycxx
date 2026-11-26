@@ -208,6 +208,8 @@ void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidd
                              const std::map<EntityId, FunctionVisibility>& function_visibility, bool target_is_linux) {
   if (!inline_declarations.empty())
     for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
+  if (!inline_declarations.empty())
+    for (Entity& e : tu.entities) e.inline_function = e.is_function && inline_declarations.contains(e.id);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
@@ -1353,6 +1355,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     Entity& emitted = tu.entities.back();
     if (fn) {
       const auto* owner = r.scope == EntityId::none ? nullptr : world.entities.find(r.scope);
+      emitted.namespace_static = program.is_namespace(r.scope) &&
+          (d.storage == ast::Storage::static_ ||
+           (r.linkage == ast::Linkage::internal && !parse::Program::unnamed(program.namespace_path(r.scope))));
       if (has_class_argument(r) || (owner && has_class_argument(*owner)))
         emitted.unsupported_class_parameter_signature = !default_visible_type(d.type) ||
             !std::ranges::all_of(r.args, default_visible_argument) ||
@@ -2186,11 +2191,12 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));
-      } else if (!e.asm_label.empty()) {
+      } else if (e.namespace_static || !e.asm_label.empty()) {
         // A group may read another declaration out of order. Compare written positions.
         auto& kept = *std::ranges::find(tu.entities, e.id, &Entity::id);
-        if (kept.asm_label.empty() ||
-            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at))) {
+        kept.namespace_static |= e.namespace_static;
+        if (!e.asm_label.empty() && (kept.asm_label.empty() ||
+            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at)))) {
           kept.asm_label = std::move(e.asm_label);
           kept.asm_label_at = e.asm_label_at;
         }

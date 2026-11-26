@@ -38,6 +38,8 @@ struct LocalFunction {
   ast::EntityId scope = ast::EntityId::none;
   bool special = false;
   std::optional<TemplateSpec> spec;
+  bool internal_name = false;
+  bool c_name = false;
 };
 
 // The declaration named by a symbolic function template argument.
@@ -77,6 +79,7 @@ struct ClassName {
   std::optional<std::uint32_t> unnamed_type_ordinal{};
   ast::EntityId closure_variable = ast::EntityId::none;
   std::optional<ast::SeqId<ast::TemplateParamSema>> template_params{};
+  std::optional<std::uint32_t> private_closure_number{};
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -271,7 +274,8 @@ class Mangler {
         auto x = in_.types.get<ast::TTransform>(in_.types.canon(bare));
         const std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
         if (compatibility_ == ast::Compatibility::gcc)
-          return std::unexpected(std::format("a dependent built-in type trait '{}' in the signature", n));
+          return std::unexpected(std::format("a {}built-in type trait '{}' in the signature",
+                                             dependent(x.arg) ? "dependent " : "", n));
         auto a = type(x.arg);
         if (!a) return a;
         inner = std::format("u{}{}I{}E", n.size(), n, *a);
@@ -416,9 +420,9 @@ class Mangler {
       if (!n.local) return std::unexpected("a closure type whose function is unknown");
       auto l = local_encoding(*n.local);
       if (!l) return l;
-      auto sig = closure_sig(n);
-      if (!sig) return sig;
-      std::string r = "Z" + *l + "EUl" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
+      auto component = closure_component(n);
+      if (!component) return component;
+      std::string r = "Z" + *l + "E" + *component;
       candidates_.push_back(key);
       return r;
     }
@@ -460,9 +464,9 @@ class Mangler {
         if (compatibility_ != ast::Compatibility::gcc || classes_(n.closure_variable).templ == ast::EntityId::none)
           r += "M";
       }
-      auto sig = closure_sig(n);
-      if (!sig) return sig;
-      r += "Ul" + *sig + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
+      auto component = closure_component(n);
+      if (!component) return component;
+      r += *component;
       candidates_.push_back(key);
       return r;
     }
@@ -510,10 +514,17 @@ class Mangler {
     if (!sig) return sig;
     return out + *sig;
   }
+  std::expected<std::string, std::string> closure_component(const ClassName& n) {
+    if (n.private_closure_number) return source_name("$_" + std::to_string(*n.private_closure_number));
+    return closure_sig(n).transform([&](const std::string& signature) {
+      return "Ul" + signature + "E" + (n.closure_number ? std::to_string(n.closure_number - 1) : "") + "_";
+    });
+  }
   // A function's <encoding> (§5.1.2), without `_Z`: its <name>, a <nested-name> in a class or
   // namespace, then its parameter types. A member of a closure type is in a <local-name>, the
   // closure's function's <encoding> first (§5.1.6).
-  std::expected<std::string, std::string> encoding(std::string_view name, ast::QualType type, ast::EntityId scope, bool special) {
+  std::expected<std::string, std::string> encoding(std::string_view name, ast::QualType type, ast::EntityId scope,
+                                                  bool special, bool internal_name = false) {
     ast::QualType c = in_.types.canon(type);
     if (!in_.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
     auto f = in_.types.get<ast::TFunction>(c);
@@ -531,6 +542,7 @@ class Mangler {
       if (!code) return std::unexpected(std::format("the operator function '{}'", name));
       unqualified = *code;
     }
+    if (internal_name) unqualified = "L" + unqualified;
     std::string out = unqualified;
     if (scope != ast::EntityId::none) {
       std::string local;
@@ -562,17 +574,17 @@ class Mangler {
   // A function template specialization's <encoding>, without `_Z` (§5.1.2).
   // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
   std::expected<std::string, std::string> specialization_encoding(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
-                                                                  bool special = false) {
+                                                                  bool special = false, bool internal_name = false) {
     // Template parameters are mangled relative to the specialization's own head (a member
     // template's is inside its class's), for its encoding only.
     ast::u16 saved = own_depth;
     if (!spec.params.empty()) own_depth = spec.params[0].depth;
-    auto r = specialization_encoding_at(name, spec, scope, special);
+    auto r = specialization_encoding_at(name, spec, scope, special, internal_name);
     own_depth = saved;
     return r;
   }
   std::expected<std::string, std::string> specialization_encoding_at(std::string_view name, const TemplateSpec& spec, ast::EntityId scope,
-                                                                     bool special) {
+                                                                     bool special, bool internal_name) {
     ast::QualType c = in_.types.canon(spec.pattern);
     // A generic lambda's function call operator, a member function template of a closure type:
     // `N [<CV-qualifiers>] <prefix> <unqualified-name> <template-args> E` and its signature, in a
@@ -604,7 +616,7 @@ class Mangler {
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
       return local + "N" + cv + *p + unqualified + *args + "E" + *sig;
     }
-    auto n = template_name(name, scope, special);
+    auto n = template_name(name, scope, special, internal_name);
     if (!n) return n;
     auto args = specialization_args(spec);
     if (!args) return args;
@@ -619,8 +631,9 @@ class Mangler {
     return delimit_name(cv + *n + *args, scope) + *sig;
   }
   std::expected<std::string, std::string> local_encoding(const LocalFunction& f) {
-    if (f.spec) return specialization_encoding(f.name, *f.spec, f.scope);
-    return encoding(f.name, f.type, f.scope, f.special);
+    if (f.c_name) return source_name(f.name);
+    if (f.spec) return specialization_encoding(f.name, *f.spec, f.scope, f.special, f.internal_name);
+    return encoding(f.name, f.type, f.scope, f.special, f.internal_name);
   }
 
   // <bare-function-type>: the return type when `with_return`, then the parameter types, `v` for
@@ -1146,7 +1159,9 @@ class Mangler {
         bool empty = p.pack && a.kind == ast::TemplateArgKind::pack && in_.seqs.size(a.elems) == 0;
         bool same = i < same_heads.size() && same_heads[i];
         const bool gcc = compatibility_ == ast::Compatibility::gcc;
-        const bool decl = p.kind == ast::TemplateArgKind::value    ? !gcc && (dependent(p.type) || empty)
+        const bool placeholder = in_.types.is<ast::TAuto>(in_.types.canon(p.type));
+        const bool value_prefix = placeholder ? !gcc || !empty : !gcc && (dependent(p.type) || empty);
+        const bool decl = p.kind == ast::TemplateArgKind::value    ? value_prefix
                           : p.kind == ast::TemplateArgKind::template_ ? (empty ? !gcc : !same)
                                                                       : p.type_constraint != ast::ConstId::none;
         if (decl) {
@@ -1173,13 +1188,15 @@ class Mangler {
   // A function template's name before its <template-args>: an <unscoped-template-name>, or in a
   // namespace a <template-prefix> after the namespace's <prefix>; a substitution candidate either
   // way (§5.1.5.3, §5.1.10).
-  std::expected<std::string, std::string> template_name(std::string_view name, ast::EntityId scope, bool special = false) {
+  std::expected<std::string, std::string> template_name(std::string_view name, ast::EntityId scope,
+                                                       bool special, bool internal_name) {
     std::string r;
     if (scope != ast::EntityId::none) {
       auto p = prefix(scope);
       if (!p) return p;
       r = *p;
     }
+    if (internal_name) r += "L";
     if (special) r += name;
     else if (name.starts_with(lex::literal_operator_prefix)) r += "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
     else r += source_name(name);

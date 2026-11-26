@@ -219,7 +219,9 @@ public:
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: a positive converted constant expression of type std::size_t.
         const auto bits = ast::int_bits(ins(), a->value);
-        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(bits))
+          const auto value_type = ins().values.get<ast::VInt>(a->value).type;
+          const auto builtin = types().builtin_of(value_type);
+          if (!builtin || (ast::is_signed(w_->target, *builtin) && ast::is_negative(bits)))
           return std::nullopt;
         const auto width = ast::width_of(w_->target, w_->target.size_type);
         if (ast::wide::is_zero(bits) || ast::wrap(bits, width, false) != bits) return std::nullopt;
@@ -1344,7 +1346,16 @@ public:
           if (ins().values.is<ast::VDepParam>(ar.bound_value) && ins().values.get<ast::VDepParam>(ar.bound_value).depth == depth)
             return false;
           if (!ins().values.is<ast::VInt>(ar.bound_value) && !ins().values.is<ast::VDepParam>(ar.bound_value)) return false;
-          QualType size = types().canonical(types().builtin(Builtin::unsigned_long));
+          QualType size = types().canonical(types().builtin(w_->target.size_type));
+          ConstId bound = ar.bound_value;
+          if (compatibility == ast::Compatibility::gcc && !head_.empty() && head_.front().depth == depth &&
+              p.index < head_.size() && types().is_plain_auto(head_[p.index].type) && ins().values.is<ast::VInt>(bound)) {
+            // GCC deduces a signed int for a bare auto parameter inferred from an array bound.
+            const auto bits = ast::int_bits(ins(), bound);
+            if (ast::wrap(bits, ast::width_of(w_->target, Builtin::int_), true) != bits) return false;
+            size = types().builtin(Builtin::int_);
+            bound = ast::int_value(ins(), w_->target, size, bits);
+          }
           // Keep the array-bound type deduction as a fallback until all
           // compared parameters have supplied their ordinary deductions.
           if (array_bound_types_ && !head_.empty() && head_.front().depth == depth && p.index < head_.size()) {
@@ -1352,7 +1363,7 @@ public:
             if (bound_type.kind == TypeKind::template_param && bound_type.depth == depth)
               array_bound_types_->insert(bound_type.index);
           }
-          if (!bind(out, p.index, {TemplateArgKind::value, size, ar.bound_value})) return false;
+          if (!bind(out, p.index, {TemplateArgKind::value, size, bound})) return false;
           return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
         }
       }
@@ -1932,6 +1943,15 @@ public:
   // pointer. None when it does not convert.
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
+    if (types().is_plain_auto(t)) {
+      // [temp.arg.nontype] deduces auto from the argument, before checking its value.
+      const QualType from = types().canonical(Types::unqualified(a.type));
+      if (types().is_dependent(from) || ins().values.is_dependent(a.value)) return value_arg(from, a.value);
+      if (types().is_integral(from) || types().is_enum(from) || types().is_pointer(from) ||
+          types().is(from, Builtin::nullptr_t) || (types().is_class(from) && structural_class_parameter(from)))
+        return converted_value(a, from);
+      return std::nullopt;
+    }
     if (needs_class_value_check(a.type, t, a.value)) {
       if (!structural_class_parameter(t)) return std::nullopt;
       if (ins().values.is<ast::VDepCall>(a.value)) {
@@ -2032,6 +2052,11 @@ public:
         auto v = a && pt ? converted_value(*a, *pt) : std::nullopt;
         if (!v) return std::nullopt;
         d = *v;
+      }
+      if (d.kind == TemplateArgKind::value && types().is_plain_auto(params[i].type)) {
+        auto value = converted_value(d, params[i].type);
+        if (!value) return std::nullopt;
+        d = *value;
       }
       out[i] = d;
     }

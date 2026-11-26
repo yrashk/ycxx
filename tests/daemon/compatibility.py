@@ -390,7 +390,6 @@ SYMBOLS = {
     'typed': ('_Z5typedIiTnT_Li4EEiv', '_Z5typedIiLi4EEiv'),
     'empty-values': ('_Z12empty_valuesIiTpTnT_JEEiv', '_Z12empty_valuesIiJEEiv'),
     'member': ('_Z6memberIiEi3UseIN1YIT_E5applyEE', '_Z6memberIiEi3UseIsr1YIT_EE5applyE'),
-    'closure': ('_ZZ7closureiENUliE_8__invokeEi', '_ZZ7closureiENUliE_4_FUNEi'),
     'closure-prefix': ('_ZNK2ltIiEMUliE_clEi', '_ZNK2ltIiEUliE_clEi'),
     'function-pointer': ('_Z9convertedIXcvPFivEadL_Z6targetvEEEiv', '_Z9convertedIXadL_Z6targetvEEEiv'),
 }
@@ -681,6 +680,50 @@ static_assert(__builtin_memcmp(&left, &right, sizeof(left)) < 0);
 static_assert(__builtin_memchr(&left, 0x31, sizeof(left)) == &left);
 #endif
 ''')
+    (world.scope / 'memory-long-double.cpp').write_text('''\
+constexpr long double one = 1.0L;
+#ifdef X87
+constexpr long double slight = 1.0000000000000000001084202172485504434007L;
+constexpr long double full = 0x1.fffffffffffffffep-1000L;
+constexpr long double huge = 1.0e4000L;
+static_assert(sizeof(one) == 16 && sizeof(huge) == 16);
+#ifndef CONTROL
+static_assert(__builtin_memcmp(&one, &slight, sizeof one) < 0);
+static_assert(__builtin_memchr(&one, 0xff, 10) != nullptr);
+static_assert(__builtin_memchr(&full, 0, 10) == nullptr);
+static_assert(__builtin_memchr(&full, 0, sizeof full) != nullptr);
+#endif
+#else
+constexpr long double two = 2.0L;
+static_assert(sizeof(one) == 8);
+#ifndef CONTROL
+static_assert(__builtin_memcmp(&one, &two, sizeof one) > 0);
+static_assert(__builtin_memchr(&one, 0x3f, sizeof one) != nullptr);
+#endif
+#endif
+''')
+    (world.scope / 'memory-union-object.cpp').write_text('''\
+union Sample { unsigned char first; unsigned long long second; };
+constexpr Sample value{1}, larger{2}, empty{};
+#if defined(INACTIVE)
+static_assert(empty.second == 0);
+#elif defined(LOCAL)
+constexpr bool test() {
+  Sample local{1};
+  return __builtin_memchr(&local, 1, sizeof local) == &local;
+}
+static_assert(test());
+#elif defined(BYTES)
+static_assert(__builtin_memcmp(&value, &larger, sizeof value) < 0);
+static_assert(__builtin_memchr(&value, 1, sizeof value) == &value.first);
+static_assert(__builtin_memchr(&value, 0, 1) == nullptr);
+static_assert(__builtin_memchr(&value, 0, sizeof value) != nullptr);
+#else
+static_assert(value.first == 1 && empty.first == 0);
+constexpr bool test() { Sample local{5}; return local.first == 5; }
+static_assert(test());
+#endif
+''')
     (world.scope / 'memory-record-object.cpp').write_text('''\
 struct Padded { char tag; unsigned word; };
 struct Tail { unsigned word; char tag; };
@@ -711,6 +754,25 @@ static_assert(__builtin_memchr(&low, 3, sizeof low) == &low);
 static_assert(__builtin_memchr(&low, 0x11, sizeof low) == &low.word);
 static_assert(__builtin_memchr(&tail, 0, sizeof tail) != nullptr);
 #endif
+''')
+    (world.scope / 'memory-nested-record.cpp').write_text('''\
+struct Inner { char tag; unsigned word; };
+struct Outer { char head; Inner inner[2]; unsigned tail; };
+constexpr Outer left{13, {{15, 17}, {19, 21}}, 25};
+constexpr Outer right{13, {{15, 17}, {19, 21}}, 26};
+static_assert(left.inner[1].word == 21 && right.tail == 26);
+#ifdef BYTE_READ
+static_assert(__builtin_memcmp(&left, &right, sizeof left) < 0);
+static_assert(__builtin_memcmp(&left.inner, &right.inner, sizeof left.inner) == 0);
+static_assert(__builtin_memchr(&left, 21, sizeof left) == &left.inner[1].word);
+static_assert(__builtin_memchr(&left, 0, sizeof left) != nullptr);
+#endif
+''')
+    (world.scope / 'constexpr-empty-union.cpp').write_text('''\
+struct Variant { unsigned word; constexpr Variant() : word(17) {} };
+union U { Variant first; unsigned other; };
+constexpr U value{};
+static_assert(value.first.word == EXPECTED);
 ''')
     (world.scope / 'memory-pointer-object.cpp').write_text('''\
 #ifdef NON_NULL
@@ -1108,10 +1170,21 @@ int use() { return transform(7); }
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-array-object.cpp', status=1)
             for case in ('FLOAT', 'DOUBLE', 'ENUM'):
                 invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-scalar-object.cpp', status=mode != 'gcc')
+            long_double = ['-DX87'] if target == LINUX else []
+            invoke(target, *flags, *long_double, '-DCONTROL', '-fsyntax-only', 'memory-long-double.cpp')
+            invoke(target, *flags, *long_double, '-fsyntax-only', 'memory-long-double.cpp', status=mode != 'gcc')
+            invoke(target, *flags, '-fsyntax-only', 'memory-union-object.cpp')
+            invoke(target, *flags, '-DBYTES', '-fsyntax-only', 'memory-union-object.cpp', status=mode != 'gcc')
+            for case in ('LOCAL', 'INACTIVE'):
+                invoke(target, *flags, '-D' + case, '-fsyntax-only', 'memory-union-object.cpp', status=1)
             for case in ('', 'ARRAY', 'REUSE', 'LOCAL'):
                 args = ['-D' + case] if case else []
                 invoke(target, *flags, *args, '-fsyntax-only', 'memory-record-object.cpp',
                        status=mode != 'gcc' or case in ('REUSE', 'LOCAL'))
+            invoke(target, *flags, '-fsyntax-only', 'memory-nested-record.cpp')
+            invoke(target, *flags, '-DBYTE_READ', '-fsyntax-only', 'memory-nested-record.cpp', status=mode != 'gcc')
+            union_expected = 0 if mode == 'gcc' else 17
+            invoke(target, *flags, f'-DEXPECTED={union_expected}', '-fsyntax-only', 'constexpr-empty-union.cpp')
             for case in ('', 'NON_NULL', 'LOCAL'):
                 args = ['-D' + case] if case else []
                 invoke(target, *flags, *args, '-fsyntax-only', 'memory-pointer-object.cpp',
@@ -1249,6 +1322,9 @@ def mangling(world):
             use_second = mode == ('clang' if key in ('index', 'member') else 'gcc')
             assert alternatives[use_second].encode() in names, (mode, key, sorted(names)[-45:])
             assert alternatives[not use_second].encode() not in names, (mode, key)
+        closure = {'spec': 'UliE_8__invoke', 'gcc': 'UliE_4_FUN', 'clang': '3$_08__invoke'}
+        for candidate, component in closure.items():
+            assert (f'_ZZ7closureiEN{component}Ei'.encode() in names) == (mode == candidate), (mode, names)
         assert b'_Z14different_headITtTyE3TwoEiv' in names, (mode, sorted(names)[-45:])
 
     source = '''\
@@ -1271,6 +1347,92 @@ int labelled(int v) { return v; }
         assert result == (0, b'', b''), result
         names = (scope / 'asm.o').read_bytes().split(b'\0')
         assert b'_first' in names and b'_next' not in names, [name for name in names if name.startswith(b'_')]
+
+
+def private_closure_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'private-closures.cpp').write_text('''\
+using F = int(*)(int);
+using L = int(*)(long);
+F direct(int flag) {
+  auto unused = [](int n) { return n; };
+  auto a = [](int n) { return n + 1; };
+  auto b = [](long n) { return int(n) + 2; };
+  auto c = [](int n) { return n + 3; };
+  int v = a(flag);
+  L fn = b;
+  if (flag && v == 1 && fn(0) == 2) return c;
+  return a;
+}
+static F internal(int flag);
+F internal(int flag) {
+  auto unused = [](int n) { return n; };
+  auto a = [](int n) { return n + 1; };
+  auto b = [](long n) { return int(n) + 2; };
+  auto c = [](int n) { return n + 3; };
+  L fn = b;
+  if (flag && fn(0) == 2) return a;
+  return c;
+}
+template<class T> int consume(T value) { return value(1); }
+int needs_type() {
+  auto a = [](int n) { return n; };
+  auto b = [](int n) { return n+2; };
+  F f = b;
+  return f(2) + consume(a);
+}
+static inline F file_inline() { return [](int v) { return v + 4; }; }
+template<class T> static F file_template(T) { return [](int v) { return v + 5; }; }
+struct Out { static F member(); static F inside() { return [](int v) { return v + 6; }; } };
+F Out::member() { return [](int v) { return v + 7; }; }
+extern "C" F c_owner() { return [](int v) { return v + 8; }; }
+extern "C" int exercise() {
+  return direct(0)(0) + internal(0)(0) + needs_type() + file_inline()(0) + file_template(0)(0)
+      + Out::inside()(0) + Out::member()(0) + c_owner()(0);
+}
+''')
+    (scope / 'private-closure-caller.cpp').write_text('extern "C" int exercise();\n'
+                                                     'int main() { return exercise() != 39; }\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        invoker = '4_FUN' if mode == 'gcc' else '8__invoke'
+        local = 'L' if mode != 'spec' else ''
+        direct = ('3$_0', '3$_1', '3$_2') if mode == 'clang' else ('UliE0_', 'UllE_', 'UliE1_')
+        internal = ('3$_1', '3$_0', '3$_2') if mode == 'clang' else direct
+        expected = []
+        for owner, components in (('6directi', direct), (local + '8internali', internal)):
+            for component, parameter in zip(components, 'ili'):
+                expected += [f'_ZZ{owner}EN{component}{invoker}E{parameter}', f'_ZZ{owner}ENK{component}clE{parameter}']
+        expected += [
+            f'_Z7consumeIZ10needs_typevE{"3$_1" if mode == "clang" else "UliE_"}EiT_',
+            f'_ZZ{local}11file_inlinevENUliE_{invoker}Ei',
+            f'_ZZ{"L" if mode == "clang" else ""}13file_templateIiEPFiiET_ENUliE_{invoker}Ei',
+            f'_ZZN3Out6insideEvENUliE_{invoker}Ei',
+            f'_ZZN3Out6memberEvEN{"3$_0" if mode == "clang" else "UliE_"}{invoker}Ei',
+            f'_ZZ{"7c_ownerv" if mode == "spec" else "7c_owner"}EN{"3$_0" if mode == "clang" else "UliE_"}{invoker}Ei',
+        ]
+        command = ['-fcompat=' + mode, '-c', 'private-closures.cpp', '-o', 'private-closures.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            binaries = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx([target, *command], scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                binaries.append((scope / 'private-closures.o').read_bytes())
+            assert binaries[0] == binaries[1], (mode, target)
+            names = set(binaries[0].split(b'\0'))
+            for symbol in expected:
+                assert (prefix + symbol).encode() in names, (mode, target, symbol, sorted(n for n in names if b'_ZZ' in n))
+            if mode != 'spec':
+                for owner in ('6directi', local + '8internali'):
+                    unused = '3$_3' if mode == 'clang' else 'UliE_'
+                    assert (prefix + f'_ZZ{owner}ENK{unused}clEi').encode() not in names, (mode, target, names)
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                peer = clang if mode == 'clang' else gxx
+                if peer:
+                    subprocess.run([peer, '-std=c++26', 'private-closure-caller.cpp', 'private-closures.o',
+                                    '-o', 'private-closures'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'private-closures'], cwd=scope, check=True, timeout=20)
 
 
 def mixed_class_calls(world, gxx):
@@ -1810,6 +1972,75 @@ def template_argument_prefixes(world, gxx):
             subprocess.run([scope / 'prefix-link'], cwd=scope, check=True, timeout=20)
 
 
+def placeholder_template_prefixes(world, gxx):
+    scope = world.scope
+    templates = (
+        ('template<auto V> int single()', 'static_cast<int>(V)'),
+        ('template<auto... Values> int pack()', '(0 + ... + Values)'),
+        ('template<auto V = 9L> int fallback()', 'static_cast<int>(V)'),
+        ('template<auto A, auto B = A> int inherits()', 'static_cast<int>(A + B)'),
+        ('template<auto N> int deduced(const char (&)[N])', 'static_cast<int>(N)'),
+    )
+    calls = 'single<4>() + single<4u>() + pack<>() + pack<2, 3L, true>() + fallback<>() + inherits<7u>() + deduced("xyz")'
+    definitions = '\n'.join(f'{signature} {{ return {value}; }}' for signature, value in templates)
+    declarations = '\n'.join(signature + ';' for signature, _ in templates)
+    (scope / 'placeholder-provider.cpp').write_text(definitions + f'\nint instantiate() {{ return {calls}; }}\n')
+    (scope / 'placeholder-consumer.cpp').write_text(declarations + f'\nint main() {{ return {calls} - 41; }}\n')
+    (scope / 'placeholder-array.cpp').write_text('''\
+template<auto N> int gather(const char (&)[N]);
+#ifdef LARGE
+extern char array[2147483648ULL];
+#else
+extern char array[2147483647ULL];
+#endif
+int use() { return gather(array); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        empty = '' if mode == 'gcc' else 'TpTnDa'
+        array_type = 'i' if mode == 'gcc' else 'm'
+        symbols = (
+            '_Z6singleITnDaLi4EEiv',
+            '_Z6singleITnDaLj4EEiv',
+            f'_Z4packI{empty}JEEiv',
+            '_Z4packITpTnDaJLi2ELl3ELb1EEEiv',
+            '_Z8fallbackITnDaLl9EEiv',
+            '_Z8inheritsITnDaLj7ETnDaLj7EEiv',
+            f'_Z7deducedITnDaL{array_type}4EEiRAT__Kc',
+        )
+        command = [*flags, '-c', 'placeholder-provider.cpp', '-o', 'placeholder-provider.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for env in (world.cold, world.daemon):
+                outcome = world.cxx([target, *command], scope, env, timeout=40)
+                assert outcome == (0, b'', b''), (mode, target, outcome)
+                names = (scope / 'placeholder-provider.o').read_bytes().split(b'\0')
+                for symbol in symbols:
+                    assert (prefix + symbol).encode() in names, (mode, target, symbol, [n for n in names if b'_Z' in n])
+                array_cmd = [target, *flags, '-c', 'placeholder-array.cpp', '-o', 'placeholder-array.o']
+                for large in (False, True):
+                    args = [*array_cmd, '-DLARGE'] if large else array_cmd
+                    result = world.cxx(args, scope, env, timeout=30)
+                    if large and mode == 'gcc':
+                        assert result[0] == 1, (mode, target, result)
+                        continue
+                    assert result == (0, b'', b''), (mode, target, result)
+                    bound = 2147483648 if large else 2147483647
+                    symbol = f'{prefix}_Z6gatherITnDaL{array_type}{bound}EEiRAT__Kc'.encode()
+                    names = (scope / 'placeholder-array.o').read_bytes().split(b'\0')
+                    assert symbol in names, (mode, target, symbol, [n for n in names if b'_Z' in n])
+        peer = gxx if mode == 'gcc' else clang
+        if peer:
+            result = world.cxx(command, scope, world.daemon, timeout=40)
+            assert result == (0, b'', b''), (mode, result)
+            subprocess.run([peer, '-std=c++26', '-c', 'placeholder-consumer.cpp', '-o', 'placeholder-consumer.o'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([gxx, 'placeholder-provider.o', 'placeholder-consumer.o', '-o', 'placeholder-link'],
+                           cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'placeholder-link'], cwd=scope, check=True, timeout=20)
+
+
 def mixed_source_location(world, gxx):
     scope = world.scope
     (scope / 'descriptor-peer.cpp').write_text('''\
@@ -1876,6 +2107,62 @@ int main() {
                 subprocess.run([scope / 'tail-calls'], cwd=scope, check=True, timeout=20)
 
 
+def concrete_transform_signatures(world):
+    scope = world.scope
+    (scope / 'concrete-transform.cpp').write_text('''\
+enum E : int { item = 7 };
+#if defined(TRAILING)
+template<class T> auto f(T n) -> __remove_cv(const int) { return n; }
+#elif defined(PARAMETER)
+template<class T> int apply(__remove_cv(const int) x) { return x; }
+template<class T> int f(T n) { return apply<T>(n); }
+#elif defined(UNDERLYING)
+template<class T> __underlying_type(E) f(T n) { return n; }
+#elif defined(ORDINARY_ALIAS)
+using Alias = __remove_cv(const int);
+template<class T> Alias f(T n) { return n; }
+#elif defined(ALIAS_TEMPLATE)
+template<class T> using Alias = __remove_cv(const int);
+template<class T> Alias<T> f(T n) { return n; }
+#elif defined(BOUND_ALIAS)
+template<class T> using Alias = __remove_cv(const int);
+template<class T> Alias<int> f(T n) { return n; }
+#elif defined(ORDINARY_MEMBER)
+template<class T> struct S { __remove_cv(const int) apply(int n) { return n; } };
+template<class T> int f(T n) { S<T> s; return s.apply(n); }
+#elif defined(MEMBER_TEMPLATE)
+struct S { template<class T> static __remove_cv(const int) apply(T n) { return n; } };
+template<class T> int f(T n) { return S::apply(n); }
+#elif defined(BODY)
+template<class T> int f(T n) { __remove_cv(const int) value = n; return value; }
+#elif defined(HEADER_EXTENSION)
+template<class T> __remove_const(const int) f(T n) { return n; }
+#elif defined(OVERLOAD)
+template<class T> __remove_cv(const int) f(T n);
+template<class T> int f(T n) { return n; }
+#else
+template<class T> __remove_cv(const int) f(T n) { return n; }
+#endif
+int use() { return f(7); }
+''')
+    for mode in MODES:
+        flags = ['-fcompat=' + mode]
+        for target in (LINUX, DARWIN):
+            for case in ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ORDINARY_ALIAS', 'ALIAS_TEMPLATE', 'BOUND_ALIAS',
+                         'ORDINARY_MEMBER', 'MEMBER_TEMPLATE', 'BODY', 'HEADER_EXTENSION', 'OVERLOAD'):
+                opts = [target, *flags, *(['-D' + case] if case else [])]
+                syntax = [*opts, '-fsyntax-only', 'concrete-transform.cpp']
+                native = [*opts, '-c', 'concrete-transform.cpp', '-o', 'concrete-transform.o']
+                ambiguous = mode == 'gcc' and case == 'OVERLOAD'
+                emitted = mode == 'gcc' and case in ('', 'TRAILING', 'PARAMETER', 'UNDERLYING', 'ALIAS_TEMPLATE', 'MEMBER_TEMPLATE')
+                for command, reject in ((syntax, ambiguous), (native, ambiguous or emitted)):
+                    cold = world.cxx(command, scope, world.cold, timeout=40)
+                    resident = world.cxx(command, scope, world.daemon, timeout=40)
+                    assert cold == resident and resident[0] == int(reject), (mode, target, case, cold, resident)
+                    if reject and emitted:
+                        assert b'built-in type trait' in resident[2], (mode, target, case, resident)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -1909,6 +2196,7 @@ def main():
     try:
         pid = preprocess_and_syntax(world)
         mangling(world)
+        private_closure_symbols(world, gxx)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)
@@ -1928,7 +2216,9 @@ def main():
         operator_constraints(world, gxx)
         requires_expression_symbols(world, gxx)
         template_argument_prefixes(world, gxx)
+        placeholder_template_prefixes(world, gxx)
         mixed_source_location(world, gxx)
+        concrete_transform_signatures(world)
         compile_database(world)
         world.same_daemon('compatibility modes', pid)
     finally:

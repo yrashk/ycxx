@@ -121,6 +121,8 @@ struct Entity {
   bool nonthrowing = false;  // including implicit exception specifications on destructors
   bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
   bool unsupported_class_parameter_signature = false;
+  bool inline_function = false;
+  bool namespace_static = false;
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -2655,20 +2657,83 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       }
     }
   }
+  // A private lambda's Clang number is allocated in native reference order. The
+  // bodies of unreferenced closure members must not participate in that walk.
+  std::map<std::uint32_t, const Entity*> by_id;
+  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
+  const sema::World* closure_world = universe().world_for(target);
+  auto private_closure_owner = [&](EntityId closure) -> std::optional<EntityId> {
+    if (closure == EntityId::none || !closure_world) return std::nullopt;
+    const auto* record = closure_world->entities.find(closure);
+    if (!record || record->kind != sema::EntityKind::class_ || record->unnamed_type_ordinal ||
+        !closure_world->ins.names.spelling(record->name).empty()) return std::nullopt;
+    auto found = by_id.find(ir::raw(record->scope));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& owner = *found->second;
+    if (!owner.is_function || owner.inline_function || owner.template_type) return std::nullopt;
+    if (owner.scope != EntityId::none) {
+      const auto* scope = closure_world->entities.find(owner.scope);
+      if (scope && scope->kind == sema::EntityKind::class_ &&
+          (scope->templ != EntityId::none || closure_world->ins.names.spelling(scope->name).empty())) return std::nullopt;
+    }
+    return owner.id;
+  };
+  std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
+  auto note_closure = [&](EntityId closure) {
+    if (private_closure_numbers.contains(closure)) return;
+    if (auto owner = private_closure_owner(closure))
+      private_closure_numbers.emplace(closure, next_private_closure_number[*owner]++);
+  };
+  auto note_type = [&](this auto&& visit, ast::QualType type) -> void {
+    const auto t = closure_world->types.rec(type);
+    switch (t.kind) {
+    case sema::TypeKind::class_: note_closure(t.entity); break;
+    case sema::TypeKind::pointer:
+    case sema::TypeKind::reference:
+    case sema::TypeKind::array: visit(t.inner); break;
+    case sema::TypeKind::member_pointer:
+      visit(t.member_owner);
+      visit(t.inner);
+      break;
+    case sema::TypeKind::function:
+      visit(t.inner);
+      for (ast::QualType p : t.params) visit(p);
+      break;
+    default: break;
+    }
+  };
+  auto note_argument = [&](this auto&& visit, const ast::TemplateArg& arg) -> void {
+    if (arg.kind == ast::TemplateArgKind::pack)
+      for (const auto& element : in.seqs.elements(arg.elems)) visit(element);
+    else if (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value)
+      note_type(arg.type);
+  };
+  const bool defer_closures = compatibility != ast::Compatibility::spec && !tu.has_raw_linkage_names &&
+                              tu.asm_hidden_symbols.empty();
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) {
-    if (f.emit_if_referenced) deferred.insert(ir::raw(f.entity));
+    auto found = by_id.find(ir::raw(f.entity));
+    if (f.emit_if_referenced || (defer_closures && found != by_id.end() && private_closure_owner(found->second->scope)))
+      deferred.insert(ir::raw(f.entity));
     else if (!deferred.contains(ir::raw(f.entity))) fns.push_back({id, f.entity});
   }
 
   // Follow native references in the lowered bodies, where only the runtime edge of an
   // if consteval remains. Each demanded definition can introduce more demands.
   std::set<std::uint32_t> used;
+  std::set<std::uint32_t> numbered_references;
   std::set<EntityId> unreachable_immediate;
   std::vector<FnKey> pending;
-  auto use_entity = [&](std::uint32_t entity) {
-    if (used.insert(entity).second && deferred.contains(entity))
-      pending.push_back({id, EntityId(entity)});
+  auto use_entity = [&](std::uint32_t entity, bool referenced = true) {
+    if (used.insert(entity).second && deferred.contains(entity)) pending.push_back({id, EntityId(entity)});
+    if (referenced && compatibility == ast::Compatibility::clang && closure_world && numbered_references.insert(entity).second) {
+      auto found = by_id.find(entity);
+      if (found != by_id.end()) {
+        note_closure(found->second->scope);
+        for (const auto& arg : found->second->template_args) note_argument(arg);
+        note_type(found->second->type);
+      }
+    }
   };
   auto collect_lowered = [&](std::span<const FnKey> keys, const auto& bodies) {
     for (std::size_t i = 0; i < keys.size(); ++i) {
@@ -2676,7 +2741,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (l.error) errors.push_back(*l.error);
       if (!l.body) continue;
       if (l.unreachable_immediate) unreachable_immediate.insert(keys[i].fn);
-      use_entity(ir::raw(keys[i].fn));
+      use_entity(ir::raw(keys[i].fn), false);
       for (const auto& ref : references(l.body->f)) use_entity(ir::raw(ref.entity));
     }
   };
@@ -2823,8 +2888,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   }
 
   // The declarations that own closure types, by entity (docs/design/closures.md).
-  std::map<std::uint32_t, const Entity*> by_id;
-  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   auto spec_of = [](const Entity& e) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
                         e.template_head_constraint, e.template_trailing_constraint};
@@ -2888,13 +2951,24 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       n.closure_type = r.type;
       n.closure_number = r.ordinal;
       n.closure_head = r.closure_head;
+      if (compatibility == ast::Compatibility::clang) {
+        note_closure(c);
+        if (auto private_number = private_closure_numbers.find(c); private_number != private_closure_numbers.end())
+          n.private_closure_number = private_number->second;
+      }
       if (f != by_id.end()) {
         const Entity& fe = *f->second;
         if (fe.is_function) {
           std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+          const bool namespace_function = fe.scope == EntityId::none || w->entities.rec(fe.scope).kind == sema::EntityKind::namespace_;
+          const bool internal_name = namespace_function &&
+              ((compatibility == ast::Compatibility::gcc && !fe.template_type && fe.linkage == ast::Linkage::internal) ||
+               (compatibility == ast::Compatibility::clang && fe.namespace_static));
+          const bool c_name = compatibility != ast::Compatibility::spec &&
+                              (fe.lang == ast::LangLinkage::c || fe.id == tu.main);
           n.local = std::make_shared<const LocalFunction>(LocalFunction{
               fname, fe.type, fe.scope, fe.special != Special::none,
-              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt, internal_name, c_name});
         } else {
           n.closure_variable = fe.id;
         }
