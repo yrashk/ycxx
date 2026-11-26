@@ -35,6 +35,10 @@ What is true of the code today. Work in progress and its owners are tracked in
   offline solver's integer range. Optional CTest runs exported models through Chuffed.
   The standalone solver build pins HiGHS, CaDiCaL, and Chuffed by revision and archive
   hash. See [optimizer experiments](docs/BUILDING.md#optimizer-experiments) and [#66](https://github.com/yrashk/ycxx/issues/66).
+- Experimental x86-64 Linux optimization rewrites unsigned division and remainder by
+  powers of two. The solver mode also selects compatible quotient/remainder pairs using
+  an exact prefix model with emitted byte costs. The query engine traces modeling, solving,
+  validation and fallback. [Unsigned division experiment](docs/design/optimization.md#93-unsigned-division-on-x86-64).
 - `ycxx.bench` in `packages/ycxx-bench/` provides calibrated, warmed sampling and balanced
   comparisons, with typed callable properties and metadata. It reports clock and
   host context, retained samples, and practical comparison verdicts. The optimizer
