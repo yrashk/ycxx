@@ -822,16 +822,20 @@ class Planner {
     std::vector<ArtifactInputPlan> result;
     if (inputs.empty()) return result;
     const auto& bindings = as<Record>(require_field(decl, "plan_inputs"), "a record of named planning inputs");
+    constexpr auto host_error = "host executable artifacts are not available in rule planning inputs";
     result.reserve(inputs.size());
     for (const auto& input : inputs) {
       const auto& binding = *field(bindings, input.name);
       const auto& ref = as<ArtifactRef>(binding, "artifact(target, output) for a planning input");
       ++planning_edges_;
-      const auto requested = artifact(ref, binding.location, true);
+      const auto target = find(ref.target, binding.location);
+      if (target.kind == Primitive::host_executable) fail(binding.location, host_error);
+      const auto requested = generator_artifact(target, ref.output, binding.location);
       --planning_edges_;
-      artifact_dependency(decl, requested, "plan_inputs", binding.location, input.name);
       const auto [producer, output] = requested;
       const auto& gen = plan_.generators[producer];
+      if (gen.host_dependent) fail(binding.location, host_error);
+      artifact_dependency(decl, requested, "plan_inputs", binding.location, input.name);
       auto path = display_path(generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_));
       result.push_back({input.name, std::move(path), producer, output});
     }
@@ -1076,7 +1080,7 @@ class Planner {
           plan.host_inputs.push_back({name, path_for(host_executable_output), executable});
           continue;
         }
-        const auto requested = generator_artifact(target, ref->output, value.location, observer);
+        const auto requested = generator_artifact(target, ref->output, value.location);
         artifact_dependency(decl, requested, "inputs", value.location, name);
         const auto [producer, output] = requested;
         const auto& filename = plan_.generators[producer].action.outputs[output].filename;
@@ -1184,23 +1188,20 @@ class Planner {
     return find(name, at);
   }
 
-  ArtifactOutputPlan generator_artifact(ResolvedTarget target, std::string_view name, SourceLocation at, bool early) {
-    constexpr auto early_error = "host executable artifacts are not available in rule planning inputs or witnesses "
-                                 "except as a directly selected witness tool";
+  ArtifactOutputPlan generator_artifact(ResolvedTarget target, std::string_view name, SourceLocation at) {
     const auto [decl, kind] = target;
     if (kind == Primitive::host_executable)
-      fail(at, early ? early_error : "host executable artifacts are only available in ordinary generator inputs");
+      fail(at, "host executable artifacts require a generator input or a directly selected witness tool");
     if (kind != Primitive::generator) fail(at, "artifact references require a generate target");
     const auto producer = resolve_generator(decl);
-    if (early && plan_.generators[producer].host_dependent) fail(at, early_error);
     const auto& outputs = plan_.generators[producer].action.outputs;
     const auto output = std::ranges::find(outputs, name, &ActionOutput::name);
     if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, name));
     return {producer, static_cast<std::size_t>(output - outputs.begin())};
   }
 
-  ArtifactOutputPlan artifact(const ArtifactRef& ref, SourceLocation at, bool early = false) {
-    return generator_artifact(find(ref.target, at), ref.output, at, early);
+  ArtifactOutputPlan artifact(const ArtifactRef& ref, SourceLocation at) {
+    return generator_artifact(find(ref.target, at), ref.output, at);
   }
 
   std::string native_artifact(const ArtifactRef& ref, const TargetDecl& consumer, std::string_view usage,
