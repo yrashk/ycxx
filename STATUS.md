@@ -3806,6 +3806,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   declaration, including with an lvalue or rvalue ref-qualifier. Specializations preserve
   deletion and diagnose a selected deleted overload.
   [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+- Ordinary classes and class templates accept an unconstrained, nonvirtual deleted move assignment
+  on its first in-class declaration. It affects implicit special members and remains a candidate
+  after specialization. A diagnostic is required when it wins overload resolution.
+  [#244](https://github.com/yrashk/ycxx/issues/244) · [#1417](https://github.com/yrashk/ycxx/issues/1417)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 

@@ -6208,8 +6208,8 @@ private:
         const auto& owner = s_.world().entities.rec(c.entity);
         const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
                                      p_->is_namespace(p_->outermost_class_scope(c.entity));
-        // Replay the written object ref-qualifier for the supported deleted copy-assignment form.
-        // member_function_or_static checks the copy-assignment parameter and declaration context.
+        // Replay the written object ref-qualifier for deleted special-member assignment.
+        // member_function_or_static checks the parameter and declaration context.
         const bool deleted_template_assignment = !spec.is_static && !member_template_ &&
             owner.templ != EntityId::none && p_->is_namespace(owner.scope) &&
             s_.ins().names.spelling(d.name) == "operator=" && plain_deleted_body();
@@ -8106,10 +8106,14 @@ private:
       const auto& owner = s_.world().entities.rec(c.entity);
       const bool supported_class = p_->is_namespace(p_->outermost_class_scope(c.entity)) &&
                                    ((s_.template_scopes.empty() && !inst_) || (deleted && owner.templ != EntityId::none));
-      if (!supported_class || !parameter || types.rec(*parameter).rvalue_ref) {
+      // [class.copy.assign], [dcl.fct.def.delete]: an explicitly deleted move assignment
+      // is still a declared overload. Defaulting and virtual moves need separate support.
+      if (!supported_class || !parameter || ((defaulted || is_virtual) && types.rec(*parameter).rvalue_ref)) {
         s_.diag(d.name_at, Diag::not_supported, defaulted ? Tk::kw_default : Tk::kw_delete);
         return false;
       }
+      // A trailing requires-clause must affect overload viability ([over.match.viable], #1417).
+      if (deleted && types.rec(*parameter).rvalue_ref && !finish_constructor_declarator()) return false;
       if (defaulted) {
         const auto f = types.rec(d.type);
         const auto source = types.rec(*parameter);
