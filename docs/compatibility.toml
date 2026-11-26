@@ -89,33 +89,33 @@ evidence = ["tests/own/abi/call-triviality.run.cpp", "tests/own/abi/call-trivial
 
 [[divergence]]
 id = "class-tail-padding"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §1.1 and §2.4, #308"
 prior = "Used the modern trivial and standard-layout approximation on both targets."
 spec = "Use the ABI's C++03 POD rule for supported record layouts. An all-private or all-protected data layout allows reuse of base tail padding."
 gcc = "Same as spec."
 clang = "Use the C++03 rule on x86-64 Linux and the modern rule on arm64 Darwin. The private-base probe reserves the padding on Darwin."
-limits = "Covers uniform private or protected access, mixed access, default member initializers, const and reference members, arrays of records, and a base with an empty ancestor. The layout test accounts for user-provided special members and distinguishes first-declaration defaulting or deletion from user-provided bodies. Defaulted members whose definitions ycxx cannot yet analyze and class hierarchies beyond the supported record layout remain outside this coverage. See class-tail-padding-overlapping-member for the separate attribute case."
+limits = "Covers uniform private or protected access, mixed access, default member initializers, const and reference members, arrays of records, and a base with an empty ancestor. Mixed-object tests cover first-declaration defaulting and late defaulting of scalar constructors, copy and move constructors, copy assignment, and destructors. See class-tail-padding-overlapping-member for the separate attribute case."
 evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cpp"]
 
 [[divergence]]
 id = "over-width-bit-field-allocation"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
 reference = "[class.bit], Itanium C++ ABI §1.1 and §2.4"
 prior = "Limit named int and unsigned int bit-fields to the declared type's width."
 spec = "Allocate the written width with the alignment of the largest integral POD allocation unit that fits. The low bits of the declared type represent the value. Preserve the final aligned size in an otherwise POD base."
 gcc = "For a 128-bit wide field of type unsigned long long, GCC 16.2 on Linux uses 16-byte alignment and a 32-byte base. The derived tail begins at offset 32."
 clang = "Uses an 8-byte allocation unit on x86-64 Linux, giving a 24-byte base. Uses a 16-byte unit on arm64 Darwin, giving a 32-byte base."
-limits = "The probes also cover 40-bit wide named fields and private base tail padding. The availability and warning controls of a named over-width field are tracked separately."
+limits = "The probes also cover 40-bit wide named fields, signed reads and writes, derived tail transport, and private base tail padding. The GCC-style Darwin layout is checked in ycxx object generation and still needs comparison with a native GCC object. The warning controls are tracked separately."
 probe = 'struct Base { unsigned long long field : 128; char byte; }; struct Derived : Base { char last; };'
 evidence = ["tests/daemon/compatibility.py", "https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types", "GCC 16.2 x86-64 Linux and upstream Clang 23.1.6 x86-64 Linux and arm64 Darwin layout probes"]
 
 [[divergence]]
 id = "over-width-bit-field-diagnostic"
-status = "recorded"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[class.bit]"
 prior = "Reject widths larger than the stated bounded bit-field subset."
 spec = "The pinned draft permits the excess padding bits."
@@ -274,16 +274,16 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 static i
 
 [[divergence]]
 id = "generic-lambda-conversion-function-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.5.1 and §5.1.8"
 prior = "Use the invoker address directly without emitting a separate conversion member."
-spec = "The conversion member yields the invoker address, or the address of the call operator if it is static. Encode an emitted conversion member as cv followed by the conversion type."
+spec = "Use the invoker address for a nonstatic lambda and the call operator address for a static lambda. The tested direct conversions emit no separate conversion member."
 gcc = "At -O0, emit a constexpr conversion member when the address conversion is used. A deduced generic conversion type uses a dependent call to the lambda call operator, using a null closure pointer for a nonstatic operator."
 clang = "At -O0, emit the conversion member when used. The conversion type of the tested generic closure has a placeholder return. Both peers use the same concrete conversion-member spelling for the tested nongeneric closure."
 limits = "The object symbols depend on optimization. Both peers inline these tested conversions at -O2. A static lambda's conversion returns its call operator directly. At -O0 both peers emit a conversion member, and GCC uses the direct dependent call encoding DTcloncl for the tested generic static lambdas."
 probe = 'inline int (*provider())(int) { return [](auto n) { return n; }; }'
-evidence = ["GCC 16.2 with -fabi-compat-version=0 and upstream Clang 23.1.6 -O0 and -O2 ELF and Mach-O symbol probes"]
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 with -fabi-compat-version=0 and upstream Clang 23.1.6 -O0 and -O2 ELF and Mach-O symbol probes"]
 
 [[divergence]]
 id = "constrained-lambda-conversion-trailing-symbol"
@@ -422,8 +422,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constexp
 
 [[divergence]]
 id = "floating-literal-underflow-warning"
-status = "pending"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[lex.fcon]"
 prior = "Round to zero without a diagnostic in all modes."
 spec = "Keep the existing nearest-value rounding and emit no underflow warning."
@@ -599,8 +599,8 @@ evidence = ["docs/design/ast.md", "tests/own/templates/c6-overloads.run.cpp", "t
 
 [[divergence]]
 id = "nested-function-template-head-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "Itanium C++ ABI §5.1.5.3 and §5.1.5.7, [temp.over.link], constraint mangling proposal"
 prior = "Encode a function's template-head constraint and parameter declaration prefixes the same way in a nested name as in an unscoped name."
 spec = "Keep the written Q constraint and applicable parameter declaration prefixes in a nested function template's arguments. A trailing Q remains after the function type."
@@ -611,8 +611,8 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF with -fabi-co
 
 [[divergence]]
 id = "constraint-lambda-expression-symbol"
-status = "pending"
-mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda], Itanium C++ ABI §5.1.6.2 and §5.1.8, constraint mangling proposal"
 prior = "Encode a lambda in a written constraint with the opaque constraint fingerprint."
 spec = "Use the published expression and structural closure productions for a lambda operand, with source-order ordinals of matching signatures."
@@ -831,15 +831,16 @@ evidence = ["tests/own/consteval/function-reference-constexpr.accept.cpp", "test
 
 [[divergence]]
 id = "immediate-function-template-argument-escalation"
-status = "pending"
-mode_status = { spec = "partial", gcc = "partial", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.const.imm]/2, example 2; [temp.arg.nontype]"
 prior = "Allow a direct constant call through a bare auto template parameter in every mode. Targetless address selection for the function specialization fails before immediate escalation can be checked."
 spec = "Accept a direct immediate-function template argument. Treat the specialization as immediate when the substituted call cannot be evaluated at compile time, and reject an escaping address of that specialization."
-gcc = "Accept a direct immediate-function template argument. The tested forwarding specialization is immediate even when it supplies a constant to the substituted call. Reject a class-valued argument that retains the address."
+gcc = "Accept a direct immediate-function pointer template argument. The tested forwarding specialization is immediate even when it supplies a constant to the substituted call."
 clang = "Reject the immediate function as a template argument, including at a direct constant call. The tested ordinary type-template specialization still escalates when it calls a named immediate function with a runtime parameter."
 probe = 'consteval int id(int x) { return x; } template<auto F> constexpr auto apply_to(int i) { return F(i); }'
-limits = "GCC and Clang both accept a direct call and a targetless address for the same specialization when id is constexpr. The existing draft rejection case does not distinguish targetless address deduction from immediate escalation."
+gcc_observed = "GCC accepts the tested direct function-reference template argument as well. Both peers reject a class-valued argument that stores the immediate address."
+limits = "Covers direct pointer template arguments, including targetless address deduction. GCC and Clang both accept a direct call and a targetless address for the same specialization when id is constexpr."
 evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin direct, typed and aggregate template arguments, ordinary address controls, and immediate-escalation probes"]
 
 [[divergence]]
