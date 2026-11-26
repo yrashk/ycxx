@@ -827,25 +827,100 @@ class Mangler {
       const auto op = in_.values.get<ast::VWrittenOperator>(v);
       const auto operands = in_.seqs.elements(op.operands);
       const auto token = lex::Tk(op.token);
-      if (token == lex::Tk::kw_static_cast) {
-        if (operands.size() != 2 || !in_.values.is<ast::VType>(operands.front()))
-          return std::unexpected("a cast whose operands are unknown");
+      if (!operands.empty() && in_.values.is<ast::VType>(operands.front())) {
         const auto target = in_.values.get<ast::VType>(operands.front());
         auto cast = type(ast::with_cv(target.type, ast::Cv(target.cv)));
         if (!cast) return cast;
-        auto operand = expression(operands.back());
-        if (!operand) return operand;
-        return "sc" + *cast + *operand;
+        const bool braced = token == lex::Tk::l_brace;
+        const bool static_cast_ = token == lex::Tk::kw_static_cast;
+        const bool multiple = !braced && !static_cast_ && operands.size() != 2;
+        std::string result = (braced ? "tl" : static_cast_ ? "sc" : "cv") + *cast;
+        if (multiple) result += '_';
+        for (ast::ConstId operand : std::span(operands).subspan(1)) {
+          auto child = expression(operand);
+          if (!child) return child;
+          result += *child;
+        }
+        if (braced || multiple) result += 'E';
+        return result;
       }
-      const auto code = operator_code(lex::spelling(token), operands.size());
+      std::optional<std::string_view> code;
+      switch (token) {
+      case lex::Tk::l_paren: code = "cl"; break;
+      case lex::Tk::l_square: code = "ix"; break;
+      case lex::Tk::question: code = "qu"; break;
+      case lex::Tk::kw_sizeof: code = "sz"; break;
+      case lex::Tk::kw_noexcept: code = "nx"; break;
+      case lex::Tk::plusplus: code = operands.size() == 1 ? "pp_" : "pp"; break;
+      case lex::Tk::minusminus: code = operands.size() == 1 ? "mm_" : "mm"; break;
+      default: code = operator_code(lex::spelling(token), operands.size()); break;
+      }
       if (!code) return std::unexpected("an unsupported written operator");
       std::string encoded(*code);
       for (ast::ConstId operand : operands) {
+        if (operand == ast::ConstId::none) continue;
         auto child = expression(operand);
         if (!child) return child;
         encoded += *child;
       }
+      if (token == lex::Tk::l_paren) encoded += 'E';
       return encoded;
+    }
+    if (in_.values.is<ast::VWrittenMember>(v)) {
+      const auto member = in_.values.get<ast::VWrittenMember>(v);
+      auto object = expression(member.object);
+      if (!object) return object;
+      std::string result = (member.arrow ? "pt" : "dt") + *object + source_name(in_.names.spelling(member.name));
+      if (!member.template_id) return result;
+      auto args = template_args(in_.seqs.elements(member.arguments));
+      if (!args) return args;
+      return result + *args;
+    }
+    if (in_.values.is<ast::VWrittenCallee>(v)) {
+      const auto callee = in_.values.get<ast::VWrittenCallee>(v);
+      std::string result;
+      if (compatibility_ != ast::Compatibility::gcc) {
+        if (callee.resolved != ast::EntityId::none && functions_) {
+          if (const auto function = functions_(callee.resolved)) {
+            if (function->lang == ast::LangLinkage::c) return "L" + source_name(function->declaration.name) + "E";
+            auto name = local_encoding(function->declaration);
+            if (!name) return name;
+            return "L_Z" + *name + "E";
+          }
+        }
+        if (callee.global) result = "gs";
+        const auto qualifier = in_.seqs.elements(callee.qualifier);
+        if (!qualifier.empty()) {
+          result += "sr";
+          for (ast::NameId name : qualifier) result += source_name(in_.names.spelling(name));
+          result += 'E';
+        }
+      }
+      result += source_name(in_.names.spelling(callee.name));
+      if (!callee.template_id) return result;
+      auto args = template_args(in_.seqs.elements(callee.arguments));
+      if (!args) return args;
+      return result + *args;
+    }
+    if (in_.values.is<ast::VDepMember>(v)) {
+      const auto member = in_.values.get<ast::VDepMember>(v);
+      const auto qualifier = in_.types.canon(member.qualifier);
+      if (compatibility_ != ast::Compatibility::gcc && classes_ && in_.types.is<ast::TClass>(qualifier)) {
+        const auto scope = classes_(in_.types.get<ast::TClass>(qualifier).entity);
+        if (scope.templ != ast::EntityId::none) {
+          auto args = template_args(scope.args);
+          if (!args) return args;
+          std::string prefix = "sr";
+          if (scope.scope != ast::EntityId::none) {
+            prefix = unresolved_qualifier(scope.scope, true, false);
+            prefix.pop_back();
+          }
+          return prefix + source_name(scope.name) + *args + "E" + source_name(in_.names.spelling(member.name));
+        }
+      }
+      auto scope = type(qualifier);
+      if (!scope) return scope;
+      return "sr" + *scope + source_name(in_.names.spelling(member.name));
     }
     if (in_.values.is<ast::VConstraint>(v)) {
       const auto c = in_.values.get<ast::VConstraint>(v);
@@ -869,6 +944,11 @@ class Mangler {
       return requires_expression(in_.values.get<ast::VRequiresExpression>(v));
     if (in_.values.is<ast::VRequiresParameter>(v))
       return requires_parameter(in_.values.get<ast::VRequiresParameter>(v));
+    if (in_.values.is<ast::VDepFnParam>(v)) {
+      const auto parameter = in_.values.get<ast::VDepFnParam>(v);
+      const ast::u64 level = requires_depth_ + parameter.depth + (compatibility_ == ast::Compatibility::gcc);
+      return parameter_encoding(level, parameter.index, ast::Cv(parameter.cv));
+    }
     if (in_.values.is<ast::VInt>(v)) {
       const auto value = in_.values.get<ast::VInt>(v);
       return template_arg({ast::TemplateArgKind::value, value.type, v});
@@ -1023,12 +1103,14 @@ class Mangler {
       level = requires_depth_ - !template_head_constraint_;
     else if (compatibility_ == ast::Compatibility::gcc)
       level = ast::u64{0} - parameter.scope;
+    return parameter_encoding(level, parameter.index, compatibility_ == ast::Compatibility::gcc ? ast::Cv::none : parameter.cv);
+  }
+
+  std::string parameter_encoding(ast::u64 level, ast::u16 index, ast::Cv cv) const {
     std::string encoded = level == 0 ? "fp" : std::format("fL{}p", level - 1);
-    if (compatibility_ != ast::Compatibility::gcc) {
-      if (std::to_underlying(parameter.cv) & 2) encoded += 'V';
-      if (std::to_underlying(parameter.cv) & 1) encoded += 'K';
-    }
-    if (parameter.index) encoded += std::to_string(parameter.index - 1);
+    if (std::to_underlying(cv) & 2) encoded += 'V';
+    if (std::to_underlying(cv) & 1) encoded += 'K';
+    if (index) encoded += std::to_string(index - 1);
     return encoded + '_';
   }
 

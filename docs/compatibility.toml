@@ -533,7 +533,7 @@ prior = "Omit constraints from symbols, matching the Darwin Clang oracle recorde
 spec = "Use the current Itanium proposal for supported template-head and trailing Q constraints and the Tk prefix for a constrained parameter."
 gcc = "Use the current primary encoding. Qualified concept expressions use unqualified names and converted arguments. A bare boolean template-parameter constraint is omitted as in GCC 16.2."
 clang = "Use the Q and Tk encodings tested against upstream Clang 23.1.6, with qualified concept names and written arguments."
-limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, and the operator and requires-expression forms recorded below. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. GCC mode emits the primary symbols used by current GCC callers."
+limits = "The Itanium proposal is open. The interoperable slice covers concept names, boolean literals and parameters, logical combinations, and the operator, call, and requires-expression forms recorded below. Other retained clauses receive a ycxx-specific encoding so they keep distinct symbols. GCC mode emits the primary symbols used by current GCC callers."
 evidence = ["docs/design/ast.md", "tests/own/templates/c6-overloads.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
@@ -547,6 +547,19 @@ gcc = "Use the same primary symbols for the tested operators, including arithmet
 clang = "Same as GCC."
 probe = 'template<class T> requires (sizeof(T) > 0) int size(T) { return 1; } int instantiate() { return size(0); }'
 evidence = ["tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "constrained-member-and-call-expression-symbol"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[temp.over.link], Itanium C++ ABI §5.1.6.2 and the constraint mangling proposal"
+prior = "Use a token fingerprint for member selection, calls, conditional expressions, functional conversions, and written references to a function parameter."
+spec = "Use the published expression grammar for member selection, dependent qualified names, calls, conditional expressions, conversions, noexcept and sizeof. Number function parameters relative to their use."
+gcc = "Encode the tested qualified calls by their unqualified name. A dependent member of a class template uses the complete type as its qualifier and counts that template prefix in the substitution table. Use level one for references to a function parameter in the tested trailing clauses."
+clang = "Use a resolved function's encoded name or the written namespace path for a dependent template-id. Encode a dependent member's class template as an unresolved qualifier. The tested trailing function parameters use level zero."
+limits = "Covers the tested call and member forms, including local parameters of requires-expressions, named namespace variables, array subscripts and named and functional casts. The result-concept scope rules are recorded separately."
+probe = 'template<class T> int f(T x) requires (noexcept(x.member()));'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary symbols with -fabi-compat-version=0 and Clang 23.1.6 ELF and Mach-O symbol probes"]
 
 [[divergence]]
 id = "constrained-requires-expression-local-parameter-symbol"

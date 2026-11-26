@@ -4636,12 +4636,12 @@ private:
     constraints_fp_ = ast::mix(constraints_fp_, head_constraint_.tokens);
   }
   // A declarator's trailing requires-clause ([dcl.decl]/4).
-  void trailing_requires_clause() {
+  void trailing_requires_clause(std::span<const parse::Param> params) {
     if (!ps_.is(Tk::kw_requires)) return;
     ps_.bump();
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
-    trailing_requires_ = ps_.constraint_expression(true, &trailing_constraint_.expression);
+    trailing_requires_ = ps_.trailing_function_constraint(params, trailing_constraint_.expression);
     trailing_constraint_.tokens = clause_fp(begin, ps_.pos());
     constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
   }
@@ -8856,13 +8856,7 @@ private:
           }
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
         flags |= sema::decl_flag::template_;
-        if (fn) {  // its parameters are in scope ([basic.scope.param])
-          s_.push_scope();
-          for (const parse::Param& prm : d.params)
-            if (prm.name != s_.no_name()) s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, prm.at, false);
-          trailing_requires_clause();
-          s_.pop_scope();
-        }
+        if (fn) trailing_requires_clause(d.params);
         sem.constraints = associated_constraints();
         sem.head_constraint = head_constraint_;
         sem.trailing_constraint = trailing_constraint_;

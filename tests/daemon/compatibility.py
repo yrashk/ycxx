@@ -2377,6 +2377,86 @@ int use() { return f(7); }
                         assert b'built-in type trait' in resident[2], (mode, target, case, resident)
 
 
+def constraint_expression_symbols(world, gxx):
+    scope = world.scope
+    declarations = '''\
+struct A {
+  static constexpr bool value = true;
+  static constexpr int number = 3;
+  constexpr int f() const noexcept { return 1; }
+  int member;
+};
+template<class T> struct Trait { static constexpr bool value = true; };
+template<class T> constexpr bool check() { return true; }
+namespace N {
+  template<class T> constexpr bool check() { return true; }
+  constexpr bool yes = true;
+  constexpr bool read(int x) { return x != 0; }
+}
+namespace Alias = N;
+'''
+    # The differences here use GCC's primary symbols with its legacy aliases disabled.
+    heads = (
+        ('(T::value)', 'srT_5value', '', ''),
+        ('(Trait<T>::value)', 'sr5TraitIT_EE5value', 'sr5TraitIT_E5value', 'S2_'),
+        ('(check<T>())', 'cl5checkIT_EE', '', ''),
+        ('(::N::check<T>())', 'clgssr1NE5checkIT_EE', 'cl5checkIT_EE', ''),
+        ('(Alias::check<T>())', 'clsr5AliasE5checkIT_EE', 'cl5checkIT_EE', ''),
+        ('(noexcept(T{}))', 'nxtlT_E', '', ''),
+        ('(T::value ? true : false)', 'qusrT_5valueLb1ELb0E', '', ''),
+        ('(bool(T::value))', 'cvbsrT_5value', '', ''),
+        ('(static_cast<bool>(T::number))', 'scbsrT_6number', '', ''),
+        ('((~T::number != 0) && ((-T::number) < 0))', 'aanecosrT_6numberLi0EltngsrS1_6numberLi0E', '', ''),
+        ('(N::yes)', 'L_ZN1NL3yesEE', '', 'T_'),
+        ('(N::read(T::number))', 'clL_ZN1N4readEiEsrT_6numberE', 'cl4readsrT_6numberE', 'S1_'),
+        ('(T::number > 0 && sizeof(T{}) > 0)', 'aagtsrT_6numberLi0EgtsztlS1_ELi0E', '', ''),
+        ('requires { T::number; }', 'rqXsrT_6numberE', '', ''),
+        ('requires(T t) { t.f(); }', 'rQT__Xcldt{arg}1fEE', '', ''),
+        ('requires(T t) { t.member; }', 'rQT__Xdt{arg}6memberE', '', ''),
+        ('requires(T* p) { p->member; }', 'rQPT__Xpt{arg}6memberE', '', ''),
+        ('requires(T* p) { { *p }; p[0]; }', 'rQPT__Xde{arg}Xix{arg}Li0EE', '', ''),
+        ('requires(T a) { { a.f() } noexcept; }', 'rQT__Xcldt{arg}1fENE', '', ''),
+    )
+    trailing = (
+        ('(sizeof(x) > 0)', 'gtsz{arg}Li0E'),
+        ('(noexcept(x.f()))', 'nxcldt{arg}1fE'),
+    )
+    signatures = [f'template<class T> requires {condition} int h{i:02}(T)' for i, (condition, *_) in enumerate(heads)]
+    signatures += [f'template<class T> int t{i:02}(T x) requires {condition}' for i, (condition, _) in enumerate(trailing)]
+    main = ' + '.join([f'h{i:02}(A{{}})' for i in range(len(heads))] + [f't{i:02}(A{{}})' for i in range(len(trailing))])
+    (scope / 'expression-constraints.cpp').write_text(declarations +
+        '\n'.join(f'{signature} {{ return 1; }}' for signature in signatures) +
+        f'\nint force() {{ return {main}; }}\n')
+    (scope / 'expression-constraints-caller.cpp').write_text(declarations +
+        ';\n'.join(signatures) + f';\nint main() {{ return ({main}) != {len(signatures)}; }}\n')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        command = ['-fcompat=' + mode, '-c', 'expression-constraints.cpp', '-o', 'expression-constraints.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for env in (world.cold, world.daemon):
+                outcome = world.cxx([target, *command], scope, env, timeout=40)
+                assert outcome == (0, b'', b''), (mode, target, outcome)
+                names = (scope / 'expression-constraints.o').read_bytes().split(b'\0')
+                for i, (_, expression, gcc, result) in enumerate(heads):
+                    parameter = result if i == 10 or (mode == 'gcc' and result) else 'S2_' if i == 11 else 'S1_'
+                    encoded = (gcc if mode == 'gcc' and gcc else expression).format(arg='fL0p_' if mode == 'clang' else 'fp_')
+                    symbol = f'{prefix}_Z3h{i:02}I1AQ{encoded}Ei{parameter}'.encode()
+                    assert symbol in names, (mode, target, symbol, [n for n in names if b'_Z3h' in n])
+                for i, (_, expression) in enumerate(trailing):
+                    encoded = expression.format(arg='fL0p_' if mode == 'gcc' else 'fp_')
+                    symbol = f'{prefix}_Z3t{i:02}I1AEiT_Q{encoded}'.encode()
+                    assert symbol in names, (mode, target, symbol, [n for n in names if b'_Z3t' in n])
+        peer = gxx if mode == 'gcc' else clang if mode == 'clang' else None
+        if peer:
+            args = ['-fabi-compat-version=0'] if mode == 'gcc' else []
+            compiled = world.cxx(command, scope, world.daemon, timeout=40)
+            assert compiled == (0, b'', b''), (mode, compiled)
+            subprocess.run([peer, '-std=c++26', *args, 'expression-constraints-caller.cpp', 'expression-constraints.o',
+                            '-o', 'expression-constraints'], cwd=scope, check=True, capture_output=True, timeout=40)
+            subprocess.run([scope / 'expression-constraints'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -2431,6 +2511,7 @@ def main():
         bound_pack_index_symbols(world, gxx)
         operator_constraints(world, gxx)
         requires_expression_symbols(world, gxx)
+        constraint_expression_symbols(world, gxx)
         template_argument_prefixes(world, gxx)
         placeholder_template_prefixes(world, gxx)
         mixed_source_location(world, gxx)

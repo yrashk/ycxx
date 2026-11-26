@@ -3475,6 +3475,20 @@ public:
   // parentheses and concept-ids decompose; any other operand is an atomic constraint. With
   // `primaries` (a requires-clause, [temp.pre]/9) operands are primary-expressions; otherwise (a
   // concept's definition) they are what binds tighter than `&&`.
+  sema::ConstId trailing_function_constraint(std::span<const Param> params, sema::ConstId& written) {
+    s_->push_scope();
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      const auto& p = params[i];
+      if (p.name == s_->no_name()) continue;
+      const auto local = s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+      written_function_parameters_.emplace(local, ast::VDepFnParam{0, u16(i), u8(ast::cv_of(p.type))});
+    }
+    const auto result = constraint_expression(true, &written);
+    s_->pop_scope();
+    written_function_parameters_.clear();
+    return result;
+  }
+
   sema::ConstId constraint_expression(bool primaries, sema::ConstId* written = nullptr) {
     sema::ConstId l = constraint_conjunction(primaries, written);
     while (is(Tk::pipepipe)) {
@@ -3517,6 +3531,8 @@ public:
     if (auto local = s_->as<ast::LocalRef>(e)) {
       const auto parameter = written_requires_parameters_.find(local->local);
       if (parameter != written_requires_parameters_.end()) return s_->ins().intern_value(parameter->second);
+      const auto fn_parameter = written_function_parameters_.find(local->local);
+      if (fn_parameter != written_function_parameters_.end()) return s_->ins().intern_value(fn_parameter->second);
     }
     if (auto p = s_->as<ast::Paren>(e)) {
       e.id = p->operand.id;
@@ -3537,7 +3553,7 @@ public:
       }
       return literal->value;
     }
-    if (writing_pack_index_) {
+    if (writing_pack_index_ || writing_constraint_atom_) {
       if (auto declaration = s_->as<ast::DeclRef>(e); declaration && !declaration->reference) {
         const auto& entity = s_->world().entities.rec(declaration->entity);
         if (entity.kind == sema::EntityKind::variable && entity.templ == EntityId::none &&
@@ -3547,10 +3563,36 @@ public:
     }
     return sema::ConstId::none;
   }
-  void record_written_operator(Ex result, Tk token, std::initializer_list<ConstId> operands) {
+  void record_written_operator(Ex result, Tk token, std::span<const ConstId> operands) {
     if (!result.ok() || std::ranges::contains(operands, ConstId::none)) return;
     written_operators_.insert_or_assign(result.id, s_->ins().intern_value(
         ast::VWrittenOperator{u8(token), s_->ins().intern_seq(operands)}));
+  }
+  void record_written_operator(Ex result, Tk token, std::initializer_list<ConstId> operands) {
+    record_written_operator(result, token, std::span(operands));
+  }
+  ConstId written_type(QualType type) {
+    const auto canonical = s_->types().canonical(type);
+    return s_->ins().intern_value(ast::VType{ast::without_cv(canonical), u8(ast::cv_of(canonical))});
+  }
+  void record_written_callee(Ex result, NameId name, u32 qualifier_end, bool template_id,
+                             std::span<const ast::TemplateArg> args = {}) {
+    if (!writing_constraint_atom_ || !result.ok()) return;
+    auto declaration = s_->address_set(result);
+    if (!template_id && !declaration) return;
+    EntityId resolved = EntityId::none;
+    if (!template_id && declaration->decls->size() == 1 &&
+        !(declaration->decls->front().flags & sema::decl_flag::template_))
+      resolved = declaration->decls->front().entity;
+    std::vector<NameId> qualifier;
+    for (u32 i = result.begin; i < qualifier_end; ++i) {
+      const auto& token = r_->tokens[begin_ + i];
+      if (token.kind == Tk::identifier) qualifier.push_back(name_of(token));
+    }
+    const bool global = r_->tokens[begin_ + result.begin].kind == Tk::coloncolon;
+    written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VWrittenCallee{
+        name, resolved, s_->ins().intern_seq(std::span<const NameId>(qualifier)), s_->ins().intern_seq(args), global,
+        template_id}));
   }
   // Whether an operand of `&&` or `||` ends here.
   bool operand_ends(bool primaries, u32 ahead = 0) const {
@@ -3582,12 +3624,12 @@ public:
     const sema::Sema::ConstraintAtomScope atom{*s_};
     const bool saved = std::exchange(writing_constraint_atom_, written != nullptr);
     Ex e = primaries ? primary_expression() : binary_expression(3);
-    writing_constraint_atom_ = saved;
     if (written) {
       *written = written_atom(e);
       if (r_->tokens[begin_ + begin].kind == Tk::kw_requires &&
           !s_->ins().values.is<ast::VRequiresExpression>(*written)) *written = sema::ConstId::none;
     }
+    writing_constraint_atom_ = saved;
     // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
     std::vector<NameId> names;
     for (u32 j = begin_ + begin; j < i_; ++j)
@@ -3635,6 +3677,7 @@ public:
   bool writing_pack_index_ = false;
   std::map<NodeId, ConstId> written_operators_;
   std::map<u32, ast::VRequiresParameter> written_requires_parameters_;
+  std::map<u32, ast::VDepFnParam> written_function_parameters_;
   u32 written_requires_depth_ = 0;
 
   // `C` or `N::C` naming a concept here, read; none, with nothing read, otherwise.
@@ -4211,7 +4254,9 @@ public:
     Ex t = expression();
     expect(Tk::colon);
     Ex f = assignment_expression();
-    return s_->conditional(cond, t, f, at, structural_member_argument());
+    Ex result = s_->conditional(cond, t, f, at, structural_member_argument());
+    if (writing_constraint_atom_) record_written_operator(result, Tk::question, {written_atom(cond), written_atom(t), written_atom(f)});
+    return result;
   }
 
   // The binary operators from `||` (precedence 1) to pointer-to-member access (12).
@@ -4516,6 +4561,7 @@ public:
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
       if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
+      if (writing_constraint_atom_) record_written_operator(r, Tk::kw_sizeof, {written_atom(e)});
       return {r.id, begin, pos(), r.info};
     }
     case Tk::coloncolon:
@@ -4533,7 +4579,9 @@ public:
       --s_->unevaluated;
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-      return s_->unary_noexcept(operand, begin, pos());
+      Ex result = s_->unary_noexcept(operand, begin, pos());
+      if (writing_constraint_atom_) record_written_operator(result, Tk::kw_noexcept, {written_atom(operand)});
+      return result;
     }
     case Tk::kw_co_await:
     case Tk::caretcaret: {
@@ -4553,7 +4601,7 @@ public:
     address_op_ = saved_address;
     if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
     Ex result = s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
-    if ((writing_constraint_atom_ && !written_requires_parameters_.empty()) ||
+    if (writing_constraint_atom_ ||
         (writing_pack_index_ && (token == Tk::plus || token == Tk::minus || token == Tk::exclaim || token == Tk::tilde)))
       record_written_operator(result, token, {written_atom(e)});
     return result;
@@ -4630,7 +4678,13 @@ public:
             ++deferred_immediate_calls_;
             break;
           }
+        std::vector<ConstId> operands;
+        if (writing_constraint_atom_) {
+          operands.push_back(written_atom(e));
+          for (Ex arg : args) operands.push_back(written_atom(arg));
+        }
         e = immediate(s_->call(e, std::move(args), pos(), at));
+        if (writing_constraint_atom_) record_written_operator(e, Tk::l_paren, operands);
         break;
       }
       case Tk::l_square: {
@@ -4638,14 +4692,24 @@ public:
         Unangle u{angle_};
         Ex index = expression();
         if (!expect(Tk::r_square)) return {NodeId::none, e.begin, pos()};
+        const Ex array = e;
         e = s_->subscript(e, index, pos(), at);
+        if (writing_constraint_atom_) record_written_operator(e, Tk::l_square, {written_atom(array), written_atom(index)});
         break;
       }
       case Tk::plusplus:
       case Tk::minusminus: {
-        auto op = is(Tk::plusplus) ? ast::UnaryOp::post_inc : ast::UnaryOp::post_dec;
+        const auto token = kind();
+        auto op = token == Tk::plusplus ? ast::UnaryOp::post_inc : ast::UnaryOp::post_dec;
+        const Ex operand = e;
         bump();
         e = s_->unary(op, e, e.begin, pos(), at);
+        if (writing_constraint_atom_ && e.ok() && written_atom(operand) != ConstId::none) {
+          // A second, empty operand marks postfix rather than prefix in the ABI.
+          const std::array operands{written_atom(operand), ConstId::none};
+          written_operators_.insert_or_assign(e.id, s_->ins().intern_value(
+              ast::VWrittenOperator{u8(token), s_->ins().intern_seq(std::span(operands))}));
+        }
         break;
       }
       case Tk::period:
@@ -4710,8 +4774,16 @@ public:
           targs = template_argument_list();
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
+        const Ex object = e;
         e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
                        structural_member_argument() && !keyword && !targs);
+        if (writing_constraint_atom_ && !member_class && e.ok()) {
+          if (const auto operand = written_atom(object); operand != ConstId::none) {
+            const auto args = targs ? std::span<const ast::TemplateArg>(*targs) : std::span<const ast::TemplateArg>{};
+            written_operators_.insert_or_assign(e.id, s_->ins().intern_value(ast::VWrittenMember{
+                operand, n, s_->ins().intern_seq(args), arrow, targs.has_value()}));
+          }
+        }
         if (targs) s_->explicit_template_args(e, std::move(*targs));
         break;
       }
@@ -5049,13 +5121,22 @@ public:
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
           // argument-dependent lookup.
           if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
-          return s_->dependent_node({}, begin, pos());
+          Ex result = s_->dependent_node({}, begin, pos());
+          if (is(Tk::l_paren)) record_written_callee(result, n, begin, /*template_id=*/true, *args);
+          return result;
+        }
+        if (writing_constraint_atom_ && is(Tk::l_paren)) {
+          Ex result = s_->template_id(n, *args, begin, pos());
+          record_written_callee(result, n, begin, /*template_id=*/true, *args);
+          return result;
         }
         return s_->template_id(n, std::move(*args), begin, pos());
       }
       const bool callee = is(Tk::l_paren);
       const bool immediate_default_call = callee && in_integral_template_default_ && !s_->unevaluated;
-      return s_->name_expr(n, begin, pos(), callee, immediate_default_call);
+      Ex result = s_->name_expr(n, begin, pos(), callee, immediate_default_call);
+      if (callee) record_written_callee(result, n, begin, /*template_id=*/false);
+      return result;
     }
     case Tk::coloncolon:
       if (!allocation_operator_ahead(1)) return qualified_id(begin);
@@ -5220,6 +5301,12 @@ public:
       if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
       if (!written_expansion) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
+      if (writing_constraint_atom_ && !written_expansion) {
+        std::vector<ConstId> operands{written_type(t)};
+        for (const auto& clause : b->clauses)
+          operands.push_back(clause.designated || clause.list ? ConstId::none : written_atom(clause.expr));
+        record_written_operator(r, Tk::l_brace, operands);
+      }
       return {r.id, begin, pos(), r.info};
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
@@ -5232,8 +5319,14 @@ public:
       while (accept(Tk::comma));
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
     const bool lambda_result = lambda_result_operand_ == begin && is(Tk::semi);
+    std::vector<ConstId> operands;
+    if (writing_constraint_atom_) {
+      operands.push_back(written_type(t));
+      for (Ex arg : args) operands.push_back(written_atom(arg));
+    }
     Ex r = lambda_result ? s_->lambda_result_cast(t, std::move(args), begin, pos())
                         : s_->functional_cast(t, std::move(args), begin, pos());
+    if (writing_constraint_atom_) record_written_operator(r, Tk::l_paren, operands);
     return {r.id, begin, pos(), r.info};
   }
 
@@ -5507,14 +5600,21 @@ public:
             const bool allow_class_result = namespace_alias_type && in_template_value_argument_ == s_->unevaluated;
             if (auto call = deferred_immediate_template_call(r, *args, allow_class_result)) return *call;
           }
-          return s_->dependent_node({}, begin, pos());
+          Ex result = s_->dependent_node({}, begin, pos());
+          if (s->ns && is(Tk::l_paren)) record_written_callee(result, n, name_at, /*template_id=*/true, *args);
+          return result;
         }
+        if (s->ns && is(Tk::l_paren)) record_written_callee(r, n, name_at, /*template_id=*/true, *args);
         s_->explicit_template_args(r, std::move(*args));
         return r;
       }
     }
     const bool immediate_default_call = s->ns && in_integral_template_default_ && !s_->unevaluated && is(Tk::l_paren);
-    return scope_expr(immediate_default_call);
+    Ex result = scope_expr(immediate_default_call);
+    if (writing_constraint_atom_ && result.ok() && s->type && s_->types().is_dependent(*s->type))
+      written_operators_.insert_or_assign(result.id, s_->ins().intern_value(ast::VDepMember{s_->types().canonical(*s->type), n}));
+    if (s->ns && is(Tk::l_paren)) record_written_callee(result, n, name_at, /*template_id=*/false);
+    return result;
   }
 
   // ------------------------------------------------------------ [stmt]
