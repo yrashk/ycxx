@@ -42,9 +42,9 @@ ycxx show app --target="$alternate" --format=html > alternate-plan.html
 ```
 
 `file` identifies the Linux executable as ELF and the macOS executable as
-Mach-O. Both builds use the host scanner. The second can reuse the
-scanner's receipt and the `config` action receipt because the generator
-receives the same executable and arguments. Inspect the compiler activity
+Mach-O. Both builds use the host scanner. The resident engine can reuse the
+scanner build across both targets. The `config` action can reuse its receipt
+because it receives the same executable and arguments. Inspect the compiler activity
 for `scanner` and `app` in the trace. Compare generator executions with
 `grep -F '"kind":"ExternalAction"' host.jsonl alternate.jsonl`.
 
