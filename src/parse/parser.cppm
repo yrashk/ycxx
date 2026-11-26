@@ -3237,7 +3237,26 @@ public:
 
   bool starts_type_id(bool template_argument = false) {
     if (transform_trait_ahead()) return true;
-    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren) return function_type_argument_ahead();
+    if (template_argument) {
+      // [temp.arg.general], [expr.type.conv]: a brace immediately after a simple type
+      // or a typename-specifier starts a functional conversion expression.
+      if (simple_type_keyword(kind())) {
+        if (kind(1) == Tk::l_brace) return false;
+        if (kind(1) == Tk::l_paren) return function_type_argument_ahead();
+      }
+      if (is(Tk::kw_typename)) {
+        // Check for the brace before lookup. An unbraced qualified template-id
+        // can contain further type arguments that would repeat this probe.
+        u32 name = kind(1) == Tk::coloncolon ? 2 : 1;
+        while (kind(name) == Tk::identifier && kind(name + 1) == Tk::coloncolon) name += 2;
+        if (name != 1 && kind(name) == Tk::identifier && kind(name + 1) == Tk::l_brace) {
+          const bool saved_half = qualified_half_;
+          const auto q = qualified_type(1);
+          qualified_half_ = saved_half;
+          if (q && kind(1 + q->second) == Tk::l_brace) return false;
+        }
+      }
+    }
     if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
