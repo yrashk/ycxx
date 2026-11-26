@@ -634,7 +634,31 @@ spec = "Normalize each bound concept pack argument individually. This selects th
 gcc = "GCC 16.2 rejects both the single concept template parameter and the pack spelling."
 clang = "Upstream Clang 23.1.6 accepts individual and empty concept packs in folds. It reports the draft example's overloads ambiguous and accepts the tested fold combining different pack kinds."
 probe = 'template<class T, template<class> concept... C> concept All = (C<T> && ...);'
-evidence = ["The explicit overload and mixed-pack examples at the draft pin", "GCC 16.2 and upstream Clang 23.1.6 C++26 acceptance, satisfaction and overload probes on x86-64 Linux and arm64 Darwin"]
+evidence = ["tests/daemon/compatibility.py", "The explicit overload and mixed-pack examples at the draft pin", "GCC 16.2 and upstream Clang 23.1.6 C++26 acceptance, satisfaction, overload and primary object symbol probes on x86-64 Linux and arm64 Darwin"]
+
+[[divergence]]
+id = "constrained-builtin-predicate-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[temp.over.link], Itanium C++ ABI §5.1.6.2, docs/EXTENSIONS.md"
+prior = "Retain an opaque constraint fingerprint even when the source uses a recognized type predicate."
+spec = "Keep the predicate's source argument types with the vendor expression encoding."
+gcc = "For the tested direct head predicate, omit the constraint from the primary symbol. Diagnose the tested predicates in trailing clauses or inside a compound written expression at emission."
+clang = "Keep the predicate structurally with u and its canonical builtin name in either position. __is_same_as uses the __is_same encoding."
+probe = 'template<class T> requires (__is_class(T) && true) int f(T);'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary symbol probes with -fabi-compat-version=0 and upstream Clang 23.1.6 ELF and Mach-O probes"]
+
+[[divergence]]
+id = "constraint-array-allocation-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.new], Itanium C++ ABI §5.1.6.2"
+prior = "Keep an opaque token fingerprint for the allocation expression in a constraint."
+spec = "Use the allocation expression production and encode the written bound in the array type."
+gcc = "Emit na with the written array bound in the type, as in na_A2_T_E."
+clang = "Emits na_T_E for the tested new T[2], retaining the allocated element type."
+probe = 'template<class T> requires requires { new T[2]; } int f(T);'
+evidence = ["tests/daemon/compatibility.py", "Itanium ABI allocation and expression productions", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbol probes"]
 
 [[divergence]]
 id = "constrained-requires-expression-local-parameter-symbol"

@@ -75,6 +75,8 @@ struct ClassName {
   bool closure = false;
   ast::QualType closure_type{};
   std::vector<ast::TemplateParamSema> closure_head{};  // its explicit template parameters
+  ast::WrittenConstraint closure_constraint{};
+  ast::u16 closure_constraint_depth = 0;
   std::uint32_t closure_number = 0;
   std::shared_ptr<const LocalFunction> local{};
   std::optional<std::uint32_t> unnamed_type_ordinal{};
@@ -506,11 +508,19 @@ class Mangler {
   // template parameters, then its parameters' types (§5.1.8; `Ty` as Clang has it).
   std::expected<std::string, std::string> closure_sig(const ClassName& n) {
     std::string out;
+    const auto saved_depth = std::exchange(own_depth, n.closure_constraint_depth);
     for (const ast::TemplateParamSema& p : n.closure_head) {
       auto d = param_decl(p);
-      if (!d) return d;
+      if (!d) {
+        own_depth = saved_depth;
+        return d;
+      }
       out += *d;
     }
+    auto constraint = constraint_suffix(n.closure_constraint, true);
+    own_depth = saved_depth;
+    if (!constraint) return constraint;
+    out += *constraint;
     auto sig = signature(in_.types.get<ast::TFunction>(in_.types.canon(n.closure_type)), false);
     if (!sig) return sig;
     return out + *sig;
@@ -616,7 +626,11 @@ class Mangler {
       const bool deduced_result = in_.types.is<ast::TAuto>(in_.types.canon(f.ret));
       auto sig = signature_for_closure(f, sc, spec, scope, gcc_invoker && deduced_result);
       if (!sig) return sig;
-      *sig += constraint_suffix(spec.trailing, false);
+      const auto saved_depth = std::exchange(own_depth, sc.closure_constraint_depth);
+      auto trailing = constraint_suffix(spec.trailing, false);
+      own_depth = saved_depth;
+      if (!trailing) return trailing;
+      *sig += *trailing;
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
       return local + "N" + cv + *p + unqualified + *args + "E" + *sig;
     }
@@ -628,7 +642,9 @@ class Mangler {
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
     auto sig = signature(in_.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
     if (!sig) return sig;
-    *sig += constraint_suffix(spec.trailing, false);
+    auto trailing = constraint_suffix(spec.trailing, false);
+    if (!trailing) return trailing;
+    *sig += *trailing;
     // In a <nested-name>, a member function template's cv-qualifiers follow the `N`.
     ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
     std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
@@ -838,6 +854,48 @@ class Mangler {
       if (!second) return second;
       return result + *second;
     }
+    if (in_.values.is<ast::VWrittenDelete>(v)) {
+      const auto deletion = in_.values.get<ast::VWrittenDelete>(v);
+      auto operand = expression(deletion.operand);
+      if (!operand) return operand;
+      return std::string(deletion.global ? "gs" : "") + (deletion.array ? "da" : "dl") + *operand;
+    }
+    if (in_.values.is<ast::VWrittenNew>(v)) {
+      const auto allocation = in_.values.get<ast::VWrittenNew>(v);
+      const bool array = allocation.bound != ast::ConstId::none;
+      std::string out = std::string(allocation.global ? "gs" : "") + (array ? "na" : "nw");
+      if (allocation.placement != ast::ConstId::none) {
+        auto placement = expression(allocation.placement);
+        if (!placement) return placement;
+        out += *placement;
+      }
+      out += '_';
+      auto allocated = allocation.allocated;
+      if (array && compatibility_ != ast::Compatibility::clang)
+        allocated = const_cast<ast::Interners&>(in_).intern_type(ast::TArray{allocated, allocation.bound});
+      auto encoded_type = type(allocated);
+      if (!encoded_type) return encoded_type;
+      out += *encoded_type;
+      if (allocation.init_kind) {
+        out += allocation.init_kind == 1 ? "pi" : "il";
+        for (const auto initializer : in_.seqs.elements(allocation.initializer)) {
+          auto argument = expression(initializer);
+          if (!argument) return argument;
+          out += *argument;
+        }
+      }
+      return out + 'E';
+    }
+    if (in_.values.is<ast::VWrittenTrait>(v)) {
+      const auto trait = in_.values.get<ast::VWrittenTrait>(v);
+      std::string encoded = "u" + source_name(in_.names.spelling(trait.name));
+      for (const auto argument : in_.seqs.elements(trait.arguments)) {
+        auto name = type(argument);
+        if (!name) return name;
+        encoded += *name;
+      }
+      return encoded + 'E';
+    }
     if (in_.values.is<ast::VWrittenOperator>(v)) {
       const auto op = in_.values.get<ast::VWrittenOperator>(v);
       const auto operands = in_.seqs.elements(op.operands);
@@ -867,6 +925,7 @@ class Mangler {
       case lex::Tk::kw_sizeof: code = "sz"; break;
       case lex::Tk::ellipsis: code = "sZ"; break;
       case lex::Tk::kw_noexcept: code = "nx"; break;
+      case lex::Tk::kw_throw: code = operands.empty() ? "tr" : "tw"; break;
       case lex::Tk::plusplus: code = operands.size() == 1 ? "pp_" : "pp"; break;
       case lex::Tk::minusminus: code = operands.size() == 1 ? "mm_" : "mm"; break;
       default: code = operator_code(lex::spelling(token), operands.size()); break;
@@ -947,6 +1006,12 @@ class Mangler {
         r += *operand;
       }
       return r;
+    }
+    if (in_.values.is<ast::VConceptParameter>(v)) {
+      const auto c = in_.values.get<ast::VConceptParameter>(v);
+      auto args = template_args(in_.seqs.elements(c.arguments));
+      if (!args) return args;
+      return source_name(in_.names.spelling(c.name)) + *args;
     }
     if (in_.values.is<ast::VDepConcept>(v)) {
       const auto c = in_.values.get<ast::VDepConcept>(v);
@@ -1135,11 +1200,44 @@ class Mangler {
     return encoded + '_';
   }
 
-  std::string constraint_suffix(const ast::WrittenConstraint& clause, bool template_head) {
-    if (clause.tokens == Fp128{}) return {};
+  std::optional<ast::NameId> gcc_signature_trait(ast::ConstId value) {
+    if (value == ast::ConstId::none) return std::nullopt;
+    if (in_.values.is<ast::VWrittenTrait>(value)) {
+      const auto trait = in_.values.get<ast::VWrittenTrait>(value);
+      if (trait.gcc_predicate) return trait.name;
+    }
+    return ast::dispatch<ast::ValueKinds>(in_.values.kind(value), [&]<class T>(std::type_identity<T>) {
+      const auto written = in_.values.get<T>(value);
+      std::optional<ast::NameId> found;
+      auto visit = [&](this auto&& walk, const auto& object) -> void {
+        ast::for_each_ref(object, [&]<class H>(const H& handle) {
+          if (found) return;
+          if constexpr (std::is_same_v<H, ast::ConstId>) {
+            found = gcc_signature_trait(handle);
+          } else if constexpr (std::is_same_v<H, ast::SeqId<ast::ConstId>> ||
+                               std::is_same_v<H, ast::SeqId<ast::TemplateArg>> ||
+                               std::is_same_v<H, ast::SeqId<ast::WrittenRequirement>>) {
+            for (const auto& element : in_.seqs.elements(handle)) walk(element);
+          }
+        });
+      };
+      visit(written);
+      return found;
+    });
+  }
+
+  std::expected<std::string, std::string> constraint_suffix(const ast::WrittenConstraint& clause, bool template_head) {
+    if (clause.tokens == Fp128{}) return std::string{};
     if (clause.expression != ast::ConstId::none) {
-      if (compatibility_ == ast::Compatibility::gcc && in_.values.is<ast::VDepParam>(clause.expression))
-        return {};  // GCC 16 uses the unadorned symbol for a bare boolean template parameter
+      if (compatibility_ == ast::Compatibility::gcc) {
+        if (in_.values.is<ast::VDepParam>(clause.expression))
+          return std::string{};  // GCC 16 uses the unadorned symbol for a bare boolean template parameter.
+        if (auto trait = gcc_signature_trait(clause.expression)) {
+          if (template_head && in_.values.is<ast::VWrittenTrait>(clause.expression)) return std::string{};
+          return std::unexpected(std::format("the built-in type trait '{}' in a written constraint",
+                                             in_.names.spelling(*trait)));
+        }
+      }
       const auto checkpoint = candidates_.size();
       const bool old_template_head = std::exchange(template_head_constraint_, template_head);
       const auto outside_requires_depth = std::exchange(requires_depth_, 0);
@@ -1321,7 +1419,7 @@ class Mangler {
         const bool placeholder = in_.types.is<ast::TAuto>(in_.types.canon(p.type));
         const bool value_prefix = placeholder ? !gcc || !empty : !gcc && (dependent(p.type) || empty);
         const bool decl = p.kind == ast::TemplateArgKind::value    ? value_prefix
-                          : p.kind == ast::TemplateArgKind::template_ ? (empty ? !gcc : !same)
+                          : p.kind == ast::TemplateArgKind::template_ ? !p.concept_template && (empty ? !gcc : !same)
                                                                       : p.type_constraint != ast::ConstId::none;
         if (decl) {
           auto d = param_decl(p);
@@ -1339,8 +1437,10 @@ class Mangler {
   std::expected<std::string, std::string> specialization_args(const TemplateSpec& spec) {
     auto args = spec.params.empty() ? template_args(spec.args) : own_template_args(spec.args, spec.params, spec.same_heads);
     if (!args || spec.head.tokens == Fp128{}) return args;
+    auto head = constraint_suffix(spec.head, true);
+    if (!head) return head;
     args->pop_back();
-    *args += constraint_suffix(spec.head, true) + "E";
+    *args += *head + "E";
     return args;
   }
 

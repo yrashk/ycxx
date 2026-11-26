@@ -1106,6 +1106,12 @@ public:
   // still names a template parameter.
   std::optional<bool> satisfied(ConstId c, u32 point) {
     if (c == ConstId::none) return true;
+    if (w_->ins.values.is<ast::VConceptParameter>(c)) {
+      auto t = templates();
+      if (t.constraint_dependent(c)) return std::nullopt;
+      auto resolved = t.substitute_constraint(c, {});
+      return resolved ? satisfied(*resolved, point) : std::optional(false);
+    }
     if (w_->ins.values.is<ast::VFoldConstraint>(c)) {
       const auto fold = w_->ins.values.get<ast::VFoldConstraint>(c);
       if (w_->ins.seqs.size(fold.packs) == w_->ins.seqs.size(fold.bound))
@@ -1134,17 +1140,9 @@ public:
     const auto size = w_->ins.seqs.size(packs.front().elements);
     if (std::ranges::any_of(packs, [&](const auto& pack) { return w_->ins.seqs.size(pack.elements) != size; }))
       return atoms_[key] = false;
-    for (std::size_t element = 0; element < size; ++element) {
-      sema::Bindings bindings;
-      for (const auto& pack : packs) {
-        const u16 depth = u16(pack.pack >> 16);
-        const u16 index = u16(pack.pack);
-        if (bindings.levels.size() <= depth) bindings.levels.resize(depth + 1);
-        auto& level = bindings.levels[depth];
-        if (level.size() <= index) level.resize(index + 1);
-        level[index] = w_->ins.seqs.at(pack.elements, element);
-      }
-      auto operand = templates().substitute_constraint(fold.operand, bindings);
+    auto t = templates();
+    for (u32 element = 0; element < size; ++element) {
+      auto operand = t.substitute_constraint(fold.operand, t.fold_element_bindings(packs, element));
       auto value = operand ? satisfied(*operand, point) : std::optional(false);
       if (!value) return std::nullopt;
       if (operand && satisfaction_failed(*operand)) {
@@ -4693,7 +4691,7 @@ private:
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
     head_requires_ = ps_.constraint_expression(true, &head_constraint_.expression);
-    head_constraint_.tokens = clause_fp(begin, ps_.pos());
+    head_constraint_.tokens = ps_.clause_fp(begin, ps_.pos());
     constraints_fp_ = ast::mix(constraints_fp_, head_constraint_.tokens);
   }
   // A declarator's trailing requires-clause ([dcl.decl]/4).
@@ -4703,28 +4701,8 @@ private:
     u32 begin = ps_.pos();
     const sema::Sema::ClosureOwnerScope owner(s_, constraint_owner());
     trailing_requires_ = ps_.trailing_function_constraint(params, trailing_constraint_.expression);
-    trailing_constraint_.tokens = clause_fp(begin, ps_.pos());
+    trailing_constraint_.tokens = ps_.clause_fp(begin, ps_.pos());
     constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
-  }
-  // The fingerprint of a clause's tokens with each template parameter as its position: equal for
-  // equivalent clauses of redeclarations ([temp.over.link]/5, as tokens, not as expressions).
-  sema::Fp128 clause_fp(u32 begin, u32 end) {
-    sema::Fp128 f = ast::seed("ycxx.parse.clause");
-    const pp::Region& r = p_->region();
-    for (u32 j = it_->begin + begin; j < it_->begin + end; ++j) {
-      const lex::Tok& t = r.tokens[j];
-      if (t.kind == Tk::identifier) {
-        NameId n = s_.world().ins.names.intern(r.name(t));
-        if (const ast::TemplateParamSema* p = s_.template_param(n)) {
-          f = ast::mix(ast::mix(ast::mix(f, u64(0xA11)), u64(p->depth)), u64(p->index));
-          continue;
-        }
-      }
-      f = ast::mix(f, std::to_underlying(t.kind));
-      std::string_view sp = r.spelling(t);
-      f = ast::mix(f, s_.world().ins.names.fp(s_.world().ins.names.intern(sp)));
-    }
-    return f;
   }
   // A partial specialization's associated constraints ([temp.constr.decl]/3: its head's
   // type-constraints, then its requires-clause) and, into `fp`, their tokens' fingerprint, as
@@ -8583,7 +8561,10 @@ private:
       f = ast::mix(ast::mix(f, std::to_underlying(p.kind)), p.pack);
       if (p.kind == ast::TemplateArgKind::value) f = ast::mix(f, s_.types().fp(s_.types().canonical(p.type)));
       // A template template parameter's own head ([temp.over.link]/6).
-      if (p.kind == ast::TemplateArgKind::template_) f = ast::mix(f, head_fp(s_.world().ins.seqs.elements(p.params)));
+      if (p.kind == ast::TemplateArgKind::template_) {
+        if (p.concept_template) f = ast::mix(f, ast::seed("ycxx.sema.concept-template-parameter"));
+        f = ast::mix(f, head_fp(s_.world().ins.seqs.elements(p.params)));
+      }
     }
     return f;
   }
@@ -11232,6 +11213,8 @@ public:
       ast::DeclSema d = ins.seqs.at(is.decls, 0);
       if (ins.seqs.size(d.template_params) > 0) s_.template_scopes.push_back(ins.seqs.elements(d.template_params));
     }
+    if (ins.seqs.size(atom_.lambda_head) != 0)
+      s_.template_scopes.push_back(ins.seqs.elements(atom_.lambda_head));
     sema::Templates t = s_.templates();
     s_.template_args.levels.resize(atom_.depth + 1);
     for (ConstId e : ins.seqs.elements(atom_.mapping))
@@ -11244,9 +11227,11 @@ public:
           if (auto arg = s_.template_args.at(parameter.depth, parameter.index); arg && arg->kind != ast::TemplateArgKind::pack)
             parameter.pack = false;
     // The function's parameters, of their substituted types, for an atom that names them.
-    if (atom_.fn_params && ins.seqs.size(is.decls) > 0) s_.push_scope();
-    if (atom_.fn_params && ins.seqs.size(is.decls) > 0)
-      for (const ast::ParamSema& prm : ins.seqs.elements(ins.seqs.at(is.decls, 0).params)) {
+    if (atom_.fn_params && (ins.seqs.size(atom_.lambda_parameters) != 0 || ins.seqs.size(is.decls) != 0)) {
+      s_.push_scope();
+      const auto params = ins.seqs.size(atom_.lambda_parameters) != 0
+          ? atom_.lambda_parameters : ins.seqs.at(is.decls, 0).params;
+      for (const ast::ParamSema& prm : ins.seqs.elements(params)) {
         if (s_.types().kind(prm.type) == sema::TypeKind::pack_expansion) {
           const std::array pattern{t.type_arg(prm.type)};
           auto expanded = t.substitute_args(pattern, s_.template_args);
@@ -11260,6 +11245,7 @@ public:
         auto ty = t.substitute(prm.type, s_.template_args);
         s_.declare_local(prm.name, ty ? *ty : prm.type, sema::local_flag::parameter, 0, false);
       }
+    }
     // A value argument without a type of its own has its parameter's, substituted
     // ([temp.arg.nontype]). Verify enum conversions after a dependent mapping becomes concrete.
     for (const auto& head : s_.template_scopes) {

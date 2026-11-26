@@ -3010,6 +3010,383 @@ int main() { return f(1, 2L) != 2; }
                 subprocess.run([scope / 'pack-app'], cwd=scope, check=True, timeout=20)
 
 
+def concept_template_parameters(world):
+    scope = world.scope
+    (scope / 'concept-pack.cpp').write_text('''\
+template<class T> concept A = sizeof(T) > 0;
+template<class T> concept B = A<T> && (sizeof(T) > 1);
+template<class T> concept C = sizeof(T) >= 1;
+template<class T> concept D = C<T> && (sizeof(T) > 2);
+#if CASE == 0
+template<class T, template<class> concept... Cs>
+concept all_of = (Cs<T> && ...);
+template<class T> requires all_of<T, A, C>
+constexpr int f(T) { return 1; }
+template<class T> requires all_of<T, B, D>
+constexpr int f(T) { return 2; }
+static_assert(all_of<int>);
+static_assert(f(1) == 2);
+#elif CASE == 1
+template<class T, template<class> concept Cc> concept apply = Cc<T>;
+static_assert(apply<int, A>);
+#elif CASE == 2
+template<A... T> constexpr int f(T...) { return 1; }
+template<B... T> constexpr int f(T...) { return 2; }
+static_assert(f(42) == 2);
+#elif CASE == 3
+template<A... T> constexpr int f(T...) { return 1; }
+static_assert(f(42) == 1);
+#elif CASE == 4
+template<class T, template<class> concept... Cs>
+concept all_of = (Cs<T> && ...);
+static_assert(all_of<int>);
+static_assert(all_of<int, A, B, D>);
+static_assert(!all_of<char, A, B>);
+#elif CASE == 5
+template<class T, template<class> concept... Cs>
+concept any_of = (... || Cs<T>);
+static_assert(!any_of<int>);
+static_assert(any_of<char, B, A>);
+static_assert(!any_of<char, B, D>);
+#elif CASE == 6
+template<class T, template<class> concept Cc> struct Wrap {};
+template <class... T, template<class> concept... Cs>
+int f(Wrap<T, Cs>...) requires (Cs<T> && ...);
+#endif
+''')
+    (scope / 'concept-pack-symbol.cpp').write_text('''\
+template<class T> concept Check = sizeof(T) >= 4;
+template<class T> concept Second = sizeof(T) >= 2;
+#if CASE == 0
+template<template<class> concept C> int f(int value) { return value; }
+int use() { return f<Check>(7); }
+#elif CASE == 1
+template<template<class> concept... C> int f(int value) { return value + sizeof...(C); }
+int use() { return f<Check, Second>(7); }
+#elif CASE == 2
+template<template<class> concept C> requires C<int> int f(int value) { return value; }
+int use() { return f<Check>(7); }
+#elif CASE == 3
+template<template<class> concept... C> requires (C<int> && ...) int f(int value) { return value; }
+int use() { return f<Check, Second>(7); }
+#endif
+''')
+    expected = (
+        '_Z1fI5CheckEii',
+        '_Z1fIJ5Check6SecondEEii',
+        '_Z1fI5CheckQ1CIiEEii',
+        '_Z1fIJ5Check6SecondEQfraa1CIiEEii',
+    )
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            flags = [target, '-fcompat=' + mode]
+            for case in (0, 1, 4, 5, 6):
+                args = [*flags, f'-DCASE={case}', '-fsyntax-only', 'concept-pack.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                rejected = mode == 'gcc' or (case == 0 and mode == 'clang') or (case == 6 and mode == 'spec')
+                assert cold == warm and warm[0] == int(rejected), (mode, target, case, cold, warm)
+                if mode == 'clang' and case == 0:
+                    assert b'ambiguous' in warm[2], warm[2]
+                if mode == 'spec' and case == 6:
+                    assert b'other kinds of packs' in warm[2], warm[2]
+            for case, name in enumerate(expected):
+                command = [*flags, f'-DCASE={case}', '-c', 'concept-pack-symbol.cpp', '-o', 'concept-pack-symbol.o']
+                cold, warm = (world.cxx(command, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == int(mode == 'gcc'), (mode, target, case, cold, warm)
+                if mode == 'gcc':
+                    continue
+                prefix = '_' if target == DARWIN else ''
+                names = (scope / 'concept-pack-symbol.o').read_bytes().split(b'\0')
+                assert (prefix + name).encode() in names, (mode, target, case, name, names)
+                if clang and ((target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')):
+                    result = 9 if case == 1 else 7
+                    (scope / 'concept-pack-caller.cpp').write_text(f'''\
+extern "C" int f(int) asm("{prefix}{name}");
+int main() {{ return f(7) != {result}; }}
+''')
+                    subprocess.run([clang, '-std=c++26', 'concept-pack-caller.cpp', 'concept-pack-symbol.o',
+                                    '-o', 'concept-pack-call'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'concept-pack-call'], cwd=scope, check=True, timeout=20)
+
+
+def constrained_lambda_members(world, gxx):
+    scope = world.scope
+    (scope / 'constrained-lambda.cpp').write_text('''\
+template<class T> concept Integral = sizeof(T) >= 2;
+#if CASE == 0
+inline int direct() { return []<class T> requires Integral<T> (T n) { return n; }(7); }
+#elif CASE == 1
+inline int direct() { return []<Integral T>(T n) { return n; }(7); }
+#elif CASE == 2
+inline int direct() { return [](Integral auto n) { return n; }(7); }
+#elif CASE == 3
+inline int direct() { return [](auto n) requires Integral<decltype(n)> { return n; }(7); }
+#elif CASE == 4
+inline int direct() { return []<class T> requires (sizeof(T) >= 2) (T n) { return n; }(7); }
+#elif CASE == 5
+inline int direct() { return [](auto n) requires (sizeof(decltype(n)) >= 2) { return n; }(7); }
+#elif CASE == 6
+inline int direct() { return []<class T> requires Integral<T> (T n) { return n; }('x'); }
+#elif CASE == 7
+inline int direct() { return []<Integral T>(T n) { return n; }('x'); }
+#elif CASE == 8
+inline int direct() { return [](Integral auto n) { return n; }('x'); }
+#elif CASE == 9
+inline int direct() { return [](auto n) requires Integral<decltype(n)> { return n; }('x'); }
+#elif CASE == 10
+inline int direct() { return []<class T> requires (sizeof(T) >= 2) (T n) { return n; }('x'); }
+#elif CASE == 11
+inline int direct() { return [](auto n) requires (sizeof(decltype(n)) >= 2) { return n; }('x'); }
+#endif
+int keep() { return direct(); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        level = 'fL0p_' if mode == 'gcc' else 'fp_'
+        symbols = (
+            '_ZZ6directvENKUlTyQ8IntegralIT_ES_E_clIiEEDaS_',
+            '_ZZ6directvENKUlTk8IntegralT_E_clIiEEDaS_',
+            '_ZZ6directvENKUlT_E_clIiEEDaS_',
+            f'_ZZ6directvENKUlT_E_clIiEEDaS_Q8IntegralIDt{level}EE',
+            '_ZZ6directvENKUlTyQgestT_Li2ES_E_clIiEEDaS_',
+            f'_ZZ6directvENKUlT_E_clIiEEDaS_QgestDt{level}ELi2E',
+        )
+        for target in (LINUX, DARWIN):
+            peer = gxx if mode == 'gcc' else clang
+            prefix = '_' if target == DARWIN else ''
+            for case, name in enumerate(symbols):
+                outputs = []
+                for env in (world.cold, world.daemon):
+                    command = [target, '-fcompat=' + mode, f'-DCASE={case}', '-c', 'constrained-lambda.cpp',
+                               '-o', 'constrained-lambda.o']
+                    result = world.cxx(command, scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, case, result)
+                    outputs.append((scope / 'constrained-lambda.o').read_bytes())
+                names = outputs[1].split(b'\0')
+                assert outputs[0] == outputs[1] and (prefix + name).encode() in names, (
+                    mode, target, case, name, [n for n in names if b'_Z' in n])
+                rejecting = [target, '-fcompat=' + mode, f'-DCASE={case + 6}', '-fsyntax-only', 'constrained-lambda.cpp']
+                cold, warm = (world.cxx(rejecting, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == 1 and b'viable' in warm[2], (mode, target, case, cold, warm)
+                if peer and ((target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')):
+                    (scope / 'lambda-caller.cpp').write_text(f'''\
+struct EmptyClosure {{}};
+extern "C" int call(const EmptyClosure&, int) asm("{prefix}{name}");
+int main() {{ return call(EmptyClosure{{}}, 19) != 19; }}
+''')
+                    abi = ['-fabi-compat-version=0'] if mode == 'gcc' else []
+                    subprocess.run([peer, '-std=c++26', *abi, 'lambda-caller.cpp', 'constrained-lambda.o',
+                                    '-o', 'lambda-call'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'lambda-call'], cwd=scope, check=True, timeout=20)
+
+
+def written_trait_constraint_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'trait-constraint.cpp').write_text('''\
+struct A { int n; };
+#if CASE == 0
+#define HEAD (__is_class(T) && true)
+#elif CASE == 1
+#define HEAD (__is_class(T) || false)
+#elif CASE == 2
+#define HEAD (!__is_class(T))
+#elif CASE == 3
+#define HEAD requires { __is_class(T); }
+#elif CASE == 4
+#define HEAD (__is_class(T) == true)
+#elif CASE == 5
+#define HEAD (__is_same_as(T, A))
+#elif CASE == 6
+#define HEAD (__is_same(T, A) && __is_class(T))
+#elif CASE == 7
+#define HEAD (true && __is_class(T))
+#elif CASE == 8
+template<class T> concept True = true;
+#define HEAD (True<T> && __is_class(T))
+#elif CASE == 9
+#define HEAD (__is_trivially_copyable(T))
+#elif CASE == 10
+#define HEAD (__is_class(T) && sizeof(T) > 0)
+#elif CASE == 11
+#define HEAD (__is_same(T, A) ? true : false)
+#endif
+#if CASE == 2
+#define ARG 1
+#else
+#define ARG A{}
+#endif
+#ifdef TRAILING
+template<class T> int f(T) requires HEAD { return 1; }
+#else
+template<class T> requires HEAD int f(T) { return 1; }
+#endif
+int use() { return f(ARG); }
+''')
+    def suffix(case, parameter):
+        trait = f'u10__is_class{parameter}E'
+        same = f'u9__is_same{parameter}S0_E'
+        result = (
+            f'aa{trait}Lb1E', f'oo{trait}Lb0E', f'nt{trait}', f'rqX{trait}E',
+            f'eq{trait}Lb1E', same, f'aa{same}u10__is_classS1_E', f'aaLb1E{trait}',
+            'aa4TrueI' + parameter + 'Eu10__is_classS1_E', f'u23__is_trivially_copyable{parameter}E',
+            f'aa{trait}gtstS1_Li0E', f'qu{same}Lb1ELb0E',
+        )
+        return result[case]
+
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            for case in range(12):
+                typ, substitution = ('i', 'S0_') if case == 2 else ('1A', 'S1_')
+                for trailing in (False, True):
+                    flags = [target, '-fcompat=' + mode, f'-DCASE={case}', *(['-DTRAILING'] if trailing else [])]
+                    reject = mode == 'gcc' and (trailing or case not in (5, 9))
+                    outputs = []
+                    for env in (world.cold, world.daemon):
+                        syntax = world.cxx([*flags, '-fsyntax-only', 'trait-constraint.cpp'], scope, env, timeout=40)
+                        assert syntax == (0, b'', b''), (mode, target, case, trailing, syntax)
+                        command = [*flags, '-c', 'trait-constraint.cpp', '-o', 'trait-constraint.o']
+                        result = world.cxx(command, scope, env, timeout=40)
+                        assert result[0] == int(reject), (mode, target, case, trailing, result)
+                        if reject:
+                            assert b'built-in type trait' in result[2], result
+                        else:
+                            outputs.append((scope / 'trait-constraint.o').read_bytes())
+                    if reject:
+                        continue
+                    if mode == 'gcc':
+                        suffix_name = f'I{typ}EiT_'
+                    elif trailing:
+                        suffix_name = f'I{typ}EiT_Q{suffix(case, substitution)}'
+                    else:
+                        suffix_name = f'I{typ}Q{suffix(case, "T_")}Ei{substitution}'
+                    prefix = '_' if target == DARWIN else ''
+                    symbol = prefix + '_Z1f' + suffix_name
+                    assert outputs[0] == outputs[1] and symbol.encode() in outputs[1].split(b'\0'), (
+                        mode, target, case, trailing, symbol)
+                    peer = gxx if mode == 'gcc' else clang
+                    host = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+                    if peer and host and case in (5, 9) and not trailing:
+                        (scope / 'trait-caller.cpp').write_text(f'''\
+struct A {{ int n; }};
+extern "C" int call(A) asm("{symbol}");
+int main() {{ return call({{42}}) != 1; }}
+''')
+                        subprocess.run([peer, '-std=c++26', 'trait-caller.cpp', 'trait-constraint.o',
+                                        '-o', 'trait-call'], cwd=scope, check=True, capture_output=True, timeout=40)
+                        subprocess.run([scope / 'trait-call'], cwd=scope, check=True, timeout=20)
+
+
+def written_allocation_constraint_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'allocation-constraint.cpp').write_text('''\
+using Size = decltype(sizeof(0));
+void* operator new(Size, void*);
+struct Box {
+  int number;
+  static constexpr int num = 1;
+  constexpr Box(int n = 0) : number(n) {}
+  constexpr operator int() const { return number; }
+};
+#if CASE == 0
+#define CONSTRAINT (__is_same(T, Box))
+#elif CASE == 1
+#define CONSTRAINT (__is_class(T))
+#elif CASE == 2
+#define CONSTRAINT (__is_convertible(T, int))
+#elif CASE == 3
+#define CONSTRAINT (__is_constructible(T, int))
+#elif CASE == 4
+#define CONSTRAINT (__builtin_is_constant_evaluated())
+#elif CASE == 5
+#define CONSTRAINT (alignof(T) > 0)
+#elif CASE == 6
+#define CONSTRAINT requires(T* p) { delete p; }
+#elif CASE == 7
+#define CONSTRAINT requires { new T; }
+#elif CASE == 8
+#define CONSTRAINT requires(void* p) { new (p) T; }
+#elif CASE == 9
+#define CONSTRAINT requires { throw T{}; }
+#elif CASE == 10
+#define CONSTRAINT requires(T k) { (void(k), k); }
+#elif CASE == 11
+#define CONSTRAINT requires(T k) { k.number += k.number; }
+#elif CASE == 12
+#define CONSTRAINT requires { &T::number; }
+#elif CASE == 13
+#define CONSTRAINT requires { int{T::num}; }
+#elif CASE == 14
+#define CONSTRAINT requires(T* p) { delete[] p; }
+#elif CASE == 15
+#define CONSTRAINT requires { new T[2]; }
+#elif CASE == 16
+#define CONSTRAINT requires { new T(7); }
+#elif CASE == 17
+#define CONSTRAINT requires { new T{7}; }
+#elif CASE == 18
+#define CONSTRAINT requires(T* p) { ::delete p; }
+#elif CASE == 19
+#define CONSTRAINT requires { ::new T; }
+#endif
+template<class T> requires CONSTRAINT
+int f(T) { return 1; }
+int use() { return f(Box{}); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        arg = 'fL0p_' if mode == 'clang' else 'fp_'
+        array = 'T_' if mode == 'clang' else 'A2_T_'
+        expected = {
+            6: f'rQPT__Xdl{arg}E',
+            7: 'rqXnw_T_EE',
+            8: f'rQPv_Xnw{arg}_T_EE',
+            9: 'rqXtwtlT_EE',
+            10: f'rQT__Xcmcvv{arg}{arg}E',
+            11: f'rQT__XpLdt{arg}6numberdt{arg}6numberE',
+            12: 'rqXadsrT_6numberE',
+            13: 'rqXtlisrT_3numEE',
+            14: f'rQPT__Xda{arg}E',
+            15: f'rqXna_{array}EE',
+            16: 'rqXnw_T_piLi7EEE',
+            17: 'rqXnw_T_ilLi7EEE',
+            18: f'rQPT__Xgsdl{arg}E',
+            19: 'rqXgsnw_T_EE',
+        }
+        for target in (LINUX, DARWIN):
+            for case, clause in expected.items():
+                command = [target, '-fcompat=' + mode, f'-DCASE={case}', '-c', 'allocation-constraint.cpp',
+                           '-o', 'allocation-constraint.o']
+                outputs = []
+                for env in (world.cold, world.daemon):
+                    result = world.cxx(command, scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, case, result)
+                    outputs.append((scope / 'allocation-constraint.o').read_bytes())
+                prefix = '_' if target == DARWIN else ''
+                parameter = 'S2_' if case == 8 else 'S1_'
+                name = f'{prefix}_Z1fI3BoxQ{clause}Ei{parameter}'
+                names = outputs[1].split(b'\0')
+                assert outputs[0] == outputs[1] and name.encode() in names, (
+                    mode, target, case, name, [n for n in names if b'_Z1f' in n])
+                peer = gxx if mode == 'gcc' else clang
+                host = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+                if peer and host and case in (6, 11, 15):
+                    (scope / 'allocation-caller.cpp').write_text(f'''\
+struct Box {{
+  int number;
+  static constexpr int num = 1;
+  constexpr Box(int n = 0) : number(n) {{}}
+  constexpr operator int() const {{ return number; }}
+}};
+extern "C" int call(Box) asm("{name}");
+int main() {{ return call(Box{{7}}) != 1; }}
+''')
+                    subprocess.run([peer, '-std=c++26', 'allocation-caller.cpp', 'allocation-constraint.o',
+                                    '-o', 'allocation-call'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'allocation-call'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3072,7 +3449,11 @@ def main():
         binary_fold_constraints(world)
         fold_constraint_substitution_failures(world)
         constrained_parameter_packs(world, gxx)
+        concept_template_parameters(world)
         constraint_expression_symbols(world, gxx)
+        constrained_lambda_members(world, gxx)
+        written_trait_constraint_symbols(world, gxx)
+        written_allocation_constraint_symbols(world, gxx)
         template_argument_prefixes(world, gxx)
         placeholder_template_prefixes(world, gxx)
         mixed_source_location(world, gxx)

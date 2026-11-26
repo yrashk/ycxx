@@ -239,6 +239,14 @@ struct [[=dependent]] VDepConcept {
   bool global = false;
 };
 
+// The written concept-id of a concept template parameter and its parameter mapping
+// ([temp.constr.concept]). The written name also participates in symbol formation.
+struct [[=dependent]] VConceptParameter {
+  TemplateArg parameter;
+  SeqId<TemplateArg> arguments;
+  NameId name;
+};
+
 // A value named through a dependent nested-name-specifier.
 struct [[=dependent]] VDepMember {
   QualType qualifier;
@@ -334,6 +342,27 @@ struct VType {
 
 // The operands of an operator as written, for ABI encoding before conversions and folding.
 // `token` is a lex::Tk. A named cast stores its type as a VType before the operand.
+struct VWrittenTrait {
+  NameId name;
+  SeqId<QualType> arguments;
+  bool gcc_predicate;
+};
+
+struct VWrittenNew {
+  QualType allocated;
+  ConstId bound;
+  ConstId placement;
+  SeqId<ConstId> initializer;
+  u8 init_kind;  // 0 for none, 1 for parentheses, 2 for braces
+  bool global;
+};
+
+struct VWrittenDelete {
+  ConstId operand;
+  bool array;
+  bool global;
+};
+
 struct VWrittenOperator {
   u8 token;
   SeqId<ConstId> operands;
@@ -369,6 +398,10 @@ struct VConstraintPack {
   SeqId<ConstId> elements;
 };
 
+struct VConstraintTemplate {
+  TemplateArg argument;
+};
+
 // A mapped enum argument retains its nominal type alongside the underlying integer value.
 struct VConstraintEnum {
   QualType type;
@@ -392,6 +425,8 @@ struct VAtom {
   SeqId<u32> calls;
   bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
   EntityId lookup_class;  // class scope visible at the atom's spelling
+  SeqId<TemplateParamSema> lambda_head{};
+  SeqId<ParamSema> lambda_parameters{};
 };
 
 // A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
@@ -409,7 +444,8 @@ struct VFoldConstraint {
   SeqId<u32> packs;
   u8 op;
   SeqId<FoldPackBinding> bound;
-  bool legacy = false;  // GCC uses atomic ordering for a constrained parameter pack
+  bool legacy = false;  // atomic ordering for the corresponding compiler's fold
+  bool expand_concepts = false;  // spec normalization expands bound concept packs
 };
 
 // The written form of a requires-expression in a constraint symbol.
@@ -426,9 +462,9 @@ struct [[=dependent]] VRequiresParameter {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional,
-                               VRequiresExpression, VRequiresParameter, VWrittenOperator, VWrittenCallee, VWrittenMember,
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack, VConstraintTemplate,
+                               VDepCall, VDepMember, VDepConcept, VConceptParameter, VConstraintEnum, VDepField, VDepConditional,
+                               VRequiresExpression, VRequiresParameter, VWrittenTrait, VWrittenNew, VWrittenDelete, VWrittenOperator, VWrittenCallee, VWrittenMember,
                                VWrittenFold, VFoldConstraint>;
 
 template <class T>

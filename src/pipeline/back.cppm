@@ -2956,6 +2956,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       n.closure_type = r.type;
       n.closure_number = r.ordinal;
       n.closure_head = r.closure_head;
+      n.closure_constraint = r.lambda_head_constraint;
+      n.closure_constraint_depth = r.lambda_constraint_depth;
       if (compatibility == ast::Compatibility::clang) {
         note_closure(c);
         if (auto private_number = private_closure_numbers.find(c); private_number != private_closure_numbers.end())

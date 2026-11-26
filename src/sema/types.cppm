@@ -635,6 +635,11 @@ struct EntityRec {
   ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
+  // Lambda constraints use the template head of the declaration which contains their spelling.
+  ConstId lambda_constraints = ConstId::none;
+  ast::WrittenConstraint lambda_head_constraint{};
+  ast::WrittenConstraint lambda_trailing_constraint{};
+  u16 lambda_constraint_depth = 0;
 };
 
 class Entities {

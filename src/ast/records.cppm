@@ -36,6 +36,7 @@ struct TemplateArg {
   ConstId value;              // none for a type
   SeqId<TemplateArg> elems{};  // a pack's elements; the empty list (index 0) otherwise
   EntityId templ = EntityId::none;  // a template_ argument's template; none while dependent
+  bool concept_template = false;
   constexpr bool operator==(const TemplateArg&) const = default;
 };
 
@@ -63,6 +64,7 @@ struct TemplateParamSema {
   SeqId<TemplateParamSema> params{};
   u8 rank_type_default = 0;  // substituting the written type default can check a dependent rank
   ConstId type_constraint = ConstId::none;  // concept and its explicit arguments, for linkage
+  bool concept_template = false;  // `template<...> concept C`
   constexpr bool operator==(const TemplateParamSema&) const = default;
 };
 

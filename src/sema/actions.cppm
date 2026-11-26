@@ -1637,6 +1637,26 @@ public:
   }
   // The type-constraints of the template-head being read, in normal form ([temp.constr.decl]/3).
   std::vector<ConstId> head_constraints;
+  // Atoms in a lambda constraint replay in its own declarator scope.
+  ast::SeqId<ast::TemplateParamSema> atom_lambda_head{};
+  ast::SeqId<ast::ParamSema> atom_lambda_parameters{};
+  struct LambdaConstraintScope {
+    Sema& sema;
+    ast::SeqId<ast::TemplateParamSema> saved_head;
+    ast::SeqId<ast::ParamSema> saved_parameters;
+
+    LambdaConstraintScope(Sema& s, std::span<const ast::ParamSema> parameters)
+        : sema(s), saved_head(s.atom_lambda_head), saved_parameters(s.atom_lambda_parameters) {
+      sema.atom_lambda_head = sema.template_scopes.empty() ? ast::SeqId<ast::TemplateParamSema>{}
+          : sema.ins().intern_seq(std::span<const ast::TemplateParamSema>(sema.template_scopes.back()));
+      sema.atom_lambda_parameters = sema.ins().intern_seq(parameters);
+    }
+    ~LambdaConstraintScope() {
+      sema.atom_lambda_head = saved_head;
+      sema.atom_lambda_parameters = saved_parameters;
+    }
+  };
+
   // An atomic constraint ([temp.constr.atomic]): the expression at [begin, end) of this part, whose
   // parameter mapping takes the innermost head's parameters among `names` (the identifiers it
   // contains) to themselves, the others to none.
@@ -1656,10 +1676,12 @@ public:
         // Bound in an instantiation (a nested-requirement of a requires-expression being
         // re-analysed): its argument; otherwise the parameter itself.
         auto bound = template_args.at(p.depth, p.index);
-        TemplateArg a = bound                                     ? *bound
-                        : p.kind == ast::TemplateArgKind::type ? t.type_arg(p.type)
-                                                               : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
-        if (!bound && p.pack && p.kind != TemplateArgKind::template_ &&
+        TemplateArg a = bound ? *bound
+                        : p.kind == TemplateArgKind::type ? t.type_arg(p.type)
+                        : p.kind == TemplateArgKind::template_ ? TemplateArg{
+                              TemplateArgKind::template_, p.type, ConstId::none, {}, EntityId::none, p.concept_template}
+                        : t.value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+        if (!bound && p.pack &&
             !std::ranges::contains(fold_packs, PackRef{p.depth, p.index, {}})) {
           const std::array expansion{t.expansion_of(a)};
           a = t.pack(expansion);
@@ -1671,7 +1693,8 @@ public:
     for (u32 c : dependent_calls)
       if (c >= begin && c < end) calls.push_back(c - begin);
     return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, depth, ins().intern_seq(std::span<const ConstId>(mapping)),
-                                         ins().intern_seq(std::span<const u32>(calls)), fn_params, current_class});
+                                         ins().intern_seq(std::span<const u32>(calls)), fn_params, current_class,
+                                         atom_lambda_head, atom_lambda_parameters});
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
@@ -1710,6 +1733,25 @@ public:
     if (!*sat) diag(at, Diag::constraints_not_satisfied, name);
     return *sat;
   }
+  ConstId concept_parameter_id(const ast::TemplateParamSema& p, std::span<const TemplateArg> args) {
+    const auto parameter = bound_arg(p).value_or(
+        TemplateArg{TemplateArgKind::template_, p.type, ConstId::none, {}, EntityId::none, true});
+    return ins().intern_value(ast::VConceptParameter{parameter, ins().intern_seq(args), p.name});
+  }
+
+  Ex concept_parameter_expression(const ast::TemplateParamSema& p, std::span<const TemplateArg> args,
+                                  u32 begin, u32 end, bool written) {
+    const auto expression = concept_parameter_id(p, args);
+    const auto boolean = builtin(Builtin::bool_);
+    if (written) return literal(boolean, expression, ValueCategory::prvalue, begin, end);
+    auto normal = templates().substitute_constraint(expression, {});
+    if (!normal) return {NodeId::none, begin, end};
+    auto sat = q_->satisfied(*normal);
+    if (q_->satisfaction_failed(*normal)) return {NodeId::none, begin, end};
+    if (!sat) return dependent_node({}, begin, end, boolean);
+    return bool_literal(*sat, begin, end);
+  }
+
   // A concept-id as an expression ([temp.names]/8): whether it is satisfied, a `bool` prvalue;
   // value-dependent while its arguments are.
   Ex concept_id_expr(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 begin, u32 end,
@@ -4662,7 +4704,7 @@ public:
   // The template template parameter `name` names here, if it does.
   const ast::TemplateParamSema* template_template_param(NameId name) {
     const ast::TemplateParamSema* p = template_param(name);
-    return p && p->kind == ast::TemplateArgKind::template_ ? p : nullptr;
+    return p && p->kind == ast::TemplateArgKind::template_ && !p->concept_template ? p : nullptr;
   }
   // Whether `name` names a template whose template-id is a type: a class or alias template, or a
   // template template parameter.
@@ -4755,7 +4797,7 @@ public:
       if (const ast::TemplateParamSema* p = template_param(name)) {
         if (p->kind != ast::TemplateArgKind::template_) return std::nullopt;
         if (auto a = bound_arg(*p)) return a;
-        return TemplateArg{ast::TemplateArgKind::template_, p->type, ConstId::none};
+        return TemplateArg{TemplateArgKind::template_, p->type, ConstId::none, {}, EntityId::none, p->concept_template};
       }
     // In a class template, its injected-class-name is the template as a template argument and the
     // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
@@ -4765,7 +4807,11 @@ public:
         return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
     }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
-    if (!t) return std::nullopt;
+    if (!t) {
+      const auto c = ns ? namespace_template(*ns, name, ast::DeclKind::concept_) : concept_named(name);
+      if (!c) return std::nullopt;
+      return TemplateArg{TemplateArgKind::template_, QualType{}, ConstId::none, {}, c->entity, true};
+    }
     if (!ns && at) unqualified_type_template_access(*t, name, *at);
     return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {},
                        templates().template_argument_entity(*t)};
@@ -5318,6 +5364,9 @@ public:
     // A generic lambda's template-head, explicit and invented ([expr.prim.lambda.closure]/7): the
     // parser pushed it onto `template_scopes`, and pops it after the body.
     std::vector<ast::TemplateParamSema> head;
+    ConstId constraints = ConstId::none;
+    ast::WrittenConstraint head_constraint{};
+    ast::WrittenConstraint trailing_constraint{};
   };
 
   // A lambda whose body encloses the point: its closure so far and the enclosing context's state.
@@ -5614,7 +5663,11 @@ public:
     // The <lambda-sig> declares the explicit template parameters only (`Ty`, `Tp`), so they and
     // the invented ones of `auto` parameters make different signatures.
     for (const ast::TemplateParamSema& h : spec.head)
-      if (h.name != invented_name()) sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
+      if (h.name != invented_name()) {
+        sig = ast::mix(sig, (u64(std::to_underlying(h.kind)) + 1) * 4 + u64(h.pack));
+        if (h.type_constraint != ConstId::none) sig = ast::mix(sig, ins().values.fp(h.type_constraint));
+      }
+    if (spec.head_constraint.tokens != Fp128{}) sig = ast::mix(sig, spec.head_constraint.tokens);
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
@@ -5623,15 +5676,29 @@ public:
     // depth 0, as the innermost template's are mangled.
     EntityRec cr{EntityKind::class_, no_name(), rebased(call_type, spec.head), LangLinkage::cxx, linkage, {}, scope};
     cr.head = ast::mix(sig, u64(ordinal));
+    // The symbol's ordinal is based on the written signature. The semantic record
+    // also depends on the normalized constraints in this translation unit and mode.
+    if (spec.constraints != ConstId::none) cr.head = ast::mix(cr.head, ins().values.fp(spec.constraints));
+    for (const auto& clause : {spec.head_constraint, spec.trailing_constraint}) {
+      if (clause.tokens != Fp128{}) cr.head = ast::mix(cr.head, clause.tokens);
+      if (clause.expression != ConstId::none) cr.head = ast::mix(cr.head, ins().values.fp(clause.expression));
+    }
     cr.ordinal = ordinal;
     // In a template's definition, its own template-head (pushed already) aside.
     cr.closure_pattern = declaration_part && (in_generic_definition() ||
                                               (template_scopes.size() > (spec.head.empty() ? 0u : 1u) && !instantiating() && !satisfying_atom));
     for (const ast::TemplateParamSema& h : spec.head)
       if (h.name != invented_name()) cr.closure_head.push_back(h);
+    const u16 depth = spec.head.empty() ? 0 : spec.head.front().depth;
+    cr.lambda_head_constraint = spec.head_constraint;
+    cr.lambda_constraint_depth = depth;
     LambdaFrame f;
     f.closure = w_->entities.entity(std::move(cr));
-    f.call = w_->entities.entity({EntityKind::function, ins().names.intern("operator()"), call_type, LangLinkage::cxx, linkage, {}, f.closure});
+    EntityRec call{EntityKind::function, ins().names.intern("operator()"), call_type, LangLinkage::cxx, linkage, {}, f.closure};
+    call.lambda_constraints = spec.constraints;
+    call.lambda_trailing_constraint = spec.trailing_constraint;
+    call.lambda_constraint_depth = depth;
+    f.call = w_->entities.entity(std::move(call));
     f.call_type = call_type;
     if (spec.noexcept_dependent) dependent_noexcept_calls_.insert(std::to_underlying(f.call));
     f.sig = sig;
@@ -6112,11 +6179,12 @@ public:
     parameter_pattern.entity = call_member.entity;
     parameter_pattern.type = invoker_type(call_member.type);
     parameter_pattern.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(call_member.head));
+    parameter_pattern.constraints = w_->entities.rec(call_member.entity).lambda_constraints;
     const QualType target = types().pointee(to);
     // A nonthrowing invoker can also convert to a potentially throwing pointer.
     QualType deduction_target = types().rec(parameter_pattern.type).fn_noexcept ? with_noexcept(target) : target;
     auto args = templates().deduce_declaration(parameter_pattern, deduction_target, {}, /*address=*/true);
-    if (!args) return std::nullopt;
+    if (!args || !constraints_satisfied(parameter_pattern, *args)) return std::nullopt;
     auto call = generic_call(call_member, *args, at_, demand_definition);
     if (!call) return std::nullopt;
     const QualType type = invoker_type(call->type);
@@ -7136,11 +7204,11 @@ public:
         td.entity = c->entity;
         td.type = c->type;
         td.kind = ast::DeclKind::function;
-        td.constraints = ConstId::none;
+        td.constraints = w_->entities.rec(c->entity).lambda_constraints;
         td.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(c->head));
         Templates t = templates();
         auto targs = t.deduce_call(td, shapes, explicit_args);
-        if (!targs) continue;
+        if (!targs || !constraints_satisfied(td, *targs)) continue;
         auto st = t.specialization_type(td, *targs);
         if (!st) continue;
         cands.push_back({c->entity, *st, c->is_static, c->is_deleted});

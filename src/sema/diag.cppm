@@ -379,6 +379,7 @@ enum class Diag : std::uint32_t {
   pack_index_not_constant [[=message{Severity::error, "a pack index must be a non-negative integral constant expression"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
   trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
+  mixed_concept_fold_packs [[=message{Severity::error, "a concept parameter pack fold cannot expand other kinds of packs"}]],
   constraint_not_bool [[=message{Severity::error, "an atomic constraint must be of type bool, not '{0:t}'"}]],
   constraint_not_constant [[=message{Severity::error, "an atomic constraint is not a constant expression: {0:r}"}]],
   constraints_not_satisfied [[=message{Severity::error, "the constraints of '{0:n}' are not satisfied"}]],

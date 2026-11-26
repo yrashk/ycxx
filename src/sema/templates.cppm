@@ -886,6 +886,7 @@ public:
   }
   // A mapping entry as a template argument, and back.
   TemplateArg mapping_arg(ConstId v) {
+    if (ins().values.is<ast::VConstraintTemplate>(v)) return ins().values.get<ast::VConstraintTemplate>(v).argument;
     if (ins().values.is<ast::VConstraintPack>(v)) {
       std::vector<TemplateArg> elements;
       for (ConstId e : ins().seqs.elements(ins().values.get<ast::VConstraintPack>(v).elements))
@@ -904,6 +905,7 @@ public:
     return {TemplateArgKind::value, ins().values.is<ast::VInt>(v) ? ins().values.get<ast::VInt>(v).type : QualType{}, v};
   }
   ConstId mapping_value(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::template_) return ins().intern_value(ast::VConstraintTemplate{a});
     if (a.kind == TemplateArgKind::pack) {
       std::vector<ConstId> elements;
       for (const TemplateArg& e : ins().seqs.elements(a.elems))
@@ -918,11 +920,41 @@ public:
       return ins().intern_value(ast::VConstraintEnum{types().canonical(Types::unqualified(a.type)), a.value});
     return a.value;
   }
+  Bindings fold_element_bindings(std::span<const ast::FoldPackBinding> packs, u32 index) {
+    Bindings bindings;
+    for (const auto& pack : packs) {
+      const u16 depth = u16(pack.pack >> 16);
+      const u16 parameter = u16(pack.pack);
+      if (bindings.levels.size() <= depth) bindings.levels.resize(depth + 1);
+      auto& level = bindings.levels[depth];
+      if (level.size() <= parameter) level.resize(parameter + 1);
+      level[parameter] = ins().seqs.at(pack.elements, index);
+    }
+    return bindings;
+  }
+
   // A normal form with the parameters `b` binds replaced in its atoms' mappings
   // ([temp.constr.normal]/1.4); none when a mapping cannot be formed, which in a concept-id is
   // ill-formed.
   std::optional<ConstId> substitute_constraint(ConstId c, const Bindings& b) {
     if (c == ConstId::none) return c;
+    if (ins().values.is<ast::VConceptParameter>(c)) {
+      auto ref = ins().values.get<ast::VConceptParameter>(c);
+      const auto parameter = substitute_arg(ref.parameter, b);
+      const auto args = substitute_args(ins().seqs.elements(ref.arguments), b);
+      if (!parameter || !args) return std::nullopt;
+      if (parameter->templ == EntityId::none) {
+        ref.parameter = *parameter;
+        ref.arguments = ins().intern_seq(std::span<const TemplateArg>(*args));
+        return ins().intern_value(ref);
+      }
+      const auto decl = template_decl ? template_decl(parameter->templ) : std::nullopt;
+      if (!decl || decl->kind != ast::DeclKind::concept_) return std::nullopt;
+      const auto shape = ins().seqs.elements(decl->template_params);
+      const auto full = complete_concept_arguments(*decl, shape, *args);
+      if (!full) return std::nullopt;
+      return substitute_constraint(decl->constraints, Bindings::of(shape.empty() ? 0 : shape.front().depth, *full));
+    }
     if (ins().values.is<ast::VFoldConstraint>(c)) {
       auto fold = ins().values.get<ast::VFoldConstraint>(c);
       auto expression = substitute_constraint(fold.expression, b);
@@ -962,6 +994,20 @@ public:
       }
       auto operand = substitute_constraint(fold.operand, operand_bindings);
       if (!operand) return std::nullopt;
+      if (fold.expand_concepts && !bound_packs.empty() && packs.size() == bound_packs.size()) {
+        // [temp.constr.normal] forms the normal form of the individual concept
+        // arguments before checking either subsumption or satisfaction.
+        const auto count = ins().seqs.size(bound_packs.front().elements);
+        if (std::ranges::any_of(bound_packs, [&](const auto& pack) { return ins().seqs.size(pack.elements) != count; }))
+          return std::nullopt;
+        std::vector<ConstId> elements;
+        for (u32 index = 0; index < count; ++index) {
+          auto mapped = substitute_constraint(*operand, fold_element_bindings(bound_packs, index));
+          if (!mapped) return std::nullopt;
+          elements.push_back(*mapped);
+        }
+        return ins().intern_value(ast::VConstraint{fold.op, ins().intern_seq(std::span<const ConstId>(elements))});
+      }
       fold.operand = *operand;
       fold.packs = ins().intern_seq(std::span<const u32>(packs));
       fold.bound = ins().intern_seq(std::span<const ast::FoldPackBinding>(bound_packs));
@@ -985,6 +1031,8 @@ public:
         continue;
       }
       auto s = [&]() -> std::optional<ConstId> {
+        if (ins().values.is<ast::VConstraintTemplate>(e))
+          return substitute_arg(mapping_arg(e), b).transform([&](const auto& arg) { return mapping_value(arg); });
         if (ins().values.is<ast::VConstraintPack>(e)) {
           const std::array args{mapping_arg(e)};
           return substitute_args(args, b).transform([&](const auto& mapped) { return mapping_value(mapped.front()); });
@@ -1016,9 +1064,24 @@ public:
     a.mapping = ins().intern_seq(std::span<const ConstId>(m));
     return ins().intern_value(a);
   }
+  std::optional<std::vector<TemplateArg>> complete_concept_arguments(
+      const ast::DeclSema& decl, std::span<const ast::TemplateParamSema> parameters, std::span<const TemplateArg> arguments) {
+    const auto written = flatten(arguments);
+    auto saved = std::exchange(explicit_packs_, {});
+    std::vector<std::optional<TemplateArg>> mapped(parameters.size());
+    const bool fits = explicit_into(parameters, written, mapped);
+    explicit_packs_ = std::move(saved);
+    return fits ? complete(decl, parameters, std::move(mapped)) : std::nullopt;
+  }
+
   // Whether an atom's mapping still names a template parameter: its satisfaction waits for them.
   bool constraint_dependent(ConstId c) {
     if (c == ConstId::none) return false;
+    if (ins().values.is<ast::VConceptParameter>(c)) {
+      const auto ref = ins().values.get<ast::VConceptParameter>(c);
+      return w_->arg_dependent(ref.parameter) ||
+             std::ranges::any_of(ins().seqs.elements(ref.arguments), [&](const auto& a) { return w_->arg_dependent(a); });
+    }
     if (ins().values.is<ast::VFoldConstraint>(c)) {
       const auto fold = ins().values.get<ast::VFoldConstraint>(c);
       if (fold.expression != ConstId::none) return constraint_dependent(fold.expression);
@@ -1065,7 +1128,8 @@ private:
   // set of atoms; none past the budget.
   std::optional<std::vector<std::vector<ConstId>>> clauses(ConstId c, u8 outer) {
     constexpr std::size_t budget = 65536;
-    if (ins().values.is<ast::VAtom>(c) || ins().values.is<ast::VFoldConstraint>(c))
+    if (ins().values.is<ast::VAtom>(c) || ins().values.is<ast::VFoldConstraint>(c) ||
+        ins().values.is<ast::VConceptParameter>(c))
       return std::vector<std::vector<ConstId>>{{c}};
     auto v = ins().values.get<ast::VConstraint>(c);
     // No operands (an atom whose mapping was invalid, false): no clause beside the others, or one
@@ -1107,8 +1171,9 @@ public:
     std::vector<TemplateArg> r;
     for (const ast::TemplateParamSema& p : params) {
       TemplateArg a = p.kind == TemplateArgKind::type       ? type_arg(p.type)
-                      : p.kind == TemplateArgKind::template_ ? TemplateArg{TemplateArgKind::template_, p.type, ConstId::none}
-                                                             : value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
+                      : p.kind == TemplateArgKind::template_ ? TemplateArg{
+                          TemplateArgKind::template_, p.type, ConstId::none, {}, EntityId::none, p.concept_template}
+                      : value_arg(p.type, ins().intern_value(ast::VDepParam{p.depth, p.index}));
       if (p.pack) {
         std::array<TemplateArg, 1> e{expansion_of(a)};
         a = pack(e);
@@ -1136,13 +1201,15 @@ public:
   TemplateArg expansion_of(const TemplateArg& pattern) {
     if (pattern.kind == TemplateArgKind::type) return type_arg(types().pack_expansion(pattern.type));
     if (pattern.kind == TemplateArgKind::template_)
-      return {TemplateArgKind::template_, types().pack_expansion(pattern.type), ConstId::none};
+      return {TemplateArgKind::template_, types().pack_expansion(pattern.type), ConstId::none, {},
+              EntityId::none, pattern.concept_template};
     return {TemplateArgKind::value, pattern.type, ins().intern_value(ast::VDepExpansion{pattern.value})};
   }
   // An expansion's pattern, as an argument of its kind.
   TemplateArg pattern_of(const TemplateArg& e) {
     if (e.kind == TemplateArgKind::type) return type_arg(types().rec(e.type).inner);
-    if (e.kind == TemplateArgKind::template_) return {TemplateArgKind::template_, types().rec(e.type).inner, ConstId::none};
+    if (e.kind == TemplateArgKind::template_)
+      return {TemplateArgKind::template_, types().rec(e.type).inner, ConstId::none, {}, EntityId::none, e.concept_template};
     return {TemplateArgKind::value, e.type, ins().values.get<ast::VDepExpansion>(e.value).pattern};
   }
   // The template parameters a type or value names, by (depth, index). Without `nested`, not those
@@ -1893,7 +1960,8 @@ public:
     if (ps.empty()) return true;
     Bindings b = Bindings::of(as[0].depth, own_args(ps));
     for (std::size_t i = 0; i < ps.size(); ++i) {
-      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack) return false;
+      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack || ps[i].concept_template != as[i].concept_template)
+        return false;
       if (ps[i].kind == TemplateArgKind::value) {
         auto t = substitute(as[i].type, b);
         if (!t || types().canonical(*t) != types().canonical(ps[i].type)) return false;
@@ -1965,6 +2033,7 @@ public:
   // P0522): p's own parameters, made unique, are arguments a's head takes, with a's defaults. A
   // template template parameter (dependent) is checked when it is bound.
   bool template_matches(const ast::TemplateParamSema& p, const TemplateArg& a) {
+    if (p.concept_template != a.concept_template) return false;
     if (a.templ == EntityId::none) return true;
     if (!template_decl) return false;
     auto decl = template_decl(a.templ);
@@ -1993,7 +2062,8 @@ public:
         if (as[j].kind == TemplateArgKind::type) synth.push_back(type_arg(types().template_param(unique_depth, index)));
         else if (as[j].kind == TemplateArgKind::value)
           synth.push_back(value_arg(as[j].type, ins().intern_value(ast::VDepParam{unique_depth, index})));
-        else synth.push_back({TemplateArgKind::template_, types().template_param(unique_depth, index), ConstId::none});
+        else synth.push_back({TemplateArgKind::template_, types().template_param(unique_depth, index), ConstId::none, {},
+                              EntityId::none, as[j].concept_template});
       }
     }
     std::vector<std::optional<TemplateArg>> out(as.size());
@@ -2636,7 +2706,8 @@ private:
     for (const ast::TemplateParamSema& p : ps) {
       if (p.kind == TemplateArgKind::type) unique.push_back(type_arg(types().template_param(unique_depth, p.index, p.pack != 0)));
       else if (p.kind == TemplateArgKind::template_)
-        unique.push_back({TemplateArgKind::template_, types().template_param(unique_depth, p.index, p.pack != 0), ConstId::none});
+        unique.push_back({TemplateArgKind::template_, types().template_param(unique_depth, p.index, p.pack != 0),
+                          ConstId::none, {}, EntityId::none, p.concept_template});
       else unique.push_back(value_arg(p.type, w_->ins.intern_value(ast::VDepParam{unique_depth, p.index})));
     }
     return Bindings::of(ps[0].depth, unique);
