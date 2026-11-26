@@ -2109,6 +2109,8 @@ private:
 
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
+  // Whether the analysis of item `k` is running (an item that asks about one asks too early).
+  bool running(u32 k) const { return std::ranges::find(running_, k) != running_.end(); }
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
   std::set<u32> templated_friend_items_;  // the item of each friend function a class template defines
   std::set<EntityId> unapplied_declaration_attributes_;
@@ -2582,14 +2584,8 @@ public:
     if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end()) return b->second;
     return {};
   }
+  // The class's definition analyses its member items before their bodies, which ask this.
   bool dependent_member_using(EntityId c, ast::NameId name) override {
-    const auto definition = p_->class_items_.find(std::to_underlying(c));
-    if (definition == p_->class_items_.end()) return false;
-    // Its using-declarations are analysed before the name is asked about.
-    for (u32 m : p_->items().items[definition->second].members)
-      if (m != item_ && p_->items().items[m].kind != ItemKind::access_spec &&
-          p_->region().tokens[p_->items().items[m].begin].kind == lex::Tk::kw_using)
-        p_->item_sema(m);
     const auto found = p_->dependent_member_usings_.find(std::to_underlying(c));
     return found != p_->dependent_member_usings_.end() && found->second.contains(name);
   }
@@ -4161,7 +4157,7 @@ private:
           p_->region().tokens[p_->items().items[m].begin].kind != Tk::kw_using)
         continue;
       // A specialization's members are analysed in order; a class's earlier ones on demand.
-      if (!p_->class_patterns_.contains(std::to_underlying(ce))) p_->item_sema(m);
+      if (!p_->class_patterns_.contains(std::to_underlying(ce)) && !p_->running(m)) p_->item_sema(m);
       const auto earlier = p_->member_usings_.find({m, std::to_underlying(ce)});
       if (earlier == p_->member_usings_.end()) continue;
       for (const sema::MemberDeclRec* f : functions)
