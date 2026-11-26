@@ -26,7 +26,7 @@ SHADERS = {'vertex': 'shaders/triangle.vert', 'fragment': 'shaders/triangle.frag
 FRAGMENT = SHADERS['fragment']
 PRODUCER = 'fragment_reflection <b data-value-probe="1">&'
 EXPORT = f'{PRODUCER}.layout'
-SCHEMA = 'shader.descriptors.v1'
+SCHEMA = 'shader.descriptors.v2'
 EXE = '.ycxx/out/app'
 BUNDLE = '.ycxx/assets/app/scene.bundle'
 
@@ -51,11 +51,12 @@ def prepare(scope, journal):
     manifest.write_text(definition, encoding='utf-8')
 
 
-def layout(binding):
-    return f'{SCHEMA}\nMaterial binding={binding} set=0'
+def layout(binding, texture_count=2):
+    return (f'{SCHEMA}\nMaterial binding={binding} element_count=1 kind=1 set=0\n'
+            f'scene_textures binding=7 element_count={texture_count} kind=2 set=1')
 
 
-def inspect(ycxx, scope, env, journal, binding=None):
+def inspect(ycxx, scope, env, journal, binding=None, *, texture_count=2):
     before = journal.read_bytes() if journal.exists() else None
     result = run_client(ycxx, scope, env, 'show', 'app', '--format=json')
     assert result.returncode == 0, result.stderr
@@ -67,8 +68,8 @@ def inspect(ycxx, scope, env, journal, binding=None):
         assert any(row['kind'] == 'unresolved' for row in plan['facts']), plan
         return None
 
-    export = fact(plan, 'value-export', PRODUCER, layout(binding))
-    consumer = fact(plan, 'fact-input', 'scene_bindings', layout(binding))
+    export = fact(plan, 'value-export', PRODUCER, layout(binding, texture_count))
+    consumer = fact(plan, 'fact-input', 'scene_bindings', layout(binding, texture_count))
     assert export['name'] == consumer['name'] == 'layout', (export, consumer)
     assert EXPORT in consumer['origin'], consumer
     assert all(term in export['origin'] for term in (EXPORT, 'spirv-cross-fixture',
@@ -127,7 +128,7 @@ def check_value_binding_views(ycxx, scope, env, journal, initial, current):
     assert diff['dependency_changes'] == [], diff
     for kind, target in (('value-export', PRODUCER), ('fact-input', 'scene_bindings')):
         change = {'change': 'changed', 'before': fact(initial, kind, target, layout(1)),
-                  'after': fact(current, kind, target, layout(3))}
+                  'after': fact(current, kind, target, layout(3, 3))}
         assert change in diff['changes'], (change, diff)
     check_value_bindings_html(show('html', *args), current)
 
@@ -164,17 +165,19 @@ def check_bundle(scope, target='app'):
     return actual['fragment']
 
 
-def check_application(scope, binding, status=0):
+def check_application(scope, binding, status=0, *, texture_count=None):
     args = [str(binding)] if binding is not None else ['--runtime-only']
+    if texture_count is not None:
+        args.extend(('--texture-count', str(texture_count)))
     result = subprocess.run([sys.executable, scope / 'run.py', *args], cwd=scope,
                             capture_output=True, timeout=30)
     assert result.returncode == status, (args, status, result.returncode, result.stdout, result.stderr)
 
 
-def value_key(events, binding, outcome):
+def value_key(events, binding, outcome, *, texture_count=2):
     values = [event for event in events if event.get('kind') == 'RuleValue']
     matching = {event['key'] for event in values
-                if event.get('value') == layout(binding) and event['outcome'] == outcome}
+                if event.get('value') == layout(binding, texture_count) and event['outcome'] == outcome}
     assert len(matching) == 1, (binding, outcome, values)
     return matching.pop()
 
@@ -266,7 +269,32 @@ def check_watch(ycxx, scope, env, journal, original, stable_key):
         check_reuse(scope, installed, events)
         check_application(scope, 3)
         watch.idle('recovery after failed shader publication')
-        return repaired
+
+        before_array_edit = inspect(ycxx, scope, env, journal, 3)
+        previous_bundle = (scope / BUNDLE).read_text(encoding='ascii')
+        assert repaired.count('scene_textures[2]') == 1, repaired
+        resized = repaired.replace('scene_textures[2]', 'scene_textures[3]')
+        offset = len(read_journal(journal))
+        replace_source(scope, FRAGMENT, resized)
+        _, events, watched = watch.build('edit only the fragment sampler array count')
+        assert str(scope / FRAGMENT) in watched, watched
+        check_external_actions(events, 'fragment', 'scene', 'scene_bindings')
+        check_observation(events)
+        check_generation(events)
+        assert value_key(events, 3, 'executed', texture_count=3) == stable_key
+        fragment = check_bundle(scope)
+        check_tools(read_journal(journal)[offset:], 'fragment', 'spirv-cross', 'python3', fragment=fragment)
+        assert (scope / EXE).read_bytes() != installed[0], 'array count edit kept stale native code'
+        assert (scope / BUNDLE).read_text(encoding='ascii') != previous_bundle, 'array count edit kept stale SPIR-V'
+        check_application(scope, 3, texture_count=3)
+        check_application(scope, 3, status=4, texture_count=2)
+        # Both bundles have Material binding 3. Only the sampler array count can explain this mismatch.
+        stale = subprocess.run([scope / EXE, '3', previous_bundle, '3'], cwd=scope, capture_output=True, timeout=30)
+        assert stale.returncode == 4, (stale.returncode, stale.stdout, stale.stderr)
+        after_array_edit = inspect(ycxx, scope, env, journal, 3, texture_count=3)
+        assert after_array_edit['dependency_graph'] == before_array_edit['dependency_graph']
+        watch.idle('successful sampler array publication')
+        return resized
     finally:
         watch.close()
 
@@ -337,7 +365,7 @@ def check_builds(ycxx, scope, env, journal):
     compiler.write_text(command + '\n# changed compiler identity\n', encoding='utf-8')
     inspect(ycxx, scope, env, journal)
     compiler.write_text(command, encoding='utf-8')
-    current = inspect(ycxx, scope, env, journal, 3)
+    current = inspect(ycxx, scope, env, journal, 3, texture_count=3)
     check_value_binding_views(ycxx, scope, env, journal, initial, current)
 
     check_runtime_only(ycxx, scope, env, journal, repaired)

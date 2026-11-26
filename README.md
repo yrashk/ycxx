@@ -83,8 +83,9 @@ The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
 owned names. The shader bundle plans its modules from a generated inventory
 using a named `plan_inputs` binding. The reflection
-example also uses a compiled shader's descriptor layout to generate `constexpr`
-C++ bindings. Shader edits with the same layout reuse the native executable.
+example uses a compiled shader's uniform buffers and fixed-size sampler arrays
+to generate `constexpr` C++ bindings. Shader edits with the same layout reuse
+the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
