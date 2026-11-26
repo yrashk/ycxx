@@ -123,6 +123,7 @@ struct Entity {
   bool unsupported_class_parameter_signature = false;
   bool inline_function = false;
   bool namespace_static = false;
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -2890,7 +2891,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   // The declarations that own closure types, by entity (docs/design/closures.md).
   auto spec_of = [](const Entity& e) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
-                        e.template_head_constraint, e.template_trailing_constraint};
+                        e.template_head_constraint, e.template_trailing_constraint, e.generic_invoker_head};
   };
   const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
     auto found = by_id.find(ir::raw(id));

@@ -1445,6 +1445,112 @@ extern "C" int exercise() {
                     subprocess.run([scope / 'private-closures'], cwd=scope, check=True, timeout=20)
 
 
+def generic_invoker_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'generic-invoker.cpp').write_text('''\
+using I = int(*)(int);
+using R = int(*)(const int&);
+using B = int(*)(int, int);
+using M = int(*)(int, long);
+using N = int(*)(int) noexcept;
+using V = void(*)(int);
+inline I typed() { return []<class T>(T v) -> T { return v; }; }
+inline I fixed() { return [](auto v) -> int { return v; }; }
+inline R lref() { return [](const auto& v) { return v; }; }
+inline B same() { return []<class T>(T a, T b) { return a + b; }; }
+inline M multi() { return []<class T, class U>(T a, U b) { return a+int(b); }; }
+inline I mut() { return [](auto v) mutable { return v; }; }
+inline N noex() { return [](auto v) noexcept { return v; }; }
+inline I drop_noex() { return [](auto v) noexcept { return v; }; }
+inline V vvoid() { return [](auto v) -> void { (void)v; }; }
+inline M packed() { return []<class... T>(T... v) { return static_cast<int>((v + ...)); }; }
+inline I defaulted() { return []<class T, int N=7>(T v) { return v + N; }; }
+inline I inferred() { return [](auto v) { return v; }; }
+I private_generic() {
+  auto unused = [](auto v) { return v; };
+  return [](auto v) { return v + 1; };
+}
+extern "C" int exercise() {
+  int val = 2;
+  vvoid()(0);
+  return typed()(1) + fixed()(1) + lref()(val) + same()(1, 2) + multi()(1, 2L)
+      + mut()(1) + noex()(1) + drop_noex()(1) + packed()(1, 2L) + defaulted()(1) + inferred()(1);
+}
+''')
+    (scope / 'generic-invoker-constant.cpp').write_text('''\
+constexpr auto lim = []<class T>(T n) { return n + 2; };
+using Fn = int(*)(int);
+#if defined(CAPTURE)
+Fn bad() { return [n = 2](auto v) { return v + n; }; }
+#elif defined(RETURN_TYPE)
+Fn bad() { return [](auto v) -> long { return v; }; }
+#elif defined(NOEXCEPT)
+using Safe = int(*)(int) noexcept;
+Safe bad() { return [](auto v) { return v; }; }
+#else
+constexpr Fn fn = lim;
+static_assert(fn(4) == 6);
+constexpr int run(int (*f)(int), int n) { return f(n); }
+constexpr int run_lambda() { return run([](auto n) { return n + 3; }, 4); }
+static_assert(run_lambda() == 7);
+#endif
+''')
+    (scope / 'generic-invoker-caller.cpp').write_text('''\
+extern "C" int exercise();
+extern "C" int invoker(int) __asm__(INVOKER);
+int main() { return exercise() != 25 || invoker(8) != 8; }
+''')
+    cases = (
+        ('5typedvENUlTyT_E_', 'IiEES_S_', 'IiEES_S_'),
+        ('5fixedvENUlT_E_', 'IiEEiS_', 'IiEEiS_'),
+        ('4lrefvENUlRKT_E_', 'IiEEDTcldtdeLKPKS2_0EonclIS_EscS1_fp_EES1_', 'IiEEDaS1_'),
+        ('4samevENUlTyT_S_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_scS5_fp0_EES_S_', 'IiEEDaS_S_'),
+        ('5multivENUlTyTyT_T0_E_', 'IilEEDTcldtdeLKPKS1_0EonclIS_S0_EscOS_fp_scOS0_fp0_EES_S0_', 'IilEEDaS_S0_'),
+        ('3mutvENUlT_E_', 'IiEEDTcldtdeLKPS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+        ('4noexvENUlT_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+        ('9drop_noexvENUlT_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+        ('5vvoidvENUlT_E_', 'IiEEvS_', 'IiEEvS_'),
+        ('6packedvENUlTpTyDpT_E_', 'IJilEEEDTcldtdeLKPKS1_0EonclIJS0_EEspscOS_fp_EES0_', 'IJilEEEDaS0_'),
+        ('9defaultedvENUlTyTniT_E_', 'IiLi7EEEDTcldtdeLKPKS0_0EonclIS_XT0_EEscOS_fp_EES_', 'IiLi7EEEDaS_'),
+        ('8inferredvENUlT_E_', 'IiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_', 'IiEEDaS_'),
+    )
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    private = {
+        'spec': '_ZZ15private_genericvENUlT_E0_8__invokeIiEEDaS_',
+        'gcc': '_ZZ15private_genericvENUlT_E0_4_FUNIiEEDTcldtdeLKPKS0_0EonclIS_EscOS_fp_EES_',
+        'clang': '_ZZ15private_genericvEN3$_08__invokeIiEEDaT_',
+    }
+    for mode in MODES:
+        invoker = '4_FUN' if mode == 'gcc' else '8__invoke'
+        names = tuple(f'_ZZ{owner}{invoker}{gcc if mode == "gcc" else other}' for owner, gcc, other in cases)
+        flags = ['-fcompat=' + mode]
+        command = [*flags, '-c', 'generic-invoker.cpp', '-o', 'generic-invoker.o']
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            outputs = []
+            for env in (world.cold, world.daemon):
+                result = world.cxx([target, *command], scope, env, timeout=40)
+                assert result == (0, b'', b''), (mode, target, result)
+                outputs.append((scope / 'generic-invoker.o').read_bytes())
+            assert outputs[0] == outputs[1], (mode, target)
+            symbols = outputs[0].split(b'\0')
+            for name in (*names, private[mode]):
+                assert (prefix + name).encode() in symbols, (mode, target, name, [s for s in symbols if b'_ZZ' in s])
+            for case in ('', 'CAPTURE', 'RETURN_TYPE', 'NOEXCEPT'):
+                define = ['-D' + case] if case else []
+                args = [target, *flags, *define, '-fsyntax-only', 'generic-invoker-constant.cpp']
+                cold, warm = (world.cxx(args, scope, env, timeout=30) for env in (world.cold, world.daemon))
+                assert cold == warm and cold[0] == bool(case), (mode, target, case, cold, warm)
+            if (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin'):
+                definition = f'-DINVOKER="{prefix}{names[-1]}"'
+                peer = clang if mode == 'clang' else gxx
+                if not peer:
+                    continue
+                subprocess.run([peer, '-std=c++26', definition, 'generic-invoker-caller.cpp', 'generic-invoker.o',
+                                '-o', 'generic-invoker'], cwd=scope, check=True, capture_output=True, timeout=40)
+                subprocess.run([scope / 'generic-invoker'], cwd=scope, check=True, timeout=20)
+
+
 def mixed_class_calls(world, gxx):
     scope = world.scope
     (scope / 'caller.cpp').write_text(CLASS_DECLARATIONS + CLASS_CALLER)
@@ -2207,6 +2313,7 @@ def main():
         pid = preprocess_and_syntax(world)
         mangling(world)
         private_closure_symbols(world, gxx)
+        generic_invoker_symbols(world, gxx)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
         if NATIVE_LINUX:
             mixed_class_calls(world, gxx)

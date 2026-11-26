@@ -631,6 +631,8 @@ struct EntityRec {
   // A closure type of a template's definition, outside function bodies: a dependent type, which
   // each instantiation's own closure types replace (docs/design/closures.md).
   bool closure_pattern = false;
+  // The head of a captureless generic lambda's synthesized static invoker template.
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
 };

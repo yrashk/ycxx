@@ -1360,6 +1360,11 @@ public:
       for (EntityId f : {c.call, c.invoker})
         if (f != EntityId::none) declaration_closures_.insert_or_assign(std::to_underlying(f), DeclarationClosure{c, item, begin});
   }
+  void generated_invokers(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
+    for (const auto& c : w_->ins.seqs.elements(closures))
+      if (c.flags & sema::closure_flag::generic_invoker)
+        declaration_closures_.try_emplace(std::to_underlying(c.invoker), DeclarationClosure{c, item, begin});
+  }
   // A generic lambda's function call operator specialized ([temp.inst]): its body re-analysed
   // from the lambda's tokens with the arguments bound, an `Instance`; its type with the return
   // type deduced, none when it fails.
@@ -11451,6 +11456,7 @@ public:
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree, root.begin);
+    p_->generated_invokers(out_.value.closures, k_, begin());
     if (!keeps) out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -11541,6 +11547,7 @@ public:
                                          b_.seq(std::span<const u32>{}), r ? r->type : s_.builtin(sema::Builtin::void_), u8(r.has_value()),
                                          b_.seq(std::span<const ast::ClosureDef>(s_.closures))});
     s_.check_immediate_addresses(out_.value.tree, root.begin);
+    p_->generated_invokers(out_.value.closures, k_, begin());
     out_.demands = std::move(s_.demands);
     return std::move(out_);
   }
@@ -14023,7 +14030,7 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
   if (auto it = declaration_closures_.find(key); it != declaration_closures_.end()) {
     const DeclarationClosure& c = it->second;
     if (c.item >= item) return r;
-    return define(c.def, c.item, c.begin, false);
+    return define(c.def, c.item, c.begin, (c.def.flags & sema::closure_flag::generic_invoker) != 0);
   }
   // The function whose body has the lambda: past the operators of enclosing lambdas.
   EntityId fn = w_->entities.rec(w_->entities.rec(f).scope).scope;

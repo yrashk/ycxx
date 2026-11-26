@@ -1383,13 +1383,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           std::ranges::any_of(type.params, [&](QualType param) { return names_tu_local(program, param); });
     }
     if (r.templ != EntityId::none) {
-      tu.entities.back().template_type = world.entities.rec(r.templ).type;
+      const auto& pattern = world.entities.rec(r.templ);
+      emitted.template_type = pattern.type;
+      emitted.generic_invoker_head = pattern.generic_invoker_head;
+      const bool invoker = ins.seqs.size(pattern.generic_invoker_head) != 0;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
-      if (sema::Sema::closure_member(world, r.templ))
-        tu.entities.back().template_type = world.entities.rec(world.entities.rec(r.templ).scope).type;
+      if (!invoker && sema::Sema::closure_member(world, r.templ))
+        emitted.template_type = world.entities.rec(pattern.scope).type;
       tu.entities.back().template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
-      if (world.entities.rec(r.templ).kind == sema::EntityKind::function_template)
+      if (!invoker && pattern.kind == sema::EntityKind::function_template)
         if (auto td = program.declaration(r.templ, program.end())) {
           std::vector<ast::TemplateParamSema> ps = ins.seqs.elements(td->template_params);
           sema::Templates t = program.templates();
@@ -1430,7 +1433,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
-        if (in_declaration) declaration_closure_member(tu.functions.back());
+        if (in_declaration || (c.flags & sema::closure_flag::generic_invoker))
+          declaration_closure_member(tu.functions.back());
       }
     }
   };

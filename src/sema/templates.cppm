@@ -2080,7 +2080,11 @@ public:
     QualType pattern = tmpl.type;
     TypeRec f = types().rec(pattern);
     const bool deduced_result = address && types().has_placeholder(f.inner);
-    if (deduced_result) pattern = types().function(types().rec(type).inner, f.params, f.variadic, f.linkage, f.fn_cv);
+    if (deduced_result) {
+      auto signature = ins().types.get<ast::TFunction>(types().canonical(pattern));
+      signature.ret = types().rec(type).inner;
+      pattern = ins().intern_type(signature);
+    }
     if (!deduce(pattern, type, depth, out)) return std::nullopt;
     auto full = complete(tmpl, params, std::move(out));
     if (!full || deduced_result) return full;

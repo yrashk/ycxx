@@ -30,6 +30,7 @@ struct TemplateSpec {
   // Clang writes no `Tt` for it.
   std::vector<std::uint8_t> same_heads{};
   ast::WrittenConstraint head{}, trailing{};
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
 };
 // The declaration data for a function's <encoding> nested inside another name.
 struct LocalFunction {
@@ -592,6 +593,8 @@ class Mangler {
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
     if (sc.closure && in_.types.is<ast::TFunction>(c)) {
       auto f = in_.types.get<ast::TFunction>(c);
+      const bool gcc_invoker = compatibility_ == ast::Compatibility::gcc && in_.seqs.size(spec.generic_invoker_head) != 0;
+      if (gcc_invoker) name = "_FUN";
       std::string local;
       if (sc.closure_variable == ast::EntityId::none) {  // else the variable is its <closure-prefix>
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
@@ -610,7 +613,8 @@ class Mangler {
       candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());  // the <template-prefix>
       auto args = specialization_args(spec);
       if (!args) return args;
-      auto sig = signature(f, true);
+      const bool deduced_result = in_.types.is<ast::TAuto>(in_.types.canon(f.ret));
+      auto sig = signature_for_closure(f, sc, spec, scope, gcc_invoker && deduced_result);
       if (!sig) return sig;
       *sig += constraint_suffix(spec.trailing, false);
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
@@ -629,6 +633,52 @@ class Mangler {
     ast::Cv fcv = in_.types.get<ast::TFunction>(c).cv;
     std::string cv = std::string(std::to_underlying(fcv) & 2 ? "V" : "") + (std::to_underlying(fcv) & 1 ? "K" : "");
     return delimit_name(cv + *n + *args, scope) + *sig;
+  }
+  std::expected<std::string, std::string> signature_for_closure(const ast::TFunction& invoker, const ClassName& closure,
+                                                               const TemplateSpec& spec, ast::EntityId scope,
+                                                               bool gcc_deduced_invoker) {
+    if (!gcc_deduced_invoker) return signature(invoker, true);
+    // GCC's current primary signature describes the deduced result by calling
+    // operator() through a null closure pointer with the forwarded parameters.
+    auto& in = const_cast<ast::Interners&>(in_);
+    const auto member = in_.types.get<ast::TFunction>(in_.types.canon(closure.closure_type));
+    auto object = ast::with_cv(in.intern_type(ast::TClass{scope}), member.cv);
+    auto pointer = type(ast::pointer_to(in, object, ast::Cv::const_));
+    if (!pointer) return pointer;
+    std::string out = "DTcldtdeL" + *pointer + "0EonclI";
+    for (const auto& parameter : in_.seqs.elements(spec.generic_invoker_head)) {
+      if (parameter.pack) out += 'J';
+      if (parameter.kind == ast::TemplateArgKind::value) {
+        auto value = in.intern_value(ast::VDepParam{parameter.depth, parameter.index});
+        if (parameter.pack) value = in.intern_value(ast::VDepExpansion{value});
+        auto a = template_arg({ast::TemplateArgKind::value, parameter.type, value});
+        if (!a) return a;
+        out += *a;
+      } else {
+        auto t = in.intern_type(ast::TTemplateParam{parameter.depth, parameter.index, parameter.pack});
+        if (parameter.pack) t = in.intern_type(ast::TPackExpansion{t});
+        auto a = type(t);
+        if (!a) return a;
+        out += *a;
+      }
+      if (parameter.pack) out += 'E';
+    }
+    out += 'E';
+    std::size_t index = 0;
+    for (auto p : in_.seqs.elements(invoker.params)) {
+      if (in_.types.is<ast::TPackExpansion>(in_.types.canon(p))) {
+        out += "sp";
+        p = in_.types.get<ast::TPackExpansion>(in_.types.canon(p)).pattern;
+      }
+      auto forwarded = type(ast::rvalue_ref_to(in, p));
+      if (!forwarded) return forwarded;
+      out += "sc" + *forwarded;
+      out += index == 0 ? "fp_" : std::format("fp{}_", index - 1);
+      ++index;
+    }
+    auto parameters = signature(invoker, false);
+    if (!parameters) return parameters;
+    return out + "EE" + *parameters;
   }
   std::expected<std::string, std::string> local_encoding(const LocalFunction& f) {
     if (f.c_name) return source_name(f.name);

@@ -188,12 +188,12 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 array-bo
 
 [[divergence]]
 id = "lambda-invoker-symbol"
-status = "partial"
-mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.8, #281"
 prior = "Clang's __invoke spelling for the static function-pointer conversion target."
 spec = "Use ycxx's established __invoke spelling."
-gcc = "Use _FUN for the static invoker."
+gcc = "Use _FUN for the static invoker, including a specialization of a generic lambda's conversion target."
 clang = "Same as spec."
 limits = "This controls the invoker's name inside the closure symbol. Translation-unit-local closure numbering and generic invoker signatures have separate entries."
 evidence = ["tests/own/lambda/p2-impl-mangle.run.cpp", "tests/daemon/compatibility.py"]
@@ -212,17 +212,41 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 primary 
 
 [[divergence]]
 id = "generic-lambda-invoker-signature"
-status = "recorded"
-mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.8"
 prior = "Reject conversion from a generic lambda to a function pointer."
-spec = "Same as prior. The draft requires a conversion function template for a captureless generic lambda without an explicit object parameter. The ABI specifies a closure encoding and leaves the conversion target implementation-defined."
-gcc = "Same as prior."
-clang = "Same as prior."
-gcc_observed = "Encodes the generic invoker's return as a dependent call through a null closure pointer, retaining the explicit template head on externally linkable closures."
-clang_observed = "Uses Da for the deduced return and an ordinary mangled parameter type or substitution. Externally linkable closures encode the explicit template head and distinguish it from an invented auto parameter."
+spec = "Deduce the specialization from the target pointer and use the structural closure encoding. An explicit return type is encoded as written. A deduced return keeps its placeholder in the invoker's signature."
+gcc = "Use the written return type when present. A deduced return is encoded as a dependent call to the call operator through a null closure pointer, with template arguments and forwarded parameters."
+clang = "Use the written return type, preserving the placeholder for a deduced return. Inline and templated owners retain the explicit template head in the closure component."
+limits = "This entry covers the invoker for captureless unconstrained lambda specializations. A written dependent exception specification, constrained lambdas, and static call operators have separate language requirements. The conversion member is recorded separately."
 probe = 'inline int (*provider())(int) { return []<class T>(T n) { return n; }; }'
-evidence = ["GCC 16.2 and Clang 23.1.6 static invoker symbols from generic lambdas on ELF and Mach-O"]
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 static invoker symbols from generic lambdas on ELF and Mach-O, including explicit and inferred types, packs, defaults, references, mutable and noexcept"]
+
+[[divergence]]
+id = "generic-lambda-conversion-function-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.lambda.closure], Itanium C++ ABI §5.1.5.1 and §5.1.8"
+prior = "Use the invoker address directly without emitting a separate conversion member."
+spec = "The conversion member yields the invoker address, or the address of the call operator if it is static. Encode an emitted conversion member as cv followed by the conversion type."
+gcc = "At -O0, emit a constexpr conversion member when the address conversion is used. A deduced generic conversion type uses a dependent call to the lambda call operator, using a null closure pointer for a nonstatic operator."
+clang = "At -O0, emit the conversion member when used. The conversion type of the tested generic closure has a placeholder return. Both peers use the same concrete conversion-member spelling for the tested nongeneric closure."
+limits = "The object symbols depend on optimization. Both peers inline these tested conversions at -O2. Both return the static call operator directly for a static lambda."
+probe = 'inline int (*provider())(int) { return [](auto n) { return n; }; }'
+evidence = ["GCC 16.2 with -fabi-compat-version=0 and upstream Clang 23.1.6 -O0 and -O2 ELF and Mach-O symbol probes"]
+
+[[divergence]]
+id = "constrained-lambda-call-operator-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.lambda.closure], [temp.constr.decl], Itanium C++ ABI §5.1.8 and the constraint mangling proposal"
+prior = "A lambda's written requires-clause is unsupported."
+spec = "The conversion template has the same associated constraints as the function call operator template. An emitted symbol uses the corresponding closure signature or trailing constraint according to its source placement."
+gcc = "The tested explicit head constraint and explicit constrained parameter use Q and Tk in the closure signature. A trailing concept argument decltype(n) references a level-one function parameter."
+clang = "Use the same Q and Tk prefixes for the tested explicit forms. The tested trailing decltype(n) references a level-zero function parameter. Both peers omit the tested invented auto parameter's constraint from the closure signature."
+probe = 'inline int (*provider())(int) { return [](auto n) requires Integral<decltype(n)> { return n; }; }'
+evidence = ["GCC 16.2 primary symbols and upstream Clang 23.1.6 ELF and Mach-O symbols for explicit, invented and trailing lambda constraints"]
 
 [[divergence]]
 id = "constexpr-memory-builtin-range"
