@@ -784,6 +784,41 @@ union U { Variant first; unsigned other; };
 constexpr U value{};
 static_assert(value.first.word == EXPECTED);
 ''')
+    (world.scope / 'constexpr-union-destruction.cpp').write_text('''\
+void runtime_only();
+struct Variant {
+  unsigned word;
+  mutable unsigned scratch;
+  constexpr Variant() : word(17), scratch(3) {}
+  constexpr ~Variant() {}
+};
+union U {
+  Variant first;
+  unsigned later;
+#if defined(NON_CONSTEXPR)
+  ~U() {}
+#elif defined(CONDITIONAL)
+  constexpr ~U() { if (first.word == 17) runtime_only(); }
+#elif defined(BAD)
+  constexpr ~U() { if (first.word == 17 || first.word == 0) runtime_only(); }
+#elif defined(MUTABLE_READ)
+  constexpr ~U() { if (first.scratch != 3) {} }
+#elif defined(MUTABLE_WRITE)
+  constexpr ~U() { ++first.scratch; }
+#elif defined(WRITE)
+  constexpr ~U() { ++first.word; }
+#else
+  constexpr ~U() {}
+#endif
+};
+#ifdef LOCAL
+constexpr unsigned read() { constexpr U value{}; return value.first.word; }
+static_assert(read() == EXPECTED);
+#else
+constexpr U value{};
+static_assert(value.first.word == EXPECTED);
+#endif
+''')
     (world.scope / 'memory-pointer-object.cpp').write_text('''\
 #ifdef NON_NULL
 int object;
@@ -1203,6 +1238,13 @@ int use() { return transform(7); }
             invoke(target, *flags, '-DBYTE_READ', '-fsyntax-only', 'memory-nested-record.cpp', status=mode != 'gcc')
             union_expected = 0 if mode == 'gcc' else 17
             invoke(target, *flags, f'-DEXPECTED={union_expected}', '-fsyntax-only', 'constexpr-empty-union.cpp')
+            cases = {'': 0, 'WRITE': 0, 'NON_CONSTEXPR': 1, 'BAD': 1,
+                     'CONDITIONAL': mode != 'gcc', 'MUTABLE_READ': mode != 'gcc', 'MUTABLE_WRITE': mode != 'gcc'}
+            for case, status in cases.items():
+                definition = [f'-D{case}'] if case else []
+                for scope in ([], ['-DLOCAL']):
+                    invoke(target, *flags, f'-DEXPECTED={union_expected}', *definition, *scope,
+                           '-fsyntax-only', 'constexpr-union-destruction.cpp', status=status)
             for case in ('', 'NON_NULL', 'LOCAL'):
                 args = ['-D' + case] if case else []
                 invoke(target, *flags, *args, '-fsyntax-only', 'memory-pointer-object.cpp',

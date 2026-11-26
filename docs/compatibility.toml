@@ -840,16 +840,28 @@ evidence = ["tests/own/builtins/pack-arguments-addressof.run.cpp", "tests/daemon
 
 [[divergence]]
 id = "empty-union-list"
-status = "partial"
-mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.init.aggr], CWG2084"
 prior = "Initialize the first variant member of a nonempty union when the applicable C++26 empty-list rule selects it."
 spec = "Copy-list-initialize the first variant of an empty aggregate union initializer when there is no default member initializer. This includes omission inside another aggregate."
 gcc = "Use zero initialization without calling the first variant's constructor in the tested empty lists. A written default initializer on the first variant still runs."
 clang = "Same as spec."
 gcc_observed = "GCC 16.2 zeroes automatic union storage without calling a constructor for the first variant in direct lists, copy lists, and nested lists. A constexpr aggregate union can expose zero in the first variant even when the variant's constructor would produce a different value."
-limits = "The supported runtime aggregates and a constexpr union with an implicit destructor and a nontrivial first record are covered. Constant evaluation with a written union destructor still needs coverage."
-evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp", "tests/daemon/compatibility.py"]
+limits = "Covers supported runtime aggregates and constexpr named unions with a nontrivial first record and an implicit or written constexpr destructor. A destructor whose constant validity depends on the first variant sees the selected mode's initialized value."
+evidence = ["tests/own/unions/omitted-union-member.run.cpp", "tests/own/unions/explicit-empty-list.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 constexpr namespace and automatic union lifetime probes"]
+
+[[divergence]]
+id = "constant-destruction-mutable-subobjects"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[dcl.constexpr], [expr.const.init]"
+prior = "Do not evaluate a record's written destructor for a constexpr variable."
+spec = "Check destruction with the initialized object's non-mutable subobject lifetimes inside the evaluation. Diagnose attempted reads and writes of mutable subobjects whose lifetimes are external to this check."
+gcc = "Allow the tested reads and writes of a mutable member of the initialized union variant while checking constant destruction."
+clang = "Same as spec on both supported targets."
+limits = "Covers the modeled record layouts, including a class variant with scalar fields in a namespace or automatic constexpr union."
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 readonly, mutation, and unused mutable member controls"]
 
 [[divergence]]
 id = "empty-union-new-list"

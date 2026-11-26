@@ -8346,6 +8346,10 @@ private:
           declare_member(ConstId::none, {});
           return false;
         }
+        if (spec.is_constexpr && !evaluator.check_constant_destruction(d.type, *v.value, at)) {
+          declare_member(ConstId::none, {});
+          return false;
+        }
         value = *v.value;
         if (usable) p_->set_constant(sem.entity, value, k_);
         if (member_value_ == ordinal) {
@@ -9099,6 +9103,9 @@ private:
         dynamic_ok(at, v.reason);
       }
     };
+    const auto constant_destruction = [&](ConstId initialized, u32 at) {
+      return !spec.is_constexpr || sema::Evaluator(s_, q_).check_constant_destruction(d.type, initialized, at);
+    };
     if (fn && has_init && !is_function_def) {
       s_.diag(ps_.pos(), Diag::function_initialized, d.name);
       ps_.skip_to_semi();
@@ -9114,8 +9121,10 @@ private:
         } else {
           const auto v = sema::Evaluator(s_, q_).evaluate_initializer(init);
           if (v.value) {
-            value = *v.value;
-            if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
+            if (constant_destruction(*v.value, b->begin)) {
+              value = *v.value;
+              if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
+            }
           } else if (!v.diagnosed_failure()) {
             dynamic_ok(b->begin, v.reason);
           }
@@ -9146,10 +9155,12 @@ private:
           sema::Evaluated v = lit != ConstId::none ? sema::Evaluated{lit, 0, true}
                                   : s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
           if (v.value) {
-            value = *v.value;
-            if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
-                                      types.is_integral(d.type)))
-              p_->set_constant(sem.entity, *v.value, k_);
+            if (constant_destruction(*v.value, e.begin)) {
+              value = *v.value;
+              if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
+                                        types.is_integral(d.type)))
+                p_->set_constant(sem.entity, value, k_);
+            }
           } else if (!v.diagnosed_failure()) {
             dynamic_ok(e.begin, v.reason);
           }
@@ -9186,8 +9197,10 @@ private:
         // expression, for a class the evaluator can represent ([basic.start.static]).
         sema::Evaluated v = sema::Evaluator(s_, q_).evaluate_initializer(init);
         if (v.value) {
-          value = *v.value;
-          if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
+          if (constant_destruction(*v.value, open)) {
+            value = *v.value;
+            if (spec.is_constexpr) p_->set_constant(sem.entity, value, k_);
+          }
         } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }

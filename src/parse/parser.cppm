@@ -6711,6 +6711,7 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
+      if (is_constexpr && !evaluator.check_constant_destruction(t, *v.value, init.begin)) return;
       if (is_constexpr && (s_->folded_immediate_result != ast::EntityId::none ||
                           s_->compatibility() != ast::Compatibility::spec) &&
           !s_->check_immediate_initializer(*v.value, init.begin)) return;
