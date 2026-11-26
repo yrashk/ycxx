@@ -13,7 +13,7 @@
 //   :cond    #if expressions ([cpp.cond])
 //
 // `pp(file)` is an engine query over the main file's text and its `Source` (its name, working
-// directory and configuration). Every file it includes is read as a `FileContent` input, provided
+// directory and configuration). Every disk file it includes is read as a `FileContent` input, provided
 // on first read (daemon design §5.1, #93), so editing a header invalidates the `pp` cells that read
 // it. The region cache of the process's session for the configuration still shares regions between
 // units, where their traces verify; contextual queries (#16) will replace it.
@@ -149,6 +149,10 @@ struct Source {
   std::string cwd;
   Config config;
 };
+// A null pointer leaves the path to the file table. A disengaged value is a miss
+// in the immutable host overlay. An engaged empty string is an empty file.
+const std::optional<std::string>* host_overlay_content(const Config& config, std::string_view cwd,
+                                                       std::string_view name);
 // Read a path in the source's view. A build view reserves a virtual directory for
 // generated contents under the workspace's selected build state directory. A disk
 // view with a host overlay serves its reserved directory from the configuration.
@@ -289,31 +293,29 @@ Paths& paths() {
   return p;
 }
 
-PathId source_path(const Source& source, std::string_view name) {
+std::string normalized_source_path(std::string_view cwd, std::string_view name) {
   std::filesystem::path path(name);
-  if (path.is_relative() && !source.cwd.empty()) path = std::filesystem::path(source.cwd) / path;
-  return path_id(path.lexically_normal().generic_string<char>());
+  if (path.is_relative() && !cwd.empty()) path = std::filesystem::path(cwd) / path;
+  return path.lexically_normal().generic_string<char>();
 }
 
-bool is_generated_path(const Source& source, PathId id) {
+bool is_generated_path(const Source& source, std::string_view path) {
   const auto view = source.config.view;
   if (view != View::build && view != View::explicit_target_build) return false;
   auto state = std::filesystem::path(source.cwd) / ".ycxx";
   if (view == View::explicit_target_build) state = state / "targets" / source.config.target->triple;
   const auto root = (state / "virtual").lexically_normal();
   const std::string prefix = root.generic_string<char>() + '/';
-  return path_of(id).starts_with(prefix);
+  return path.starts_with(prefix);
 }
 
-// Null means this view does not own the path. A disengaged value is a miss in the overlay.
-const std::optional<std::string>* host_overlay_content(const Source& source, PathId id) {
-  if (source.config.view != View::disk || !source.config.host_overlay) return nullptr;
-  const auto root = (std::filesystem::path(source.cwd) / ".ycxx/host/virtual").lexically_normal();
+const std::optional<std::string>* host_overlay_at(const Config& config, std::string_view cwd, std::string_view path) {
+  if (config.view != View::disk || !config.host_overlay) return nullptr;
+  const auto root = (std::filesystem::path(cwd) / ".ycxx/host/virtual").lexically_normal();
   const auto prefix = root.generic_string<char>();
-  const auto& path = path_of(id);
   if (!path.starts_with(prefix) || (path.size() > prefix.size() && path[prefix.size()] != '/'))
     return nullptr;
-  const auto& files = source.config.host_overlay->files();
+  const auto& files = config.host_overlay->files();
   const auto found = files.find(path);
   static const std::optional<std::string> absent;
   return found == files.end() ? &absent : &found->second;
@@ -469,21 +471,29 @@ engine::provided<std::optional<std::string>> no_buffer(PathId) { return {std::nu
 
 engine::provided<std::optional<std::string>> no_generated_file(PathId) { return {std::nullopt, engine::Durability::low}; }
 
+const std::optional<std::string>* host_overlay_content(const Config& config, std::string_view cwd,
+                                                       std::string_view name) {
+  if (!config.host_overlay) return nullptr;
+  return host_overlay_at(config, cwd, normalized_source_path(cwd, name));
+}
+
 const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name) {
-  const PathId id = source_path(source, name);
-  if (const auto* overlay = host_overlay_content(source, id)) return *overlay;
+  const auto path = normalized_source_path(source.cwd, name);
+  if (const auto* overlay = host_overlay_at(source.config, source.cwd, path)) return *overlay;
+  const PathId id = path_id(path);
   if (source.config.view == View::editor)
     if (const auto& open = cx.fetch<Buffer>(id)) return open;
-  if (is_generated_path(source, id)) return cx.fetch<GeneratedFile>(id);
+  if (is_generated_path(source, path)) return cx.fetch<GeneratedFile>(id);
   return cx.fetch<FileContent>(id);
 }
 
 const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name) {
-  const PathId id = source_path(source, name);
-  if (const auto* overlay = host_overlay_content(source, id)) return *overlay ? &**overlay : nullptr;
+  const auto path = normalized_source_path(source.cwd, name);
+  if (const auto* overlay = host_overlay_at(source.config, source.cwd, path)) return *overlay ? &**overlay : nullptr;
+  const PathId id = path_id(path);
   if (source.config.view == View::editor)
     if (const auto* open = db.peek<Buffer>(id); open && *open) return &**open;
-  const auto* content = is_generated_path(source, id) ? db.peek<GeneratedFile>(id) : db.peek<FileContent>(id);
+  const auto* content = is_generated_path(source, path) ? db.peek<GeneratedFile>(id) : db.peek<FileContent>(id);
   return content && *content ? &**content : nullptr;
 }
 

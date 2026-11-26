@@ -257,7 +257,7 @@ def check_rejection(ycxx, scope, env, journal, expected):
 def check_rejections(ycxx, workspace, env):
     for name, original, changed, expected in (
         ('cycle', f'sources = ["{SCANNER}"]', f'sources = [{GENERATED_HEADER}]',
-         'host executable sources require disk paths or globs'),
+         'host executable generated source dependency cycle'),
         ('planning', 'sources = ["main.cc"]', f'sources = ["main.cc"]\n    plan_inputs = {{ scanner = {REFERENCE} }}',
          PLANNING_UNSUPPORTED),
     ):
