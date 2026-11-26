@@ -37,7 +37,12 @@ def main():
         for test in ('arith', 'abi', 'symbols'):
             run([ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26', '-Wno-pedantic', '-c',
                  f'{test}.run.cpp', '-o', f'{test}.o'], scope, env)
-        for compiler, version in peers(host, scope, env):
+        # Without a peer nothing below runs; that is a failure, not a pass.
+        chosen = list(peers(host, scope, env))
+        if not chosen:
+            raise AssertionError(f'no peer compiler for the int128 tests: every candidate, {host} included, is older '
+                                 f'than Clang {ORACLE_CLANG} (#1368); set YCXX_GXX or YCXX_CLANGXX')
+        for compiler, version in chosen:
             for level in ('-O0', '-O2'):
                 print(f'Checking mixed int128 tests with {compiler} ({version}) at {level}', flush=True)
                 for test in ('abi', 'symbols'):
