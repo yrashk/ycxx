@@ -10,9 +10,10 @@ static_assert(__is_convertible(int*&, int*&) && !__is_convertible(int*&, int*&&)
 static_assert(__is_convertible(int*&&, int*&&) && __is_convertible(int*&&, int* const&));
 // A reference-compatible lvalue binds directly ([dcl.init.ref]/4: int** to const int* const*).
 static_assert(__is_convertible(int*&, const int* const&) && !__is_convertible(int*&, const int*&));
-// A related lvalue converts to a temporary only for a const lvalue reference.
-static_assert(!__is_convertible(int*&, const int*&&) && __is_convertible(int*, const int*&&));
-// cv1 must be at least cv2 for related types ([dcl.init.ref]/5.4.3).
+// A reference-related operand that does not bind directly never binds a temporary
+// ([dcl.init.ref]/5.4). The xvalue cases Clang gets wrong are in
+// pointer_reference_related_temporary.accept.cpp.
+static_assert(!__is_convertible(int*&, const int*&&) && !__is_convertible(int*&, const int*&));
 static_assert(!__is_convertible(int* volatile&, int* const&) && !__is_convertible(int* const&, int*&&));
 static_assert(!__is_convertible(int* const&, int*&) && !__is_convertible(int*, int* volatile const&));
 // Converting to a temporary needs a valid conversion.
@@ -23,7 +24,7 @@ struct Left : B {};
 struct Right : B {};
 struct Both : Left, Right {};
 static_assert(!__is_convertible(Private*&, B* const&) && !__is_convertible(Both*, B*&&));
-static_assert(__is_convertible(int**, const int* const*&&) && !__is_convertible(int**&, const int* const*&&));
+static_assert(!__is_convertible(int**&, const int* const*&&) && __is_convertible(int**, const int* const* const&));
 static_assert(__is_convertible(D*&, B* const&) && __is_convertible(D*, B*&&) && !__is_convertible(D*&, B*&));
 static_assert(__is_convertible(int*, void* const&) && __is_convertible(int*&, const void* const&));
 static_assert(__is_convertible(decltype(nullptr), int* const&) && !__is_convertible(decltype(nullptr), int*&));

@@ -2591,9 +2591,8 @@ session's.*
   noexcept function converts to one to the plain function ([conv.fctptr]). References to
   arithmetic, pointer and `std::nullptr_t` types follow [dcl.init.ref]/5: direct binding of a
   reference-compatible operand (a qualification conversion of pointers to them), otherwise a
-  converted temporary for a const lvalue or rvalue reference, which a reference-related (similar)
-  operand allows only without dropping qualifiers or binding an rvalue reference to an lvalue
-  (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
+  converted temporary for a const lvalue or rvalue reference, never for a reference-related
+  (similar) operand (/5.4, CWG2352; Clang 23 differs, GCC 16 agrees) (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
   sources, are diagnosed (#1399). Supported class-template bases and variable-template initializers
   replay dependent operands and check class completeness at the demand. Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.

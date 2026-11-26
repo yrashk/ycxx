@@ -2456,11 +2456,11 @@ public:
     if (!r.rvalue_ref && lvalue && compatible) return yes;           // /5.1
     if (!r.rvalue_ref && object_cv(target) != Cv::const_) return no;  // /5.2
     if (!lvalue && compatible) return yes;                            // /5.3
-    // /5.4.2: the source converted to a prvalue of T1, materialized. A reference-related T1 and T2
-    // (similar here) need cv1 at least cv2, and an rvalue reference no lvalue.
+    // /5.4: otherwise T1 shall not be reference-related to T2 (similar, for these types; CWG2352),
+    // and the source is converted to a prvalue of T1 and materialized.
     const auto related = similar_types(from_pointer, to_pointer);
     if (!related) return unmodelled;
-    if (*related && (!cv_within(object_cv(source), object_cv(target)) || (r.rvalue_ref && lvalue))) return no;
+    if (*related) return no;
     return scalar_conversion(object_unqualified(source), object_unqualified(target), loc);
   }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
