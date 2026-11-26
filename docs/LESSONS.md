@@ -1002,23 +1002,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Run `git status` after `git merge -q … | tail`: the pipe hides a conflict's exit code, and a gate
     ran for half an hour on a half-merged tree.
   - Learned on #1243.
-- **The item splitter must learn every token-level construct that looks like `name(`.** It decides
-  what a namespace-scope item declares from tokens alone, and a miss is silent: `typedef
-  __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never existed and
-  only its uses failed, far away.
+- **The item splitter guesses from tokens, and a wrong guess is silent.** It decides what a
+  namespace-scope item or member declares from tokens alone.
+  - `typedef __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never
+    existed and only its uses failed, far away (#211).
+  - It read `requires` after any `&&` as a requires-expression. While templated members with `&&`
+    were rejected, that guess was never reached. Once #311 accepted them,
+    `int a() && requires (C) { … }` took its `(…)` and `{…}` as the expression's parts and ran the
+    next member's body: a miscompile that every own test missed and an independent review caught.
   - Do: when adding a specifier that takes parentheses (`decltype`, `__attribute__`, the type-trait
-    built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
-    namespace-scope typedef, variable and function template whose type begins with it.
-  - Learned on #211.
-- **Lifting a "not supported" rejection exposes the item splitter's token guesses.** The splitter
-  read `requires` after any `&&` as a requires-expression. While templated members with `&&` were
-  rejected, that guess was never reached. Once #311 accepted them, `int a() && requires (C) { … }`
-  took its `(…)` and `{…}` as the expression's parts and ran the next member's body: a silent
-  miscompile that every own test missed and an independent review caught.
-  - Do: when a gate stops rejecting a token form, grep `items.cppm` for that token and test the
-    new form followed by each thing that can come next (a requires-clause, `noexcept`, `->`,
-    `= 0`, `= delete`, a body, another member).
-  - Learned on #311.
+    built-ins), or when a gate stops rejecting a token form, grep `items.cppm` for the token. Test
+    the form in a namespace-scope typedef, variable and function template, and as a member followed
+    by each thing that can come next (a requires-clause, `noexcept`, `->`, `= 0`, `= delete`, a
+    body, another member).
+  - Rule: AGENTS.md ("While working"). Learned on #211 and #311.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
