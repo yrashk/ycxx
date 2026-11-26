@@ -10,7 +10,7 @@ import ycxx.engine;
 export namespace ycxx::trace {
 
 using engine::Outcome;
-inline constexpr std::size_t outcome_count = 9;
+inline constexpr std::size_t outcome_count = std::to_underlying(Outcome::stopped) + 1;
 
 // An engine event as it crosses the daemon socket: times in nanoseconds since the trace began.
 struct Event {
@@ -105,6 +105,7 @@ constexpr std::string_view outcome_name(Outcome o) {
     case Outcome::recomputed: return "recomputed";
     case Outcome::waited: return "waited";
     case Outcome::failed: return "failed";
+    case Outcome::stopped: return "stopped";
   }
   return "?";
 }
@@ -120,6 +121,7 @@ constexpr std::string_view outcome_meaning(Outcome o) {
     case Outcome::recomputed: return "computed privately: another frame owned it";
     case Outcome::waited: return "another frame owned it: waited for it";
     case Outcome::failed: return "left without a value";
+    case Outcome::stopped: return "cancelled before publishing a value";
   }
   return "?";
 }
@@ -135,12 +137,13 @@ constexpr std::string_view outcome_glyph(Outcome o, bool unicode) {
     case Outcome::recomputed: return unicode ? "◆" : "%";
     case Outcome::waited: return unicode ? "⧗" : "&";
     case Outcome::failed: return unicode ? "✗" : "!";
+    case Outcome::stopped: return unicode ? "■" : "x";
   }
   return "?";
 }
 // SGR parameters: executed bold green, cutoff yellow, verified green, reused light gray (it did
 // nothing),
-// durable blue, inputs dim, recomputed bright yellow, waited cyan, failed bold magenta. A cell
+// durable blue, inputs dim, recomputed bright yellow, waited cyan, failed bold magenta, stopped magenta. A cell
 // whose value holds errors is red whatever its outcome (`event_sgr`).
 inline constexpr std::string_view error_sgr = "1;31";
 inline constexpr std::string_view error_here_sgr = "1;97;41";
@@ -155,6 +158,7 @@ constexpr std::string_view outcome_sgr(Outcome o) {
     case Outcome::recomputed: return "93";
     case Outcome::waited: return "36";
     case Outcome::failed: return "1;35";
+    case Outcome::stopped: return "35";
   }
   return "0";
 }

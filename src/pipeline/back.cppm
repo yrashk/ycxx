@@ -1865,7 +1865,8 @@ struct DivisionFusionModel {
   using Key = Fp128;
   using Value = FusionModel;
   static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
-    auto groups = x86_64::group_divisions(universe().units->at(unit).body.f);
+    co_await cx.stop_point();
+    auto groups = x86_64::group_divisions(universe().units->at(unit).body.f, cx.stop_token());
     co_await cx.stop_point();
     if (!groups) co_return Value{{}, groups.error()};
     co_return Value{std::move(*groups), {}};
@@ -1893,6 +1894,11 @@ struct DivisionFusionSolve {
   static constexpr std::size_t visit_budget = 4'096;
   using Key = Fp128;
   using Value = FusionResult;
+  static std::string describe(const Key& unit) {
+    std::string key;
+    engine::describe_into(key, unit);
+    return key + std::format(", model=unsigned_divrem_fusion backend=exact_prefix budget={}", visit_budget);
+  }
   static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
     // Optimized builds the model first. Fetch the completed value to record the dependency,
     // then do the solve synchronously on this worker.

@@ -61,7 +61,7 @@ export struct DivisionSite {
 export bool compatible_division_pair(const l2::Function& body, DivisionPair pair);
 // Each group has identical operands and contains both quotients and remainders in block order.
 export std::expected<std::vector<std::vector<DivisionSite>>, std::string>
-group_divisions(const l2::Function& body);
+group_divisions(const l2::Function& body, std::inplace_stop_token stop);
 
 // Compile well-formed L2 with INTEGER ABI values and direct scalar SSE values.
 // The producer checks original signatures and ellipsis types and flattens INTEGER records.
@@ -188,7 +188,8 @@ bool unsigned_division(const l2::Function& body, NodeId id) {
   return type == Type::i32 || type == Type::i64;
 }
 
-std::expected<Frame, std::string> layout(const l2::Function& body) {
+template <bool Poll = false>
+std::expected<Frame, std::string> layout(const l2::Function& body, std::inplace_stop_token stop = {}) {
   // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
   // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
   constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
@@ -205,6 +206,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   frame.slots.resize(body.values.size());
   frame.objects.resize(body.nodes.size());
   for (std::size_t i = 0; i < body.values.size(); ++i) {
+    if constexpr (Poll)
+      if ((i % 256 == 0) && stop.stop_requested()) return std::unexpected("model cancelled");
     Type t = body.values[i].type;
     if (t == Type::state) continue;
     frame.size += 8;
@@ -214,6 +217,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 
   std::uint64_t scratch_words = 0;
   for (BlockId b : body.block_ids()) {
+    if constexpr (Poll)
+      if (stop.stop_requested()) return std::unexpected("model cancelled");
     const ir::Block& block = body.block(b);
     if (!block.nnodes) return std::unexpected("a block needs a terminator");
     auto params = body.params_of(b);
@@ -224,6 +229,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
     if (raw(b) != 0) scratch_words = std::max(scratch_words, std::uint64_t(block.nparams - 1));
 
     for (NodeId n : body.nodes_of(b)) {
+      if constexpr (Poll)
+        if ((raw(n) % 256 == 0) && stop.stop_requested()) return std::unexpected("model cancelled");
       const l2::Node& nd = body.node(n);
       auto imms = body.imms_of(n);
       auto operands = body.operands_of(n);
@@ -906,12 +913,15 @@ bool compatible_division_pair(const l2::Function& body, DivisionPair pair) {
          division_operand(body, lhs[1]) == division_operand(body, rhs[1]);
 }
 
-std::expected<std::vector<std::vector<DivisionSite>>, std::string> group_divisions(const l2::Function& body) {
+std::expected<std::vector<std::vector<DivisionSite>>, std::string>
+group_divisions(const l2::Function& body, std::inplace_stop_token stop) {
   using Operands = std::pair<DivisionOperand, DivisionOperand>;
   std::vector<std::vector<DivisionSite>> groups;
   for (const auto block : body.block_ids()) {
+    if (stop.stop_requested()) return std::unexpected("model cancelled");
     std::map<Operands, std::vector<DivisionSite>> sites;
     for (const auto id : body.nodes_of(block)) {
+      if ((raw(id) % 256 == 0) && stop.stop_requested()) return std::unexpected("model cancelled");
       if (!unsigned_division(body, id)) continue;
       const auto operands = body.operands_of(id);
       const auto divisor = division_operand(body, operands[1]);
@@ -924,18 +934,22 @@ std::expected<std::vector<std::vector<DivisionSite>>, std::string> group_divisio
       sites[{division_operand(body, operands[0]), divisor}].push_back({id, body.node(id).op == Op::udiv, 0});
     }
     for (auto& [operand, group] : sites) {
+      if (stop.stop_requested()) return std::unexpected("model cancelled");
       if (std::ranges::any_of(group, [&](const DivisionSite& s) { return s.quotient != group.front().quotient; }))
         groups.push_back(std::move(group));
     }
   }
   if (groups.empty()) return groups;
+  if (stop.stop_requested()) return std::unexpected("model cancelled");
   std::ranges::sort(groups, {}, [](const auto& group) { return group.front().node; });
-  const auto frame = layout(body);
+  if (stop.stop_requested()) return std::unexpected("model cancelled");
+  const auto frame = layout<true>(body, stop);
   if (!frame) return std::unexpected(frame.error());
   std::vector<std::uint8_t> bytes;
   Encoder encoder(bytes);
   for (auto& group : groups) {
     for (auto& site : group) {
+      if (stop.stop_requested()) return std::unexpected("model cancelled");
       const auto operands = body.operands_of(site.node);
       const bool wide = body.type(body.result(site.node)) == Type::i64;
       bytes.clear();
