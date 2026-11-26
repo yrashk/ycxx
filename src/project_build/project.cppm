@@ -3,6 +3,7 @@
 export module ycxx.build.project;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
@@ -72,6 +73,7 @@ using Apply = std::function<void(const std::function<void(engine::Db&)>&)>;
 struct Planned {
   Fp128 workspace;
   ProjectPlan resolved;
+  std::vector<pipeline::RequestId> host_requests;
 };
 struct [[=engine::input{engine::Durability::low}]] WorkspacePlan {
   using Key = Fp128;  // The requested executable's output path.
@@ -253,12 +255,13 @@ Fp128 action_key(const GeneratorPlan& generator, const std::vector<ActionInput>&
   const auto key = [&](const Action& recipe) {
     return fingerprint(std::tie(recipe, inputs, generator.tool_fingerprint));
   };
-  if (!std::ranges::contains(action.args, ActionArg::Kind::target_triple, &ActionArg::kind)) return key(action);
+  const auto resolved_triple = [](const ActionArg& arg) { return !triple_arg_selector(arg.kind).empty(); };
+  if (std::ranges::none_of(action.args, resolved_triple)) return key(action);
 
   // The argv word determines the receipt. Keep its provenance on the plan for traces.
   auto recipe = action;
   for (auto& arg : recipe.args)
-    if (arg.kind == ActionArg::Kind::target_triple) arg.kind = ActionArg::Kind::literal;
+    if (resolved_triple(arg)) arg.kind = ActionArg::Kind::literal;
   return key(recipe);
 }
 
@@ -286,18 +289,26 @@ struct ActionResolution {
 };
 
 template<class Lookup>
-ActionResolution resolve_actions(const ProjectPlan& plan, Lookup lookup) {
+bool append_generator_inputs(const GeneratorPlan& generator, Lookup lookup, std::span<const Artifact> host_images,
+                             std::vector<ActionInput>& inputs) {
+  for (const auto& edge : generator.host_inputs)
+    inputs.push_back({edge.name, edge.path, host_images[edge.executable]});
+  return append_artifact_inputs(generator, lookup, inputs);
+}
+
+template<class Lookup>
+ActionResolution resolve_actions(const ProjectPlan& plan, Lookup lookup, std::span<const Artifact> host_images) {
   const auto count = plan.generators.size();
   ActionResolution result{std::vector<std::optional<Fp128>>(count), {}};
   std::vector<const ActionOutputs*> outputs(count, nullptr);
   for (std::size_t i = 0; i < count; ++i) {
     const auto& generator = plan.generators[i];
     Fp128 key;
-    if (generator.artifact_inputs.empty()) {
+    if (generator.artifact_inputs.empty() && generator.host_inputs.empty()) {
       key = action_key(generator);
     } else {
       auto inputs = generator.inputs;
-      if (!append_artifact_inputs(generator, [&](std::size_t dep) { return outputs[dep]; }, inputs))
+      if (!append_generator_inputs(generator, [&](std::size_t dep) { return outputs[dep]; }, host_images, inputs))
         continue;
       key = action_key(generator, inputs);
     }
@@ -338,6 +349,7 @@ Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<F
 
 struct Demand {
   ActionResolution actions;
+  std::vector<Artifact> host_images;
   Fp128 native_plan;
   bool prepare = false;
   std::vector<std::uint8_t> image;
@@ -399,7 +411,7 @@ struct ModuleProviders {
 
 std::string module_path(const fs::path& path, const fs::path& cwd) {
   const auto relative = path.lexically_relative(cwd);
-  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_native_encoded_string();
+  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_string<char>();
 }
 
 std::string module_site(const pipeline::ModuleDirective& directive, const fs::path& cwd) {
@@ -535,11 +547,22 @@ struct WorkspaceBuild {
     const auto& snapshot = cx.fetch<WorkspacePlan>(key);
     const auto& plan = snapshot.resolved;
     Demand demand{};
+    const auto host_builds = co_await cx.par_map<pipeline::Build>(snapshot.host_requests);
+    for (const auto& [index, built] : std::views::enumerate(host_builds)) {
+      const auto& host = built.get();
+      if (!host.linked || host.linked->image.empty()) {
+        const auto errors = pipeline::Build::errors(host);
+        demand.errors.push_back(std::format("host executable '{}': {}", plan.host_executables[index].name,
+            errors.empty() ? "build produced no executable" : errors));
+        co_return demand;
+      }
+      demand.host_images.push_back({host.linked->image, true});
+    }
     const auto receipt = [&](Fp128 action) -> const ActionOutputs* {
       const auto& stored = cx.fetch<ActionReceipt>(action);
       return stored ? &*stored : nullptr;
     };
-    demand.actions = resolve_actions(plan, receipt);
+    demand.actions = resolve_actions(plan, receipt, demand.host_images);
     if (!demand.actions.pending.empty()) co_return demand;
     demand.native_plan = native_plan_key(plan, demand.actions.keys, [&](std::size_t i) {
       return receipt(*demand.actions.keys[i]);
@@ -565,7 +588,7 @@ struct WorkspaceBuild {
 
 namespace {
 
-std::string native(const fs::path& path) { return path.generic_native_encoded_string(); }
+std::string native(const fs::path& path) { return path.generic_string<char>(); }
 
 std::string_view explicit_triple(const ast::Target* target) {
   return target ? target->triple : std::string_view{};
@@ -589,9 +612,9 @@ std::string normalized_include_directory(const fs::path& path) {
 }
 
 pipeline::TuId register_project_unit(pipeline::Session& session, const std::string& cwd,
-                                     const SourcePlan& source, const ast::Target* target, bool explicit_target) {
+                                     const SourcePlan& source, const ast::Target* target, pp::View view) {
   pp::Config config;
-  config.view = explicit_target ? pp::View::explicit_target_build : pp::View::build;
+  config.view = view;
   config.target = target;
   config.freestanding = target == &ast::x86_64_linux;
   for (const auto& include : source.includes) config.angle_dirs.push_back(normalized_include_directory(include));
@@ -599,12 +622,22 @@ pipeline::TuId register_project_unit(pipeline::Session& session, const std::stri
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
 
+pipeline::RequestId register_host_executable(pipeline::Session& session, const std::string& cwd,
+                                             const HostExecutablePlan& executable, const ast::Target* host_target) {
+  pipeline::BuildKey build;
+  for (const auto& source : executable.sources)
+    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk));
+  build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name});
+  return session.request(std::move(build));
+}
+
 pipeline::RequestId register_native(pipeline::Session& session, const std::string& cwd, const std::string& target,
                                     const ast::Target* native_target, const ProjectPlan& plan,
                                     LookupActionOutputs output_at, std::string_view native_triple) {
   pipeline::BuildKey build;
+  const auto view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
   for (const auto& source : plan.sources)
-    build.units.push_back(register_project_unit(session, cwd, source, native_target, !native_triple.empty()));
+    build.units.push_back(register_project_unit(session, cwd, source, native_target, view));
   std::optional<pipeline::ArchiveLinkInputs> archives;
   if (!plan.link_inputs.empty()) {
     using enum pipeline::LinkOperand::Kind;
@@ -672,7 +705,8 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
   std::vector<std::vector<std::string>> fact_names;
   for (const auto& source : plan.sources) {
     const auto shown_source = module_unit_display({module_path(source.path, cwd), ++source_instances[source.path]}, true);
-    const auto unit = register_project_unit(session, workspace, source, target, !native_triple.empty());
+    const auto view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
+    const auto unit = register_project_unit(session, workspace, source, target, view);
     const auto file = pp::FileId{unit.n};
     auto scan = *session.run<pipeline::ModuleDirectives>(file);
     std::string_view scan_status = "complete";
@@ -1437,7 +1471,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                               std::optional<std::size_t> log_limit = std::nullopt) -> ActionResult {
     const auto scratch = build_directory(cwd, "jobs");
     if (!scratch) return {1, {}, scratch.error(), {}, ActionCompletion::setup_failed};
-    std::inplace_stop_source stop;
+    ycxx::exec::inplace_stop_source stop;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     bool timed_out = false;
     std::jthread monitor([&](std::stop_token finished) {
@@ -1474,9 +1508,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (tracer->values()) {
         if (witness_exit) event.value = std::format("exit status {}", result.exit_status);
         for (const auto& [index, arg] : std::views::enumerate(action.args)) {
-          if (arg.kind != ActionArg::Kind::target_triple) continue;
+          const auto selector = triple_arg_selector(arg.kind);
+          if (selector.empty()) continue;
           if (!event.value.empty()) event.value += '\n';
-          event.value += std::format("args[{}]: target_triple() = {}", index, arg.value);
+          event.value += std::format("args[{}]: {} = {}", index, selector, arg.value);
         }
       }
       if (event.outcome == engine::Outcome::failed)
@@ -1784,8 +1819,12 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (!prepared) return fail(prepared.error());
     const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
-    if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id)
-      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{native_workspace, plan}); });
+    if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id) {
+      std::vector<pipeline::RequestId> host_requests;
+      for (const auto& executable : plan.host_executables)
+        host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target));
+      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests)}); });
+    }
 
     for (;;) {
       const auto before = session_.db().revision();
@@ -1799,6 +1838,29 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       };
       if (!demand->actions.pending.empty()) {
         std::set<Fp128> attempted;
+        const auto host_plan = fingerprint(plan.host_executables);
+        const auto current_action = [&](const GeneratorPlan& generator, Fp128 id) {
+          auto revision = before;
+          std::span<const Artifact> images = demand->host_images;
+          std::optional<Demand> rechecked;
+          while (!cancelled()) {
+            const auto observed = observe_project(cwd, target, toolchain, planned);
+            if (!observed || fingerprint(observed->host_executables) != host_plan) return false;
+            const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
+            if (current == observed->generators.end()) return false;
+            if (!current->host_dependent || publish(revision, [] {})) {
+              const auto at = static_cast<std::size_t>(current - observed->generators.begin());
+              return resolve_actions(*observed, receipt, images).keys[at] == id;
+            }
+            // The plan only describes host source paths. Re-demand the images so an
+            // unrelated edit, or one that leaves the staged bytes equal, keeps the receipt.
+            revision = session_.db().revision();
+            rechecked = session_.run<WorkspaceBuild>(key, poll, nullptr, tracer);
+            if (!rechecked || rechecked->host_images.size() != plan.host_executables.size()) return false;
+            images = rechecked->host_images;
+          }
+          return false;
+        };
         for (const auto index : demand->actions.pending) {
           if (cancelled()) return fail("build cancelled");
           const auto& generator = plan.generators[index];
@@ -1807,18 +1869,14 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           if (!attempted.insert(id).second) continue;
           std::vector<ActionInput> staged;
           std::span<const ActionInput> inputs = generator.inputs;
-          if (!generator.artifact_inputs.empty()) {
+          if (!generator.artifact_inputs.empty() || !generator.host_inputs.empty()) {
             staged = generator.inputs;
-            if (!append_artifact_inputs(generator, output_at, staged)) break;
+            if (!append_generator_inputs(generator, output_at, demand->host_images, staged)) break;
             inputs = staged;
           }
+          if (generator.host_dependent && !publish(before, [] {})) break;
           auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
-          const auto observed = observe_project(cwd, target, toolchain, planned);
-          if (!observed) break;
-          const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
-          if (current == observed->generators.end()) break;
-          const auto at = static_cast<std::size_t>(current - observed->generators.begin());
-          if (resolve_actions(*observed, receipt).keys[at] != id) break;
+          if (!current_action(generator, id)) break;
           if (result.exit_status != 0) {
             report.status = result.exit_status;
             report.diagnostics.push_back(std::format("generator '{}': {}", generator.name,

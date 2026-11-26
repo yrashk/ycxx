@@ -64,7 +64,7 @@ int run(std::span<const std::string_view> args) {
     }
   }
   std::error_code ec;
-  std::string cwd = std::filesystem::current_path(ec).native_encoded_string();
+  std::string cwd = std::filesystem::current_path(ec).native();
   o.root = root ? real_path(*root).value_or(*root) : root_for(std::nullopt, cwd);
   return serve(o);
 }

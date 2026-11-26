@@ -94,6 +94,10 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   unblocked work it produces. If the answer is none, skip it and say so in one line.
 - Keep the issue body current: done, next, blocked. Comment on decisions and surprises.
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
+- When a change makes the item splitter meet a new token form (a specifier that takes
+  parentheses, or a form a gate used to reject), grep `items.cppm` for the token and test the form
+  at namespace scope and as a member followed by each thing that can come next. Its guesses fail
+  silently: #211 lost a typedef and #311 ran the next member's body (LESSONS).
 - A handle's `{}` is index 0, a real type, entity or list, never "none". Say "none" with the
   kind's `none` value (`EntityId::none`, `NodeId::none`), a flag or `std::optional`, and give
   a new handle field `= X::none`. Four bugs came from `T{}` (LESSONS, #25 and #88).

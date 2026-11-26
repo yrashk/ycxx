@@ -23,6 +23,12 @@ struct ArtifactInputPlan {
   std::size_t output;
 };
 
+struct HostArtifactInputPlan {
+  std::string name;
+  std::string path;
+  std::size_t executable;
+};
+
 struct GeneratorPlan {
   std::string name;
   Action action;
@@ -30,11 +36,18 @@ struct GeneratorPlan {
   std::string tool_fingerprint;
   std::vector<ArtifactInputPlan> artifact_inputs = {};
   bool native_outputs = false;
+  std::vector<HostArtifactInputPlan> host_inputs = {};
+  bool host_dependent = false;
 };
 
 struct SourcePlan {
   std::string path;
   std::vector<std::string> includes;
+};
+
+struct HostExecutablePlan {
+  std::string name;
+  std::vector<SourcePlan> sources;
 };
 
 struct ArtifactOutputPlan {
@@ -49,6 +62,7 @@ struct ProjectPlan {
   std::vector<SourcePlan> sources;
   std::vector<ArtifactOutputPlan> runtime_assets = {};
   std::vector<LinkInputPlan> link_inputs = {};
+  std::vector<HostExecutablePlan> host_executables = {};
 };
 
 struct RuleInputPlan {
@@ -154,7 +168,7 @@ constexpr EmbeddedInput capabilities_inputs[] = {
 };
 
 std::string path_text(const fs::path& path) {
-  return path.generic_native_encoded_string();
+  return path.generic_string<char>();
 }
 
 struct PlanningError {
@@ -399,6 +413,8 @@ void append_value(std::string& out, const Value& value) {
       out += ')';
     } else if constexpr (std::same_as<T, TargetTriple>) {
       out += "target_triple()";
+    } else if constexpr (std::same_as<T, HostTriple>) {
+      out += "host_triple()";
     } else if constexpr (std::same_as<T, ProbeRef>) {
       fail(value.location, "probe() requires a named rule capability binding");
     } else if constexpr (std::same_as<T, ValueRef>) {
@@ -489,7 +505,8 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
   return demand;
 }
 
-enum class Primitive { unknown, executable, library, generator, observer, host_action };
+enum class Primitive { unknown, executable, library, generator, observer, host_action, host_executable };
+constexpr std::string_view host_executable_output = "executable";
 
 struct LoweredTarget {
   TargetDecl declaration;
@@ -503,6 +520,7 @@ struct ResolvedTarget {
 
 Primitive emitted_kind(std::string_view kind) {
   if (kind == "native.executable") return Primitive::executable;
+  if (kind == "native.host_executable") return Primitive::host_executable;
   if (kind == "native.library") return Primitive::library;
   if (kind == "action.generate") return Primitive::generator;
   if (kind == "action.observe") return Primitive::observer;
@@ -595,6 +613,10 @@ class Planner {
     const auto [root, kind] = find(target, {});
     if (inspection_ && kind == Primitive::generator) {
       resolve_generator(root);
+      return std::move(plan_);
+    }
+    if (inspection_ && kind == Primitive::host_executable) {
+      resolve_host_executable(root);
       return std::move(plan_);
     }
     if (kind != Primitive::executable && !(inspection_ && kind == Primitive::library))
@@ -720,6 +742,22 @@ class Planner {
                                   std::string(origin), at.line, at.column});
   }
 
+  void dependency(const TargetDecl& consumer, std::string_view producer, std::string_view usage, SourceLocation at,
+                  std::optional<std::string_view> output = std::nullopt,
+                  std::optional<std::string_view> binding = std::nullopt) {
+    const auto own = [](std::string_view name) { return std::string(name); };
+    inspection_->dependency_graph->edges.push_back({
+        consumer.name, std::string(producer), std::string(usage), output.transform(own), binding.transform(own),
+        {.line = at.line, .column = at.column}});
+  }
+
+  void artifact_dependency(const TargetDecl& consumer, ArtifactOutputPlan artifact, std::string_view usage,
+                           SourceLocation at, std::optional<std::string_view> binding = std::nullopt) {
+    if (!inspection_) return;
+    const auto& generator = plan_.generators[artifact.producer];
+    dependency(consumer, generator.name, usage, at, generator.action.outputs[artifact.output].name, binding);
+  }
+
   void observe(const fs::path& path) const {
     if (!watch_) return;
     auto normalized = path.lexically_normal();
@@ -789,8 +827,10 @@ class Planner {
       const auto& binding = *field(bindings, input.name);
       const auto& ref = as<ArtifactRef>(binding, "artifact(target, output) for a planning input");
       ++planning_edges_;
-      const auto [producer, output] = artifact(ref, binding.location);
+      const auto requested = artifact(ref, binding.location, true);
       --planning_edges_;
+      artifact_dependency(decl, requested, "plan_inputs", binding.location, input.name);
+      const auto [producer, output] = requested;
       const auto& gen = plan_.generators[producer];
       auto path = display_path(generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_));
       result.push_back({input.name, std::move(path), producer, output});
@@ -843,20 +883,26 @@ class Planner {
       const auto* value = field(decl, name);
       return value ? std::get_if<Record>(&value->data) : nullptr;
     };
-    const auto require_binding = [&](const RuleValueReference& ref, SourceLocation location, bool structured) {
+    const auto require_binding = [&](const RuleValueReference& ref, std::string_view binding,
+                                     SourceLocation location, bool structured) {
       const auto [provider, kind] = find(ref.target, location, ref.field);
       require_value_export(provider, kind, ref.field, location);
       if (observation_schema(provider).has_value() != structured)
         fail(location, std::format("value export '{}.{}' requires a {} binding", ref.target, ref.field,
                                   structured ? "capability" : "fact"));
+      if (inspection_)
+        inspection_->dependency_graph->value_edges->push_back({
+            decl.name, provider.name, structured ? "facts" : "capabilities", std::string(binding), ref.field,
+            {.line = location.line, .column = location.column}});
     };
     const auto* capabilities = find_bindings("capabilities");
     const auto* facts = find_bindings("facts");
     for (const auto& binding : demand.capabilities) {
-      if (binding.value) require_binding(*binding.value, field(*capabilities, binding.name)->location, false);
+      if (binding.value)
+        require_binding(*binding.value, binding.name, field(*capabilities, binding.name)->location, false);
     }
     for (const auto& binding : demand.facts)
-      require_binding(binding.value, field(*facts, binding.name)->location, true);
+      require_binding(binding.value, binding.name, field(*facts, binding.name)->location, true);
     (void)resolve_rule_inputs(decl, demand.plan_inputs);
     const auto expansion = std::ranges::find(expansions_, demand, &RuleExpansion::demand);
     if (expansion == expansions_.end()) {
@@ -909,11 +955,24 @@ class Planner {
     artifact.bytes.assign(contents.begin(), contents.end());
   }
 
+  static std::optional<ActionArg::Kind> triple_selector_kind(const Value& value) {
+    if (std::holds_alternative<HostTriple>(value.data)) return ActionArg::Kind::host_triple;
+    if (std::holds_alternative<TargetTriple>(value.data)) return ActionArg::Kind::target_triple;
+    return std::nullopt;
+  }
+
+  std::string_view resolve_action_triple(ActionArg::Kind kind, SourceLocation at) const {
+    const bool use_host = kind == ActionArg::Kind::host_triple || native_triple_.empty();
+    const auto* host = pp::native_target;
+    if (use_host && !host) fail(at, "no default native target for this host");
+    return use_host ? host->triple : native_triple_;
+  }
+
   GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt,
                           std::span<const EmbeddedInput> embedded = {}, bool observer = false) {
     if (sdk_header)
       check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args", "probe_flags", "probe_inputs"});
-    else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment"});
+    else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment", "tool_inputs"});
     else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "tool_inputs"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     if (inspection_ && observer)
@@ -922,24 +981,30 @@ class Planner {
     GeneratorPlan plan;
     plan.name = decl.name;
     const auto& tool = require_field(decl, "tool");
+    const bool artifact_inputs_allowed = !sdk_header;
+    const auto* staged_tool = artifact_inputs_allowed ? std::get_if<InputArg>(&tool.data) : nullptr;
     if (const auto* spelling = std::get_if<std::string>(&tool.data)) {
       if (spelling->contains('\0') || !fs::path(*spelling).is_absolute())
         fail(tool.location, "expected an absolute tool path");
       plan.action.tool = *spelling;
       if (inspection_) fact("tool", decl, "tool", display_path(*spelling), "declared in tool", tool.location);
       else observe(*spelling);
-    } else if (!sdk_header || !std::holds_alternative<CxxTool>(tool.data)) {
-      fail(tool.location, sdk_header ? "expected an absolute tool path or cxx() selector"
-                                     : "expected an absolute tool path");
+    } else if (!staged_tool && (!sdk_header || !std::holds_alternative<CxxTool>(tool.data))) {
+      if (sdk_header) fail(tool.location, "expected an absolute tool path or cxx() selector");
+      fail(tool.location, "expected an absolute tool path or input(name) selector");
     }
 
     if (const auto* entries = field(decl, "environment")) {
       for (const auto& [name, value] : as<Record>(*entries, "a record of environment variables")) {
-        const auto& text = as<std::string>(value, "an environment value");
+        const auto kind = sdk_header ? std::nullopt : triple_selector_kind(value);
+        const std::string_view text = kind ? resolve_action_triple(*kind, value.location)
+                                           : as<std::string>(value, "an environment value");
         if (name.empty() || name.contains('=') || name.contains('\0') || text.contains('\0'))
           fail(value.location, "invalid action environment entry");
         plan.action.environment.emplace_back(name, text);
-        if (inspection_) fact("environment", decl, name, text, "declared in environment", value.location);
+        if (inspection_)
+          fact("environment", decl, name, text, kind ? triple_arg_selector(*kind) : "declared in environment",
+               value.location);
       }
     }
 
@@ -950,7 +1015,6 @@ class Planner {
       plan.inputs.push_back({"ycxx_rule_api.h", std::move(sdk_path),
                              {{sdk_header->begin(), sdk_header->end()}, false}});
     }
-    const bool artifact_inputs_allowed = !sdk_header;
     const auto first_file_input = plan.inputs.size();
     const auto* inputs = field(decl, "inputs");
     const auto* bindings = inputs ? &as<Record>(*inputs, "a record of named inputs") : nullptr;
@@ -992,12 +1056,44 @@ class Planner {
         const auto* ref = std::get_if<ArtifactRef>(&value.data);
         if (!ref) continue;
         if (!basename(name)) fail(value.location, "expected an artifact input name with a single path component");
-        const auto [producer, output] = artifact(*ref, value.location, decl.name);
-        auto path = "artifacts/" + name + '/' + plan_.generators[producer].action.outputs[output].filename;
-        add_input_path(input_paths, path, value.location);
-        if (inspection_) fact("input", decl, name, path, artifact_origin(*ref), value.location);
-        plan.artifact_inputs.push_back({name, std::move(path), producer, output});
+        const auto path_for = [&](std::string_view filename) {
+          auto path = "artifacts/" + name + '/' + std::string(filename);
+          add_input_path(input_paths, path, value.location);
+          if (inspection_) fact("input", decl, name, path, artifact_origin(*ref), value.location);
+          return path;
+        };
+        const auto target = artifact_target(ref->target, value.location, decl.name);
+        if (target.kind == Primitive::host_executable && !observer) {
+          if (ref->output != host_executable_output)
+            fail(value.location, std::format("host executable '{}' has no output '{}'", target.declaration.name,
+                                             ref->output));
+          const auto executable = resolve_host_executable(target.declaration);
+          if (inspection_)
+            dependency(decl, target.declaration.name, "inputs", value.location, host_executable_output, name);
+          plan.host_inputs.push_back({name, path_for(host_executable_output), executable});
+          continue;
+        }
+        const auto requested = generator_artifact(target, ref->output, value.location, observer);
+        artifact_dependency(decl, requested, "inputs", value.location, name);
+        const auto [producer, output] = requested;
+        const auto& filename = plan_.generators[producer].action.outputs[output].filename;
+        plan.artifact_inputs.push_back({name, path_for(filename), producer, output});
       }
+    }
+    const auto artifact_input_path = [&](std::string_view name) -> std::optional<std::string_view> {
+      if (const auto binding = std::ranges::find(plan.artifact_inputs, name, &ArtifactInputPlan::name);
+          binding != plan.artifact_inputs.end()) return binding->path;
+      if (const auto binding = std::ranges::find(plan.host_inputs, name, &HostArtifactInputPlan::name);
+          binding != plan.host_inputs.end()) return binding->path;
+      return std::nullopt;
+    };
+    if (staged_tool) {
+      const auto path = artifact_input_path(staged_tool->name);
+      if (!path)
+        fail(tool.location, std::format("tool input '{}' must name an artifact-backed input", staged_tool->name));
+      plan.action.tool = "inputs/" + std::string(*path);
+      if (inspection_)
+        fact("tool", decl, "tool", plan.action.tool, std::format("input({:?})", staged_tool->name), tool.location);
     }
 
     if (!observer) {
@@ -1024,22 +1120,22 @@ class Planner {
         if (const auto* text = std::get_if<std::string>(&value.data)) {
           if (inspection_) argv_fact(*text, "declared in args");
           plan.action.args.push_back({literal, *text});
-        } else if (std::holds_alternative<TargetTriple>(value.data)) {
-          if (sdk_header) fail(value.location, "target_triple() is only available in project action arguments");
-          const auto* host = pp::native_target;
-          if (native_triple_.empty() && !host) fail(value.location, "no default native target for this host");
-          const auto triple = native_triple_.empty() ? host->triple : native_triple_;
-          if (inspection_) argv_fact(triple, "target_triple()");
-          plan.action.args.push_back({target_triple, std::string(triple)});
+        } else if (const auto kind = triple_selector_kind(value)) {
+          const auto selector = triple_arg_selector(*kind);
+          if (sdk_header) fail(value.location, std::format("{} is only available in project action arguments", selector));
+          const auto triple = resolve_action_triple(*kind, value.location);
+          if (inspection_) argv_fact(triple, selector);
+          plan.action.args.push_back({*kind, std::string(triple)});
         } else if (const auto* input_name = std::get_if<InputArg>(&value.data)) {
           const auto binding = std::ranges::find(plan.inputs, input_name->name, &ActionInput::name);
           if (binding != plan.inputs.end()) {
             if (inspection_) argv_fact("inputs/" + binding->path, std::format("input({:?})", binding->name));
           } else {
-            const auto artifact = std::ranges::find(plan.artifact_inputs, input_name->name, &ArtifactInputPlan::name);
-            if (artifact == plan.artifact_inputs.end())
+            const auto path = artifact_input_path(input_name->name);
+            if (!path)
               fail(value.location, std::format("unknown input '{}'", input_name->name));
-            if (inspection_) argv_fact("inputs/" + artifact->path, std::format("input({:?})", artifact->name));
+            if (inspection_)
+              argv_fact("inputs/" + std::string(*path), std::format("input({:?})", input_name->name));
           }
           plan.action.args.push_back({input, input_name->name});
         } else if (const auto* output_name = std::get_if<OutputArg>(&value.data)) {
@@ -1049,7 +1145,7 @@ class Planner {
           if (inspection_) argv_fact("outputs/" + binding->filename, std::format("output({:?})", binding->name));
           plan.action.args.push_back({output, output_name->name});
         } else {
-          fail(value.location, "expected a string, input(name), output(name) or target_triple()");
+          fail(value.location, "expected a string, input(name), output(name), target_triple() or host_triple()");
         }
       }
     }
@@ -1068,6 +1164,9 @@ class Planner {
     auto gen = generator(decl);
     active_generators_.erase(decl.name);
     const auto index = plan_.generators.size();
+    gen.host_dependent = !gen.host_inputs.empty() || std::ranges::any_of(gen.artifact_inputs, [&](const auto& input) {
+      return plan_.generators[input.producer].host_dependent;
+    });
     plan_.generators.push_back(std::move(gen));
     generators_.emplace(decl.name, index);
     return index;
@@ -1082,21 +1181,117 @@ class Planner {
     return find(name, at);
   }
 
-  ArtifactOutputPlan artifact(const ArtifactRef& ref, SourceLocation at, std::string_view consumer = {}) {
-    const auto [decl, kind] = artifact_target(ref.target, at, consumer);
+  ArtifactOutputPlan generator_artifact(ResolvedTarget target, std::string_view name, SourceLocation at, bool early) {
+    constexpr auto early_error = "host executable artifacts are not available in rule planning inputs or witnesses";
+    const auto [decl, kind] = target;
+    if (kind == Primitive::host_executable)
+      fail(at, early ? early_error : "host executable artifacts are only available in ordinary generator inputs");
     if (kind != Primitive::generator) fail(at, "artifact references require a generate target");
     const auto producer = resolve_generator(decl);
+    if (early && plan_.generators[producer].host_dependent) fail(at, early_error);
     const auto& outputs = plan_.generators[producer].action.outputs;
-    const auto output = std::ranges::find(outputs, ref.output, &ActionOutput::name);
-    if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, ref.output));
+    const auto output = std::ranges::find(outputs, name, &ActionOutput::name);
+    if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, name));
     return {producer, static_cast<std::size_t>(output - outputs.begin())};
   }
 
-  std::string native_artifact(const ArtifactRef& ref, SourceLocation at) {
-    const auto [producer, output] = artifact(ref, at);
+  ArtifactOutputPlan artifact(const ArtifactRef& ref, SourceLocation at, bool early = false) {
+    return generator_artifact(find(ref.target, at), ref.output, at, early);
+  }
+
+  std::string native_artifact(const ArtifactRef& ref, const TargetDecl& consumer, std::string_view usage,
+                              SourceLocation at) {
+    const auto requested = artifact(ref, at);
+    artifact_dependency(consumer, requested, usage, at);
+    const auto [producer, output] = requested;
     auto& gen = plan_.generators[producer];
     gen.native_outputs = true;
     return generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_);
+  }
+
+  void for_each_include_dir(const TargetDecl& decl, const auto& include) {
+    if (const auto* dirs = field(decl, "public_include_dirs")) {
+      for (const auto& value : as<List>(*dirs, "a list of include directories")) {
+        const auto path = cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true);
+        observe(path);
+        include(path_text(path), "declared in public_include_dirs", value.location);
+      }
+    }
+  }
+
+  void append_sources(const TargetDecl& decl, const std::vector<std::string>& includes,
+                      std::vector<SourcePlan>& sources, bool generated) {
+    std::set<std::string> source_paths;
+    const auto add = [&](std::string path, SourceLocation at, std::string_view origin) {
+      if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
+      if (inspection_) {
+        const auto display = display_path(path);
+        fact("source", decl, display, display, origin, at);
+      }
+      sources.push_back({std::move(path), includes});
+    };
+    const auto add_glob = [&](const Glob& glob, SourceLocation at) {
+      const auto matches = expand_glob(glob, [&](std::string_view dir) {
+        observe(cwd_ / dir);
+        return list_directory(cwd_, dir);
+      });
+      if (!matches) fail(at, matches.error());
+      if (watch_) watch_->values.push_back(fingerprint(*matches));
+      const auto origin = inspection_ ? glob_origin(glob) : std::string{};
+      for (const auto& match : *matches) {
+        const auto path = cwd_ / match;
+        observe(path);
+        add(path_text(path), at, origin);
+      }
+    };
+    if (const auto* files = field(decl, "sources")) {
+      if (const auto* glob = std::get_if<Glob>(&files->data)) {
+        add_glob(*glob, files->location);
+      } else {
+        for (const auto& value : as<List>(*files, "a list of C++ sources or a glob")) {
+          if (const auto* path = std::get_if<std::string>(&value.data)) {
+            const auto absolute = cwd_ / relative_path(*path, value.location);
+            observe(absolute);
+            add(path_text(absolute), value.location, "declared in sources");
+          } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
+            add_glob(*glob, value.location);
+          } else if (!generated) {
+            fail(value.location, "host executable sources require disk paths or globs");
+          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
+            add(native_artifact(*ref, decl, "sources", value.location), value.location,
+                inspection_ ? artifact_origin(*ref) : std::string{});
+          } else {
+            fail(value.location, "expected a source path, glob or artifact reference");
+          }
+        }
+      }
+    }
+  }
+
+  std::size_t resolve_host_executable(const TargetDecl& decl) {
+    const auto existing = std::ranges::find(plan_.host_executables, decl.name, &HostExecutablePlan::name);
+    if (existing != plan_.host_executables.end())
+      return static_cast<std::size_t>(existing - plan_.host_executables.begin());
+    check_fields(decl, {"sources", "public_include_dirs"});
+    const auto* host = pp::native_target;
+    if (!host) fail(decl.location, "no default native target for this host");
+    if (inspection_) {
+      fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
+      fact("host-target", decl, "triple", host->triple, "build host", decl.location);
+      fact("output", decl, host_executable_output, host_executable_output, "linked host executable", decl.location);
+    }
+    std::vector<std::string> includes;
+    for_each_include_dir(decl, [&](std::string path, std::string_view origin, SourceLocation at) {
+      if (std::ranges::contains(includes, path)) return;
+      if (inspection_) fact("include", decl, std::to_string(includes.size()), display_path(path), origin, at);
+      includes.push_back(std::move(path));
+    });
+    HostExecutablePlan tool{decl.name, {}};
+    append_sources(decl, includes, tool.sources, false);
+    if (tool.sources.empty()) fail(decl.location, "host executable has no C++ source files");
+    const auto index = plan_.host_executables.size();
+    plan_.host_executables.push_back(std::move(tool));
+    return index;
   }
 
   void append_link_inputs(const CxxTargetPlan& root) {
@@ -1151,7 +1346,9 @@ class Planner {
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
         const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
                                         : std::string{};
-        target.link_inputs.push_back({artifact(ref, value.location), origin, value.location});
+        const auto requested = artifact(ref, value.location);
+        artifact_dependency(decl, requested, field_name, value.location);
+        target.link_inputs.push_back({requested, origin, value.location});
       }
     }
     const auto include = [&](std::string path, std::string_view origin, SourceLocation location) {
@@ -1162,17 +1359,11 @@ class Planner {
       }
       target.paths.push_back(std::move(path));
     };
-    if (const auto* dirs = field(decl, "public_include_dirs")) {
-      for (const auto& value : as<List>(*dirs, "a list of include directories")) {
-        const auto path = cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true);
-        observe(path);
-        include(path_text(path), "declared in public_include_dirs", value.location);
-      }
-    }
+    for_each_include_dir(decl, include);
     if (const auto* headers = field(decl, "generated_headers")) {
       for (const auto& value : as<List>(*headers, "a list of generated headers")) {
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto path = native_artifact(ref, value.location);
+        const auto path = native_artifact(ref, decl, "generated_headers", value.location);
         include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref) : std::string{}, value.location);
       }
     }
@@ -1181,7 +1372,10 @@ class Planner {
       for (const auto& value : as<List>(*deps, "a list of dependencies")) {
         const auto [dep, kind] = find(as<std::string>(value, "a library target name"), value.location);
         if (kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
-        if (inspection_) fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
+        if (inspection_) {
+          fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
+          dependency(decl, dep.name, "deps", value.location);
+        }
         ++position;
         const auto& inherited = cxx_target(dep, kind);
         target.dependencies.push_back(&inherited);
@@ -1196,53 +1390,13 @@ class Planner {
       }
     }
 
-    std::set<std::string> source_paths;
-    const auto add = [&](std::string path, SourceLocation at, std::string_view origin) {
-      if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
-      if (inspection_) {
-        const auto display = display_path(path);
-        fact("source", decl, display, display, origin, at);
-      }
-      plan_.sources.push_back({std::move(path), target.paths});
-    };
-    const auto add_glob = [&](const Glob& glob, SourceLocation at) {
-      const auto matches = expand_glob(glob, [&](std::string_view dir) {
-        observe(cwd_ / dir);
-        return list_directory(cwd_, dir);
-      });
-      if (!matches) fail(at, matches.error());
-      if (watch_) watch_->values.push_back(fingerprint(*matches));
-      const auto origin = inspection_ ? glob_origin(glob) : std::string{};
-      for (const auto& match : *matches) {
-        const auto path = cwd_ / match;
-        observe(path);
-        add(path_text(path), at, origin);
-      }
-    };
-    if (const auto* files = field(decl, "sources")) {
-      if (const auto* glob = std::get_if<Glob>(&files->data)) {
-        add_glob(*glob, files->location);
-      } else {
-        for (const auto& value : as<List>(*files, "a list of C++ sources or a glob")) {
-          if (const auto* path = std::get_if<std::string>(&value.data)) {
-            const auto absolute = cwd_ / relative_path(*path, value.location);
-            observe(absolute);
-            add(path_text(absolute), value.location, "declared in sources");
-          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
-            add(native_artifact(*ref, value.location), value.location, inspection_ ? artifact_origin(*ref) : std::string{});
-          } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
-            add_glob(*glob, value.location);
-          } else {
-            fail(value.location, "expected a source path, glob or artifact reference");
-          }
-        }
-      }
-    }
+    append_sources(decl, target.paths, plan_.sources, true);
     if (assets) {
       std::set<std::string> filenames;
       for (const auto& value : as<List>(*assets, "a list of runtime assets")) {
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
         const auto asset = artifact(ref, value.location);
+        artifact_dependency(decl, asset, "runtime_assets", value.location);
         const auto& filename = plan_.generators[asset.producer].action.outputs[asset.output].filename;
         if (!filenames.insert(filename).second)
           fail(value.location, std::format("duplicate runtime asset filename '{}'", filename));
@@ -1327,14 +1481,28 @@ ProjectWatchState watch_project(const fs::path& cwd, std::string_view target,
 std::expected<PlanInspection, std::string> inspect_project(
     const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
     std::string_view native_triple, ProjectPlan& resolved) {
-  PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {}};
+  PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {},
+                            .dependency_graph = DependencyGraphInspection{
+                                .value_edges = std::vector<PlanValueDependencyEdge>{}}};
+  auto& graph = *inspection.dependency_graph;
   try {
     auto plan = read_project(cwd, target, nullptr, &inspection, expansions, nullptr, native_triple);
     if (!plan) return std::unexpected(std::move(plan.error()));
     resolved = std::move(*plan);
   } catch (const RuleDemand&) {
     // The unresolved fact was recorded where the planner first needed the rule.
+    graph.complete = false;
   }
+  const auto edge_order = [](const auto& edge) {
+    return std::tie(edge.consumer, edge.location.line, edge.location.column, edge.usage,
+                    edge.producer, edge.output, edge.binding);
+  };
+  std::ranges::sort(graph.edges, {}, edge_order);
+  const auto value_edge_order = [](const auto& edge) {
+    return std::tie(edge.consumer, edge.location.line, edge.location.column, edge.usage,
+                    edge.producer, edge.export_name, edge.binding);
+  };
+  std::ranges::sort(*graph.value_edges, {}, value_edge_order);
   return inspection;
 }
 

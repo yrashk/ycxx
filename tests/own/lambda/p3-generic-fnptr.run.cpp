@@ -1,7 +1,6 @@
 // θ step 3 (#281), spec-only: a captureless generic lambda has a conversion function template to
 // pointer to function; the target pointer type deduces the invented template parameters
 // ([expr.prim.lambda.closure], [temp.deduct.conv]).
-// XFAIL: ycxx a generic lambda's conversion function template, #339
 int apply(int (*f)(int), int x) { return f(x); }
 
 int main() {

@@ -142,6 +142,7 @@ struct Placed {
   // Its subobjects of empty class type, by class entity and offset, itself included.
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
   u8 bit_width = 0;  // a bit-field has a width within its declared type's allocation unit
+  bool potentially_overlapping = false;
 };
 // A scalar, pointer or reference member's.
 constexpr Placed scalar_placed(std::uint64_t size, std::uint64_t align) { return {size, align, size, align, false, {}}; }
@@ -176,6 +177,7 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
   std::uint64_t size = polymorphic_root ? polymorphic_root->pointer_size : 0;
   std::uint64_t align = polymorphic_root ? polymorphic_root->pointer_align : 1;
   std::uint64_t dsize = size;
+  std::uint64_t overlapping_extent = 0;
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
   auto conflicts = [&](const Placed& d, std::uint64_t at) {
     for (auto [t, x] : d.empties)
@@ -185,19 +187,20 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
   };
   auto place = [&](const Placed& d, bool base) {
     std::uint64_t a = base ? d.nvalign : d.align;
-    std::uint64_t at = 0;
-    if (!(base && d.empty)) at = (dsize + a - 1) / a * a;
-    if (base && d.empty && conflicts(d, 0)) at = (dsize + a - 1) / a * a;
+    const bool overlapping = base || d.potentially_overlapping;
+    const bool empty = overlapping && d.empty;
+    std::uint64_t at = empty && !conflicts(d, 0) ? 0 : (dsize + a - 1) / a * a;
     while (conflicts(d, at)) at += a;
     for (auto [t, x] : d.empties) empties.push_back({t, at + x});
     align = std::max(align, a);
-    if (base && d.empty) {
+    if (empty) {
       size = std::max(size, at + d.size);
     } else {
-      std::uint64_t n = base ? d.nvsize : d.size;
+      std::uint64_t n = overlapping ? d.nvsize : d.size;
       size = std::max(size, at + n);
       dsize = at + n;
     }
+    if (d.potentially_overlapping) overlapping_extent = std::max(overlapping_extent, at + d.size);
     return at;
   };
   for (const Placed& b : bases) out.base_offsets.push_back(place(b, true));
@@ -229,8 +232,11 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
     out.offsets.push_back(place(f, false));
     next_bit = dsize * 8;
   }
-  bool empty = !polymorphic_root && fields.empty() && std::ranges::all_of(bases, &Placed::empty);
+  const bool empty = !polymorphic_root && std::ranges::all_of(bases, &Placed::empty) &&
+      std::ranges::all_of(fields, [](const Placed& field) { return field.potentially_overlapping && field.empty; });
   std::uint64_t nvsize = size;
+  // Itanium §2.4 finalization preserves the extent of each complete member type.
+  size = std::max(size, overlapping_extent);
   align = std::max(align, std::uint64_t(explicit_alignment));
   out.align = align;
   out.size = size == 0 ? align : (size + align - 1) / align * align;
@@ -305,6 +311,7 @@ inline constexpr Target aarch64_darwin{
     .va_list = VaList::char_pointer,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
+    .native_operations = std::to_underlying(NativeOperation::source_location_descriptor),
     .always_pic = true,
     .little_endian_unsigned_integers = true,
 };

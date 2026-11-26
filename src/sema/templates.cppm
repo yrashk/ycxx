@@ -134,6 +134,8 @@ public:
     case TypeKind::template_param: {
       auto a = b.at(r.depth, r.index);
       if (!a) return t;
+      // A placeholder non-type parameter's type is its argument's ([temp.arg.nontype]/1).
+      if (a->kind == TemplateArgKind::value) return types().add_cv(a->type, cv);
       if (a->kind != TemplateArgKind::type) return std::nullopt;
       return types().add_cv(a->type, cv);
     }
@@ -219,7 +221,9 @@ public:
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: a positive converted constant expression of type std::size_t.
         const auto bits = ast::int_bits(ins(), a->value);
-        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(bits))
+          const auto value_type = ins().values.get<ast::VInt>(a->value).type;
+          const auto builtin = types().builtin_of(value_type);
+          if (!builtin || (ast::is_signed(w_->target, *builtin) && ast::is_negative(bits)))
           return std::nullopt;
         const auto width = ast::width_of(w_->target, w_->target.size_type);
         if (ast::wide::is_zero(bits) || ast::wrap(bits, width, false) != bits) return std::nullopt;
@@ -308,6 +312,8 @@ public:
       if (!a) return std::nullopt;
       auto x = transform(lex::TypeTrait(r.trait), *a);
       if (!x) return std::nullopt;
+      if (retain_gcc_concrete_transforms && !types().is_dependent(*a))
+        return types().add_cv(types().transform(r.trait, *a), cv);
       return types().add_cv(*x, cv);
     }
     }
@@ -351,16 +357,16 @@ public:
       auto es = substitute_args(ins().seqs.elements(r.args), b);
       if (!es) return std::nullopt;
       if (ins().values.is_dependent(*i))
-        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)));
+        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)), r.written_index);
       return select_element(*es, *i);
     }
     TypeRec p = types().rec(r.inner);
     auto a = b.at(p.depth, p.index);
-    if (!a) return types().pack_index(r.inner, *i);
+    if (!a) return types().pack_index(r.inner, *i, r.written_index);
     if (a->kind == TemplateArgKind::type && types().kind(a->type) == TypeKind::template_param && types().rec(a->type).pack)
-      return types().pack_index(types().canonical(a->type), *i);
+      return types().pack_index(types().canonical(a->type), *i, r.written_index);
     if (a->kind != TemplateArgKind::pack) return std::nullopt;
-    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems);
+    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems, r.written_index);
     return select_element(elements(*a), *i);
   }
   // The element of a pack's arguments at the constant `index`, a type ([dcl.type.pack.index]/2:
@@ -652,6 +658,8 @@ public:
         if (!types().is_class(*q)) return std::nullopt;
         auto templ = member_template_of(types().class_of(*q), r.name);
         if (!templ) return std::nullopt;
+        if (compatibility == ast::Compatibility::gcc && template_decl)
+          if (auto decl = template_decl(*templ)) *templ = template_argument_entity(*decl);
         return TemplateArg{TemplateArgKind::template_, QualType{}, ConstId::none, {}, *templ};
       }
       if (a.templ != EntityId::none || types().kind(a.type) != TypeKind::template_param) return a;
@@ -1271,6 +1279,10 @@ public:
     if (pr.kind == TypeKind::dep_name || pr.kind == TypeKind::transform || pr.kind == TypeKind::pack_index) return true;
     if (partial_deduction_ && pr.kind == TypeKind::builtin && pr.builtin == Builtin::dependent) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
+      // A placeholder non-type parameter's type (`decltype(X)`) is deduced only from X's
+      // argument ([temp.arg.nontype]/1): here it is a non-deduced context ([temp.deduct.type]/5).
+      if (pr.index < head_.size() && head_[pr.index].depth == depth && head_[pr.index].kind == TemplateArgKind::value)
+        return true;
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
       if (!within(cp, ca) && !allow.more_cv) return false;
       QualType v = types().add_cv(Types::unqualified(ac), Cv(std::to_underlying(ca) & ~std::to_underlying(cp)));
@@ -1314,7 +1326,8 @@ public:
              pr.args == ar.args;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
     case TypeKind::pack_index:  // non-deduced, above
-      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.pack == ar.pack && pr.args == ar.args;
+      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.written_index == ar.written_index &&
+             pr.pack == ar.pack && pr.args == ar.args;
     case TypeKind::placeholder: return pr.decltype_auto == ar.decltype_auto;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
@@ -1341,7 +1354,17 @@ public:
           if (ins().values.is<ast::VDepParam>(ar.bound_value) && ins().values.get<ast::VDepParam>(ar.bound_value).depth == depth)
             return false;
           if (!ins().values.is<ast::VInt>(ar.bound_value) && !ins().values.is<ast::VDepParam>(ar.bound_value)) return false;
-          QualType size = types().canonical(types().builtin(Builtin::unsigned_long));
+          QualType size = types().canonical(types().builtin(w_->target.size_type));
+          ConstId bound = ar.bound_value;
+          if (compatibility == ast::Compatibility::gcc && !head_.empty() && head_.front().depth == depth &&
+              p.index < head_.size() && head_[p.index].placeholder == ast::Placeholder::auto_ &&
+              ins().values.is<ast::VInt>(bound)) {
+            // GCC deduces a signed int for a bare auto parameter inferred from an array bound.
+            const auto bits = ast::int_bits(ins(), bound);
+            if (ast::wrap(bits, ast::width_of(w_->target, Builtin::int_), true) != bits) return false;
+            size = types().builtin(Builtin::int_);
+            bound = ast::int_value(ins(), w_->target, size, bits);
+          }
           // Keep the array-bound type deduction as a fallback until all
           // compared parameters have supplied their ordinary deductions.
           if (array_bound_types_ && !head_.empty() && head_.front().depth == depth && p.index < head_.size()) {
@@ -1349,7 +1372,7 @@ public:
             if (bound_type.kind == TypeKind::template_param && bound_type.depth == depth)
               array_bound_types_->insert(bound_type.index);
           }
-          if (!bind(out, p.index, {TemplateArgKind::value, size, ar.bound_value})) return false;
+          if (!bind(out, p.index, {TemplateArgKind::value, size, bound})) return false;
           return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
         }
       }
@@ -1432,8 +1455,11 @@ public:
     if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth) {
       const u16 index = ins().values.get<ast::VDepParam>(x.value).index;
       if (needs_class_value_check(y.type, x.type, y.value)) {
-        if (index >= head_.size() || head_[index].pack) return false;
-        auto value = converted_value(y, head_[index].type);
+        if (index >= head_.size()) return false;
+        // An element of a placeholder pack deduces its own type, as a placeholder parameter does.
+        if (head_[index].pack && head_[index].placeholder == ast::Placeholder::none) return false;
+        auto value = head_[index].placeholder != ast::Placeholder::none ? placeholder_value(y)
+                                                                        : converted_value(y, head_[index].type);
         return value && bind(out, index, *value);
       }
       return bind(out, index, y);
@@ -1625,6 +1651,12 @@ public:
     // ([temp.deduct.type]/20).
     for (std::size_t i = 0; i < params.size(); ++i) {
       if (!out[i] || params[i].kind != TemplateArgKind::value || params[i].pack) continue;
+      if (params[i].placeholder != ast::Placeholder::none) {  // the deduced value's own type
+        auto v = placeholder_value(*out[i]);
+        if (!v) return std::nullopt;
+        out[i] = *v;
+        continue;
+      }
       auto pt = substitute(params[i].type, bindings(depth, out));
       if (pt && types().is_class(*pt) && types().is_dependent(params[i].type)) return std::nullopt;
       auto v = pt ? converted_value(*out[i], *pt) : std::nullopt;
@@ -1771,6 +1803,10 @@ public:
       if (a.kind != p.kind) return std::nullopt;
       if (p.kind == TemplateArgKind::type) return a;
       if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
+      if (p.placeholder != ast::Placeholder::none) {
+        if (deferred(a)) return types().is_integral(a.type) || types().is_dependent(a.type) ? std::optional(a) : std::nullopt;
+        return placeholder_value(a);
+      }
       auto pt = substitute(p.type, bindings(depth, out));
       if (pt && types().is_class(*pt) && types().is_dependent(p.type)) return std::nullopt;
       if (deferred(a)) return pt && (types().is_integral(*pt) || types().is_dependent(*pt)) ? std::optional(a) : std::nullopt;
@@ -1814,8 +1850,9 @@ public:
     if (ps.empty()) return true;
     Bindings b = Bindings::of(as[0].depth, own_args(ps));
     for (std::size_t i = 0; i < ps.size(); ++i) {
-      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack) return false;
-      if (ps[i].kind == TemplateArgKind::value) {
+      if (ps[i].kind != as[i].kind || ps[i].pack != as[i].pack || ps[i].placeholder != as[i].placeholder) return false;
+      // Two placeholder parameters are equivalent; their types are their own positions.
+      if (ps[i].kind == TemplateArgKind::value && ps[i].placeholder == ast::Placeholder::none) {
         auto t = substitute(as[i].type, b);
         if (!t || types().canonical(*t) != types().canonical(ps[i].type)) return false;
       }
@@ -1824,6 +1861,34 @@ public:
         return false;
     }
     return true;
+  }
+
+  // GCC uses the target's identity for an unconstrained alias that forwards its complete
+  // parameter list unchanged. An alias with different defaults still denotes its own template.
+  EntityId template_argument_entity(const ast::DeclSema& decl) {
+    if (compatibility != ast::Compatibility::gcc || decl.kind != ast::DeclKind::type_alias ||
+        decl.constraints != ConstId::none || !types().is_class(decl.type) || !template_decl)
+      return decl.entity;
+    const EntityRec& result = w_->entities.rec(types().class_of(decl.type));
+    if (result.templ == EntityId::none) return decl.entity;
+    const auto target = template_decl(result.templ);
+    if (!target || target->kind != ast::DeclKind::class_) return decl.entity;
+    const auto params = ins().seqs.elements(decl.template_params);
+    const auto target_params = ins().seqs.elements(target->template_params);
+    if (target_params.empty() || !heads_equivalent(params, target_params)) return decl.entity;
+    const auto own = own_args(params);
+    if (result.args != own) return decl.entity;
+    const auto renamed = Bindings::of(target_params[0].depth, own);
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      const auto& source = params[i];
+      const auto& target = target_params[i];
+      if (source.has_default != target.has_default) return decl.entity;
+      if (source.has_default && source.default_ != target.default_) {
+        const auto target_default = substitute_arg(target.default_, renamed, /*default_argument=*/true);
+        if (!target_default || *target_default != source.default_) return decl.entity;
+      }
+    }
+    return result.templ;
   }
 
   // The type template `templ` names with `args`, as a template-id says it ([temp.names]): a class
@@ -1894,6 +1959,23 @@ public:
     bool ok = explicit_into(as, synth, out) && complete(*decl, as, out).has_value();
     explicit_packs_ = std::move(saved);
     return ok;
+  }
+
+  // The argument of a non-type parameter declared with a placeholder: the parameter's type is
+  // deduced from the argument ([temp.arg.nontype]/1, [dcl.type.auto.deduct]), here the argument's
+  // own type without cv, and must be structural ([temp.param]/7). Template-argument identity
+  // then includes that type ([temp.type]): `1` and `1u` are different arguments.
+  // `decltype(auto)` deduces the same, which is right for a prvalue or a name of a non-reference
+  // object, but not for a parenthesized lvalue or a reference, whose declared type and value
+  // category the argument no longer has (#1401).
+  std::optional<TemplateArg> placeholder_value(const TemplateArg& a) {
+    if (a.kind != TemplateArgKind::value) return std::nullopt;
+    const QualType t = types().canonical(Types::unqualified(a.type));
+    if (types().is_dependent(t)) return TemplateArg{TemplateArgKind::value, t, a.value};
+    if (!types().is_integral(t) && !types().is_enum(t) && !types().is_pointer(t) && !types().is_member_pointer(t) &&
+        !types().is(t, Builtin::nullptr_t) && !types().is_class(t))
+      return std::nullopt;
+    return converted_value(TemplateArg{TemplateArgKind::value, t, a.value}, t);
   }
 
   // A template argument's value as a converted constant expression of type `t` ([expr.const]):
@@ -1972,7 +2054,8 @@ public:
     for (std::size_t i = 0; i < params.size(); ++i) {
       // A class-valued parameter's declared type is fixed in this profile. Check before
       // accepting a deduced argument or any form of omitted default ([temp.arg.nontype]).
-      if (params[i].kind == TemplateArgKind::value && types().is_dependent(params[i].type)) {
+      if (params[i].kind == TemplateArgKind::value && params[i].placeholder == ast::Placeholder::none &&
+          types().is_dependent(params[i].type)) {
         auto type = substitute(params[i].type, bindings(depth, out));
         if (type && types().is_class(*type) && !types().is_dependent(*type)) return std::nullopt;
       }
@@ -1998,7 +2081,16 @@ public:
         auto p = ins().values.get<ast::VDepParam>(d.value);
         auto a = p.depth == depth && p.index < i ? out[p.index] : std::nullopt;
         auto pt = substitute(params[i].type, bindings(depth, out));
-        auto v = a && pt ? converted_value(*a, *pt) : std::nullopt;
+        auto v = !a                                                 ? std::nullopt
+                 : params[i].placeholder != ast::Placeholder::none ? placeholder_value(*a)
+                 : pt                                               ? converted_value(*a, *pt)
+                                                                    : std::nullopt;
+        if (!v) return std::nullopt;
+        d = *v;
+      }
+      // A placeholder parameter's substituted default deduces its type ([temp.arg.nontype]/1).
+      if (params[i].placeholder != ast::Placeholder::none && d.kind == TemplateArgKind::value) {
+        auto v = placeholder_value(d);
         if (!v) return std::nullopt;
         d = *v;
       }
@@ -2024,7 +2116,11 @@ public:
     QualType pattern = tmpl.type;
     TypeRec f = types().rec(pattern);
     const bool deduced_result = address && types().has_placeholder(f.inner);
-    if (deduced_result) pattern = types().function(types().rec(type).inner, f.params, f.variadic, f.linkage, f.fn_cv);
+    if (deduced_result) {
+      auto signature = ins().types.get<ast::TFunction>(types().canonical(pattern));
+      signature.ret = types().rec(type).inner;
+      pattern = ins().intern_type(signature);
+    }
     if (!deduce(pattern, type, depth, out)) return std::nullopt;
     auto full = complete(tmpl, params, std::move(out));
     if (!full || deduced_result) return full;
@@ -2545,6 +2641,8 @@ private:
   const Classes* classes_;
 
 public:
+  ast::Compatibility compatibility = ast::Compatibility::spec;
+  bool retain_gcc_concrete_transforms = false;  // substitution into a still-dependent alias-id
   // The definition of a class if it is complete at the deduction's point of use.
   std::function<const ClassRec*(EntityId)> class_definition;
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at

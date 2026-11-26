@@ -18,6 +18,7 @@ using lex::Severity;
 struct message {
   Severity severity;
   char text[120];
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 
 enum class Diag : std::uint32_t {
@@ -25,11 +26,18 @@ enum class Diag : std::uint32_t {
   expected_token [[=message{Severity::error, "expected '{0:k}'"}]] = 1,
   expected_expression [[=message{Severity::error, "expected an expression"}]],
   type_as_expression [[=message{Severity::error, "unexpected type name '{0:n}': expected an expression"}]],
+  local_class_odr_use [[=message{Severity::error, "a member of a local class cannot use '{0:n}', a variable of the enclosing function"}]],
+  local_class_member_template [[=message{Severity::error, "a local class cannot have a member template"}]],
+  local_class_static_data_member [[=message{Severity::error, "a local class cannot have a static data member"}]],
+  local_class_friend_definition [[=message{Severity::error, "a friend function cannot be defined in a local class"}]],
   elaborated_template_param [[=message{Severity::error, "template parameter '{0:n}' after a class-key"}]],
   elaborated_typedef [[=message{Severity::error, "typedef-name '{0:n}' after a class-key or 'enum'"}]],
   typedef_definition [[=message{Severity::error, "a function definition cannot be declared 'typedef'"}]],
   using_namespace_name [[=message{Severity::error, "using-declaration names the namespace '{0:n}'"}]],
   using_class_member [[=message{Severity::error, "a using-declaration at namespace scope names the class member '{0:n}'"}]],
+  // [namespace.udecl]/3: a member using-declarator names a member of a base class.
+  using_not_base [[=message{Severity::error, "a member using-declaration names '{0:t}', which is not a base class of '{1:t}'"}]],
+  using_namespace_member [[=message{Severity::error, "a member using-declaration names the namespace member '{0:n}'"}]],
   attributes_not_allowed [[=message{Severity::error, "an attribute-specifier cannot appear here"}]],
   array_initializer [[=message{Severity::error, "an array is initialized by a braced list or, for characters, a string literal"}]],
   asm_label_conflict [[=message{Severity::error, "'{0:n}' is given another asm label"}]],
@@ -57,6 +65,8 @@ enum class Diag : std::uint32_t {
   integer_literal_operator_conflict [[=message{Severity::error, "both a raw literal operator and a numeric literal operator template are visible"}]],
   integer_literal_operator_unsupported [[=message{Severity::error, "raw and template integer literal calls are not supported yet"}]],
   enum_no_type [[=message{Severity::error, "no integral type can hold every value of '{0:n}'"}]],
+  enum_increment_truncation [[=message{Severity::warning, "incremented enumerator value {0:i} is not representable in the largest integer type", lex::Warning::enum_too_large}]],
+  enum_range_truncation [[=message{Severity::warning, "enumeration values exceed range of largest integer", lex::Warning::enum_too_large}]],
   enum_base_required [[=message{Severity::error, "this declaration of unscoped enumeration '{0:n}' requires an underlying type"}]],
   enum_base_not_integral [[=message{Severity::error, "an enumeration base must name an integral type"}]],
   enum_base_mismatch [[=message{Severity::error, "enumeration '{0:n}' redeclared with a different underlying type"}]],
@@ -72,6 +82,7 @@ enum class Diag : std::uint32_t {
   unexpected_identifier [[=message{Severity::error, "unexpected identifier '{0:n}'"}]],
   not_supported [[=message{Severity::error, "'{0:k}' is not supported yet"}]],
   extended_float_not_supported [[=message{Severity::error, "extended floating-point types are not supported yet"}]],
+  float_literal_out_of_range [[=message{Severity::warning, "floating-point literal is out of the range of its type; it is infinity"}]],
   static_member_definition_not_supported [[=message{Severity::error, "defining a static data member of a class template outside the class is not supported yet"}]],
   extraneous_template_head [[=message{Severity::error, "extraneous template parameter list: only a member template of a class template is declared after two"}]],
   // [dcl.spec], [dcl.type]
@@ -137,6 +148,9 @@ enum class Diag : std::uint32_t {
   pointer_to_reference [[=message{Severity::error, "cannot form a pointer to a reference type '{0:t}'"}]],
   indirection_to_qualified_function [[=message{Severity::error, "cannot form a pointer or reference to qualified function type '{0:t}'"}]],
   noexcept_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to 'bool' in a noexcept-specifier"}]],
+  explicit_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to 'bool' in an explicit-specifier"}]],
+  explicit_condition_type [[=message{Severity::error, "an explicit-specifier's condition of type '{0:t}' is not a constant convertible to 'bool'"}]],
+  explicit_class_condition [[=message{Severity::error, "an explicit-specifier's condition of class type '{0:t}' is not supported yet"}]],
   recursive_noexcept [[=message{Severity::error, "exception specification depends on itself"}]],
   function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
@@ -146,6 +160,7 @@ enum class Diag : std::uint32_t {
   allocation_declaration [[=message{Severity::error, "unsupported declaration of '{0:n}'; expected an ordinary global allocation or deallocation function"}]],
   negative_new_bound [[=message{Severity::error, "array new bound is negative"}]],
   oversized_new_bound [[=message{Severity::error, "array new bound exceeds the maximum allocation size"}]],
+  new_bound_conversion [[=message{Severity::warning, "converting the array new bound to size_t changes its value from {0:i} to {1:i}", lex::Warning::constant_conversion}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
   default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],
@@ -170,6 +185,7 @@ enum class Diag : std::uint32_t {
   nonconstant_initializer [[=message{Severity::error, "dynamic initialization of a namespace-scope variable is not supported yet: {0:r}"}]],
   // [dcl.constexpr], [dcl.pre], [expr.const]
   not_constant [[=message{Severity::error, "not a constant expression: {0:r}"}]],
+  gcc_static_guard_transform [[=message{Severity::error, "cannot name a static initialization guard for a function signature containing the built-in type trait '{0:n}'"}]],
   static_assert_failed [[=message{Severity::error, "static assertion failed"}]],
   static_assert_failed_message [[=message{Severity::error, "static assertion failed: {0:c}"}]],
   constexpr_uninitialized [[=message{Severity::error, "constexpr variable '{0:n}' must be initialized"}]],
@@ -288,6 +304,8 @@ enum class Diag : std::uint32_t {
   defaulted_copy_declaration [[=message{Severity::error, "only a default, copy or move constructor without default arguments can be defaulted"}]],
   defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy or move construction of '{0:t}' is not supported for this class"}]],
   defaulted_default_constructor [[=message{Severity::error, "default construction of '{0:t}' by its explicitly defaulted constructor is not supported"}]],
+  defaulted_default_constructor_definition [[=message{Severity::error, "explicitly defaulting a default constructor outside its class is not supported for this class"}]],
+  defaulted_const_uninitialized [[=message{Severity::error, "default initialization of const type '{0:t}' requires initialized subobjects"}]],
   defaulted_default_delegation [[=message{Severity::error, "delegation to an explicitly defaulted default constructor is not supported yet"}]],
   defaulted_destructor [[=message{Severity::error, "an explicitly defaulted destructor is not supported for this class"}]],
   defaulted_destructor_out_of_class [[=message{Severity::error, "explicitly defaulting a destructor outside its class is not supported yet"}]],
@@ -415,6 +433,8 @@ enum class Diag : std::uint32_t {
   class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  class_alignment_zero [[=message{Severity::warning, "a zero class alignment is not a positive power of two", lex::Warning::attributes}]],
+  class_alignment_ignored [[=message{Severity::warning, "class alignment is ignored after the class is defined", lex::Warning::attributes}]],
   post_definition_layout_attribute [[=message{Severity::error, "layout- or ABI-affecting attributes after a class or enum definition are not supported yet"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   field_alignment_not_constant [[=message{Severity::error, "a member alignment requires an integral constant expression or a type"}]],
@@ -460,6 +480,7 @@ enum class Diag : std::uint32_t {
   unique_object_representations_unsupported [[=message{Severity::error, "'__has_unique_object_representations' for '{0:t}' is not supported yet"}]],
   trivial_or_pod_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
   trivial_or_pod_unsupported [[=message{Severity::error, "'{1:n}' for '{0:t}' is not supported yet"}]],
+  builtin_nansl_string [[=message{Severity::error, "the supported form of '__builtin_nansl' requires an empty ordinary string literal"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

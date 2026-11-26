@@ -10,6 +10,7 @@
 export module ycxx.pipeline:session;
 
 import std;
+import ycxx.execution;
 import ycxx.ast;
 import ycxx.engine;
 import ycxx.items;
@@ -54,6 +55,7 @@ struct BuildKey {
   ProgramId program{};  // with `link`
   bool want_dependencies = false;
   bool check_policies = false;
+  OptimizationMode optimization = OptimizationMode::none;
   bool operator==(const BuildKey&) const = default;
 };
 // A request, numbered by the registry (`Session::request`): a key holds no vector.
@@ -113,7 +115,7 @@ struct RunStats {
 };
 
 // Optional process-test checkpoint, after the pooled Build has read and analysed its sources.
-using BuildCheckpoint = std::function<void(std::string_view, std::inplace_stop_token)>;
+using BuildCheckpoint = std::function<void(std::string_view, ycxx::exec::inplace_stop_token)>;
 
 class Session {
  public:
@@ -208,7 +210,7 @@ class Session {
   static std::string absolute(const UnitSpec& u) {
     std::filesystem::path p(u.path);
     if (p.is_relative() && !u.cwd.empty()) p = std::filesystem::path(u.cwd) / p;
-    return p.lexically_normal().generic_native_encoded_string();
+    return p.lexically_normal().generic_string<char>();
   }
 
  public:
@@ -223,7 +225,7 @@ class Session {
     Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
     const pp::FileId file{tu.n};
     const bool disk = config.view == pp::View::disk;
-    pp::name_file(file, std::filesystem::path(path).filename().native_encoded_string());
+    pp::name_file(file, std::filesystem::path(path).filename().native());
     db_.set<pp::SourceOf>(file, {std::move(path), std::move(cwd), std::move(config)});
     if (disk) db_.set<pp::FileText>(file, std::move(text));
     db_.set<TuSourceIn>(tu, {std::move(object), tu.n, {}});
@@ -243,7 +245,7 @@ class Session {
     auto [it, fresh] = unit_numbers_.try_emplace(key, registry_base + static_cast<std::uint32_t>(named_.size()));
     if (fresh) {
       if (u.config.view == pp::View::disk) by_path_[absolute(u)].push_back(it->second);
-      pp::name_file(pp::FileId{it->second}, std::filesystem::path(u.path).filename().native_encoded_string());
+      pp::name_file(pp::FileId{it->second}, std::filesystem::path(u.path).filename().native());
       named_.push_back(std::move(u));
     }
     return TuId{it->second};
@@ -270,7 +272,7 @@ class Session {
       for (TuId u : k.units) {
         if (!name.empty()) name += ' ';
         if (u.n >= registry_base && u.n - registry_base < named_.size())
-          name += std::filesystem::path(named_[u.n - registry_base].path).filename().native_encoded_string();
+          name += std::filesystem::path(named_[u.n - registry_base].path).filename().native();
       }
       if (k.until == Until::syntax) name += " -fsyntax-only";
       else if (k.until == Until::object) name += " -c";
@@ -491,7 +493,8 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   if (k.until == Until::syntax) co_return out;
   std::vector<Tu::Key> compiled;
   for (std::size_t i = 0; i < k.units.size(); ++i)
-    if (out.units[i].readable && !out.units[i].front_failed) compiled.push_back({k.units[i], k.check_policies});
+    if (out.units[i].readable && !out.units[i].front_failed)
+      compiled.push_back({k.units[i], k.check_policies, k.optimization});
   {
     const auto tus = co_await cx.par_map<Tu>(compiled);
     std::size_t j = 0;

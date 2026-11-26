@@ -56,7 +56,7 @@ public:
     edges_.insert(edges_.end(), cs.begin(), cs.end());
     return l;
   }
-  ChildList list(std::initializer_list<Child> cs) { return list(std::span<const Child>(cs.begin(), cs.size())); }
+  inline ChildList list(std::initializer_list<Child> cs) { return list(std::span<const Child>(cs.begin(), cs.size())); }
 
   // A list: a draft if its elements hold nodes, else interned at once (§3.6).
   template <class T>
