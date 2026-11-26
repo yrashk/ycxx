@@ -927,6 +927,7 @@ class Mangler {
       candidates_.push_back((std::uint64_t{1} << 32) | std::to_underlying(closure));
       return "L" + delimit_name(scope + *name, named.scope) + "E";
     }
+    if (in_.values.is<ast::VWrittenThis>(v)) return "fpT";
     if (in_.values.is<ast::VWrittenDelete>(v)) {
       const auto deletion = in_.values.get<ast::VWrittenDelete>(v);
       auto operand = expression(deletion.operand);

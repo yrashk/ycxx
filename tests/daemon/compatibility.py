@@ -3894,6 +3894,66 @@ int main() {{ return call(19) != 19; }}
                     subprocess.run([scope / 'constraint-lambda'], cwd=scope, check=True, timeout=20)
 
 
+def implicit_object_constraint_symbols(world, gxx):
+    scope = world.scope
+    (scope / 'this-constraint.cpp').write_text('''\
+#if CASE == 1
+struct S { template<class T> int f(T n) const requires (sizeof(this) >= 1) { return n; } };
+#elif CASE == 2
+struct S { template<class T> int f(T n) const requires (sizeof(*this) >= 1) { return n; } };
+#elif CASE == 3
+template<class U> struct Record {
+  template<class T> int f(T n) const requires (sizeof(*this) >= 1) { return n; }
+};
+using S = Record<int>;
+#elif CASE == 4
+struct S {
+  template<class T> int h() const { return 1; }
+  template<class T> int f(T n) const requires requires { this->template h<T>(); } { return n; }
+};
+#elif CASE == 5
+struct S { template<class T> int f(T n) const requires (sizeof(this) == 1) { return n; } };
+#endif
+int use() { S x; return x.f(7); }
+''')
+    clang = shutil.which(os.environ.get('YCXX_CLANGXX', 'clang++-23'))
+    for mode in MODES:
+        value = 'Lm8E' if mode == 'clang' else 'szfpT'
+        symbols = {1: f'_ZNK1S1fIiEEiT_Qge{value}Li1E', 3: '_ZNK6RecordIiE1fIiEEiT_QgeszdefpTLi1E',
+                   4: '_ZNK1S1fIiEEiT_QrqXclptfpT1hIS1_EEE'}
+        for target in (LINUX, DARWIN):
+            prefix = '_' if target == DARWIN else ''
+            for case in range(1, 6):
+                flags = [target, '-fcompat=' + mode, f'-DCASE={case}']
+                if case not in symbols:
+                    rejection = [*flags, '-fsyntax-only', 'this-constraint.cpp']
+                    cold, warm = (world.cxx(rejection, scope, env, timeout=40) for env in (world.cold, world.daemon))
+                    assert cold == warm and warm[0] == 1, (mode, target, case, cold, warm)
+                    diagnostic = b'incomplete' if case == 2 else b'viable'
+                    assert diagnostic in warm[2], (mode, target, case, warm)
+                    continue
+                command = [*flags, '-c', 'this-constraint.cpp', '-o', 'this-constraint.o']
+                binaries = []
+                for env in (world.cold, world.daemon):
+                    result = world.cxx(command, scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, case, result)
+                    binaries.append((scope / 'this-constraint.o').read_bytes())
+                assert binaries[0] == binaries[1], (mode, target, case)
+                symbol = prefix + symbols[case]
+                assert symbol.encode() in binaries[1].split(b'\0'), (mode, target, case, symbol)
+                peer = clang if mode == 'clang' else gxx
+                native = (target == LINUX and NATIVE_LINUX) or (target == DARWIN and sys.platform == 'darwin')
+                if peer and native:
+                    (scope / 'this-constraint-caller.cpp').write_text(f'''\
+struct Empty {{}};
+extern "C" int call(const Empty&, int) asm("{symbol}");
+int main() {{ return call(Empty{{}}, 19) != 19; }}
+''')
+                    subprocess.run([peer, '-std=c++26', 'this-constraint-caller.cpp', 'this-constraint.o',
+                                    '-o', 'this-constraint'], cwd=scope, check=True, capture_output=True, timeout=40)
+                    subprocess.run([scope / 'this-constraint'], cwd=scope, check=True, timeout=20)
+
+
 def compile_database(world):
     scope = world.scope
     unit = scope / 'editor.cpp'
@@ -3934,6 +3994,7 @@ def main():
         constrained_lambda_conversions(world, gxx)
         nested_template_symbols(world, gxx)
         lambda_constraint_expression_symbols(world, gxx)
+        implicit_object_constraint_symbols(world, gxx)
         lambda_conversion_symbols(world, gxx)
         floating_underflow_warnings(world)
         # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.

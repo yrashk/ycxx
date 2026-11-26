@@ -8296,6 +8296,14 @@ private:
         s_.diag(d.name_at, Diag::cv_on_non_member);  // [class.static.mfct]/2
         return false;
       }
+      if (member_template_ && ps_.is(Tk::kw_requires)) {
+        const auto before = s_.diag_count();
+        const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, r.fn_cv)));
+        const auto saved = std::exchange(s_.this_type, object);
+        trailing_requires_clause(d.params);
+        s_.this_type = saved;
+        if (s_.has_error_since(before)) return false;
+      }
       if (ps_.is(Tk::equal)) {
         if (!is_virtual || is_def || assignment || ps_.kind(1) == Tk::kw_default || ps_.kind(1) == Tk::kw_delete) {
           s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);
@@ -8327,6 +8335,7 @@ private:
         e.head = head_fp(s_.template_scopes.back());
         sem.constraints = associated_constraints();
         sem.head_constraint = head_constraint_;
+        sem.trailing_constraint = trailing_constraint_;
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       } else {
@@ -11245,6 +11254,10 @@ public:
     if (ins.seqs.size(is.decls) > 0) {
       ast::DeclSema d = ins.seqs.at(is.decls, 0);
       if (ins.seqs.size(d.template_params) > 0) s_.template_scopes.push_back(ins.seqs.elements(d.template_params));
+      if (atom_.lookup_class != EntityId::none && p_->this_type(d)) {
+        const auto cv = s_.types().rec(d.type).fn_cv;
+        s_.this_type = s_.types().pointer(s_.types().add_cv(s_.types().class_type(atom_.lookup_class), cv));
+      }
     }
     const bool in_lambda = ins.seqs.size(atom_.lambda_scope) != 0;
     const auto lambda = in_lambda ? ins.seqs.at(atom_.lambda_scope, 0) : ast::AtomLambdaScope{};

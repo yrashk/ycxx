@@ -623,6 +623,19 @@ probe = 'template<class T> requires ([] { return true; }()) int f(T n) { return 
 evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols for unused declarations, namespace qualifiers, reordered calls, and calls following an ordinary function-local closure"]
 
 [[divergence]]
+id = "constraint-implicit-object-expression-symbol"
+status = "pending"
+mode_status = { spec = "pending", gcc = "pending", clang = "pending" }
+reference = "[expr.prim.this], [class.mem.general], [temp.constr.atomic], Itanium C++ ABI §5.1.6.2"
+prior = "Ignore the in-class member function template's trailing constraint."
+spec = "Check the member's trailing clause with this in scope and the enclosing record's applicable completeness. Use fpT for a written reference to this."
+gcc = "Retain sizeof(this) as szfpT even when the pointer has nondependent type. Retain dereferencing the dependent this and a dependent member call."
+clang = "Fold the tested nondependent sizeof(this) to a size-type literal. Encode the dependent dereference and member call as GCC does."
+limits = "Both tested compilers reject sizeof(*this) when the enclosing ordinary class is incomplete, and an unsatisfied pointer-size constraint keeps the specialization out of overload resolution."
+probe = 'struct S { template<class T> int f(T n) const requires (sizeof(this) >= 1) { return n; } };'
+evidence = ["tests/daemon/compatibility.py", "GCC 16.2 primary ELF and upstream Clang 23.1.6 ELF and Mach-O symbols for the nondependent pointer, dependent dereference and dependent member call, with completeness and unsatisfied-clause controls"]
+
+[[divergence]]
 id = "constrained-operator-expression-symbol"
 status = "shared"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

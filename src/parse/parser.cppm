@@ -3592,8 +3592,10 @@ public:
   }
   sema::ConstId written_atom(Ex e) {
     if (const auto operand = written_operators_.find(e.id); operand != written_operators_.end()) return operand->second;
-    if (writing_constraint_atom_)
+    if (writing_constraint_atom_) {
       if (auto closure = s_->as<ast::Lambda>(e)) return s_->ins().intern_value(ast::VWrittenLambda{closure->closure});
+      if (s_->as<ast::This>(e)) return s_->ins().intern_value(ast::VWrittenThis{});
+    }
     if (auto local = s_->as<ast::LocalRef>(e)) {
       const auto parameter = written_requires_parameters_.find(local->local);
       if (parameter != written_requires_parameters_.end()) return s_->ins().intern_value(parameter->second);
@@ -4823,7 +4825,13 @@ public:
       // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
       if (!e.glvalue() && !s_->require_concrete_call_result(e.type(), e.begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
-      if (writing_constraint_atom_) record_written_operator(r, Tk::kw_sizeof, {written_atom(e)});
+      if (writing_constraint_atom_) {
+        const auto operand = written_atom(e);
+        // Clang folds the size of a nondependent `this` pointer in its symbol.
+        const bool folded_this = s_->compatibility() == ast::Compatibility::clang &&
+            s_->ins().values.is<ast::VWrittenThis>(operand) && s_->as<ast::Literal>(r).has_value();
+        if (!folded_this) record_written_operator(r, Tk::kw_sizeof, {operand});
+      }
       return {r.id, begin, pos(), r.info};
     }
     case Tk::coloncolon:
