@@ -139,6 +139,8 @@ export enum class Form : std::uint16_t {
   LSLV [[=f(0x1AC02000, Size::sf, {D(), U(rn), U(rm)})]],
   LSRV [[=f(0x1AC02400, Size::sf, {D(), U(rn), U(rm)})]],
   ASRV [[=f(0x1AC02800, Size::sf, {D(), U(rn), U(rm)})]],
+  RBIT [[=f(0x5AC00000, Size::sf, {D(), U(rn)})]],
+  CLZ [[=f(0x5AC01000, Size::sf, {D(), U(rn)})]],
   // Conditional select.
   CSEL [[=f(0x1A800000, Size::sf, {D(), U(rn), U(rm), C(cc)})]],
   CSINC [[=f(0x1A800400, Size::sf, {D(), U(rn), U(rm), C(cc)})]],

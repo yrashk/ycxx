@@ -2566,9 +2566,11 @@ session's.*
   diagnostics. The supported class-template base and variable-template initializer replay paths
   accept dependent operands. Replay expands packs in place among the arguments, checks newly
   concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
-  pack contributes zero arguments. The target must be a separately written type-id. General
-  dependent queries, including function-template uses, and class construction remain in
-  [#218](https://github.com/yrashk/ycxx/issues/218).
+  pack contributes zero arguments. The target must be a separately written type-id.
+  `__is_nothrow_constructible(C, C&&)` can use a written exact move constructor and the
+  effective destructor facts of a complete ordinary class without bases. A query during class
+  completion gets an unsupported-operand diagnostic if the constructor's specification is pending.
+  General dependent queries and broader class construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
@@ -2576,9 +2578,10 @@ session's.*
   fold to the same Boolean when both underlying types are supported arithmetic types. A non-const
   lvalue reference destination is assignable, including a volatile referent. The source may be
   cv-qualified or a reference. Supported class-template base and variable-template initializer
-  replay paths evaluate dependent operands at instantiation. Other operand types and dependent
-  queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
-  predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
+  replay paths evaluate dependent operands at instantiation. `__is_nothrow_assignable(C&, C&&)` can
+  use a written exact move assignment returning `C&` in a complete ordinary class without bases.
+  `__has_builtin` answers 0 for the three predicates while support is partial
+  ([meta.unary.prop], [expr.assign], #218).
 - `__is_convertible(From, To)` and `__is_nothrow_convertible(From, To)` share a Boolean result
   for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
   give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
@@ -2708,6 +2711,14 @@ scan's reads indeterminately sequenced with the caller's other evaluations ([int
 and diagnoses reads past the end of an unterminated array in a required constant expression
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
+
+## Trailing-zero count builtin (#1381)
+
+`__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
+operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
+after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
+Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
+Other unsigned operand types and the optional fallback argument remain in #248.
 
 ## C library string and memory builtins (#248, #1093, #1170)
 
@@ -3329,6 +3340,23 @@ The standalone HTML plan renders that inspection data under **Module graph**
 physical locations and links to candidate declarations. The section identifies
 incomplete scans, provider conflicts, and cyclic components. With `--against`,
 it shows the current plan's graph below **Plan changes**.
+
+JSON plan comparisons include `module_changes` when both snapshots contain a
+module graph (#1383). Units match by logical source and ordered include paths,
+so provider changes can be compared across target variants. The comparison
+reports changes to units, imports, conflicts, cycles, and scan completeness.
+Body-only edits and moved source sites preserve the semantic results. Older
+graphs can use source-only matching when their unit paths are unambiguous.
+
+HTML comparisons show these semantic differences in **Module changes** when
+both plans contain graphs (#1390). The report shows before and after provider
+locations, resolution and scan states, conflicts, and cycles. After entries
+link to the corresponding imports, declarations, and units in the current
+graph. The section identifies source-only matches and explains when an older
+graph lacks enough configuration information to compare. An available
+comparison with equal semantic results reports no module changes. Earlier
+schema-1 snapshots without a graph still show **Plan changes** and the current
+**Module graph** when available.
 
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
@@ -4171,7 +4199,19 @@ member templates already had (#713, `replay_member_exception`); an explicit spec
 its own specification. An invalid condition of a specialization that is never needed is no error.
 In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
 In a template's definition, `noexcept` on a call of such a function is value-dependent.
-- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- A function template's exception specification can combine dependent `__is_nothrow_constructible`
+  and `__is_nothrow_assignable` with `&&`, as in libycxx's move-swap overload in
+  `include/ycxx/core/concepts.hpp`. After overload selection, replay forms both written type-ids
+  with the selected arguments and checks class completeness at the demand. A failing substitution
+  in that specification is a hard error. A nested requirement's replay skips semantic analysis of
+  discarded operands that were parsed successfully in the template definition, including logical
+  expressions in complete parenthesized groups. An enclosing equality, negation, call, cast,
+  conditional, assignment or comma keeps its expression atomic
+  ([#1314](https://github.com/yrashk/ycxx/issues/1314)). The trait evaluators cover the arithmetic
+  cases and the written exact move operations above. Broader class queries remain in
+  [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
+  [#1303](https://github.com/yrashk/ycxx/issues/1303).
+- Tests: `tests/own/template-noexcept/`.
 - Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
   in the address of a class template member (#838).
 

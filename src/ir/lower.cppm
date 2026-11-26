@@ -687,6 +687,12 @@ class Lowering {
         out(n, 0, emit1(Op2::neg, *t, {in(n, 0)}, {}, nd.flags));
         return {};
       }
+      case Op::ctz: {
+        auto t = result_type();
+        if (!t) return fail(t.error());
+        out(n, 0, emit1(Op2::ctz, *t, {in(n, 0)}));
+        return {};
+      }
       case Op::icmp: out(n, 0, emit1(Op2::icmp, T::i1, {in(n, 0), in(n, 1)}, {imms[0]})); return {};
 
       case Op::fadd: return arith(Op2::fadd);

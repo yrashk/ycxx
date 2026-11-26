@@ -48,8 +48,10 @@ project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
 report to follow links from imports to their provider declarations.
 Use `ycxx show app --format=json` to read these dependencies and their physical
-source locations as a structured `module_graph`. Named-module compilation and
-BMI support are tracked in
+source locations as a structured `module_graph`. Run
+`ycxx show app --against before.json --format=html > changes.html` to compare
+module dependencies with a saved JSON plan and follow links into the current
+graph. Named-module compilation and BMI support are tracked in
 [#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
@@ -80,8 +82,10 @@ Member function template specializations preserve bare `noexcept` in their funct
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Function templates, member function templates and members of class templates substitute a
-dependent exception specification when it is needed.
-[#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828)
+dependent exception specification when it is needed. A function template's condition can use the
+nonthrowing construction and assignment traits for arithmetic types and supported written class
+move operations.
+[#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828) [#218](https://github.com/yrashk/ycxx/issues/218)
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
@@ -809,6 +813,8 @@ written default member initializer are value-initialized.
   `intmax_t` result during constant evaluation. [#1077](https://github.com/yrashk/ycxx/issues/1077)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
+  Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
+  expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the

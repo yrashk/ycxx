@@ -633,6 +633,10 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[0]);
       e_.reg({0xf7}, 3, rax);
       break;
+    case Op::ctz:
+      read(ops[0]);
+      e_.reg({0x0f, 0xbc}, rax, rax, body_.type(ops[0]) == Type::i64);  // BSF (Intel SDM vol. 2)
+      break;
     case Op::fadd: float_two(0x58); return {};
     case Op::fsub: float_two(0x5c); return {};
     case Op::fmul: float_two(0x59); return {};

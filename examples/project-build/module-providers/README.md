@@ -35,44 +35,59 @@ candidate link to its declaration at `shared_linux.cc:2:1`. In
 `arm64-apple-darwin-plan.html`, both links land at `shared_darwin.cc:2:1`.
 The import sites are `left.cc:3:1` and `right.cc:3:1` in both reports.
 
-Open `linux-to-darwin.html` to see what changed. **Plan changes** compares the
-saved Linux snapshot with the current Darwin plan. **Module graph** below it
-shows the current Darwin graph.
+Open `linux-to-darwin.html` and find **Module changes**. Under **Import changes**,
+both `demo.shared` entries show `shared_linux.cc:2:1` under **Before** and
+`shared_darwin.cc:2:1` under **After**. Follow either **After** provider link
+to its declaration in the current Darwin graph. The report also includes
+**Plan changes** and **Module graph**.
 
-## Read the provider edges from JSON
+## Compare provider edges in JSON
 
-Run this in the copied workspace after the builds above. Python 3 reads both
-JSON snapshots and joins each `demo.shared` import to its provider declaration
-using the candidate's unit ID and directive index.
+Run this in the copied workspace after the builds above. The comparison records
+each changed import with its original `before` and `after` data. Python 3 uses
+the Linux snapshot for `before` candidates and the Darwin snapshot for `after`
+candidates. Unit IDs and directive indexes refer to their own snapshots.
 
 ```sh
-python3 - x86_64-pc-linux-gnu-plan.json arm64-apple-darwin-plan.json <<'PY'
+ycxx show app --target=arm64-apple-darwin --against x86_64-pc-linux-gnu-plan.json \
+    --format=json > linux-to-darwin.json
+
+python3 - <<'PY'
 import json
 from pathlib import Path
-import sys
 
-def site(location):
-    return f'{location["path"]}:{location["line"]}:{location["column"]}'
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding='utf-8'))
 
-for snapshot in sys.argv[1:]:
-    graph = json.loads(Path(snapshot).read_text(encoding='utf-8'))['module_graph']
-    declarations = {
+def declarations(path):
+    graph = read_json(path)['module_graph']
+    return {
         (unit['id'], declaration['directive_index']): declaration['location']
         for unit in graph['units']
         for declaration in unit['declarations']
     }
-    print(graph['native_target'])
-    for edge in graph['imports']:
-        if edge['name'] == 'demo.shared':
-            for candidate in edge['candidates']:
-                provider = declarations[candidate['unit_id'], candidate['directive_index']]
-                print(f'  {site(edge["location"])} -> {site(provider)} ({edge["status"]})')
+
+def site(location):
+    return f'{location["path"]}:{location["line"]}:{location["column"]}'
+
+linux = declarations('x86_64-pc-linux-gnu-plan.json')
+darwin = declarations('arm64-apple-darwin-plan.json')
+changes = read_json('linux-to-darwin.json')['module_changes']
+for row in changes['imports']:
+    if row['change'] != 'changed' or row['after']['name'] != 'demo.shared':
+        continue
+    before, after = row['before'], row['after']
+    print(f'{after["name"]} at {site(after["location"])}')
+    for target, edge, sites in [('Linux', before, linux), ('Darwin', after, darwin)]:
+        for candidate in edge['candidates']:
+            key = candidate['unit_id'], candidate['directive_index']
+            print(f'  {target}: {site(sites[key])} ({edge["status"]})')
 PY
 ```
 
-Both import sites are on line 3 of their physical files. They point to line 2
-of `shared_linux.cc` for the Linux snapshot and line 2 of `shared_darwin.cc`
-for the Darwin snapshot.
+Both `demo.shared` imports are `resolved` in each variant. For each import on
+line 3 of `left.cc` or `right.cc`, the candidate changes from
+`shared_linux.cc:2:1` to `shared_darwin.cc:2:1`.
 
 ## Watch a provider body edit
 
@@ -97,9 +112,12 @@ resolution. Compare the plan with the saved Linux snapshot.
 ```sh
 ycxx show app --target=x86_64-pc-linux-gnu --against x86_64-pc-linux-gnu-plan.json \
     --format=html > linux-body-edit.html
+ycxx show app --target=x86_64-pc-linux-gnu --against x86_64-pc-linux-gnu-plan.json \
+    --format=json > linux-body-edit.json
 ```
 
-Press `q` in the trace view to stop watch.
+The HTML report shows **No semantic module changes.** The body edit leaves all
+four `module_changes` arrays empty. Press `q` in the trace view to stop watch.
 
 ## See ambiguous providers
 
@@ -118,6 +136,7 @@ ycxx show app --target=x86_64-pc-linux-gnu --against x86_64-pc-linux-gnu-plan.js
     --format=html > ambiguous-plan.html
 ```
 
-Open `ambiguous-plan.html` and find **Module graph**. Each `demo.shared` import
-now shows an ambiguous status with links to `shared_linux.cc:2:1` and
-`shared_darwin.cc:2:1`. The `demo.shared` conflict links to both declarations.
+Open `ambiguous-plan.html` and find **Module changes**. Each `demo.shared`
+import changes from resolved to ambiguous. Its **After** candidates link to
+`shared_linux.cc:2:1` and `shared_darwin.cc:2:1`. Under **Provider conflict
+changes**, the added `demo.shared` conflict links to both declarations.
