@@ -2273,6 +2273,52 @@ public:
     suffix.noexcept_condition = e;
   }
 
+  // An explicit-specifier, after `explicit` ([dcl.fct.spec]). Without a condition it is
+  // `explicit(true)`. A condition is a contextually converted constant expression of type bool.
+  // One that is value-dependent has no value yet; with `want_atom` it is also kept as an atom,
+  // read again once the template's arguments are known ([temp.deduct.general]). As in an atomic
+  // constraint, a type trait with dependent operands waits for them. None if it is diagnosed.
+  struct ExplicitSpec {
+    std::optional<bool> value;
+    sema::ConstId atom = sema::ConstId::none;
+  };
+  std::optional<ExplicitSpec> explicit_specifier(bool want_atom) {
+    if (!accept(Tk::l_paren)) return ExplicitSpec{true};
+    const int saved = std::exchange(angle_, 0);
+    const u32 begin = pos();
+    Ex e = [&] {
+      const sema::Sema::ConstraintAtomScope scope{*s_};
+      return constant_expression();
+    }();
+    const u32 end = pos();
+    const u32 end_index = i_;
+    angle_ = saved;
+    if (!e.ok() || !expect(Tk::r_paren)) return std::nullopt;
+    Ex operand = s_->rvalue(e);
+    Ex condition = s_->to_bool(operand, operand.begin);
+    sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(condition);
+    if (result.value) {
+      if (s_->narrows(operand, condition.type())) {
+        s_->diag(operand.begin, Diag::explicit_narrowing, operand.type());
+        return std::nullopt;
+      }
+      return ExplicitSpec{s_->world().values.as_signed(*result.value) != 0};
+    }
+    if (!result.dependent) {
+      if (condition.ok()) s_->diag(condition.begin, Diag::not_constant, result.reason);
+      return std::nullopt;
+    }
+    ExplicitSpec spec;
+    if (want_atom) {
+      // The template parameters it names: the atom's parameter mapping's ([temp.constr.atomic]/1).
+      std::vector<NameId> names;
+      for (u32 j = begin_ + begin; j < end_index; ++j)
+        if (r_->tokens[j].kind == Tk::identifier) names.push_back(name_of(r_->tokens[j]));
+      spec.atom = s_->atom(begin, end, names);
+    }
+    return spec;
+  }
+
   // The value of a noexcept-specifier's condition ([except.spec]/2). With `dependent`, a
   // value-dependent condition sets it instead of being diagnosed.
   bool noexcept_value(const std::optional<Ex>& condition, bool& ok, bool* dependent = nullptr) {

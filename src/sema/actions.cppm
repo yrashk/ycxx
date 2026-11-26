@@ -269,6 +269,10 @@ public:
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
   // bool, not constant, or not supported): the expression that asked is then invalid.
   virtual bool satisfaction_failed(ConstId /*c*/) { return false; }
+  // A value-dependent explicit-specifier's condition, atom `c` with its mapping substituted
+  // ([dcl.fct.spec]): whether the specialization is explicit; none when substitution into it
+  // fails, which fails deduction ([temp.deduct.general]).
+  virtual std::optional<bool> explicit_value(ConstId /*c*/) { return false; }
   // A class template's static data member whose initializer is value-dependent; and a use of a
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
   // The declaration of template `t` here: its head and, for an alias template, its type.
@@ -7355,6 +7359,17 @@ public:
     return {};
   }
 
+  // Whether the specialization of constructor template `td` for `args` is explicit, its
+  // value-dependent explicit-specifier substituted; none when that substitution fails
+  // ([temp.deduct.general]).
+  std::optional<bool> explicit_specialization(const ast::DeclSema& td, std::span<const TemplateArg> args) {
+    std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+    auto atom = templates().substitute_constraint(td.explicit_condition, Bindings::of(ps.empty() ? 0 : ps[0].depth, args));
+    // An invalid mapping is a substitution failure.
+    if (!atom || !ins().values.is<ast::VAtom>(*atom)) return std::nullopt;
+    return q_->explicit_value(*atom);
+  }
+
   // [over.best.ics]: viability uses the parameter conversions of ordinary constructors. Access,
   // deletion, and the copy-list restriction on an explicit winner are checked after selection.
   std::optional<Ics> constructor_ics(std::span<const Ex> args, QualType t, Construction form) {
@@ -7641,9 +7656,17 @@ public:
         }
         auto st = t.specialization_type(td, *targs);
         if (!st) continue;
-        Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults};
+        Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults, m.is_explicit || td.is_explicit};
         k.is_consteval = (td.flags & decl_flag::consteval_) != 0;
-        if (copy_init && (types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
+        // A value-dependent explicit-specifier is substituted after deduction, and the
+        // specialization leaves a context that admits only converting constructors
+        // ([over.match.funcs.general]/8).
+        if (td.explicit_condition != ConstId::none) {
+          auto is_explicit = explicit_specialization(td, *targs);
+          if (!is_explicit) continue;
+          k.is_explicit = *is_explicit;
+        }
+        if (copy_init && (k.is_explicit || types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
         // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
         if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
         k.entity = specialization(td, *targs, *st);
