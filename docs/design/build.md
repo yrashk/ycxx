@@ -249,6 +249,25 @@ and staged witness tools. Ordinary generator chains can also run them
 upstream of a generated planning input.
 [Native host tool example](../../examples/project-build/native-host-tool/README.md)
 
+### Libraries for native host tools (#1576)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["shared"]
+}
+```
+
+Host executable dependencies are disk-backed `cpp.library` declarations.
+Each executable collects its own reachable sources and public include
+directories. In a diamond, both dependency paths remain visible in the
+plan and the shared library contributes its sources once per executable.
+The same library declaration can supply both the host scanner and a
+foreign-target app. The scanner's source and include observations cover its
+library translation units, so edits can wake watch and refresh the staged
+host image.
+[Shared library diamond example](../../examples/project-build/host-cxx-libraries/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
