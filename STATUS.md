@@ -87,6 +87,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   translation-unit configuration and is read from editor compilation commands. The
   [compatibility table](docs/compatibility.toml) records prior choices, mode behavior and probes. Constrained function
   templates use the current `Q` and `Tk` forms for supported requires-clauses and type constraints.
+  Mode-specific symbols also cover nested and lambda templates, including written folds,
+  member and allocation expressions, casts, and target floating-point literals. The table records
+  the fallback for builtin expressions whose symbols the two compilers cannot emit.
   GCC mode selects the last nonzero class-head alignment and carries a preceding alignment
   into a definition that supplies none. Clang mode checks alignment consistency on opaque
   class declarations. The compatibility table records Clang's underalignment case separately.
@@ -94,7 +97,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   mangled signature. GCC and Clang modes use one type for both. C function names retain their
   C linkage and unmangled symbols in every mode.
   Compiler modes also select the documented wide array bound conversions, constexpr byte
-  comparisons, empty union initializers, and abstract result checks.
+  comparisons, empty union initializers, abstract result checks, and over-width bit-field layout
+  and diagnostics.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -2228,8 +2232,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
-  calls follows the published Itanium rule by default. On x86-64 Linux, GCC mode passes
+  rest unused (C.11). Spec and Clang modes omit the tested empty-class arguments on Darwin.
+  GCC mode transports a naturally aligned one-byte empty argument in direct calls on Darwin.
+  The published Itanium rule selects which classes are trivial for calls by default. On x86-64 Linux, GCC mode passes
   supported classes whose copy is implicitly deleted by a class subobject in stack slots.
   The explicit
   `-fclass-call-abi=itanium` and `-fclass-call-abi=apple` flags override that choice (DECISIONS §1.6).
@@ -3713,6 +3718,14 @@ public include directories and visits each library declaration once. The
 same declaration can also serve the selected target app. Inspection shows
 the shared declaration and each authored dependency edge.
 [Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
+
+A `cpp.host_executable` can consume `generated_headers` through ordinary
+action producers (#1579). The resident host compile sees a virtual include
+directory with the producer's output names and bytes. Equal header bytes
+preserve the host compile, and real disk lookup observations continue to
+drive watch. Normal builds, planning inputs, and witnesses share the
+header producer receipts.
+[Generated host header example](examples/project-build/host-generated-headers/README.md)
 
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated

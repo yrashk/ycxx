@@ -208,7 +208,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, callee_read, write, callee_write, lifetime };
+  enum class Use : u8 { read, callee_read, write, callee_write, lifetime, gcc_member_receiver };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -235,6 +235,7 @@ private:
     Origin origin = Origin::automatic;
     bool storage = true;    // false once deallocated
     bool outside = false;   // its lifetime began outside the evaluation
+    bool switch_bypassed = false;  // the switch dispatch bypassed this local's vacuous declaration
     bool mutable_lifetimes_outside = false;  // [expr.const.init] constant destruction
     bool usable = true;     // readable in constant mode
     bool read_only = false; // a string literal object
@@ -738,14 +739,14 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (p.kind != VKind::object) return fail(p.kind == VKind::function ? Reason::access_type : Reason::ill_formed);
   if (volatile_ && config_.mode == Mode::constant) return fail(Reason::volatile_access);
   const Object& ob = objects_[p.ref];
-  if (!ob.storage) return fail(Reason::storage_ended);
+  if (!ob.storage && use != Use::gcc_member_receiver) return fail(Reason::storage_ended);
   bool past = false;
   auto pl = resolve(p, extra, past);
   if (!pl) return fail(Reason::past_end_access);
   if (past) return fail(Reason::past_end_access);
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
-  if (use == Use::lifetime) return Flow::next;
+  if (use == Use::lifetime || use == Use::gcc_member_receiver) return Flow::next;
   // Only an ordinary store can initialize storage before the lifetime begins.
   const bool requires_live = use != Use::write;
   const Life record_life = pl->primary_base ? ob.primary_base_life : ob.record_life;
@@ -771,7 +772,9 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
       if ((cv(pl->type) | cv(ob.type)) & std::to_underlying(ast::Cv::volatile_))
         return fail(Reason::volatile_object_access);
     }
-    if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
+    if (config_.mode == Mode::constant &&
+        (ob.outside || (ob.switch_bypassed && config_.compatibility == ast::Compatibility::gcc)))
+      return fail(Reason::modify_outside);
   } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
     return fail(Reason::not_usable, 0, global);

@@ -69,11 +69,13 @@ namespace ycxx::build {
 
 namespace fs = std::filesystem;
 using Apply = std::function<void(const std::function<void(engine::Db&)>&)>;
+using HostHeaderOverlay = std::shared_ptr<const pp::HostOverlay>;
 
 struct Planned {
   Fp128 workspace;
   ProjectPlan resolved;
   std::vector<pipeline::RequestId> host_requests;
+  std::vector<std::optional<Fp128>> host_header_keys;
 };
 struct [[=engine::input{engine::Durability::low}]] WorkspacePlan {
   using Key = Fp128;  // The requested executable's output path.
@@ -655,21 +657,25 @@ std::string normalized_include_directory(const fs::path& path) {
 }
 
 pipeline::TuId register_project_unit(pipeline::Session& session, const std::string& cwd,
-                                     const SourcePlan& source, const ast::Target* target, pp::View view) {
+                                     const SourcePlan& source, const ast::Target* target, pp::View view,
+                                     HostHeaderOverlay host_headers = {}) {
   pp::Config config;
   config.view = view;
   config.target = target;
   config.freestanding = target == &ast::x86_64_linux;
+  config.host_overlay = std::move(host_headers);
   for (const auto& include : source.includes) config.angle_dirs.push_back(normalized_include_directory(include));
   config.system_from = config.angle_dirs.size();
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
 
 pipeline::RequestId register_host_executable(pipeline::Session& session, const std::string& cwd,
-                                             const HostExecutablePlan& executable, const ast::Target* host_target) {
+                                             const HostExecutablePlan& executable, const ast::Target* host_target,
+                                             const HostHeaderOverlay& headers) {
   pipeline::BuildKey build;
-  for (const auto& source : executable.sources)
-    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk));
+  for (const auto& [index, source] : std::views::enumerate(executable.sources))
+    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk,
+        static_cast<std::size_t>(index) >= executable.first_own_source ? headers : nullptr));
   build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name});
   return session.request(std::move(build));
 }
@@ -955,7 +961,7 @@ struct BuiltHostTools {
 };
 
 using BuildHostTools = std::function<std::optional<BuiltHostTools>(
-    const ProjectPlan&, std::span<const std::size_t>)>;
+    const ProjectPlan&, std::span<const std::size_t>, std::span<const HostHeaderOverlay>)>;
 using FindActionReceipt = std::function_ref<const ActionOutputs*(Fp128)>;
 using AdmitRuleValue = std::function<void(std::string_view, std::string_view, RuleValueRecord)>;
 using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePackagePlan&, const RulePackageAction&)>;
@@ -1019,7 +1025,8 @@ struct ProducerClosure {
   std::vector<std::size_t> hosts;
 };
 
-ProducerClosure producer_closure(const ProjectPlan& plan, std::span<const ArtifactInputPlan> requested,
+template<class Inputs>
+ProducerClosure producer_closure(const ProjectPlan& plan, const Inputs& requested,
                                   std::span<const HostArtifactInputPlan> direct = {}) {
   // Other rule expansions can have added nodes to the plan. Follow only the requested outputs.
   std::vector<bool> needed(plan.generators.size());
@@ -1058,6 +1065,51 @@ std::expected<StagedProducers, std::string> stage_producers(
   return staged;
 }
 
+ProducerClosure host_header_closure(const ProjectPlan& plan, std::span<const std::size_t> needed) {
+  std::vector<ArtifactOutputPlan> requested;
+  for (const auto index : needed) requested.append_range(plan.host_executables[index].generated_headers);
+  return producer_closure(plan, requested);
+}
+
+HostHeaderOverlay host_header_overlay(const fs::path& cwd, const ProjectPlan& plan, std::size_t index,
+                                       LookupActionOutputs output_at) {
+  std::set<std::size_t> directories;
+  pp::HostOverlay::Files files;
+  for (const auto& header : plan.host_executables[index].generated_headers) {
+    if (!directories.insert(header.producer).second) continue;
+    const auto* contents = output_at(header.producer);
+    if (!contents) return {};
+    const auto& generator = plan.generators[header.producer];
+    // The include directory exposes the producer's declared siblings too.
+    for (const auto& [output, artifact] : std::views::zip(generator.action.outputs, *contents)) {
+      const auto& bytes = artifact.contents.bytes;
+      files.emplace(host_generated_path(cwd, generator.name, output.filename),
+                    std::string(bytes.begin(), bytes.end()));
+    }
+  }
+  if (files.empty()) return {};
+  return std::make_shared<const pp::HostOverlay>(std::move(files));
+}
+
+std::expected<std::vector<HostHeaderOverlay>, std::string> stage_host_headers(
+    const fs::path& cwd, const ProjectPlan& plan, std::span<const std::size_t> needed,
+    const RunRuleAction& run, std::function_ref<bool(std::size_t, Fp128)> current_action,
+    std::function_ref<bool()> current_recipe, std::function_ref<std::unexpected<std::string>()> changed) {
+  std::vector<HostHeaderOverlay> overlays(needed.size());
+  const auto closure = host_header_closure(plan, needed);
+  if (closure.generators.empty()) return overlays;
+  if (!closure.hosts.empty()) return std::unexpected("host generated headers require host-independent producers");
+  if (!current_recipe()) return changed();
+  auto staged = stage_producers(plan, closure.generators, {}, run, current_action);
+  if (!staged) return std::unexpected(std::move(staged.error()));
+  if (!current_recipe()) return changed();
+
+  const auto output_at = [&](std::size_t index) { return staged->output_at(index); };
+  for (auto&& [index, overlay] : std::views::zip(needed, overlays))
+    overlay = host_header_overlay(cwd, plan, index, output_at);
+  return overlays;
+}
+
 std::optional<Fp128> current_producer_key(const ProjectPlan& plan, const ProducerClosure& closure,
                                           std::size_t index, std::span<const Artifact> host_images,
                                           FindActionReceipt receipt) {
@@ -1090,12 +1142,14 @@ bool planning_uses_hosts(const RuleInputPlan& plan) {
 }
 
 struct HostProducerStage {
+  const fs::path& cwd;
   const ProjectPlan& plan;
   ProducerClosure closure;
   const RunRuleAction& run;
   const BuildHostTools& build;
   FindActionReceipt receipt;
   std::shared_ptr<const BuiltHostTools> hosts = {};
+  std::optional<std::vector<HostHeaderOverlay>> headers = std::nullopt;
 
   bool current() const {
     return closure.hosts.empty() || (hosts && current_host_files(hosts->files));
@@ -1110,10 +1164,16 @@ struct HostProducerStage {
       std::function_ref<bool()> current_recipe,
       std::function_ref<void(const std::vector<HostFileObservation>&)> observe,
       std::function_ref<std::unexpected<std::string>()> changed) {
+    if (!headers) {
+      auto staged = stage_host_headers(cwd, plan, closure.hosts, run,
+          [&](std::size_t, Fp128) { return current_recipe(); }, current_recipe, changed);
+      if (!staged) return std::unexpected(std::move(staged.error()));
+      headers = std::move(*staged);
+    }
     const auto refresh = [&] {
       if (!current_recipe()) return false;
       if (current()) return true;
-      auto updated = build(plan, closure.hosts);
+      auto updated = build(plan, closure.hosts, *headers);
       if (!updated) return false;
       hosts = std::make_shared<const BuiltHostTools>(std::move(*updated));
       observe(hosts->files);
@@ -1285,7 +1345,7 @@ std::expected<void, std::string> prepare_project(
     if (planning_plan) {
       auto closure = producer_closure(planning_plan->producers, planning_plan->inputs);
       if (!closure.hosts.empty())
-        planning_producers.emplace(planning_plan->producers, std::move(closure), run, build_host_tools, receipt);
+        planning_producers.emplace(cwd, planning_plan->producers, std::move(closure), run, build_host_tools, receipt);
       auto staged = planning_producers ? stage_planning()
           : stage_producers(planning_plan->producers, closure.generators, {}, run,
                             [&](std::size_t, Fp128) { return current_invocation(); });
@@ -1353,7 +1413,7 @@ std::expected<void, std::string> prepare_project(
       }
       auto& plan = std::get<RuleWitnessPlan>(*witness_plan);
       witness_key = witness_stamp(plan);
-      HostProducerStage witness_producers{plan.producers,
+      HostProducerStage witness_producers{cwd, plan.producers,
           producer_closure(plan.producers, plan.witness.artifact_inputs, plan.witness.host_inputs),
           run, build_host_tools, receipt};
       const auto current_witness_recipe = [&] {
@@ -1893,11 +1953,13 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return evidence;
   };
   const std::function<void()> check_revision = [] {};
-  const BuildHostTools build_host_tools = [&](const ProjectPlan& plan, std::span<const std::size_t> needed)
+  const BuildHostTools build_host_tools = [&](const ProjectPlan& plan, std::span<const std::size_t> needed,
+                                             std::span<const HostHeaderOverlay> headers)
       -> std::optional<BuiltHostTools> {
     std::vector<pipeline::RequestId> requests;
-    for (const auto i : needed)
-      requests.push_back(register_host_executable(session_, workspace_path, plan.host_executables[i], host_target));
+    for (const auto& [i, overlay] : std::views::zip(needed, headers))
+      requests.push_back(register_host_executable(session_, workspace_path, plan.host_executables[i],
+                                                  host_target, overlay));
     while (!cancelled()) {
       refresh();
       const auto before = session_.db().revision();
@@ -2136,6 +2198,11 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     const auto* entry = session_.db().peek<ActionReceipt>(id);
     return entry && *entry ? &**entry : nullptr;
   };
+  struct CompletedHostAction {
+    Fp128 key;
+    ActionResult result;
+  };
+  std::optional<CompletedHostAction> completed_host_action;
   while (!cancelled()) {
     refresh();
     superseded = false;
@@ -2182,11 +2249,48 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (!prepared) return fail(prepared.error());
     const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
+    const bool has_host_headers = std::ranges::any_of(plan.host_executables, [](const auto& executable) {
+      return !executable.generated_headers.empty();
+    });
+    std::vector<std::optional<Fp128>> host_header_keys;
     if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id) {
+      std::vector<std::size_t> needed;
+      needed.append_range(std::views::iota(std::size_t{0}, plan.host_executables.size()));
+      const auto current_recipe = [&] {
+        const auto observed = observe_project(cwd, target, toolchain, planned);
+        return observed && fingerprint(*observed) == plan_id;
+      };
+      const auto current_header_action = [&](std::size_t index, Fp128 id) {
+        const auto observed = observe_project(cwd, target, toolchain, planned);
+        if (!observed) return false;
+        if (fingerprint(*observed) == plan_id) return true;
+        const auto action = std::ranges::find(observed->generators, plan.generators[index].name, &GeneratorPlan::name);
+        if (action == observed->generators.end()) return false;
+        std::vector<std::size_t> observed_hosts;
+        observed_hosts.append_range(std::views::iota(std::size_t{0}, observed->host_executables.size()));
+        const auto closure = host_header_closure(*observed, observed_hosts);
+        if (!closure.hosts.empty()) return false;
+        const auto at = static_cast<std::size_t>(action - observed->generators.begin());
+        return current_producer_key(*observed, closure, at, {}, receipt) == id;
+      };
+      auto headers = stage_host_headers(cwd, plan, needed, run_rule, current_header_action, current_recipe, [&] {
+        superseded = true;
+        return std::unexpected(std::string("host generated headers changed during preparation"));
+      });
+      if (!headers) {
+        if (superseded) continue;
+        return fail(std::move(headers.error()));
+      }
       std::vector<pipeline::RequestId> host_requests;
-      for (const auto& executable : plan.host_executables)
-        host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target));
-      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests)}); });
+      for (const auto& [executable, overlay] : std::views::zip(plan.host_executables, *headers)) {
+        host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target, overlay));
+        host_header_keys.push_back(overlay ? std::optional{overlay->fingerprint()} : std::nullopt);
+      }
+      apply([&](engine::Db& db) {
+        db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests), host_header_keys});
+      });
+    } else {
+      host_header_keys = prior->host_header_keys;
     }
 
     for (;;) {
@@ -2213,7 +2317,21 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             if (current == observed->generators.end()) return false;
             if (!current->host_dependent || publish(revision, [] {})) {
               const auto at = static_cast<std::size_t>(current - observed->generators.begin());
-              return resolve_actions(*observed, receipt, images).keys[at] == id;
+              const auto actions = resolve_actions(*observed, receipt, images);
+              if (actions.keys[at] != id) return false;
+              if (!current->host_dependent || !has_host_headers || fingerprint(*observed) == plan_id) return true;
+              // Only the reachable host overlays affect this action. Check
+              // bytes from known receipts without starting a header producer.
+              const auto hosts = producer_closure(*observed, current->artifact_inputs, current->host_inputs).hosts;
+              const auto known_output = [&](std::size_t producer) -> const ActionOutputs* {
+                const auto& key = actions.keys[producer];
+                return key ? receipt(*key) : nullptr;
+              };
+              return std::ranges::all_of(hosts, [&](std::size_t host) {
+                if (!host_header_keys[host]) return true;
+                const auto overlay = host_header_overlay(cwd, *observed, host, known_output);
+                return overlay && overlay->fingerprint() == *host_header_keys[host];
+              });
             }
             // The plan only describes host source paths. Re-demand the images so an
             // unrelated edit, or one that leaves the staged bytes equal, keeps the receipt.
@@ -2237,9 +2355,19 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             if (!append_generator_inputs(generator, output_at, demand->host_images, staged)) break;
             inputs = staged;
           }
-          if (generator.host_dependent && !publish(before, [] {})) break;
-          auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
-          if (!current_action(generator, id)) break;
+          if (generator.host_dependent &&
+              (has_host_headers ? !current_action(generator, id) : !publish(before, [] {}))) break;
+          const bool completed = completed_host_action && completed_host_action->key == id;
+          auto result = completed ? std::move(completed_host_action->result)
+                                  : run_action("ExternalAction", generator.name, generator.action, inputs);
+          if (completed) completed_host_action.reset();
+          if (!current_action(generator, id)) {
+            // The new host header recipe may need to run first. Retain this
+            // effect until the next plan can prove its exact staged inputs.
+            if (has_host_headers && generator.host_dependent)
+              completed_host_action.emplace(id, std::move(result));
+            break;
+          }
           if (result.exit_status != 0) {
             report.status = result.exit_status;
             report.diagnostics.push_back(std::format("generator '{}': {}", generator.name,

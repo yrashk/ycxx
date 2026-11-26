@@ -106,6 +106,7 @@ export enum class Flag : std::uint8_t {
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
   ctz_gcc_zero,      // GCC mode accepts a zero operand for this spelling in constant evaluation
+  switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
   observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
 };
 export using Flags = std::uint16_t;
@@ -237,7 +238,9 @@ export enum class Op : std::uint16_t {
   // Memory and object lifetime ([basic.life], [basic.stc], [class.union]).
   alloc [[=state({S}, {S, V}).imms({type, storage, init})]],
   dealloc [[=state({S, V}, {S}).imms({storage})]],
-  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({outside_lifetime, outside_unknown, unknown_reference})]],
+  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({
+    outside_lifetime, outside_unknown, unknown_reference, switch_bypassed_lifetime
+  })]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],

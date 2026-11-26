@@ -99,6 +99,28 @@ private:
 // build's generated files under a reserved virtual directory for its output scope.
 enum class View : u8 { disk, editor, build, explicit_target_build };
 
+// An immutable set of generated host headers, shared by the translation units of a host build.
+// Keys are absolute, lexically normal paths. An empty file still has a value.
+class HostOverlay {
+public:
+  using Files = std::map<std::string, std::optional<std::string>, std::less<>>;
+
+  explicit HostOverlay(Files files)
+      : files_(present_files(std::move(files))), fingerprint_(ycxx::fingerprint(files_)) {}
+
+  const Files& files() const noexcept { return files_; }
+  Fp128 fingerprint() const noexcept { return fingerprint_; }
+
+private:
+  static Files present_files(Files files) {
+    std::erase_if(files, [](const auto& file) { return !file.second; });
+    return files;
+  }
+
+  const Files files_;
+  const Fp128 fingerprint_;
+};
+
 // The configuration of a translation unit's preprocessing (§B1.1's root): search paths,
 // command-line macros and the view. Its fingerprint keys every region a session caches.
 struct Config {
@@ -135,6 +157,8 @@ struct Config {
   // Setup options consumed by with_system_dirs. Queries use the effective directory lists.
   bool nostdinc = false;
   bool nostdincxx = false;
+  // An opted-in disk view reserves .ycxx/host/virtual for these exact bytes.
+  std::shared_ptr<const HostOverlay> host_overlay;
   ast::CallTriviality calls() const {
     if (call_triviality) return *call_triviality;
     if (compatibility == ast::Compatibility::gcc) return ast::CallTriviality::gcc;
@@ -164,7 +188,9 @@ struct Config {
     if (!exceptions_enabled) h.uint(u8(5));
     if (!rtti_enabled) h.uint(u8(6));
     if (pic != 0 && !target->always_pic) h.uint(u8(7)).uint(pic);  // always PIC: the options change nothing
-    return h.uint(u8(8)).uint(std::to_underlying(compatibility)).finish();
+    h.uint(u8(8)).uint(std::to_underlying(compatibility));
+    if (host_overlay) h.uint(u8(9)).fp(host_overlay->fingerprint());
+    return h.finish();
   }
 };
 

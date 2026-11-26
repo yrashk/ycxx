@@ -635,6 +635,13 @@ struct EntityRec {
   ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
+  // Lambda constraints use the template head of the declaration which contains their spelling.
+  ConstId lambda_constraints = ConstId::none;
+  ast::WrittenConstraint lambda_head_constraint{};
+  ast::WrittenConstraint lambda_trailing_constraint{};
+  u16 lambda_constraint_depth = 0;
+  Fp128 lambda_signature{};
+  bool static_closure = false;
 };
 
 class Entities {
@@ -751,6 +758,7 @@ struct FieldRec {
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
   u8 explicit_alignment = 0;
   u8 written_alignment = 0;
+  u8 wide_bit_width = 0;
 };
 
 // What a complete class makes of a special member explicitly defaulted on its first declaration,
