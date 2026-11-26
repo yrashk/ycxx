@@ -3136,7 +3136,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constructors of a class template with a requires-clause in its head are never emitted
   ([#1530](https://github.com/yrashk/ycxx/issues/1530)).
 - Tests: `tests/own/member-requires/` (52: a spec-only author's, the review's and regressions;
-  XFAILs cite #218, #157, #311, #1150, #1299, #1461, #1524 and #1530).
+  XFAILs cite #218, #157, #1150, #1299, #1461, #1524 and #1530).
 
 ## Access control and friends (#119, 2026-11-18)
 
