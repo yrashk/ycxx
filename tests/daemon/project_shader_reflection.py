@@ -399,11 +399,17 @@ def check_builds(ycxx, scope, env, journal):
     command = compiler.read_text(encoding='utf-8')
     compiler.write_text(command + '\n# changed compiler identity\n', encoding='utf-8')
     try:
-        stale = inspect(ycxx, scope, env, journal)
+        inspect(ycxx, scope, env, journal)
         baseline = scope.parent / 'initial-value-plan.json'
         baseline.write_text(json.dumps(initial), encoding='utf-8')
-        diff = compare_value_bindings(ycxx, scope, env, baseline, stale, None)
-        assert 'dependency_changes' not in diff, diff
+        before = scope_state(scope)
+        recorded = journal.read_bytes()
+        for format_ in ('json', 'html'):
+            result = run_client(ycxx, scope, env, 'show', 'app', '--against', str(baseline), f'--format={format_}')
+            assert result.returncode != 0, result.stdout
+            assert 'cannot compare plans with unresolved rules' in result.stderr, result.stderr
+        assert scope_state(scope) == before, 'unresolved comparison changed the workspace'
+        assert journal.read_bytes() == recorded, 'unresolved comparison ran a shader tool'
     finally:
         compiler.write_text(command, encoding='utf-8')
     current = inspect(ycxx, scope, env, journal, 3, texture_count=3)
