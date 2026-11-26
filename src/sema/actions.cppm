@@ -2282,9 +2282,9 @@ public:
   }
 
   // Whether a prvalue of pointer or `std::nullptr_t` type `from` converts implicitly to the
-  // non-reference type `to`. Class targets, and pointers made similar by a nested member pointer
-  // or array, are not modelled; `failed` when Derived's instantiation failed, which was diagnosed
-  // there.
+  // non-reference type `to`. Class, array and function targets, and pointers whose pointee arrays
+  // or member pointers differ (#1399), are not modelled; `failed` when Derived's instantiation
+  // failed, which was diagnosed there.
   enum class PointerConversion : u8 { no, yes, unmodelled, failed };
   PointerConversion object_pointer_conversion(QualType from, QualType to, engine::Loc loc) {
     using enum PointerConversion;
@@ -2294,7 +2294,7 @@ public:
     // A null pointer value converts to any pointer type; to `bool` only by direct-initialization
     // ([conv.ptr]/1, [conv.bool]).
     if (ts.is(from, Builtin::nullptr_t)) {
-      if (ts.is_pointer(to)) return yes;
+      if (ts.is_pointer(to) || ts.is(to, Builtin::nullptr_t)) return yes;
       return ts.is_arithmetic(to) || ts.is_enum(to) ? no : unmodelled;
     }
     if (ts.is(to, Builtin::bool_)) return yes;  // [conv.bool]
@@ -2407,6 +2407,8 @@ public:
       }
       std::unreachable();
     };
+    // Only `void` converts to `void` ([meta.rel]).
+    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
     // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
     // throw ([conv.ptr], [conv.qual], [conv.bool]).
     if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t)))
@@ -2439,8 +2441,7 @@ public:
     const auto scalar = [&](QualType t) {
       return ts.is_arithmetic(t) || ts.is_pointer(t) || ts.is(t, Builtin::nullptr_t);
     };
-    if ((!from_void && !scalar(from_object)) || (!to_void && !scalar(to_object))) return unsupported();
-    if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
+    if (!scalar(from_object) || !scalar(to_object)) return unsupported();
     // These conversions and bindings do not throw either.
     if (!target_reference) return answer(scalar_conversion(from_object, to_object, loc));
     return answer(scalar_reference_binding(from_object, source_lvalue, to, loc));

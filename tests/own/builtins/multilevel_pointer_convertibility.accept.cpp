@@ -19,7 +19,10 @@ static_assert(!__is_convertible(D**, B**) && !__is_convertible(D**, const B* con
 static_assert(__is_convertible(int**, void*) && __is_convertible(int* const*, const void*));
 static_assert(!__is_convertible(int* const*, void*) && !__is_convertible(int***, void**));
 static_assert(__is_convertible(int**, bool) && !__is_convertible(int**, int));
-static_assert(__is_convertible(decltype(nullptr), int* const*));
+static_assert(__is_convertible(decltype(nullptr), int* const*) && __is_convertible(decltype(nullptr), decltype(nullptr)));
+// Only `void` converts to `void` ([meta.rel]).
+static_assert(!__is_convertible(int*, void) && !__is_convertible(decltype(nullptr), const void));
+static_assert(!__is_convertible(C, void) && !__is_convertible(void, int**) && __is_convertible(void, const void));
 static_assert(!__is_convertible(int, int*) && !__is_convertible(int, decltype(nullptr)));
 
 // Function pointers: a noexcept one converts to the plain one, never to `void*` ([conv.fctptr]).

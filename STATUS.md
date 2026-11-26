@@ -2590,8 +2590,8 @@ session's.*
   reference-compatible operand (a qualification conversion of pointers to them), otherwise a
   converted temporary for a const lvalue or rvalue reference, which a reference-related (similar)
   operand allows only without dropping qualifiers or binding an rvalue reference to an lvalue
-  (#1396). Pointers made similar by a nested member pointer or array of unknown bound are
-  diagnosed. Supported class-template bases and variable-template initializers
+  (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
+  sources, are diagnosed (#1399). Supported class-template bases and variable-template initializers
   replay dependent operands and check class completeness at the demand. Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
