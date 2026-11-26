@@ -10946,7 +10946,7 @@ public:
   }
 
   // [dcl.struct.bind]/1, /2, /6: the hidden entity is an array copy or an ordinary
-  // deduced reference to the initializer. The copy takes its cv from the declaration.
+  // deduced reference to the initializer. The draft gives the copy its declared cv.
   std::optional<std::pair<QualType, Ex>> array_binding(QualType declared, Ex source, u64 names, u32 at_) {
     if (!source.ok()) return std::nullopt;
     QualType array = source.type();
@@ -10972,7 +10972,8 @@ public:
       if (!init.ok()) return std::nullopt;
       return std::pair{*ref, init};
     }
-    QualType type = types().add_cv(object_unqualified(array), Types::cv(declared));
+    const auto original = compatibility() == ast::Compatibility::spec ? object_unqualified(array) : array;
+    QualType type = types().add_cv(original, Types::cv(declared));
     if (!source.glvalue()) source = materialize(source, array, false);
     return std::pair{type, convert_node(source, ast::ConversionKind::array_copy, type)};
   }

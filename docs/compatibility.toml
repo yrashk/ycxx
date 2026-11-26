@@ -392,16 +392,14 @@ evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "structured-binding-array-cv"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "[dcl.struct.bind], CWG2506"
 prior = "Apply the defect resolution to array binding by value."
 spec = "The backing array takes the declared cv-qualification."
-gcc = "Same as spec."
-clang = "Same as spec."
-gcc_observed = "Retains const from the initializer array."
-clang_observed = "Retains const from the initializer array."
-evidence = ["tests/own/auto/p1-sb-array-cwg2506.run.cpp"]
+gcc = "Retain const and volatile from the initializer array and add any cv-qualification from the declaration."
+clang = "Same as GCC."
+evidence = ["tests/own/auto/p1-sb-array-cwg2506.run.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "adl-alias-template-namespace"
@@ -482,15 +480,28 @@ probe = 'extern "C" typedef int C(); using Cxx = int(); static_assert(!__is_same
 
 [[divergence]]
 id = "builtin-type-transform-in-symbol"
-status = "recorded"
-mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
 reference = "#211, #780"
 prior = "Use Clang's vendor-type encoding for a dependent transform in a signature."
 spec = "Use the vendor encoding for the implemented builtin extensions."
+gcc = "Diagnose an emitted function signature that still contains a dependent built-in transform. The built-in remains available in function bodies and syntax-only compilation."
+clang = "Same as spec."
+evidence = ["docs/EXTENSIONS.md", "tests/own/builtins/dependent-transform-overloads.run.cpp", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "builtin-concrete-type-transform-in-template-symbol"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "Itanium C++ ABI §5.1.5 and §5.1.5.8"
+prior = "Fold a nondependent builtin transform to its result type."
+spec = "Use the concrete result of the transform in the signature."
 gcc = "Same as spec."
 clang = "Same as spec."
-gcc_observed = "GCC 16 rejects supported dependent transforms such as __remove_cv when mangling a function signature."
-evidence = ["docs/EXTENSIONS.md", "tests/own/builtins/dependent-transform-overloads.run.cpp"]
+gcc_observed = "Accepts syntax but diagnoses emitting the function template specialization when its signature contains even a nondependent __remove_cv(const int)."
+clang_observed = "Emits the same symbol as spelling the resulting int directly."
+probe = 'template<class T> __remove_cv(const int) f(T n) { return n; } int use() { return f(7); }'
+evidence = ["docs/EXTENSIONS.md"]
 
 [[divergence]]
 id = "builtin-addressof-pack"

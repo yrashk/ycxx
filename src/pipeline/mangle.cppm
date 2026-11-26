@@ -269,9 +269,11 @@ class Mangler {
         // its argument, `u11__remove_cvIT_E`, as Clang spells it (docs/EXTENSIONS.md).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
         auto x = in_.types.get<ast::TTransform>(in_.types.canon(bare));
+        const std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
+        if (compatibility_ == ast::Compatibility::gcc)
+          return std::unexpected(std::format("a dependent built-in type trait '{}' in the signature", n));
         auto a = type(x.arg);
         if (!a) return a;
-        std::string_view n = lex::type_trait_info(lex::TypeTrait(x.trait)).name;
         inner = std::format("u{}{}I{}E", n.size(), n, *a);
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TDepSpec>(in_.types.canon(bare))) {
