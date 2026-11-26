@@ -138,6 +138,8 @@ enum class Diag : std::uint32_t {
   indirection_to_qualified_function [[=message{Severity::error, "cannot form a pointer or reference to qualified function type '{0:t}'"}]],
   noexcept_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to 'bool' in a noexcept-specifier"}]],
   explicit_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to 'bool' in an explicit-specifier"}]],
+  explicit_condition_type [[=message{Severity::error, "an explicit-specifier's condition of type '{0:t}' is not a constant convertible to 'bool'"}]],
+  explicit_class_condition [[=message{Severity::error, "an explicit-specifier's condition of class type '{0:t}' is not supported yet"}]],
   recursive_noexcept [[=message{Severity::error, "exception specification depends on itself"}]],
   function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],

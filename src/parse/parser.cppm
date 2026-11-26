@@ -2282,6 +2282,38 @@ public:
     std::optional<bool> value;
     sema::ConstId atom = sema::ConstId::none;
   };
+  // An explicit-specifier's condition `e` as a contextually converted constant expression of type
+  // bool ([dcl.fct.spec], [expr.const.const]): from bool, an integral type or an enumeration,
+  // without narrowing. Its value, or none: value-dependent (`dependent` set) or diagnosed. A class
+  // operand needs a conversion function, which is not supported yet.
+  std::optional<bool> explicit_condition_value(Ex e, bool& dependent) {
+    Ex operand = s_->rvalue(e);
+    const QualType type = sema::Types::unqualified(s_->types().canonical(operand.type()));
+    if (!s_->types().is_dependent(type)) {
+      if (s_->types().is_class(type)) {
+        s_->diag(operand.begin, Diag::explicit_class_condition, type);
+        return std::nullopt;
+      }
+      if (!s_->types().is_integral(type) && !s_->types().is_enum(type)) {
+        s_->diag(operand.begin, Diag::explicit_condition_type, type);
+        return std::nullopt;
+      }
+    }
+    Ex condition = s_->to_bool(operand, operand.begin);
+    if (!condition.ok()) return std::nullopt;
+    sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(condition);
+    if (result.value) {
+      if (s_->narrows(operand, condition.type())) {
+        s_->diag(operand.begin, Diag::explicit_narrowing, operand.type());
+        return std::nullopt;
+      }
+      return s_->world().values.as_signed(*result.value) != 0;
+    }
+    if (result.dependent) dependent = true;
+    else s_->diag(condition.begin, Diag::not_constant, result.reason);
+    return std::nullopt;
+  }
+
   std::optional<ExplicitSpec> explicit_specifier(bool want_atom) {
     if (!accept(Tk::l_paren)) return ExplicitSpec{true};
     const int saved = std::exchange(angle_, 0);
@@ -2294,20 +2326,10 @@ public:
     const u32 end_index = i_;
     angle_ = saved;
     if (!e.ok() || !expect(Tk::r_paren)) return std::nullopt;
-    Ex operand = s_->rvalue(e);
-    Ex condition = s_->to_bool(operand, operand.begin);
-    sema::Evaluated result = sema::Evaluator(*s_, questions()).evaluate(condition);
-    if (result.value) {
-      if (s_->narrows(operand, condition.type())) {
-        s_->diag(operand.begin, Diag::explicit_narrowing, operand.type());
-        return std::nullopt;
-      }
-      return ExplicitSpec{s_->world().values.as_signed(*result.value) != 0};
-    }
-    if (!result.dependent) {
-      if (condition.ok()) s_->diag(condition.begin, Diag::not_constant, result.reason);
-      return std::nullopt;
-    }
+    bool dependent = false;
+    auto value = explicit_condition_value(e, dependent);
+    if (value) return ExplicitSpec{*value};
+    if (!dependent) return std::nullopt;
     ExplicitSpec spec;
     if (want_atom) {
       // The template parameters it names: the atom's parameter mapping's ([temp.constr.atomic]/1).

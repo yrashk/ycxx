@@ -10998,32 +10998,23 @@ public:
   }
 
 private:
-  // An explicit-specifier's condition: a contextually converted constant expression of type bool
-  // ([dcl.fct.spec]). A conversion that is invalid for the mapping is a substitution failure; a
-  // narrowing one or a value that is not constant is a hard error.
+  // An explicit-specifier's condition with the arguments substituted ([dcl.fct.spec]). Where it
+  // is not a contextually converted constant expression of type bool (narrowing, not constant,
+  // not convertible), the substituted specifier is invalid and deduction fails
+  // ([temp.deduct.general]/8). A limit of ycxx's stays a hard error.
   std::optional<bool> explicit_value(Ex e, std::vector<engine::Diagnostic>& hard, bool* substitution_failed) {
     const std::size_t before = sink_.size();
-    Ex operand = s_.rvalue(e);
-    Ex condition = s_.to_bool(operand, operand.begin);
-    if (!condition.ok() || sink_.size() != before) {
-      for (std::size_t i = before; i < sink_.size(); ++i)
-        if (sema::survives_substitution(sink_[i].id)) hard.push_back(sink_[i]);
-      if (substitution_failed) *substitution_failed = true;
-      return false;
-    }
-    sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(condition);
-    if (v.type_trait_failure) return std::nullopt;
-    if (!v.value) {
-      s_.diag(0, Diag::not_constant, v.reason);
-      hard.push_back(sink_.back());
-      return false;
-    }
-    if (s_.narrows(operand, condition.type())) {
-      s_.diag(0, Diag::explicit_narrowing, operand.type());
-      hard.push_back(sink_.back());
-      return false;
-    }
-    return p_->world().values.as_signed(*v.value) != 0;
+    bool dependent = false;
+    auto value = ps_.explicit_condition_value(e, dependent);
+    bool limited = false;
+    for (std::size_t i = before; i < sink_.size(); ++i)
+      if (sema::survives_substitution(sink_[i].id)) {
+        hard.push_back(sink_[i]);
+        limited = true;
+      }
+    if (value && sink_.size() == before) return value;
+    if (!limited && substitution_failed) *substitution_failed = true;
+    return false;
   }
 
   Program* p_;
@@ -11065,7 +11056,9 @@ std::optional<bool> Program::explicit_value(ConstId c, u32 point) {
   // Still dependent, or of the item being analysed: its specializations decide.
   if (templates().constraint_dependent(c) ||
       std::ranges::contains(running_, index(w_->ins.values.get<ast::VAtom>(c).item))) return false;
-  explicit_atoms_[key] = false;  // a condition that asks for itself is not explicit
+  // A condition that asks for itself leaves the candidate out while it is evaluated, as a
+  // failed deduction ([temp.inst]: its own value is not known yet).
+  explicit_atoms_[key] = std::nullopt;
   std::vector<engine::Diagnostic> hard;
   bool substitution_failed = false;
   auto r = AtomAnalysis(*this, w_->ins.values.get<ast::VAtom>(c), point, /*explicit_specifier=*/true).run(hard, &substitution_failed);
