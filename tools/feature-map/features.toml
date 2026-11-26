@@ -2145,7 +2145,8 @@ clauses = ['temp.param']
 std = 'C++17'
 ftm = '__cpp_nontype_template_parameter_auto'
 detect = '''\btemplate\s*<[^;{<>]*\bauto\b'''
-status = 'missing'
+status = 'partial'
+note = 'Deduces scalar constant template arguments and packs, including mode-specific array-bound deduction. Floating-point and further structural argument forms remain open.'
 issues = [286]
 probe = '''
 template<auto N> int get() { return N; }
