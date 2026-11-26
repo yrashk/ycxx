@@ -262,6 +262,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a == "-fcheck-policies") o.check_policies = true;
     else if (a == "-O0") o.optimization = pipeline::OptimizationMode::none;
     else if (a == "-fycxx-optimize=heuristic") o.optimization = pipeline::OptimizationMode::heuristic;
+    else if (a == "-fycxx-optimize=solver") o.optimization = pipeline::OptimizationMode::solver;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-MD") o.dependencies = true;
     else if (a.starts_with("-MF") || a.starts_with("-MT")) {

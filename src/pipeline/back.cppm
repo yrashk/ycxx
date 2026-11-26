@@ -35,6 +35,7 @@ export module ycxx.pipeline:back;
 
 import std;
 import ycxx.ast;
+import ycxx.cm;
 import ycxx.engine;
 import ycxx.ir;
 import ycxx.ir.l2;
@@ -705,7 +706,7 @@ struct UnitQ {
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
 };
 
-enum class OptimizationMode : std::uint8_t { none, heuristic };
+enum class OptimizationMode : std::uint8_t { none, heuristic, solver };
 
 struct OptKey {
   Fp128 unit;
@@ -715,12 +716,16 @@ struct OptKey {
   bool operator==(const OptKey&) const = default;
 };
 enum class RewriteOutcome : std::uint8_t { none, applied, no_candidates, rejected, unsupported_target };
+enum class FusionOutcome : std::uint8_t { none, no_candidates, invalid_model, budget_exhausted, rejected };
 struct Machine {
   std::optional<aarch64::MachineCode> code;
   std::string error;
   std::optional<x86_64::MachineCode> linux_code{};
   RewriteOutcome rewrites = RewriteOutcome::none;
   std::uint32_t candidates = 0;
+  std::uint32_t fused_pairs = 0;
+  std::uint32_t saved_bytes = 0;
+  FusionOutcome fusion = FusionOutcome::none;
   bool ok() const { return code.has_value() || linux_code.has_value(); }
 };
 // `optimized(unit, target, options, optimizer_version, level)` (§A8.1). The version is the
@@ -1410,14 +1415,31 @@ std::string Optimized::show(const Machine& m) {
   switch (m.rewrites) {
     case RewriteOutcome::none: break;
     case RewriteOutcome::applied:
-      decision = std::format("path=heuristic candidates={0} applied={0} validation=passed\n", m.candidates);
+      decision = std::format("{0}=heuristic candidates={1} applied={1} validation=passed\n",
+                             m.fused_pairs ? "prepass" : "path", m.candidates);
       break;
-    case RewriteOutcome::no_candidates: decision = "path=baseline fallback=no_candidates\n"; break;
+    case RewriteOutcome::no_candidates:
+      if (!m.fused_pairs && m.fusion == FusionOutcome::none) decision = "path=baseline fallback=no_candidates\n";
+      break;
     case RewriteOutcome::rejected:
       decision = std::format("path=baseline candidates={} applied=0 fallback=validation_or_emission_failed\n",
                              m.candidates);
       break;
     case RewriteOutcome::unsupported_target: decision = "path=baseline fallback=unsupported_target\n"; break;
+  }
+  if (m.fused_pairs != 0)
+    decision = std::format("path=solver fused_pairs={} saved_bytes={} validation=passed\n", m.fused_pairs, m.saved_bytes) + decision;
+  std::string_view fusion_fallback;
+  switch (m.fusion) {
+    case FusionOutcome::none: break;
+    case FusionOutcome::no_candidates: fusion_fallback = "no_candidates"; break;
+    case FusionOutcome::invalid_model: fusion_fallback = "invalid_model"; break;
+    case FusionOutcome::budget_exhausted: fusion_fallback = "budget_exhausted"; break;
+    case FusionOutcome::rejected: fusion_fallback = "emitted_size_or_codegen_validation_failed"; break;
+  }
+  if (!fusion_fallback.empty()) {
+    if (decision.empty()) decision = "path=baseline ";
+    decision += std::format("fusion_fallback={}\n", fusion_fallback);
   }
   if (m.linux_code)
     return decision + std::format("{} bytes, {} relocations\n", m.linux_code->bytes.size(), m.linux_code->relocs.size());
@@ -1797,6 +1819,17 @@ std::vector<DivisionRewrite> power_of_two_divisions(const l2::Function& body) {
   return rewrites;
 }
 
+std::optional<l2::Function> rewrite_divisions(const l2::Function& body,
+                                              std::span<const DivisionRewrite> rewrites) {
+  if (rewrites.empty()) return {};
+  auto transformed = body;
+  for (const auto& rewrite : rewrites) {
+    transformed.nodes[rewrite.node].op = rewrite.op;
+    transformed.imms[rewrite.immediate] = rewrite.operand;
+  }
+  return transformed;
+}
+
 }  // namespace
 
 struct DivisionModel {
@@ -1812,6 +1845,138 @@ struct DivisionModel {
   }
 };
 
+using DivisionGroups = std::vector<std::vector<x86_64::DivisionSite>>;
+
+void division_prefix_choices(std::span<const x86_64::DivisionSite> group,
+                             std::vector<cm::PrefixChoice>& choices) {
+  choices.clear();
+  std::array<std::uint32_t, 2> counts{};
+  for (const auto& site : group) {
+    ++counts[site.quotient];
+    choices.push_back({std::min(counts[0], counts[1]), site.saved_bytes});
+  }
+}
+
+struct FusionModel {
+  DivisionGroups groups;
+  std::string error;
+};
+struct DivisionFusionModel {
+  using Key = Fp128;
+  using Value = FusionModel;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    auto groups = x86_64::group_divisions(universe().units->at(unit).body.f);
+    co_await cx.stop_point();
+    if (!groups) co_return Value{{}, groups.error()};
+    co_return Value{std::move(*groups), {}};
+  }
+  static std::string show(const Value& v) {
+    if (!v.error.empty()) return "model=unsigned_divrem_fusion fallback=" + v.error;
+    auto out = std::format("model=unsigned_divrem_fusion equivalence_groups={}", v.groups.size());
+    if (v.groups.size() == 1 && v.groups.front().size() <= 8) {
+      std::vector<cm::PrefixChoice> choices;
+      division_prefix_choices(v.groups.front(), choices);
+      out += "\nprefix_capacity:byte_benefit";
+      for (const auto choice : choices) out += std::format(" {}:{}", choice.capacity, choice.benefit);
+    }
+    return out;
+  }
+};
+
+struct FusionResult {
+  std::vector<x86_64::DivisionPair> pairs;
+  std::uint32_t saved_bytes = 0;
+  std::size_t visits = 0;
+  std::optional<cm::PrefixFailure> failure;
+};
+struct DivisionFusionSolve {
+  static constexpr std::size_t visit_budget = 4'096;
+  using Key = Fp128;
+  using Value = FusionResult;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    // Optimized builds the model first. Fetch the completed value to record the dependency,
+    // then do the solve synchronously on this worker.
+    const auto& model = co_await cx.fetch<DivisionFusionModel>(unit);
+    co_await cx.stop_point();
+    Value result;
+    std::vector<cm::PrefixChoice> choices;
+    for (const auto& group : model.groups) {
+      co_await cx.stop_point();
+      if (group.size() > visit_budget - result.visits)
+        co_return Value{{}, 0, result.visits, cm::PrefixFailure::budget_exhausted};
+
+      division_prefix_choices(group, choices);
+      const auto selected = cm::solve_prefix_choices(choices, visit_budget - result.visits, cx.stop_token());
+      co_await cx.stop_point();
+      if (!selected) co_return Value{{}, 0, result.visits, selected.error()};
+      result.visits += group.size();
+
+      // An accepted later site must have a free earlier site of the opposite operation.
+      // Prefix feasibility ensures this in both directions, so reconstruct in source order.
+      std::array<std::vector<ir::NodeId>, 2> free;
+      auto next = selected->begin();
+      for (std::size_t i = 0; i < group.size(); ++i) {
+        const auto& site = group[i];
+        if (next == selected->end() || *next != i) {
+          free[site.quotient].push_back(site.node);
+          continue;
+        }
+        auto& opposite = free[!site.quotient];
+        if (opposite.empty()) co_return Value{{}, 0, result.visits, cm::PrefixFailure::unsupported};
+        result.pairs.push_back({opposite.back(), site.node});
+        opposite.pop_back();
+        result.saved_bytes += site.saved_bytes;
+        ++next;
+      }
+    }
+    co_await cx.stop_point();
+    co_return result;
+  }
+  static std::string show(const Value& v) {
+    if (v.failure)
+      return std::format("model=unsigned_divrem_fusion backend=exact_prefix budget={} visits={} fallback={}",
+                         visit_budget, v.visits,
+                         *v.failure == cm::PrefixFailure::budget_exhausted ? "budget_exhausted" : "invalid_model");
+    return std::format("model=unsigned_divrem_fusion backend=exact_prefix budget={} visits={} outcome=optimal pairs={} predicted_saved_bytes={}",
+                       visit_budget, v.visits, v.pairs.size(), v.saved_bytes);
+  }
+};
+
+struct DivisionFusionValidate {
+  using Key = Fp128;
+  using Value = Machine;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& u = universe().units->at(key);
+    const auto& fusion = co_await cx.fetch<DivisionFusionSolve>(key);
+    const auto& rewrites = co_await cx.fetch<DivisionModel>(key);
+    co_await cx.stop_point();
+
+    auto rewritten = rewrite_divisions(u.body.f, rewrites);
+    const auto& body = rewritten ? *rewritten : u.body.f;
+    auto heuristic = x86_64::compile_function(body, u.local, u.got_symbols);
+    co_await cx.stop_point();
+    const auto candidates = std::uint32_t(rewrites.size());
+    if (!heuristic) {
+      if (rewritten) heuristic = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
+      co_await cx.stop_point();
+      if (!heuristic)
+        co_return Machine{std::nullopt, heuristic.error(), {}, RewriteOutcome::rejected,
+                          candidates, 0, 0, FusionOutcome::rejected};
+      co_return Machine{std::nullopt, {}, std::move(*heuristic), RewriteOutcome::rejected,
+                        candidates, 0, 0, FusionOutcome::rejected};
+    }
+    const auto outcome = rewritten ? RewriteOutcome::applied : RewriteOutcome::no_candidates;
+    auto paired = x86_64::compile_function(body, u.local, u.got_symbols, fusion.pairs);
+    co_await cx.stop_point();
+    if (paired && paired->bytes.size() + fusion.saved_bytes == heuristic->bytes.size())
+      co_return Machine{std::nullopt, {}, std::move(*paired), outcome, candidates,
+                        std::uint32_t(fusion.pairs.size()), fusion.saved_bytes};
+    co_return Machine{std::nullopt, {}, std::move(*heuristic), outcome, candidates, 0, 0, FusionOutcome::rejected};
+  }
+  static std::string show(const Value& v) { return Optimized::show(v); }
+  static std::string errors(const Value& v) { return Optimized::errors(v); }
+};
+
 engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   (void)cx.fetch<CostModelIn>(k.target);  // part of `target` (§O8); level 0 reads no cost
   const OptUnit& u = universe().units->at(k.unit);
@@ -1819,26 +1984,36 @@ engine::query_task<Machine> Optimized::run(engine::Ctx& cx, OptKey k) {
   if (k.target == obj::target::x86_64_linux) {
     RewriteOutcome outcome = RewriteOutcome::none;
     std::uint32_t candidates = 0;
+    const FusionResult* fusion = nullptr;
+    FusionOutcome fusion_outcome = FusionOutcome::none;
+    if (k.mode == OptimizationMode::solver) {
+      const auto& model = co_await cx.fetch<DivisionFusionModel>(k.unit);
+      if (!model.error.empty()) fusion_outcome = FusionOutcome::invalid_model;
+      else if (model.groups.empty()) fusion_outcome = FusionOutcome::no_candidates;
+      else {
+        fusion = &co_await cx.fetch<DivisionFusionSolve>(k.unit);
+        if (fusion->failure)
+          fusion_outcome = *fusion->failure == cm::PrefixFailure::budget_exhausted
+            ? FusionOutcome::budget_exhausted : FusionOutcome::invalid_model;
+      }
+    }
     if (k.mode != OptimizationMode::none) {
       const auto& rewrites = co_await cx.fetch<DivisionModel>(k.unit);
       candidates = std::uint32_t(rewrites.size());
       outcome = RewriteOutcome::no_candidates;
-      if (!rewrites.empty()) {
-        auto body = u.body.f;
-        for (const auto& rewrite : rewrites) {
-          body.nodes[rewrite.node].op = rewrite.op;
-          body.imms[rewrite.immediate] = rewrite.operand;
-        }
-        auto optimized = x86_64::compile_function(body, u.local, u.got_symbols);
+      if (fusion && !fusion->pairs.empty()) co_return co_await cx.fetch<DivisionFusionValidate>(k.unit);
+      if (auto rewritten = rewrite_divisions(u.body.f, rewrites)) {
+        auto optimized = x86_64::compile_function(*rewritten, u.local, u.got_symbols);
         co_await cx.stop_point();
         if (optimized)
-          co_return Machine{std::nullopt, {}, std::move(*optimized), RewriteOutcome::applied, candidates};
+          co_return Machine{std::nullopt, {}, std::move(*optimized), RewriteOutcome::applied,
+                            candidates, 0, 0, fusion_outcome};
         outcome = RewriteOutcome::rejected;
       }
     }
     auto m = x86_64::compile_function(u.body.f, u.local, u.got_symbols);
-    if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome, candidates};
-    co_return Machine{std::nullopt, {}, std::move(*m), outcome, candidates};
+    if (!m) co_return Machine{std::nullopt, m.error(), {}, outcome, candidates, 0, 0, fusion_outcome};
+    co_return Machine{std::nullopt, {}, std::move(*m), outcome, candidates, 0, 0, fusion_outcome};
   }
   const auto outcome = k.mode == OptimizationMode::none ? RewriteOutcome::none : RewriteOutcome::unsupported_target;
   auto m = aarch64::compile_function(u.body.f, u.local);

@@ -44,6 +44,25 @@ export struct MachineCode {
   bool operator==(const MachineCode&) const = default;
 };
 
+export struct DivisionPair {
+  ir::NodeId first;
+  ir::NodeId second;
+  bool operator==(const DivisionPair&) const = default;
+};
+
+export struct DivisionSite {
+  ir::NodeId node;
+  bool quotient;
+  std::uint32_t saved_bytes;  // if this is the later node of a pair
+  bool operator==(const DivisionSite&) const = default;
+};
+
+// In verified L2, the earlier node can produce both results of the same unsigned division.
+export bool compatible_division_pair(const l2::Function& body, DivisionPair pair);
+// Each group has identical operands and contains both quotients and remainders in block order.
+export std::expected<std::vector<std::vector<DivisionSite>>, std::string>
+group_divisions(const l2::Function& body);
+
 // Compile well-formed L2 with INTEGER ABI values and direct scalar SSE values.
 // The producer checks original signatures and ellipsis types and flattens INTEGER records.
 // L2 can erase the distinction between scalar and class arguments or results. Pass
@@ -52,7 +71,8 @@ export struct MachineCode {
 // symbols in `got_symbols` so their addresses load through the ELF GOT.
 export std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                                 std::span<const ir::EntityId> direct_symbols = {},
-                                                                std::span<const ir::EntityId> got_symbols = {});
+                                                                std::span<const ir::EntityId> got_symbols = {},
+                                                                std::span<const DivisionPair> division_pairs = {});
 
 export struct EhFrameCies {
   std::optional<std::uint32_t> ordinary, handler;
@@ -141,6 +161,32 @@ bool supports_float(Op op) {
 }
 
 bool is_invoke(Op op) { return op == Op::invoke || op == Op::invoke_cleanup; }
+
+enum class OperandKind { value, constant, load };
+using DivisionOperand = std::tuple<Type, OperandKind, std::uint64_t, std::uint64_t, std::uint64_t>;
+
+DivisionOperand division_operand(const l2::Function& body, ValueId id) {
+  const auto& value = body.value(id);
+  const DivisionOperand identity{value.type, OperandKind::value, raw(id), 0, 0};
+  if (value.param) return identity;
+  const NodeId node{value.def};
+  const auto& def = body.node(node);
+  if (def.flags != 0) return identity;
+  if (def.op == Op::const_)
+    return {value.type, OperandKind::constant, body.imms_of(node).front(), 0, 0};
+  if (def.op != Op::load) return identity;
+  // Ordinary loads must have the same state, address and alias information. The emitter
+  // still evaluates both loads in their original positions.
+  const auto operands = body.operands_of(node);
+  return {value.type, OperandKind::load, raw(operands[0]), raw(operands[1]), body.imms_of(node).front()};
+}
+
+bool unsigned_division(const l2::Function& body, NodeId id) {
+  const auto& node = body.node(id);
+  if (node.flags || (node.op != Op::udiv && node.op != Op::urem)) return false;
+  const auto type = body.type(body.result(id));
+  return type == Type::i32 || type == Type::i64;
+}
 
 std::expected<Frame, std::string> layout(const l2::Function& body) {
   // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
@@ -236,9 +282,10 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 class Emitter {
  public:
   Emitter(const l2::Function& body, const Frame& frame, std::span<const ir::EntityId> direct_symbols,
-          std::span<const ir::EntityId> got_symbols)
+          std::span<const ir::EntityId> got_symbols,
+          std::span<const std::optional<NodeId>> division_peers)
       : body_(body), frame_(frame), direct_symbols_(direct_symbols), got_symbols_(got_symbols),
-        block_offsets_(body.blocks.size()) {}
+        division_peers_(division_peers), block_offsets_(body.blocks.size()) {}
 
   std::expected<MachineCode, std::string> run() {
     for (std::uint32_t n = 0; n < body_.nodes.size(); ++n)
@@ -286,6 +333,7 @@ class Emitter {
   const Frame& frame_;
   std::span<const ir::EntityId> direct_symbols_;
   std::span<const ir::EntityId> got_symbols_;
+  std::span<const std::optional<NodeId>> division_peers_;
   MachineCode out_;
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
@@ -620,12 +668,20 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       e_.move(rax, rdx);
       break;
     case Op::sdiv: case Op::udiv: case Op::srem: case Op::urem: {
+      const auto peer = division_peers_.empty() ? std::nullopt : division_peers_[raw(n)];
+      if (peer && raw(*peer) < raw(n)) return {};
       Type type = body_.type(body_.result(n));
       if (type != Type::i32 && type != Type::i64)
         return at_node(n, op, "operation is outside the x86-64 integer subset");
       read(ops[0]);
       read(ops[1], rcx);
       e_.divide(rcx, op == Op::sdiv || op == Op::srem, type == Type::i64);
+      if (peer) {
+        // Unsigned 32-bit DIV zero-extends EAX and EDX. Store the later result in its own
+        // home now, so intervening instructions may overwrite both scratch registers.
+        const auto result = body_.result(*peer);
+        e_.store(rbp, frame_.slots[raw(result)], op == Op::udiv ? rdx : rax, 8);
+      }
       if (op == Op::srem || op == Op::urem) e_.move(rax, rdx);
       break;
     }
@@ -838,15 +894,83 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
 
 }  // namespace
 
+bool compatible_division_pair(const l2::Function& body, DivisionPair pair) {
+  if (raw(pair.first) >= raw(pair.second) || raw(pair.second) >= body.nodes.size()) return false;
+  if (!unsigned_division(body, pair.first) || !unsigned_division(body, pair.second)) return false;
+  const auto& first = body.node(pair.first);
+  const auto& second = body.node(pair.second);
+  if (first.block != second.block || first.op == second.op) return false;
+  const auto lhs = body.operands_of(pair.first);
+  const auto rhs = body.operands_of(pair.second);
+  return division_operand(body, lhs[0]) == division_operand(body, rhs[0]) &&
+         division_operand(body, lhs[1]) == division_operand(body, rhs[1]);
+}
+
+std::expected<std::vector<std::vector<DivisionSite>>, std::string> group_divisions(const l2::Function& body) {
+  using Operands = std::pair<DivisionOperand, DivisionOperand>;
+  std::vector<std::vector<DivisionSite>> groups;
+  for (const auto block : body.block_ids()) {
+    std::map<Operands, std::vector<DivisionSite>> sites;
+    for (const auto id : body.nodes_of(block)) {
+      if (!unsigned_division(body, id)) continue;
+      const auto operands = body.operands_of(id);
+      const auto divisor = division_operand(body, operands[1]);
+      // The existing shift/mask path remains the policy for constant power-of-two divisors.
+      if (std::get<1>(divisor) == OperandKind::constant) {
+        auto value = std::get<2>(divisor);
+        if (body.type(operands[1]) == Type::i32) value = std::uint32_t(value);
+        if (std::has_single_bit(value)) continue;
+      }
+      sites[{division_operand(body, operands[0]), divisor}].push_back({id, body.node(id).op == Op::udiv, 0});
+    }
+    for (auto& [operand, group] : sites) {
+      if (std::ranges::any_of(group, [&](const DivisionSite& s) { return s.quotient != group.front().quotient; }))
+        groups.push_back(std::move(group));
+    }
+  }
+  if (groups.empty()) return groups;
+  std::ranges::sort(groups, {}, [](const auto& group) { return group.front().node; });
+  const auto frame = layout(body);
+  if (!frame) return std::unexpected(frame.error());
+  std::vector<std::uint8_t> bytes;
+  Encoder encoder(bytes);
+  for (auto& group : groups) {
+    for (auto& site : group) {
+      const auto operands = body.operands_of(site.node);
+      const bool wide = body.type(body.result(site.node)) == Type::i64;
+      bytes.clear();
+      encoder.load(rax, rbp, frame->slots[raw(operands[0])], 8);
+      encoder.load(rcx, rbp, frame->slots[raw(operands[1])], 8);
+      encoder.divide(rcx, false, wide);
+      if (!site.quotient) encoder.move(rax, rdx);
+      if (!wide) encoder.reg({0x89}, rax, rax, false);
+      // The later result still gets the same store to its home, just earlier in the block.
+      site.saved_bytes = std::uint32_t(bytes.size());
+    }
+  }
+  return groups;
+}
+
 std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                          std::span<const ir::EntityId> direct_symbols,
-                                                         std::span<const ir::EntityId> got_symbols) {
+                                                         std::span<const ir::EntityId> got_symbols,
+                                                         std::span<const DivisionPair> division_pairs) {
   if (auto valid = l2::verify(body); !valid) return std::unexpected(valid.error());
   if (std::ranges::contains(body.values, Type::i128, &l2::Value::type))
     return std::unexpected("an i128 value was not legalized");
+  std::vector<std::optional<NodeId>> division_peers;
+  if (!division_pairs.empty()) division_peers.resize(body.nodes.size());
+  for (const auto pair : division_pairs) {
+    if (!compatible_division_pair(body, pair)) return std::unexpected("invalid unsigned division pair");
+    auto& first = division_peers[raw(pair.first)];
+    auto& second = division_peers[raw(pair.second)];
+    if (first || second) return std::unexpected("overlapping unsigned division pairs");
+    first = pair.second;
+    second = pair.first;
+  }
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
-  return Emitter(body, *frame, direct_symbols, got_symbols).run();
+  return Emitter(body, *frame, direct_symbols, got_symbols, division_peers).run();
 }
 
 std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,

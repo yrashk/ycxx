@@ -30,6 +30,37 @@ int main() {
 }
 '''
 
+FUSION_SOURCE = '''\
+using Word = unsigned long long;
+Word quotient(Word x, Word d) { return x / d; }
+Word remainder(Word x, Word d) { return x % d; }
+Word wide_pair(Word x, Word d) { return ((x / d) << 2) ^ (x % d); }
+unsigned narrow_pair(unsigned x, unsigned d) { return (x % d) ^ ((x / d) << 3); }
+Word overlapping(Word x, Word d) { return (x % d) + (x / d) * 17 + (x / d) * 3; }
+Word different(Word x, Word y, Word d) { return (x / d) ^ (y % d); }
+Word forced_loads(volatile Word* x, Word d) { return (*x / d) ^ (*x % d); }
+Word changed(Word* x, Word d) {
+  Word a = *x / d;
+  *x += 1;
+  return a ^ (*x % d);
+}
+
+int main() {
+  Word x = 0;
+  for (int i = 0; i < 10000; ++i) {
+    Word d = (x >> 41) + 1;
+    if (wide_pair(x, d) != ((quotient(x, d) << 2) ^ remainder(x, d))) return 1;
+    unsigned y = static_cast<unsigned>(x);
+    unsigned e = static_cast<unsigned>(d);
+    if (narrow_pair(y, e) != (static_cast<unsigned>(remainder(y, e)) ^
+                            (static_cast<unsigned>(quotient(y, e)) << 3))) return 2;
+    if (overlapping(x, d) != remainder(x, d) + quotient(x, d) * 20) return 3;
+    x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+  }
+  return 0;
+}
+'''
+
 
 def main(ycxx):
     world = Env(ycxx)
@@ -72,6 +103,33 @@ def main(ycxx):
                 subprocess.run([scope / 'program'], cwd=scope, check=True, timeout=30)
                 images.append((scope / 'program').read_bytes())
             assert images[0] != images[1]
+
+        (scope / 'fusion.cpp').write_text(FUSION_SOURCE)
+        solver = '-fycxx-optimize=solver'
+        compile(world.daemon, optimizer, '-c', 'fusion.cpp', '-o', 'fusion.o')
+        comparison = (scope / 'fusion.o').read_bytes()
+        trace = compile(world.daemon, solver, '--trace-engine=json', '-c', 'fusion.cpp', '-o', 'fusion.o')
+        solved = (scope / 'fusion.o').read_bytes()
+        assert solved != comparison
+        events = [json.loads(line) for line in trace.splitlines()]
+        solves = [row for row in events if row.get('kind') == 'DivisionFusionSolve' and row['outcome'] == 'executed']
+        assert len(solves) == 3, solves
+        assert all(row['worker'] == row['end_worker'] and 'backend=exact_prefix budget=4096' in row['value'] and
+                   'outcome=optimal pairs=1' in row['value'] for row in solves), solves
+        validations = [row for row in events if row.get('kind') == 'DivisionFusionValidate' and
+                       row['outcome'] == 'executed']
+        assert len(validations) == 3 and all('validation=passed' in row['value'] for row in validations), validations
+        decisions = [row['value'] for row in events if row.get('kind') == 'Optimized' and
+                     row['outcome'] == 'executed' and row['value'].startswith('path=solver ')]
+        assert len(decisions) == 3 and all('validation=passed' in row for row in decisions), decisions
+        for workers in ('1', '4'):
+            cold = dict(world.cold, YCXX_THREADS=workers)
+            compile(cold, solver, '-c', 'fusion.cpp', '-o', 'fusion.o')
+            assert (scope / 'fusion.o').read_bytes() == solved
+        if NATIVE_LINUX:
+            for mode in (optimizer, solver):
+                compile(world.daemon, mode, '-nostdlib', 'fusion.cpp', '-o', 'program')
+                subprocess.run([scope / 'program'], cwd=scope, check=True, timeout=30)
     finally:
         world.close()
 
