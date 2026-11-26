@@ -134,6 +134,8 @@ public:
     case TypeKind::template_param: {
       auto a = b.at(r.depth, r.index);
       if (!a) return t;
+      // A placeholder non-type parameter's type is its argument's ([temp.arg.nontype]/1).
+      if (a->kind == TemplateArgKind::value) return types().add_cv(a->type, cv);
       if (a->kind != TemplateArgKind::type) return std::nullopt;
       return types().add_cv(a->type, cv);
     }
@@ -1269,6 +1271,10 @@ public:
     if (pr.kind == TypeKind::dep_name || pr.kind == TypeKind::transform || pr.kind == TypeKind::pack_index) return true;
     if (partial_deduction_ && pr.kind == TypeKind::builtin && pr.builtin == Builtin::dependent) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
+      // A placeholder non-type parameter's type (`decltype(X)`) is deduced only from X's
+      // argument ([temp.arg.nontype]/1): here it is a non-deduced context ([temp.deduct.type]/5).
+      if (pr.index < head_.size() && head_[pr.index].depth == depth && head_[pr.index].kind == TemplateArgKind::value)
+        return true;
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
       if (!within(cp, ca) && !allow.more_cv) return false;
       QualType v = types().add_cv(Types::unqualified(ac), Cv(std::to_underlying(ca) & ~std::to_underlying(cp)));
@@ -1431,7 +1437,8 @@ public:
       const u16 index = ins().values.get<ast::VDepParam>(x.value).index;
       if (needs_class_value_check(y.type, x.type, y.value)) {
         if (index >= head_.size() || head_[index].pack) return false;
-        auto value = converted_value(y, head_[index].type);
+        auto value = head_[index].placeholder != ast::Placeholder::none ? placeholder_value(y)
+                                                                        : converted_value(y, head_[index].type);
         return value && bind(out, index, *value);
       }
       return bind(out, index, y);
@@ -1623,6 +1630,12 @@ public:
     // ([temp.deduct.type]/20).
     for (std::size_t i = 0; i < params.size(); ++i) {
       if (!out[i] || params[i].kind != TemplateArgKind::value || params[i].pack) continue;
+      if (params[i].placeholder != ast::Placeholder::none) {  // the deduced value's own type
+        auto v = placeholder_value(*out[i]);
+        if (!v) return std::nullopt;
+        out[i] = *v;
+        continue;
+      }
       auto pt = substitute(params[i].type, bindings(depth, out));
       if (pt && types().is_class(*pt) && types().is_dependent(params[i].type)) return std::nullopt;
       auto v = pt ? converted_value(*out[i], *pt) : std::nullopt;
@@ -1769,6 +1782,10 @@ public:
       if (a.kind != p.kind) return std::nullopt;
       if (p.kind == TemplateArgKind::type) return a;
       if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
+      if (p.placeholder != ast::Placeholder::none) {
+        if (deferred(a)) return types().is_integral(a.type) || types().is_dependent(a.type) ? std::optional(a) : std::nullopt;
+        return placeholder_value(a);
+      }
       auto pt = substitute(p.type, bindings(depth, out));
       if (pt && types().is_class(*pt) && types().is_dependent(p.type)) return std::nullopt;
       if (deferred(a)) return pt && (types().is_integral(*pt) || types().is_dependent(*pt)) ? std::optional(a) : std::nullopt;
@@ -1894,6 +1911,22 @@ public:
     return ok;
   }
 
+  // The argument of a non-type parameter declared with a placeholder: the parameter's type is
+  // deduced from the argument ([temp.arg.nontype]/1, [dcl.type.auto.deduct]), here the argument's
+  // own type without cv, and must be structural ([temp.param]/7). Template-argument identity
+  // then includes that type ([temp.type]): `1` and `1u` are different arguments.
+  // `decltype(auto)` deduces the same, which is right for a prvalue or an unparenthesized name
+  // but not for a parenthesized lvalue, whose value category the argument no longer has (#1401).
+  std::optional<TemplateArg> placeholder_value(const TemplateArg& a) {
+    if (a.kind != TemplateArgKind::value) return std::nullopt;
+    const QualType t = types().canonical(Types::unqualified(a.type));
+    if (types().is_dependent(t)) return TemplateArg{TemplateArgKind::value, t, a.value};
+    if (!types().is_integral(t) && !types().is_enum(t) && !types().is_pointer(t) && !types().is_member_pointer(t) &&
+        !types().is(t, Builtin::nullptr_t) && !types().is_class(t))
+      return std::nullopt;
+    return converted_value(TemplateArg{TemplateArgKind::value, t, a.value}, t);
+  }
+
   // A template argument's value as a converted constant expression of type `t` ([expr.const]):
   // an integral conversion that is not narrowing, or a null pointer of type std::nullptr_t to a
   // pointer. None when it does not convert.
@@ -1970,7 +2003,8 @@ public:
     for (std::size_t i = 0; i < params.size(); ++i) {
       // A class-valued parameter's declared type is fixed in this profile. Check before
       // accepting a deduced argument or any form of omitted default ([temp.arg.nontype]).
-      if (params[i].kind == TemplateArgKind::value && types().is_dependent(params[i].type)) {
+      if (params[i].kind == TemplateArgKind::value && params[i].placeholder == ast::Placeholder::none &&
+          types().is_dependent(params[i].type)) {
         auto type = substitute(params[i].type, bindings(depth, out));
         if (type && types().is_class(*type) && !types().is_dependent(*type)) return std::nullopt;
       }

@@ -898,6 +898,7 @@ class Mangler {
     std::string r = p.pack ? "Tp" : "";
     if (p.kind == ast::TemplateArgKind::type) return r + "Ty";
     if (p.kind == ast::TemplateArgKind::value) {
+      if (p.placeholder != ast::Placeholder::none) return r + (p.placeholder == ast::Placeholder::decltype_auto ? "TnDc" : "TnDa");
       auto t = type(p.type);
       if (!t) return t;
       return r + "Tn" + *t;

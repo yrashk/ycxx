@@ -2729,6 +2729,23 @@ public:
     if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
+    // `auto X`, `decltype(auto) X`, `auto... Xs` ([temp.param]/7): each argument deduces the
+    // parameter's type ([temp.arg.nontype]/1, [dcl.type.auto.deduct]). Inside the template that
+    // type is dependent, the parameter's own position, so `decltype(X)` names it.
+    if (s_->types().kind(t) == sema::TypeKind::placeholder) {
+      const sema::TypeRec r = s_->types().rec(t);
+      if (r.entity != sema::EntityId::none) {  // `C auto X` (#286)
+        s_->diag(at, Diag::not_supported, Tk::kw_auto);
+        ok = false;
+        return std::nullopt;
+      }
+      p.placeholder = r.decltype_auto ? ast::Placeholder::decltype_auto : ast::Placeholder::auto_;
+      t = s_->types().template_param(depth, index, p.pack != 0);
+    } else if (s_->types().has_placeholder(t)) {  // `auto* P`, `auto& R` (#1401)
+      s_->diag(at, Diag::not_supported, Tk::kw_auto);
+      ok = false;
+      return std::nullopt;
+    }
     // [temp.param]: a structural type, including the supported flat aggregate profile.
     const bool class_parameter = !p.pack && s_->types().is_class(t) && !s_->types().is_dependent(t) &&
                                  s_->is_complete(t) && !questions().class_layout_uncertain(s_->types().class_of(t)) &&
@@ -2751,14 +2768,17 @@ public:
       const bool saved_default = std::exchange(in_integral_template_default_, s_->types().is_integral(t));
       Ex e = conditional_expression();
       in_integral_template_default_ = saved_default;
-      auto v = s_->types().is(t, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
-      if (!v) v = template_value(e, t);
+      // A placeholder parameter's default deduces its type as an argument does.
+      QualType dt = t;
+      if (p.placeholder != ast::Placeholder::none && e.ok()) dt = sema::Types::unqualified(s_->rvalue(e).type());
+      auto v = s_->types().is(dt, Builtin::bool_) ? negated_template_variable(e) : std::nullopt;
+      if (!v) v = template_value(e, dt);
       if (!v) {
         ok = false;
         return std::nullopt;
       }
       p.has_default = 1;
-      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(t), *v};
+      p.default_ = {ast::TemplateArgKind::value, s_->types().canonical(dt), *v};
     }
     return p;
   }
