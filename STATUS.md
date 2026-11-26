@@ -2949,28 +2949,38 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   [dcl.decl.general]/4), defaulted (`B() requires C<T> = default;`), deleted or user-provided, and
   so can its out-of-class definition, which must repeat it ([temp.over.link]/6). A non-templated
   function with one is an error.
-- The clause is part of the member's identity (`EntityRec::constraints`, mixed for non-template
-  functions only when present, [basic.scope.scope]/4), so members that differ only in it are
-  overloads. A specialization reads it as the pattern does and substitutes its arguments into
+- The clause is part of the member's identity (`EntityRec::constraints`, its own tokens, mixed for
+  non-template functions only when present, [basic.scope.scope]/4), so members that differ only in
+  it are overloads. Each member-declarator has its own (GCC agrees; Clang gives a later declarator
+  the earlier clause, docs/compatibility.toml). An explicit specialization names the member its
+  specialization satisfies. The clause is mangled after the parameters (`Q`), as Clang and GCC
+  do; a concept-id clause matches them exactly, other expressions use the vendor form templates use
+  too ([#236](https://github.com/yrashk/ycxx/issues/236)). A specialization reads it as the pattern does and substitutes its arguments into
   the atoms' mappings ([temp.constr.normal]); nothing in it is checked before the member is a
   candidate ([temp.inst]), and a mapping that cannot be formed is unsatisfied
   ([temp.constr.atomic]/3). `MemberDeclRec::constraints` keeps the specialization's normal form.
-- Member calls, constructor selection and qualified calls skip a candidate whose constraints are
-  not satisfied ([over.match.viable]/3) and prefer the more constrained of non-template functions
-  with the same parameters ([over.match.best.general]/2.6).
+- Member calls, constructor selection, qualified calls and addresses of static members skip a
+  candidate whose constraints are not satisfied ([over.match.viable]/3, [over.over]/5) and prefer
+  the more constrained of non-template functions with the same parameters
+  ([over.match.best.general]/2.6). `auto` deduces from such a set when its satisfied members agree
+  ([temp.deduct.call]/6.2).
 - When a specialization is complete, `Program::eligible_special_members` marks the special members
   that are not eligible: unsatisfied, or outranked by a more constrained satisfied one of their kind
   and parameters ([special]/6). They stay user-declared and suppress implicit declarations, but are
-  no candidates, are never defined and do not count for the class's triviality. Of the
+  no candidates, are never defined and do not count for the class's triviality or POD layout. Of the
   prospective destructors one is selected ([class.dtor]/4); none or several is an error.
 - Not yet: constraints of constructor templates are checked by
   [#1398](https://github.com/yrashk/ycxx/issues/1398); constrained friends are
   [#1180](https://github.com/yrashk/ycxx/issues/1180); type-trait built-ins on class template
   specializations are [#218](https://github.com/yrashk/ycxx/issues/218); a qualified call of an
   overloaded static member also instantiates the overloads it did not select
-  ([#1461](https://github.com/yrashk/ycxx/issues/1461)).
-- Tests: `tests/own/member-requires/` (spec-only author, 41 tests; XFAILs cite #218, #157, #311,
-  #1150 and #1461).
+  ([#1461](https://github.com/yrashk/ycxx/issues/1461)); a non-static member in `sizeof` in a clause
+  ([#1299](https://github.com/yrashk/ycxx/issues/1299)); the injected-class-name naming a dependent
+  base's member in a clause ([#1524](https://github.com/yrashk/ycxx/issues/1524)); out-of-class
+  constructors of a class template with a requires-clause in its head are never emitted
+  ([#1530](https://github.com/yrashk/ycxx/issues/1530)).
+- Tests: `tests/own/member-requires/` (52: a spec-only author's, the review's and regressions;
+  XFAILs cite #218, #157, #311, #1150, #1299, #1461, #1524 and #1530).
 
 ## Access control and friends (#119, 2026-11-18)
 
