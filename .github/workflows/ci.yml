@@ -55,8 +55,10 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
 
-      - name: Toolchain (GCC 16)
+      - name: Toolchain (GCC 16 and Clang 23 oracle)
         uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
 
       - name: Test driver self-test
         if: env.TIER == 'main'
@@ -66,7 +68,10 @@ jobs:
         run: tools/check-policy
 
       - name: Build and bootstrap smoke test (tools/build)
-        run: tools/build -j ${{ matrix.host.jobs }}
+        run: |
+          source deps/libycxx/tools/toolchain/activate.sh
+          test -x "$YCXX_CLANGXX"
+          tools/build -j ${{ matrix.host.jobs }}
 
       - name: Standalone YCXX Bench install and external consumer
         run: tools/ci/bench-package ${{ matrix.host.jobs }}
