@@ -464,9 +464,13 @@ struct ConstLayout {
   std::optional<ConstId> object;  // a string literal or compiler-created constant object
 };
 struct [[=engine::cheap]] LayoutConstant {
-  using Key = ConstId;
+  struct Key {
+    ConstId value;
+    bool linux_target;
+    bool operator==(const Key&) const = default;
+  };
   using Value = ConstLayout;
-  static Value run(engine::SyncCtx& cx, ConstId c);
+  static Value run(engine::SyncCtx& cx, Key key);
 };
 
 // A constant object a function or variable uses, and its entity.
@@ -517,7 +521,7 @@ class QueryLayout {
   bool is_class(EntityId e) const { return shape_of(e) != nullptr; }
   bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
-    ConstLayout v = cx_->fetch<LayoutConstant>(c);
+    ConstLayout v = cx_->fetch<LayoutConstant>({c, target_->triple == ast::x86_64_linux.triple});
     if (!v.base) return {v.bits, v.high};
     if (v.object && !std::ranges::contains(objects_, *v.object, &ConstantObjectUse::object))
       objects_.push_back({*v.object, *v.base});
@@ -1108,12 +1112,15 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
   return {};
 }
 
-ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
+ConstLayout LayoutConstant::run(engine::SyncCtx&, Key key) {
   ast::Interners& in = *universe().in;
+  const ConstId c = key.value;
   if (auto a = universe().consts->address(c)) {
     if (in.values.is<ast::VEntity>(a->object)) {
       const EntityId entity = in.values.get<ast::VEntity>(a->object).entity;
-      if (const auto* world = universe().linux_world) {
+      // Descriptor records are created in the target's semantic world. The same interned
+      // address can be used on both targets before both worlds contain the corresponding record.
+      if (const auto* world = universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin)) {
         if (const auto* record = world->entities.find(entity); record && record->constant_object != ConstId::none)
           return {a->offset, 0, entity, record->constant_object};
       }
@@ -1497,7 +1504,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (f.variadic && l.kind == ir::TypeKind::integer && l.size == 16)  // #1172
       return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
-        (allow_aggregates && (l.sysv_integer_eightbytes || (l.sysv_stack_record && (result || l.size <= 16))))) return {};
+        (allow_aggregates && (l.sysv_integer_eightbytes || l.sysv_stack_record))) return {};
     if (fixed_direct && l.sysv_empty_record) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
@@ -2825,13 +2832,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
-    auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) return std::nullopt;
-    const Entity& object = *found->second;
     const sema::World* w = universe().world_for(target);
-    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+    if (!w) return std::nullopt;
     const auto& r = w->entities.rec(id);
-    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
+    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none || r.linkage == ast::Linkage::none)
+      return std::nullopt;
     auto is_namespace = [&](EntityId scope) {
       return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
     };
@@ -2841,7 +2846,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
         return std::nullopt;
     }
-    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    if (auto found = by_id.find(ir::raw(id)); found != by_id.end()) {
+      const Entity& object = *found->second;
+      if (object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+      return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    }
+    // A constant may occur only in a written type and have no emitted object.
+    return ObjectName{std::string(w->ins.names.spelling(r.name)), r.type, r.scope,
+                      namespace_object && r.linkage == ast::Linkage::internal};
   };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
