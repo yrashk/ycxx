@@ -23,6 +23,12 @@ struct ArtifactInputPlan {
   std::size_t output;
 };
 
+struct HostArtifactInputPlan {
+  std::string name;
+  std::string path;
+  std::size_t executable;
+};
+
 struct GeneratorPlan {
   std::string name;
   Action action;
@@ -30,11 +36,17 @@ struct GeneratorPlan {
   std::string tool_fingerprint;
   std::vector<ArtifactInputPlan> artifact_inputs = {};
   bool native_outputs = false;
+  std::vector<HostArtifactInputPlan> host_inputs = {};
 };
 
 struct SourcePlan {
   std::string path;
   std::vector<std::string> includes;
+};
+
+struct HostExecutablePlan {
+  std::string name;
+  std::vector<SourcePlan> sources;
 };
 
 struct ArtifactOutputPlan {
@@ -49,6 +61,7 @@ struct ProjectPlan {
   std::vector<SourcePlan> sources;
   std::vector<ArtifactOutputPlan> runtime_assets = {};
   std::vector<LinkInputPlan> link_inputs = {};
+  std::vector<HostExecutablePlan> host_executables = {};
 };
 
 struct RuleInputPlan {
@@ -491,7 +504,8 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
   return demand;
 }
 
-enum class Primitive { unknown, executable, library, generator, observer, host_action };
+enum class Primitive { unknown, executable, library, generator, observer, host_action, host_executable };
+constexpr std::string_view host_executable_output = "executable";
 
 struct LoweredTarget {
   TargetDecl declaration;
@@ -505,6 +519,7 @@ struct ResolvedTarget {
 
 Primitive emitted_kind(std::string_view kind) {
   if (kind == "native.executable") return Primitive::executable;
+  if (kind == "native.host_executable") return Primitive::host_executable;
   if (kind == "native.library") return Primitive::library;
   if (kind == "action.generate") return Primitive::generator;
   if (kind == "action.observe") return Primitive::observer;
@@ -597,6 +612,10 @@ class Planner {
     const auto [root, kind] = find(target, {});
     if (inspection_ && kind == Primitive::generator) {
       resolve_generator(root);
+      return std::move(plan_);
+    }
+    if (inspection_ && kind == Primitive::host_executable) {
+      resolve_host_executable(root);
       return std::move(plan_);
     }
     if (kind != Primitive::executable && !(inspection_ && kind == Primitive::library))
@@ -807,7 +826,7 @@ class Planner {
       const auto& binding = *field(bindings, input.name);
       const auto& ref = as<ArtifactRef>(binding, "artifact(target, output) for a planning input");
       ++planning_edges_;
-      const auto requested = artifact(ref, binding.location);
+      const auto requested = artifact(ref, binding.location, true);
       --planning_edges_;
       artifact_dependency(decl, requested, "plan_inputs", binding.location, input.name);
       const auto [producer, output] = requested;
@@ -1036,22 +1055,44 @@ class Planner {
         const auto* ref = std::get_if<ArtifactRef>(&value.data);
         if (!ref) continue;
         if (!basename(name)) fail(value.location, "expected an artifact input name with a single path component");
-        const auto requested = artifact(*ref, value.location, decl.name);
+        const auto path_for = [&](std::string_view filename) {
+          auto path = "artifacts/" + name + '/' + std::string(filename);
+          add_input_path(input_paths, path, value.location);
+          if (inspection_) fact("input", decl, name, path, artifact_origin(*ref), value.location);
+          return path;
+        };
+        const auto target = artifact_target(ref->target, value.location, decl.name);
+        if (target.kind == Primitive::host_executable && !observer) {
+          if (ref->output != host_executable_output)
+            fail(value.location, std::format("host executable '{}' has no output '{}'", target.declaration.name,
+                                             ref->output));
+          const auto executable = resolve_host_executable(target.declaration);
+          if (inspection_)
+            dependency(decl, target.declaration.name, "inputs", value.location, host_executable_output, name);
+          plan.host_inputs.push_back({name, path_for(host_executable_output), executable});
+          continue;
+        }
+        const auto requested = generator_artifact(target, ref->output, value.location, observer);
         artifact_dependency(decl, requested, "inputs", value.location, name);
         const auto [producer, output] = requested;
-        auto path = "artifacts/" + name + '/' + plan_.generators[producer].action.outputs[output].filename;
-        add_input_path(input_paths, path, value.location);
-        if (inspection_) fact("input", decl, name, path, artifact_origin(*ref), value.location);
-        plan.artifact_inputs.push_back({name, std::move(path), producer, output});
+        const auto& filename = plan_.generators[producer].action.outputs[output].filename;
+        plan.artifact_inputs.push_back({name, path_for(filename), producer, output});
       }
     }
+    const auto artifact_input_path = [&](std::string_view name) -> std::optional<std::string_view> {
+      if (const auto binding = std::ranges::find(plan.artifact_inputs, name, &ArtifactInputPlan::name);
+          binding != plan.artifact_inputs.end()) return binding->path;
+      if (const auto binding = std::ranges::find(plan.host_inputs, name, &HostArtifactInputPlan::name);
+          binding != plan.host_inputs.end()) return binding->path;
+      return std::nullopt;
+    };
     if (staged_tool) {
-      const auto binding = std::ranges::find(plan.artifact_inputs, staged_tool->name, &ArtifactInputPlan::name);
-      if (binding == plan.artifact_inputs.end())
+      const auto path = artifact_input_path(staged_tool->name);
+      if (!path)
         fail(tool.location, std::format("tool input '{}' must name an artifact-backed input", staged_tool->name));
-      plan.action.tool = "inputs/" + binding->path;
+      plan.action.tool = "inputs/" + std::string(*path);
       if (inspection_)
-        fact("tool", decl, "tool", plan.action.tool, std::format("input({:?})", binding->name), tool.location);
+        fact("tool", decl, "tool", plan.action.tool, std::format("input({:?})", staged_tool->name), tool.location);
     }
 
     if (!observer) {
@@ -1089,10 +1130,11 @@ class Planner {
           if (binding != plan.inputs.end()) {
             if (inspection_) argv_fact("inputs/" + binding->path, std::format("input({:?})", binding->name));
           } else {
-            const auto artifact = std::ranges::find(plan.artifact_inputs, input_name->name, &ArtifactInputPlan::name);
-            if (artifact == plan.artifact_inputs.end())
+            const auto path = artifact_input_path(input_name->name);
+            if (!path)
               fail(value.location, std::format("unknown input '{}'", input_name->name));
-            if (inspection_) argv_fact("inputs/" + artifact->path, std::format("input({:?})", artifact->name));
+            if (inspection_)
+              argv_fact("inputs/" + std::string(*path), std::format("input({:?})", input_name->name));
           }
           plan.action.args.push_back({input, input_name->name});
         } else if (const auto* output_name = std::get_if<OutputArg>(&value.data)) {
@@ -1121,6 +1163,9 @@ class Planner {
     auto gen = generator(decl);
     active_generators_.erase(decl.name);
     const auto index = plan_.generators.size();
+    if (!gen.host_inputs.empty() || std::ranges::any_of(gen.artifact_inputs, [&](const auto& input) {
+          return host_dependent_generators_.contains(input.producer);
+        })) host_dependent_generators_.insert(index);
     plan_.generators.push_back(std::move(gen));
     generators_.emplace(decl.name, index);
     return index;
@@ -1135,14 +1180,22 @@ class Planner {
     return find(name, at);
   }
 
-  ArtifactOutputPlan artifact(const ArtifactRef& ref, SourceLocation at, std::string_view consumer = {}) {
-    const auto [decl, kind] = artifact_target(ref.target, at, consumer);
+  ArtifactOutputPlan generator_artifact(ResolvedTarget target, std::string_view name, SourceLocation at, bool early) {
+    constexpr auto early_error = "host executable artifacts are not available in rule planning inputs or witnesses";
+    const auto [decl, kind] = target;
+    if (kind == Primitive::host_executable)
+      fail(at, early ? early_error : "host executable artifacts are only available in ordinary generator inputs");
     if (kind != Primitive::generator) fail(at, "artifact references require a generate target");
     const auto producer = resolve_generator(decl);
+    if (early && host_dependent_generators_.contains(producer)) fail(at, early_error);
     const auto& outputs = plan_.generators[producer].action.outputs;
-    const auto output = std::ranges::find(outputs, ref.output, &ActionOutput::name);
-    if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, ref.output));
+    const auto output = std::ranges::find(outputs, name, &ActionOutput::name);
+    if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", decl.name, name));
     return {producer, static_cast<std::size_t>(output - outputs.begin())};
+  }
+
+  ArtifactOutputPlan artifact(const ArtifactRef& ref, SourceLocation at, bool early = false) {
+    return generator_artifact(find(ref.target, at), ref.output, at, early);
   }
 
   std::string native_artifact(const ArtifactRef& ref, const TargetDecl& consumer, std::string_view usage,
@@ -1153,6 +1206,91 @@ class Planner {
     auto& gen = plan_.generators[producer];
     gen.native_outputs = true;
     return generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_);
+  }
+
+  void for_each_include_dir(const TargetDecl& decl, const auto& include) {
+    if (const auto* dirs = field(decl, "public_include_dirs")) {
+      for (const auto& value : as<List>(*dirs, "a list of include directories")) {
+        const auto path = cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true);
+        observe(path);
+        include(path_text(path), "declared in public_include_dirs", value.location);
+      }
+    }
+  }
+
+  void append_sources(const TargetDecl& decl, const std::vector<std::string>& includes,
+                      std::vector<SourcePlan>& sources, bool generated) {
+    std::set<std::string> source_paths;
+    const auto add = [&](std::string path, SourceLocation at, std::string_view origin) {
+      if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
+      if (inspection_) {
+        const auto display = display_path(path);
+        fact("source", decl, display, display, origin, at);
+      }
+      sources.push_back({std::move(path), includes});
+    };
+    const auto add_glob = [&](const Glob& glob, SourceLocation at) {
+      const auto matches = expand_glob(glob, [&](std::string_view dir) {
+        observe(cwd_ / dir);
+        return list_directory(cwd_, dir);
+      });
+      if (!matches) fail(at, matches.error());
+      if (watch_) watch_->values.push_back(fingerprint(*matches));
+      const auto origin = inspection_ ? glob_origin(glob) : std::string{};
+      for (const auto& match : *matches) {
+        const auto path = cwd_ / match;
+        observe(path);
+        add(path_text(path), at, origin);
+      }
+    };
+    if (const auto* files = field(decl, "sources")) {
+      if (const auto* glob = std::get_if<Glob>(&files->data)) {
+        add_glob(*glob, files->location);
+      } else {
+        for (const auto& value : as<List>(*files, "a list of C++ sources or a glob")) {
+          if (const auto* path = std::get_if<std::string>(&value.data)) {
+            const auto absolute = cwd_ / relative_path(*path, value.location);
+            observe(absolute);
+            add(path_text(absolute), value.location, "declared in sources");
+          } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
+            add_glob(*glob, value.location);
+          } else if (!generated) {
+            fail(value.location, "host executable sources require disk paths or globs");
+          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
+            add(native_artifact(*ref, decl, "sources", value.location), value.location,
+                inspection_ ? artifact_origin(*ref) : std::string{});
+          } else {
+            fail(value.location, "expected a source path, glob or artifact reference");
+          }
+        }
+      }
+    }
+  }
+
+  std::size_t resolve_host_executable(const TargetDecl& decl) {
+    const auto existing = std::ranges::find(plan_.host_executables, decl.name, &HostExecutablePlan::name);
+    if (existing != plan_.host_executables.end())
+      return static_cast<std::size_t>(existing - plan_.host_executables.begin());
+    check_fields(decl, {"sources", "public_include_dirs"});
+    const auto* host = pp::native_target;
+    if (!host) fail(decl.location, "no default native target for this host");
+    if (inspection_) {
+      fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
+      fact("host-target", decl, "triple", host->triple, "build host", decl.location);
+      fact("output", decl, host_executable_output, host_executable_output, "linked host executable", decl.location);
+    }
+    std::vector<std::string> includes;
+    for_each_include_dir(decl, [&](std::string path, std::string_view origin, SourceLocation at) {
+      if (std::ranges::contains(includes, path)) return;
+      if (inspection_) fact("include", decl, std::to_string(includes.size()), display_path(path), origin, at);
+      includes.push_back(std::move(path));
+    });
+    HostExecutablePlan tool{decl.name, {}};
+    append_sources(decl, includes, tool.sources, false);
+    if (tool.sources.empty()) fail(decl.location, "host executable has no C++ source files");
+    const auto index = plan_.host_executables.size();
+    plan_.host_executables.push_back(std::move(tool));
+    return index;
   }
 
   void append_link_inputs(const CxxTargetPlan& root) {
@@ -1220,13 +1358,7 @@ class Planner {
       }
       target.paths.push_back(std::move(path));
     };
-    if (const auto* dirs = field(decl, "public_include_dirs")) {
-      for (const auto& value : as<List>(*dirs, "a list of include directories")) {
-        const auto path = cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true);
-        observe(path);
-        include(path_text(path), "declared in public_include_dirs", value.location);
-      }
-    }
+    for_each_include_dir(decl, include);
     if (const auto* headers = field(decl, "generated_headers")) {
       for (const auto& value : as<List>(*headers, "a list of generated headers")) {
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
@@ -1257,49 +1389,7 @@ class Planner {
       }
     }
 
-    std::set<std::string> source_paths;
-    const auto add = [&](std::string path, SourceLocation at, std::string_view origin) {
-      if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
-      if (inspection_) {
-        const auto display = display_path(path);
-        fact("source", decl, display, display, origin, at);
-      }
-      plan_.sources.push_back({std::move(path), target.paths});
-    };
-    const auto add_glob = [&](const Glob& glob, SourceLocation at) {
-      const auto matches = expand_glob(glob, [&](std::string_view dir) {
-        observe(cwd_ / dir);
-        return list_directory(cwd_, dir);
-      });
-      if (!matches) fail(at, matches.error());
-      if (watch_) watch_->values.push_back(fingerprint(*matches));
-      const auto origin = inspection_ ? glob_origin(glob) : std::string{};
-      for (const auto& match : *matches) {
-        const auto path = cwd_ / match;
-        observe(path);
-        add(path_text(path), at, origin);
-      }
-    };
-    if (const auto* files = field(decl, "sources")) {
-      if (const auto* glob = std::get_if<Glob>(&files->data)) {
-        add_glob(*glob, files->location);
-      } else {
-        for (const auto& value : as<List>(*files, "a list of C++ sources or a glob")) {
-          if (const auto* path = std::get_if<std::string>(&value.data)) {
-            const auto absolute = cwd_ / relative_path(*path, value.location);
-            observe(absolute);
-            add(path_text(absolute), value.location, "declared in sources");
-          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
-            add(native_artifact(*ref, decl, "sources", value.location), value.location,
-                inspection_ ? artifact_origin(*ref) : std::string{});
-          } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
-            add_glob(*glob, value.location);
-          } else {
-            fail(value.location, "expected a source path, glob or artifact reference");
-          }
-        }
-      }
-    }
+    append_sources(decl, target.paths, plan_.sources, true);
     if (assets) {
       std::set<std::string> filenames;
       for (const auto& value : as<List>(*assets, "a list of runtime assets")) {
@@ -1329,6 +1419,7 @@ class Planner {
   std::map<std::string, RulePackageRef, std::less<>> prefixes_;
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
+  std::set<std::size_t> host_dependent_generators_;
   std::map<std::string, ExecutableObservation, std::less<>> tools_;
   // The edge count at each active frame distinguishes mixed cycles from value or artifact cycles.
   std::map<std::string, std::size_t, std::less<>> resolving_rules_;
