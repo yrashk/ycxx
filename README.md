@@ -967,6 +967,9 @@ written default member initializer are value-initialized.
   character arrays in constant expressions.
   [#248](https://github.com/yrashk/ycxx/issues/248) [#1093](https://github.com/yrashk/ycxx/issues/1093)
   [#1092](https://github.com/yrashk/ycxx/issues/1092) [#1170](https://github.com/yrashk/ycxx/issues/1170)
+  `__builtin_operator_new` and `__builtin_operator_delete`, used by libycxx's `std::allocator`,
+  call the replaceable global `operator new` or `operator delete` their arguments select,
+  including one the program replaces, at run time. [#1681](https://github.com/yrashk/ycxx/issues/1681)
   `__builtin_LINE()` reports the presumed line, including the call site of an omitted ordinary
   function argument. [#327](https://github.com/yrashk/ycxx/issues/327)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,

@@ -1555,6 +1555,19 @@ struct World {
     return fn.params.size() == 2 || fn.params[1] == types.enum_type(alignment_enum());
   }
 
+  // [new.delete.single]: the replaceable global allocation and deallocation functions, the usual
+  // ones and their `const std::nothrow_t&` forms. `__builtin_operator_new` and
+  // `__builtin_operator_delete` must select one (docs/EXTENSIONS.md).
+  bool replaceable_allocation_function(std::string_view name, QualType written) {
+    if (matches_allocation_function(name, written)) return true;
+    const TypeRec fn = types.rec(written);
+    if (!matches_tagged_allocation_function(name, written, fn.fn_noexcept)) return false;
+    const EntityRec& tag = entities.rec(types.rec(types.rec(fn.params.back()).inner).entity);
+    if (tag.scope == EntityId::none || ins.names.spelling(tag.name) != "nothrow_t") return false;
+    const EntityRec& ns = entities.rec(tag.scope);
+    return ns.kind == EntityKind::namespace_ && ns.scope == EntityId::none && ins.names.spelling(ns.name) == "std";
+  }
+
   // [new.delete.placement]: the written non-allocating library signatures. They are separate
   // from the implicit, replaceable allocation functions.
   bool matches_reserved_placement_function(std::string_view name, QualType written) {
