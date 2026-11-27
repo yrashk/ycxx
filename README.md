@@ -757,7 +757,11 @@ written default member initializer are value-initialized.
   non-dependent primary class specializations with explicit type or value arguments check
   constraints. [#908](https://github.com/yrashk/ycxx/issues/908)
   Class templates and class partial specializations accept parenthesized requires-clause
-  operands joined by `&&` or `||`.
+  operands joined by `&&` or `||`. Members of class templates, constructors, prospective
+  destructors and defaulted or deleted special members included, take trailing requires-clauses:
+  a member is a candidate only while satisfied, the more constrained one wins, and an ineligible
+  special member does not count for the class's triviality.
+  [#1417](https://github.com/yrashk/ycxx/issues/1417)
   A failed dependent type requirement can end substitution before later requirements
   instantiate their types. [#1283](https://github.com/yrashk/ycxx/issues/1283)
   Non-template code outside requires-expression bodies also checks constraints on directly named

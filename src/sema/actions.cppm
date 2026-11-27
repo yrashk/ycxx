@@ -7363,7 +7363,8 @@ public:
       records.push_back({.name = name, .entity = d.entity, .type = d.type, .is_function = true, .is_static = is_static,
                          .is_deleted = (d.flags & decl_flag::deleted) != 0,
                          .is_template = (d.flags & decl_flag::template_) != 0, .defaults = defaults_of(d),
-                         .is_virtual = d.is_virtual, .is_pure = d.is_pure});
+                         .is_virtual = d.is_virtual, .is_pure = d.is_pure,
+                         .constraints = (d.flags & decl_flag::template_) ? ConstId::none : trailing_constraints(d)});
       if (is_static) statics.push_back(d);
     }
     std::vector<const MemberDeclRec*> candidates;
@@ -7471,7 +7472,10 @@ public:
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called. A member function
     // template is a set to deduce from, as overloads are.
-    if (!m.is_function || (m.is_static && !m.is_template && member_functions(c, name).size() == 1)) {
+    // A constrained one is a set of one, whose constraints the use checks ([over.match.viable]/3,
+    // [over.over]/5).
+    if (!m.is_function || (m.is_static && !m.is_template && m.constraints == ConstId::none && !m.ineligible &&
+                           member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at, naming)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       auto mt = deduced_function(m.entity, m.type, begin);
@@ -7501,7 +7505,7 @@ public:
       d.type = member->type;
       d.kind = ast::DeclKind::function;
       d.flags = member->is_deleted ? decl_flag::deleted : 0;
-      d.constraints = ConstId::none;
+      d.constraints = member->ineligible ? unsatisfiable_constraint() : member->constraints;
       statics.push_back(d);
     }
     if (!statics.empty()) overloads_[key] = std::move(statics);
@@ -7679,12 +7683,13 @@ public:
         continue;
       }
       if (!c->is_template) {
-        if (ex != explicit_args_.end()) continue;
+        if (ex != explicit_args_.end() || c->ineligible || !trailing_constraints_satisfied(c->constraints)) continue;
         // [over.match.funcs.general]/8: a defaulted move assignment operator defined as deleted is
         // no candidate.
         if (c->explicit_defaulted_assignment && types().rec(types().rec(c->type).params.front()).rvalue_ref &&
             (c->copy_assignment == CopyAssignment::deleted || c->copy_assignment == CopyAssignment::const_member)) continue;
         cands.push_back({c->entity, c->type, c->is_static, c->is_deleted, nullptr, c->defaults});
+        cands.back().constraints = c->constraints;
         recs.push_back(c);
         deduced.emplace_back();
         continue;
@@ -7939,6 +7944,8 @@ public:
     bool is_explicit = false;
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
     bool is_consteval = false;  // an immediate function ([dcl.constexpr])
+    // A non-template function's trailing requires-clause, for [over.match.best.general]/2.6.
+    ConstId constraints = ConstId::none;
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -8353,6 +8360,13 @@ public:
       const Candidate& f1 = cands[viable[a].first];
       const Candidate& f2 = cands[viable[b].first];
       if (!f1.pattern && f2.pattern) return true;
+      // [over.match.best.general]/2.6: of non-template functions with the same parameter-type-lists,
+      // the more constrained ([temp.constr.order]).
+      if (!f1.pattern && !f2.pattern && (f1.constraints != ConstId::none || f2.constraints != ConstId::none) &&
+          same_parameter_types(f1.type, f2.type)) {
+        Templates t = templates();
+        return t.subsumes(f1.constraints, f2.constraints) && !t.subsumes(f2.constraints, f1.constraints);
+      }
       if (f1.pattern && f2.pattern) {
         Templates t = templates();
         auto [a12, a21] = t.ordering(*f1.pattern, *f2.pattern, args.size());
@@ -8488,7 +8502,11 @@ public:
             types().rec(fr.params.front()).rvalue_ref) continue;
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
         k.is_consteval = m.is_consteval;
+        k.constraints = m.constraints;
+        // A user-declared copy constructor suppresses the implicit one even when it is not a
+        // candidate ([class.copy.ctor]/6, [over.match.viable]/3).
         user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
+        if (m.ineligible || !trailing_constraints_satisfied(m.constraints)) continue;
         // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
         if (copy_init && (m.is_explicit || fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
         cands.push_back(std::move(k));
@@ -10470,7 +10488,42 @@ public:
     return shape;
   }
 
+  // Whether a non-template function with constraints `c` in normal form (its trailing
+  // requires-clause) is a candidate ([over.match.viable]/3): satisfied, or still dependent. An
+  // atom whose check was a hard error leaves it in, as for a template's.
+  bool trailing_constraints_satisfied(ConstId c) {
+    if (c == ConstId::none || templates().constraint_dependent(c)) return true;
+    return q_->satisfied(c).value_or(true);
+  }
+  // Whether function types `a` and `b` have the same parameter-type-lists and implicit object
+  // parameters, for comparing non-template candidates by constraints ([over.match.best.general]/2.6).
+  bool same_parameter_types(QualType a, QualType b) {
+    const TypeRec x = types().rec(types().canonical(a));
+    const TypeRec y = types().rec(types().canonical(b));
+    if (x.params.size() != y.params.size() || x.variadic != y.variadic || x.fn_cv != y.fn_cv || x.fn_ref != y.fn_ref)
+      return false;
+    for (std::size_t i = 0; i < x.params.size(); ++i)
+      if (types().canonical(x.params[i]) != types().canonical(y.params[i])) return false;
+    return true;
+  }
+  // A non-template function's trailing requires-clause: a class member's as its class records it,
+  // with a specialization's arguments substituted; otherwise as declared.
+  ConstId trailing_constraints(const ast::DeclSema& d) {
+    if (d.constraints == ConstId::none || d.entity == EntityId::none) return d.constraints;
+    if (const ClassRec* cr = class_rec(w_->entities.rec(d.entity).scope))
+      for (const MemberDeclRec& m : cr->members)
+        if (m.entity == d.entity) return m.ineligible ? unsatisfiable_constraint() : m.constraints;
+    return d.constraints;
+  }
+  // Never satisfied: an empty disjunction.
+  ConstId unsatisfiable_constraint() {
+    return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});
+  }
   bool constraints_satisfied(const ast::DeclSema& d, std::span<const TemplateArg> args = {}) {
+    // A non-template function: its trailing requires-clause. A pattern with a template head (a
+    // generic lambda's call operator, unflagged) substitutes `args` below.
+    if (!(d.flags & decl_flag::template_) && args.empty() && ins().seqs.size(d.template_params) == 0)
+      return trailing_constraints_satisfied(trailing_constraints(d));
     if (d.constraints == ConstId::none) return true;
     std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(d.template_params);
     auto nf = templates().substitute_constraint(d.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, args));
@@ -12109,6 +12162,40 @@ public:
       e = resolve_address(e, *set, std::nullopt, at_);
       if (!e.ok()) return std::nullopt;
     }
+    // An overload set of functions, none a template: trial deduction from each member whose
+    // constraints are satisfied, a result only when they all agree ([temp.deduct.call]/6.2).
+    // Members that differ only in their trailing requires-clauses can (#1417).
+    std::optional<QualType> overload_argument;
+    if (auto set = address_set(e); set && types().kind(t) == TypeKind::placeholder && !set->decls->empty()) {
+      bool templates_in_set = false, disagree = false;
+      for (const ast::DeclSema& d : *set->decls) {
+        if (d.flags & decl_flag::template_) templates_in_set = true;
+        if (templates_in_set || !constraints_satisfied(d) || types().has_placeholder(types().rec(d.type).inner)) continue;
+        const QualType ft = types().canonical(d.type);
+        if (overload_argument && *overload_argument != ft) disagree = true;
+        overload_argument = ft;
+      }
+      if (templates_in_set || disagree) overload_argument.reset();
+      if (overload_argument && set->address) overload_argument = types().pointer(*overload_argument);
+    }
+    if (overload_argument) {
+      Templates tm = templates();
+      const u16 depth = u16(template_scopes.size());
+      Bindings invent;
+      invent.placeholder = types().template_param(depth, 0);
+      std::vector<std::optional<TemplateArg>> out(1);
+      if (auto p0 = tm.substitute(t, invent)) {
+        auto [p, a, allow] = tm.call_pair(*p0, ArgShape{*overload_argument, !types().is_pointer(*overload_argument)}, depth);
+        if (tm.deduce(p, a, depth, out, allow) && out[0]) {
+          Bindings deduced;
+          deduced.placeholder = out[0]->type;
+          if (replaced) *replaced = out[0]->type;
+          if (auto r = tm.substitute(t, deduced)) return *r;
+        }
+      }
+    }
+    // Any other overload set, or its address, deduces nothing ([temp.deduct.call]/6); a
+    // template-id naming one specialization is not resolved yet (#335).
     if (types().is(e.type(), Builtin::overload_set) || is_bound_member(e) ||
         (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set))) {
       diag(at_, Diag::auto_deduction_failed, t, e.type());
@@ -14123,8 +14210,11 @@ public:
         bool deleted = (d.flags & decl_flag::deleted) != 0;
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
-          if (ex != explicit_args_.end() || !eligible_operator_type(d.type)) continue;
+          const ConstId constraints = trailing_constraints(d);
+          if (ex != explicit_args_.end() || !eligible_operator_type(d.type) ||
+              !trailing_constraints_satisfied(constraints)) continue;
           cands.push_back(non_template_call_candidate(d, allocation));
+          cands.back().constraints = constraints;
           decls.push_back(&d);
           continue;
         }

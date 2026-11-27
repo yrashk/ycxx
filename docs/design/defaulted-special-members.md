@@ -76,6 +76,17 @@ C++03's: no user-provided constructor, destructor or copy assignment, only publi
 bases. Defaulted and deleted special members are not user-provided in either. GCC 16 agrees on Linux except for class template
 specializations, whose defaulted constructors it counts as user-provided.
 
-Defaulting outside the class, local classes, virtual assignment operators and a requires-clause are
-in [#157](https://github.com/yrashk/ycxx/issues/157). Implicit moves and assignment are in
+## Constraints
+
+A special member of a class template may have a trailing requires-clause
+([#1417](https://github.com/yrashk/ycxx/issues/1417)). When a specialization is complete,
+`Program::eligible_special_members` runs before the classification. It marks a special member as
+ineligible when its constraints are not satisfied, or when a more constrained satisfied one of its
+kind and parameters exists ([special]/6). An ineligible member is not classified or defined, is no
+candidate, and does not count for triviality. It still suppresses the implicit declarations it
+would suppress. The prospective destructors select the one this document calls the destructor
+([class.dtor]/4).
+
+Defaulting outside the class, local classes and virtual assignment operators are in
+[#157](https://github.com/yrashk/ycxx/issues/157). Implicit moves and assignment are in
 [#244](https://github.com/yrashk/ycxx/issues/244) and [#360](https://github.com/yrashk/ycxx/issues/360).

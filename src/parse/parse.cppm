@@ -1703,6 +1703,10 @@ public:
   const ast::BodySema& synthesized_body(std::size_t i);
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::vector<engine::Diagnostic>* class_diags = nullptr,
                        sema::Sema* closure_context = nullptr, std::optional<u32> point = std::nullopt);
+  // Marks the special members of class template specialization `cls` that their trailing
+  // requires-clauses make ineligible ([special]/6), and reports a destructor that cannot be
+  // selected ([class.dtor]/4).
+  void eligible_special_members(u32 item, EntityId cls, sema::ClassRec& rec, u32 point);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool user_move, std::optional<u32> point);
   void defaulted_assignments(u32 item, EntityId cls, sema::ClassRec& rec, std::optional<u32> point);
   sema::CopyAssignment require_copy_assignment(EntityId f);
@@ -5182,6 +5186,53 @@ private:
     trailing_constraint_.tokens = ps_.clause_fp(begin, ps_.pos());
     constraints_fp_ = ast::mix(ast::mix(constraints_fp_, u64(1)), trailing_constraint_.tokens);
   }
+  // A member-declarator's trailing requires-clause ([class.mem.general]), with the function's
+  // parameters in scope ([basic.scope.param]). Only a templated function has one
+  // ([dcl.decl.general]/4). A non-template member of a class template specialization reads it as
+  // its pattern does, then substitutes the specialization's arguments into its atoms' mappings
+  // ([temp.constr.normal]): nothing in it is checked before the member is used ([temp.inst]/17),
+  // and a mapping that cannot be formed leaves it unsatisfied ([temp.constr.atomic]/3).
+  // Each member-declarator has its own ([class.mem.general]). A non-templated function's is
+  // diagnosed, then read and dropped, so the member is still declared.
+  // `object`: the type of `this` in it, for a non-static member function ([expr.prim.this]/2).
+  // `defer_layout`: in a class template's definition, its class's layout is not known yet.
+  bool member_requires_clause(const std::vector<parse::Param>& params, std::optional<QualType> object = std::nullopt,
+                              bool defer_layout = false) {
+    if (!member_template_) {
+      trailing_requires_ = ConstId::none;
+      trailing_constraint_ = {};
+    }
+    if (!ps_.is(Tk::kw_requires)) return true;
+    const bool nontemplated = !member_template_ && !s_.templated();
+    if (nontemplated) s_.diag(ps_.pos(), Diag::nontemplated_constraints);
+    const std::size_t errors = s_.diag_count();
+    const bool substitute = inst_ && !member_template_;
+    sema::Bindings bound;
+    if (substitute) bound = std::exchange(s_.template_args, sema::Bindings{});
+    const auto saved_this = std::exchange(s_.this_type, object);
+    const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout, defer_layout);
+    trailing_requires_clause(params);
+    ps_.defer_member_constraint_layout = saved_layout;
+    s_.this_type = saved_this;
+    if (substitute) {
+      s_.template_args = bound;
+      const auto normal = s_.templates().substitute_constraint(trailing_requires_, bound);
+      // An empty disjunction: never satisfied.
+      trailing_requires_ = normal ? *normal
+                                  : s_.ins().intern_value(ast::VConstraint{1, s_.ins().intern_seq(std::span<const ConstId>{})});
+    }
+    if (nontemplated) {
+      trailing_requires_ = ConstId::none;
+      trailing_constraint_ = {};
+    }
+    return s_.diag_count() == errors;
+  }
+  // The identity a non-template member's trailing requires-clause gives it ([basic.scope.scope]/4):
+  // its own tokens, never a template-head's; none without one.
+  sema::Fp128 member_constraints_fp() const {
+    return trailing_requires_ == ConstId::none ? sema::Fp128{}
+                                               : ast::mix(ast::mix(sema::Fp128{}, u64(1)), trailing_constraint_.tokens);
+  }
   // A partial specialization's associated constraints ([temp.constr.decl]/3: its head's
   // type-constraints, then its requires-clause) and, into `fp`, their tokens' fingerprint, as
   // `associated_constraints` gives them, without mixing into `constraints_fp_`.
@@ -7650,8 +7701,13 @@ private:
   // constraints ([temp.over.link]/4-6), otherwise a member that is no template.
   bool same_template(const sema::MemberDeclRec& r, bool member_template) {
     if (r.is_template != member_template) return false;
-    if (!member_template) return true;
     const sema::EntityRec& e = p_->world().entities.rec(r.entity);
+    // An explicit specialization of a member names the specialization's member of that type, the
+    // one whose constraints are satisfied ([temp.expl.spec]); another definition repeats its
+    // trailing requires-clause ([temp.over.link]/6).
+    if (!member_template && explicit_)
+      return !r.ineligible && (r.constraints == ConstId::none || p_->satisfied(r.constraints, k_).value_or(true));
+    if (!member_template) return e.constraints == member_constraints_fp();
     return e.head == head_fp(s_.template_scopes.back()) && e.constraints == constraints_fp_;
   }
   // A constructor or destructor defined outside its class: `N::C::C(…)`, `C::~C()`.
@@ -7695,6 +7751,7 @@ private:
     if (!ok) return bad();
     bool nonthrowing = ctor && constructor_exception_specifier(fs, cls, ok);
     if (!ok) return bad();
+    if (!member_requires_clause(fs.params)) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     QualType type = s_.types().function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv,
@@ -8332,6 +8389,9 @@ private:
       if ((is_virtual || deferred_defaulting) && defaulted) flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
       written_noexcept = (is_virtual || defaulted_dtor) && destructor_noexcept.value_or(false);
     }
+    // A constructor's or prospective destructor's trailing requires-clause ([class.mem.general],
+    // [class.dtor]/4), before its ctor-initializer or body.
+    if (!member_requires_clause(fs.params)) return bad();
     if (ordinary_defaulting) {
       // [dcl.fct.def.default]: a first in-class defaulted special member. What its class makes of
       // it is decided when the class is complete (`defaulted_constructors`).
@@ -8403,22 +8463,31 @@ private:
       e.head = head_fp(s_.template_scopes.back());
       sem.constraints = associated_constraints();
       sem.head_constraint = head_constraint_;
+      sem.trailing_constraint = trailing_constraint_;
       e.constraints = constraints_fp_;
       sem.entity = s_.world().entities.entity(e);
     } else {
-      sem.entity = s_.world().entities.entity({ctor ? sema::EntityKind::constructor : sema::EntityKind::destructor, name, type,
-                                              LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      sema::EntityRec e{ctor ? sema::EntityKind::constructor : sema::EntityKind::destructor, name, type,
+                        LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+      e.constraints = member_constraints_fp();
+      sem.constraints = trailing_requires_;
+      sem.trailing_constraint = trailing_constraint_;
+      sem.entity = s_.world().entities.entity(e);
     }
     // One declaration of each ([class.mem.general]/5). An exception specification cannot
     // distinguish otherwise identical special members ([over.load]).
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
       for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls)) {
+        // Different trailing requires-clauses declare different functions ([basic.scope.scope]/4):
+        // overloads, or prospective destructors ([class.dtor]/4).
+        const bool same_constraints = o.entity != EntityId::none &&
+                                      p_->world().entities.rec(o.entity).constraints == member_constraints_fp();
         const bool redeclared_constructor =
             ctor && !member_template_ && (o.flags & sema::decl_flag::constructor) &&
             !(o.flags & sema::decl_flag::template_) &&
-            same_function_parameters(o.type, sem.type);
-        const bool redeclared_destructor = !ctor && (o.flags & sema::decl_flag::destructor);
+            same_function_parameters(o.type, sem.type) && same_constraints;
+        const bool redeclared_destructor = !ctor && (o.flags & sema::decl_flag::destructor) && same_constraints;
         if (o.entity == sem.entity || redeclared_constructor || redeclared_destructor) {
           s_.diag(name_at, Diag::redeclared_member, name);
           return bad();
@@ -8755,6 +8824,11 @@ private:
     bool fn = types.is_function(d.type);
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
     if (!defaults_allowed(d.params, fn, d.name)) return false;
+    if (fn) {
+      const auto cv = types.rec(d.type).fn_cv;
+      const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, cv)));
+      if (!member_requires_clause(d.params, object, p_->items().items[it_->parent].template_depth != 0)) return false;
+    }
     bool is_def = it_->kind == ItemKind::function;
     const bool assignment = fn && s_.ins().names.spelling(d.name) == "operator=";
     const bool defaulted = assignment && p_->defaulted_body(k_);
@@ -8830,17 +8904,6 @@ private:
         s_.diag(d.name_at, Diag::cv_on_non_member);  // [class.static.mfct]/2
         return false;
       }
-      if (member_template_ && ps_.is(Tk::kw_requires)) {
-        const auto before = s_.diag_count();
-        const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, r.fn_cv)));
-        const auto saved = std::exchange(s_.this_type, object);
-        const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout,
-                                                p_->items().items[it_->parent].template_depth != 0);
-        trailing_requires_clause(d.params);
-        ps_.defer_member_constraint_layout = saved_layout;
-        s_.this_type = saved;
-        if (s_.has_error_since(before)) return false;
-      }
       if (ps_.is(Tk::equal)) {
         if (!is_virtual || is_def || assignment || ps_.kind(1) == Tk::kw_default || ps_.kind(1) == Tk::kw_delete) {
           s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);
@@ -8876,8 +8939,13 @@ private:
         e.constraints = constraints_fp_;
         sem.entity = s_.world().entities.entity(e);
       } else {
-        sem.entity = s_.world().entities.entity(
-            {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+        // A trailing requires-clause is part of its identity ([basic.scope.scope]/4) and of its
+        // viability ([over.match.viable]/3).
+        sema::EntityRec e{sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+        e.constraints = member_constraints_fp();
+        sem.constraints = trailing_requires_;
+        sem.trailing_constraint = trailing_constraint_;
+        sem.entity = s_.world().entities.entity(e);
       }
       if (d.noexcept_tokens || (member_template_ && d.has_noexcept && !d.noexcept_condition))
         p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, d.noexcept_tokens});
@@ -9115,8 +9183,10 @@ private:
       }
       bool templ = (d.flags & sema::decl_flag::template_) != 0;
       if (templ != member_template_) return false;
-      if (!templ) return true;
       const sema::EntityRec& e = p_->world().entities.rec(d.entity);
+      // Non-template functions with different trailing requires-clauses do not correspond
+      // ([basic.scope.scope]/4).
+      if (!templ) return e.constraints == member_constraints_fp();
       return e.head == head_fp(s_.template_scopes.back()) && e.constraints == constraints_fp_;
     };
     for (const auto& o : s_.own)
@@ -9511,6 +9581,12 @@ private:
           }
         }
         class_member = true;
+      }
+      // A member's definition repeats its trailing requires-clause ([temp.over.link]/6).
+      if (class_member && fn && !member_requires_clause(d.params)) return false;
+      if (class_member && fn && !member_template_) {
+        sem.constraints = trailing_requires_;
+        sem.trailing_constraint = trailing_constraint_;
       }
       if (member_template_ && class_member) {
         // A member template's definition: its own head, the innermost ([temp.mem]/1).
@@ -10344,6 +10420,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         statics.back().is_final = d.is_final;
         statics.back().is_pure = d.is_pure;
         statics.back().is_consteval = (d.flags & sema::decl_flag::consteval_) != 0;
+        if (!(d.flags & sema::decl_flag::template_)) statics.back().constraints = d.constraints;
         statics.back().constrained = d.constraint != NodeId::none || d.constraints != ast::ConstId::none;
         if (auto overridden = overridden_virtuals_.find(d.entity); overridden != overridden_virtuals_.end())
           statics.back().overridden_virtual = overridden->second;
@@ -13060,7 +13137,8 @@ void Program::defaulted_constructors(u32 item, EntityId cls, sema::ClassRec& rec
   const QualType ct = types.class_type(cls);
   const bool dependent = types.is_dependent(ct);
   for (sema::MemberDeclRec& m : rec.members) {
-    if (m.defaulted == ordinary) continue;
+    // An ineligible one is no candidate and is never defined ([special]/6).
+    if (m.defaulted == ordinary || m.ineligible) continue;
     const auto function = types.rec(m.type);
     const bool initialization = function.params.empty();
     if (initialization) rec.defaulted_default_ctor = m.entity;
@@ -13299,6 +13377,76 @@ sema::TrivialCopyability Program::class_trivial_copyability(u32 item, EntityId c
   return facts;
 }
 
+void Program::eligible_special_members(u32 item, EntityId cls, sema::ClassRec& rec, u32 point) {
+  if (std::ranges::all_of(rec.members, [](const sema::MemberDeclRec& m) { return m.constraints == ConstId::none; })) return;
+  auto& types = w_->types;
+  const QualType ct = types.class_type(cls);
+  if (types.is_dependent(ct)) return;
+  enum class Kind : u8 { none, default_constructor, copy_constructor, move_constructor, copy_assignment, move_assignment, destructor };
+  const auto kind_of = [&](const sema::MemberDeclRec& m) {
+    if (!m.is_function || m.is_template || m.is_static) return Kind::none;
+    if (m.is_dtor) return Kind::destructor;
+    if (m.is_ctor) {
+      if (const auto p = copy_move_constructor_parameter(m, ct))
+        return types.rec(*p).rvalue_ref ? Kind::move_constructor : Kind::copy_constructor;
+      // [class.default.ctor]/1: callable with no arguments.
+      const bool defaults = !m.defaults.empty() && m.defaults.front() != NodeId::none;
+      return types.rec(m.type).params.empty() || defaults ? Kind::default_constructor : Kind::none;
+    }
+    if (const auto p = assignment_parameter(m, ct)) return types.rec(*p).rvalue_ref ? Kind::move_assignment : Kind::copy_assignment;
+    return Kind::none;
+  };
+  std::vector<Kind> kinds;
+  for (const sema::MemberDeclRec& m : rec.members) kinds.push_back(kind_of(m));
+  // Satisfied in the specialization, its arguments substituted when its members were declared.
+  std::vector<bool> satisfied(rec.members.size(), true);
+  bool hard_error = false;  // already reported where the constraint is
+  for (std::size_t i = 0; i < rec.members.size(); ++i) {
+    const sema::MemberDeclRec& m = rec.members[i];
+    if (m.constraints == ConstId::none || kinds[i] == Kind::none) continue;
+    satisfied[i] = this->satisfied(m.constraints, point).value_or(true);
+    hard_error |= satisfaction_failed(m.constraints);
+  }
+  // Not eligible: unsatisfied, or another of its kind and parameters with satisfied constraints is
+  // more constrained ([temp.constr.order]).
+  sema::Templates t = templates();
+  for (std::size_t i = 0; i < rec.members.size(); ++i) {
+    sema::MemberDeclRec& m = rec.members[i];
+    const Kind kind = kinds[i];
+    if (kind == Kind::none) continue;
+    if (!satisfied[i]) {
+      m.ineligible = true;
+      continue;
+    }
+    for (std::size_t j = 0; j < rec.members.size() && !m.ineligible; ++j) {
+      const sema::MemberDeclRec& o = rec.members[j];
+      if (j == i || !satisfied[j] || kinds[j] != kind || (m.constraints == ConstId::none && o.constraints == ConstId::none))
+        continue;
+      const auto a = types.rec(types.canonical(m.type));
+      const auto b = types.rec(types.canonical(o.type));
+      if (a.params != b.params || a.variadic != b.variadic || a.fn_cv != b.fn_cv || a.fn_ref != b.fn_ref) continue;
+      m.ineligible = t.subsumes(o.constraints, m.constraints) && !t.subsumes(m.constraints, o.constraints);
+    }
+  }
+  // [class.dtor]/4: overload resolution among the prospective destructors selects one.
+  std::size_t declared = 0, eligible = 0;
+  for (const sema::MemberDeclRec& m : rec.members)
+    if (m.is_dtor) {
+      ++declared;
+      if (!m.ineligible) ++eligible;
+    }
+  if (declared == 0 || eligible == 1 || hard_error) return;
+  // Reported at the first prospective destructor's declaration.
+  engine::Loc at{std::to_underlying(id(item)), 0};
+  for (const sema::MemberDeclRec& m : rec.members)
+    if (const auto decl = m.is_dtor ? member_decl(m.entity) : std::nullopt) {
+      at = {std::to_underlying(decl->item), 0};
+      break;
+    }
+  end_diags_.push_back({at, sema::diag_id(eligible == 0 ? Diag::destructor_unselected : Diag::destructor_ambiguous),
+                        {engine::DiagArg{std::to_underlying(ct), w_->types.fp(ct)}}});
+}
+
 bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::vector<engine::Diagnostic>* class_diags,
                               sema::Sema* closure_context, std::optional<u32> point) {
   sema::Types& types = w_->types;
@@ -13318,7 +13466,8 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
       else user_copy_assignment = true;
     }
     if (m.is_virtual) rec.polymorphic = true;
-    if (m.is_dtor) {
+    // The selected destructor, of the prospective ones ([class.dtor]/4).
+    if (m.is_dtor && (!user_dtor || (user_dtor->ineligible && !m.ineligible))) {
       user_dtor = &m;
       rec.declared_destructor = m.entity;
       rec.virtual_destructor |= m.is_virtual;
@@ -13459,7 +13608,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
   // [class.prop]: of the declared copy and move constructors that are not deleted, one is not trivial.
   bool copy_usable = false;
   for (const sema::MemberDeclRec& m : rec.members) {
-    const auto parameter = m.is_ctor && !m.is_deleted ? copy_move_constructor_parameter(m, ct) : std::nullopt;
+    const auto parameter = m.is_ctor && !m.is_deleted && !m.ineligible ? copy_move_constructor_parameter(m, ct) : std::nullopt;
     if (!parameter) continue;
     const bool nontrivial = m.defaulted != sema::CopyState::trivial;
     if (types.rec(*parameter).rvalue_ref) {
@@ -13550,7 +13699,8 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
     return first && defaulted_member_definition(index(decl->item), *first);
   };
   const bool user_provided_member = std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& member) {
-    return (member.is_ctor || member.is_dtor || assignment_parameter(member, ct)) &&
+    // An ineligible assignment does not count ([special]/6), as Clang and GCC lay classes out.
+    return (member.is_ctor || member.is_dtor || (!member.ineligible && assignment_parameter(member, ct))) &&
            !member.is_deleted && !first_defaulted(member);
   });
   rec.pod = !rec.layout_requires_virtual_support && !user_provided_member &&
@@ -13559,7 +13709,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
   if (compatibility_ == ast::Compatibility::clang && w_->target.operating_system == ast::OperatingSystem::darwin) {
     // Darwin Clang also requires a default constructor and a standard-layout field arrangement.
     const bool default_constructor = !rec.user_ctors || std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
-      return m.is_ctor && types.rec(m.type).params.empty() && (m.is_deleted || first_defaulted(m));
+      return m.is_ctor && !m.ineligible && types.rec(m.type).params.empty() && (m.is_deleted || first_defaulted(m));
     });
     const bool one_access = std::ranges::adjacent_find(rec.fields, [&](const sema::FieldRec& a, const sema::FieldRec& b) {
       return rec.access_of(a.entity) != rec.access_of(b.entity);
@@ -13671,7 +13821,7 @@ void Program::defaulted_assignments(u32 item, EntityId cls, sema::ClassRec& rec,
   const QualType ct = types.class_type(cls);
   if (types.is_dependent(ct)) return;
   for (sema::MemberDeclRec& m : rec.members) {
-    const auto parameter = m.explicit_defaulted_assignment ? assignment_parameter(m, ct) : std::nullopt;
+    const auto parameter = m.explicit_defaulted_assignment && !m.ineligible ? assignment_parameter(m, ct) : std::nullopt;
     if (!parameter) continue;
     const auto function = types.rec(m.type);
     const QualType source = types.canonical(types.referee(*parameter));
@@ -14515,6 +14665,7 @@ const sema::ClassRec* Program::replay_class(EntityId spec, u32 k, u32 point,
   built.adl_friends = std::move(c.adl_friends);
   if (const auto head = class_heads_.find(k); head != class_heads_.end()) built.is_final = head->second.is_final;
   std::vector<engine::Diagnostic> diags;
+  eligible_special_members(k, spec, built, point);
   special_members(k, spec, built, built.union_ || !built.bases.empty() ? &diags : nullptr, nullptr, point);
   for (engine::Diagnostic& d : diags)
     if (built.union_ || !std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));

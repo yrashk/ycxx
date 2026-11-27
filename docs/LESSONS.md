@@ -746,6 +746,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `PointerConversion` now do, and let each caller decide what `unknown` means.
   - Learned on #218.
 
+- **Order-dependent wrong bodies or false "redeclaration" errors: check entity identity first.**
+  On #1417 two members of a class template that differed only in their trailing requires-clauses
+  got one `EntityId`, because `Entities::identity` mixed `EntityRec::constraints` only for function
+  templates. The first record published won, so whichever declaration came first supplied the
+  other's body, and same-signature copy constructors were "redeclarations". Swapping the two
+  declarations' order flipped the result, which is what pointed at identity.
+  - Do: when a new property distinguishes declarations ([basic.scope.scope]/4), add it to
+    `identity` in the same change, and test both declaration orders.
+  - Learned on #1417.
+
 - **`Program`'s per-entity maps hold only the items analysed so far.** Top-level items are
   analysed one group at a time and earlier ones only when asked (#947). So `class_items_` and
   `decls_` can miss an earlier definition. On #306 a second `struct O::I { … }` was accepted

@@ -1376,6 +1376,32 @@ int call() { return var<int>(0) + enu<int>(0); }
 evidence = ["STATUS.md", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "trivially-copyable-no-eligible-copy"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[class.prop]/1.1, [special]/6, #1417"
+prior = "Special members with unsatisfied trailing requires-clauses were not supported."
+spec = "A class whose copy and move constructors and assignment operators are all ineligible (unsatisfied constraints) is not trivially copyable. Type-trait built-ins do not classify class template specializations yet (#218)."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Reports such a class as trivially copyable."
+clang_observed = "Reports such a class as not trivially copyable, as the draft says."
+evidence = ["tests/own/member-requires/no-eligible-copy.accept.cpp"]
+
+[[divergence]]
+id = "member-declarator-requires-clause"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[class.mem.general], #1417"
+prior = "A member-declarator's trailing requires-clause was not supported."
+spec = "Each member-declarator has its own requires-clause: in `int f() requires C, g();` only `f` is constrained."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Same as spec."
+clang_observed = "Gives `g` the requires-clause written for `f`."
+evidence = ["tests/own/member-requires/separate-declarators.run.cpp"]
+
+[[divergence]]
 id = "pack-index-written-operator-symbol"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

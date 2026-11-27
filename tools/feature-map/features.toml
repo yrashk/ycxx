@@ -1415,7 +1415,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Defaulting outside the class, in local classes and with a requires-clause remains open.'
+note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Constrained ones (a trailing requires-clause, #1417) are candidates only when satisfied, and an ineligible one does not count for triviality. Defaulting outside the class and in local classes remains open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1919,8 +1919,9 @@ name = 'Conditionally trivial special members (constrained destructors)'
 group = 'class'
 clauses = ['class.dtor', 'over.match.best']
 std = 'C++20'
-status = 'missing'
-issues = [234]
+status = 'done'
+issues = [234, 1417]
+note = 'A class template specialization selects among its prospective destructors, and its other special members are eligible only when their trailing requires-clauses are satisfied and no satisfied one of the same kind is more constrained (#1417). Type-trait queries on class template specializations are #218.'
 probe = '''
 template<class T> struct W { ~W() requires (sizeof(T) > 4) {} ~W() = default; };
 int main() { W<int> w; (void)w; return 0; }
@@ -2013,7 +2014,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'Member function templates and member alias templates, also as `Q::template M<args>` and as template template arguments, work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, static data member templates and `&S::f<int>` remain.'
+note = 'Member function templates and member alias templates, also as `Q::template M<args>` and as template template arguments, work. Member class templates (#306), conversion function templates (#339), static data member templates and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
@@ -2227,8 +2228,8 @@ std = 'C++20'
 ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
-issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Broader template and member constraints and constraint mangling remain.'
+issues = [234, 236, 1180]
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Trailing requires-clauses on members of class templates (functions, constructors, prospective destructors, defaulted and deleted special members, out-of-class definitions) are checked when the member is a candidate, with the more constrained preferred (#1417). Broader template constraints, constrained friends (#1180) and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }

@@ -1541,6 +1541,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       emitted.local_parameter_binding =
           std::ranges::any_of(type.params, [&](QualType param) { return names_tu_local(program, param); });
     }
+    // A non-template member's trailing requires-clause is part of its name (#1417).
+    if (fn && r.templ == EntityId::none && d.constraints != ConstId::none) tu.entities.back().trailing_constraint = d.trailing_constraint;
     if (r.templ != EntityId::none) {
       const auto& pattern = world.entities.rec(r.templ);
       emitted.template_type = pattern.type;
