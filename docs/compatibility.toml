@@ -1671,14 +1671,27 @@ probe = 'bool f(int* p, unsigned* expected) { return __atomic_compare_exchange_n
 evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]
 
 [[divergence]]
-id = "constexpr-flat-record-array-future-access"
+id = "constexpr-flat-record-array-future-read"
 status = "recorded"
 mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
 reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1642"
-spec = "Reject access before initialization completes for a later scalar member of the current array element or a scalar member of a later element."
+spec = "Reject a read before initialization completes for a later scalar member of the current array element or a scalar member of a later element."
 gcc = "Preserve the draft rejection for the first flat-record-array slice. The observed GCC acceptance is pending."
 clang = "Same as spec."
-gcc_observed = "Strict GCC 16.2.0 on x86-64 Linux accepts the fixed-bound future reads and observes 7 for the later member and 11 for the later element. It also accepts a write of 9 to that later element before initialization, directly or through an int reference parameter, and continues to observe 9 after its initializer of 2."
-clang_observed = "Strict Clang 23.1.6 on Linux x86-64 and arm64 Darwin rejects these reads and writes because the object's lifetime has not begun."
+gcc_observed = "Strict GCC 16.2.0 on x86-64 Linux accepts the fixed-bound future reads and observes 7 for the later member and 11 for the later element."
+clang_observed = "Strict Clang 23.1.6 on Linux x86-64 and arm64 Darwin rejects these reads because the object's lifetime has not begun."
 limits = "The observations cover fixed-bound automatic flat non-union aggregate arrays in immediate evaluation."
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-future-member.reject.cpp", "tests/daemon/flat_record_array/flat-record-array-future-element.reject.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "constexpr-flat-record-array-initialization-write"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1642"
+spec = "Reject ordinary assignment to a scalar field whose lifetime has not begun, including through an int reference."
+gcc = "The draft rejection is the first-slice expectation. GCC acceptance is pending."
+clang = "Same as spec."
+gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future element's field evaluates to 29 after direct and reference-parameter stores despite a later initializer of 17. The field assigned within its own initializer evaluates to 3."
+clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
+limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.reject.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.reject.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.reject.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
