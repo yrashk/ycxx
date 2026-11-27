@@ -1073,7 +1073,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   local and hidden definitions use position-independent relocations. Source inputs require
   `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
   imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
-  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
+- On arm64 macOS, `-shared` or `-dynamiclib` with `-nostdlib` writes a signed leaf `MH_DYLIB`.
+  The install name is the output basename unless overridden by `-Wl,-install_name,<name>`.
+  Source inputs require `-fPIC` or `-fpic`. Strong functions can use direct local and hidden
+  references and immutable data. The platform loader and rule worker can consume the image.
+  [Design](docs/design/darwin-shared-output.md) · [#393](https://github.com/yrashk/ycxx/issues/393)
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
