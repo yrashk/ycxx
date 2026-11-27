@@ -863,10 +863,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
   compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
   rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
-- Fixed-prototype calls support nonempty naturally aligned flat records with integral, ordinary
-  object-pointer or object lvalue-reference fields. A record must be trivial for calls and occupy
-  up to 16 bytes with alignment up to eight. The AMD64 INTEGER eightbytes follow from the laid-out
-  fields. If an entire argument cannot
+- Fixed-prototype calls support nonempty naturally aligned flat records with integral, enum,
+  ordinary object-pointer or object lvalue-reference fields. Enum fields use their known
+  underlying integer layout ([dcl.enum]/8, [#1682](https://github.com/yrashk/ycxx/issues/1682)).
+  A record must be trivial for calls and occupy up to 16 bytes with alignment up to eight.
+  The AMD64 INTEGER eightbytes follow from the laid-out fields. If an entire argument cannot
   fit in the remaining registers, it goes by value on the stack and later arguments can use
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
   tests exercise both directions and check by-value object identity. Source packing and
