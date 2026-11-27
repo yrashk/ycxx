@@ -204,6 +204,12 @@ struct TDeferredAlias {
   bool type_default = true;
 };
 
+// A data member's decl-specifier whose type is formed by replaying its declaration.
+// The item identifies the written pattern for lookup. This is not a specialization type.
+struct TReplayMemberType {
+  ItemId declaration;
+};
+
 // ---------------------------------------------------------------- sugar kinds
 
 // A use of a typedef-name or alias-declaration. The alias's template arguments come with alias
@@ -222,7 +228,7 @@ struct SWrittenTransform {
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
                               TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr, TPackIndex,
-                              TDeferredAlias, SWrittenTransform>;
+                              TDeferredAlias, SWrittenTransform, TReplayMemberType>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;
