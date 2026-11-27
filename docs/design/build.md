@@ -316,6 +316,23 @@ target's generated include paths and compile identity. Inspection shows
 both resolved include views and links them to the authored header binding.
 [Generated host library header example](../../examples/project-build/host-library-generated-headers/README.md)
 
+### Generated sources in native host library dependencies (#1600)
+
+A host-linked library can put an artifact reference in `sources`
+alongside disk paths and globs. The library's generated main sees the
+output siblings of its producer at their host logical paths. The main's
+directory participates in quoted include lookup through the includer's
+path. Adding the source leaves the library's public include search
+unchanged. Other units can see that producer's directory when a
+generated header binding makes it visible to them.
+
+Both the selected target and the host tool can compile the shared
+library. The planner stages the ordinary source producers before the
+native host compile and reports the two logical source paths against
+one authored binding. Watch and early planning continue to observe the
+real includes used by each generated main.
+[Generated host library source example](../../examples/project-build/host-library-generated-sources/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
@@ -593,6 +610,32 @@ Each target has one card, so all occurrences of a shared producer lead to
 the same destination. A partial plan shows the resolved paths and marks
 the navigation incomplete. In an HTML comparison, these links navigate
 the current plan. The comparison tables carry the saved occurrence sites.
+
+### Interactive plan graph (#1604)
+
+From `examples/project-build/host-library-generated-sources`, build the
+arm64 Darwin variant and save its HTML plan.
+
+```sh
+ycxx build app --target=arm64-apple-darwin
+ycxx show app --target=arm64-apple-darwin --format=html > plan.html
+```
+
+Open **Graph** in `plan.html`. It starts at `app` with its immediate
+dependencies, `config` and `schema`. Select a node to show or hide its
+dependencies and dependents. Expand `config` to find `scanner`, then show
+the scanner's dependencies. The scanner and the app point to the same
+`schema` node.
+
+Select `schema` to inspect its generated `wire_score.cc` paths for the host
+and selected target. The details list each authored dependency's usage and
+any named output or binding. Follow the location link for the `wire_source`
+edge to open the source binding in `build.ycxx`.
+
+The graph works offline in the saved report. An incomplete plan shows the
+resolved portion and marks it incomplete. The static **Target dependencies**
+cards and dependency tables remain available alongside the graph.
+[Host library generated sources example](../../examples/project-build/host-library-generated-sources/README.md)
 
 ### Declared target catalog (#1392)
 

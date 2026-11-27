@@ -74,6 +74,8 @@ generator in `sources`, alongside disk paths and globs.
 Libraries linked into a host tool can also declare generated headers. A
 shared library can use the same declaration in a native scanner and a
 foreign app. [Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
+Host-linked libraries can also mix disk sources and generated C++ artifacts.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
 A typed witness can select the native artifact directly with
 `tool = input("name")` or use an executable generated from it.
 [Native host witness](examples/project-build/native-host-witness/README.md) ·
@@ -96,6 +98,8 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 can be compared with the checkout and rendered as a standalone HTML report.
 In the HTML report, **Target dependencies** lets you follow producers and
 open their use sites in `build.ycxx`.
+The **Graph** view lets you expand a target's dependencies and dependents
+and inspect each connection's declaration in the same standalone report.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
