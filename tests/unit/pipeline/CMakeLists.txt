@@ -193,6 +193,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_atomic32
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_atomic32.py
             $<TARGET_FILE:ycxxc>)
+  # PARITY: by design: checks x86-64 ELF symbols and links with the Linux host compiler.
+  add_test(NAME unit.linux_builtin_acosf
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_acosf.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   # PARITY: by design: runs the freestanding ELF counterpart of builtin-line.run.cpp.
   add_test(NAME unit.linux_builtin_line
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_line.py
