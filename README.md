@@ -119,6 +119,8 @@ the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
+Native host tools can link ordered generated archives through `link_inputs`,
+including when the selected app targets another platform.
 Generators and witnesses can track helper executables by path and run
 generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
@@ -832,6 +834,8 @@ written default member initializer are value-initialized.
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Named `const_cast` changes cv-qualification on matching ordinary pointer types and scalar
+  glvalues while retaining the original address.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
   [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)

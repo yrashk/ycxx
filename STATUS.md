@@ -2092,6 +2092,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
   The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
   initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
+- Named `const_cast` changes cv-qualification on ordinary pointers with matching shapes,
+  including cv `void*`, and on scalar lvalues and xvalues ([expr.const.cast],
+  [#1424](https://github.com/yrashk/ycxx/issues/1424)). It keeps the original address and
+  gives a reference cast the requested value category. In a constant expression, an access
+  still respects the qualifiers of the underlying object. A by-value class parameter object uses
+  the definition's declared qualifiers ([dcl.fct]/5) and permits writes to mutable members.
+  Pointer-to-member casts and class or array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
 - Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
   and pointer-width integral types. A too-narrow integer destination is ill-formed, and
   an evaluated cast is disallowed in a core constant expression. Smaller integer sources
@@ -3746,6 +3753,14 @@ available for quoted includes. The library's public search directories
 continue to come from its headers and dependencies. Inspection shows
 the host and selected-target source paths with one authored source edge.
 [Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
+
+A `cpp.host_executable` can declare direct `link_inputs` from ordinary
+host-independent action chains (#1616). The native link preserves operand order
+and repeated archives under foreign target selection. Archive-only edits leave
+translation unit inputs unchanged. Equal staged images reuse consuming actions,
+including those for early planning and witnesses. Read-only plans show each
+authored archive reference and its host path.
+[Native host archive example](examples/project-build/host-static-archive-inputs/README.md)
 
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated

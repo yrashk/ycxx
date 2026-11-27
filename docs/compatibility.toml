@@ -958,6 +958,32 @@ limits = "Covers direct pointer template arguments, including targetless address
 evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin direct, typed and aggregate template arguments, ordinary address controls, and immediate-escalation probes"]
 
 [[divergence]]
+id = "constexpr-const-cast-volatile-access"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const.cast], [expr.const.core], [dcl.type.cv], #1424"
+prior = "Named const_cast lacked front-end support."
+spec = "Allow address-only casts and reject reading or writing a genuinely volatile object through a non-volatile glvalue in constant evaluation."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Accepts the tested read and write through non-volatile glvalues."
+clang_observed = "Rejects both accesses."
+evidence = ["tests/own/casts/const-cast-constexpr.accept.cpp", "tests/own/casts/const-cast-constexpr-volatile.reject.cpp"]
+
+[[divergence]]
+id = "constexpr-by-value-class-parameter-cv"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+reference = "[dcl.fct]/5, [expr.call]/7, [dcl.type.cv]/4, [expr.const.core], #1424"
+prior = "Constant evaluation used the argument object's call-site type for class parameters."
+spec = "Use the definition's declared cv for the by-value class parameter object. A cast can change the view, and writes to a const object's non-mutable fields are rejected."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Accepts the writes with const parameters, both with and without a prior unqualified declaration."
+clang_observed = "Rejects the write with a const parameter and no prior declaration. Accepts it when the prior declaration's parameter is unqualified. Rejects the write to an unqualified parameter when the prior declaration's parameter is const."
+evidence = ["tests/own/casts/const-cast-constexpr-const-parameter.reject.cpp", "tests/own/casts/const-cast-constexpr-const-parameter-definition.reject.cpp", "tests/own/casts/const-cast-constexpr-mutable-parameter-definition.accept.cpp", "tests/own/casts/const-cast-constexpr-const-parameter-mutable.accept.cpp"]
+
+[[divergence]]
 id = "constexpr-void-cast-one-past"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

@@ -333,6 +333,31 @@ one authored binding. Watch and early planning continue to observe the
 real includes used by each generated main.
 [Generated host library source example](../../examples/project-build/host-library-generated-sources/README.md)
 
+### Direct generated archives for native host tools (#1616)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    link_inputs = [artifact("scanner_archive", "archive")]
+}
+```
+
+The coordinator stages the ordinary archive producer chain together with
+generated host sources and headers before registering the host build. The
+archive chain must be independent of project-built host tools. Its actions
+keep the selected target's argument selectors, and the native linker reads
+archives in the host format. The host's source objects precede the archive
+operands. Authored order and repeated references are preserved.
+
+The archive names and exact bytes enter the host program key. Archive-only
+producers stay outside the preprocessor's host file view, so an archive
+edit can relink without recompiling the host sources. Equal host images
+reuse consumer receipts. Before admitting a result against a revised
+plan, the coordinator can compare the staged inputs with existing receipts
+without running their producers. The plan shows each archive operand's host
+path, output binding, and manifest location.
+[Host archive example](../../examples/project-build/host-static-archive-inputs/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
