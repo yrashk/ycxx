@@ -3751,6 +3751,14 @@ continue to come from its headers and dependencies. Inspection shows
 the host and selected-target source paths with one authored source edge.
 [Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
 
+A `cpp.host_executable` can declare direct `link_inputs` from ordinary
+host-independent action chains (#1616). The native link preserves operand order
+and repeated archives under foreign target selection. Archive-only edits leave
+translation unit inputs unchanged. Equal staged images reuse consuming actions,
+including those for early planning and witnesses. Read-only plans show each
+authored archive reference and its host path.
+[Native host archive example](examples/project-build/host-static-archive-inputs/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
