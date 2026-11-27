@@ -11343,6 +11343,44 @@ public:
     });
   }
 
+  // The written default constructor must be a usable, unambiguous trivial leaf.
+  bool gcc_union_variant_trivial_default(const ClassRec& record) {
+    if (!record.defined || !record.member_declarations_valid || !record.trivial_defaulted_default_ctor)
+      return false;
+    const EntityId ctor = record.defaulted_default_ctor;
+    const auto member = std::ranges::find(record.members, ctor, &MemberDeclRec::entity);
+    if (member == record.members.end() || !member->is_ctor || member->is_template || member->is_deleted ||
+        record.access_of(ctor) != ast::Access::public_)
+      return false;
+    if (const auto destructor = record.destructor_declaration();
+        destructor != EntityId::none && record.access_of(destructor) != ast::Access::public_)
+      return false;
+    return std::ranges::none_of(record.members, [&](const MemberDeclRec& other) {
+      if (!other.is_ctor || other.entity == ctor) return false;
+      const auto params = types().rec(other.type).params.size();
+      return other.is_template || params == 0 ||
+             (other.defaults.size() == params && !std::ranges::contains(other.defaults, NodeId::none));
+    });
+  }
+
+  // GCC's direct empty allocation checks the implicit union default constructor. Use the
+  // ordinary base and field defaults without treating a trivial defaulted leaf as nontrivial.
+  bool gcc_union_variant_prevents_implicit_default(QualType type, std::set<EntityId>& visited) {
+    type = types().innermost_array_element(type);
+    if (!types().is_class(type)) return false;
+    const EntityId cls = types().class_of(type);
+    const ClassRec* record = class_rec(cls);
+    if (!record || !visited.insert(cls).second) return false;
+    if (record->user_ctors) return !gcc_union_variant_trivial_default(*record);
+    if (record->implicit_default_ctor != EntityId::none) return true;
+    return std::ranges::any_of(record->bases, [&](const BaseRec& base) {
+      return gcc_union_variant_prevents_implicit_default(types().class_type(base.cls), visited);
+    }) || std::ranges::any_of(record->fields, [&](const FieldRec& field) {
+      return field.dmi || field.init != ConstId::none ||
+             (!record->union_ && gcc_union_variant_prevents_implicit_default(field.type, visited));
+    });
+  }
+
   // [expr.new]/26: the new-initializer initializes the class object as in a declaration
   // ([dcl.init.general]): default-initialization without one, value-initialization for `()`,
   // and direct- or direct-list-initialization otherwise.
@@ -11357,11 +11395,14 @@ public:
         const bool has_default = std::ranges::any_of(fields, [](const FieldRec& field) {
           return field.dmi || field.init != ConstId::none;
         });
+        // A contributing class ends the search, so every previously visited class can be skipped.
+        std::set<EntityId> visited;
         if (!has_default && std::ranges::any_of(fields, [&](const FieldRec& field) {
               const QualType element = types().innermost_array_element(field.type);
               const ClassRec* variant = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+              // Preserve the immediate variant's exemption. The narrower proof applies below it.
               return variant && !variant->trivial_defaulted_default_ctor &&
-                     (has_member_inits(field.type) || default_deleted(field.type));
+                     (gcc_union_variant_prevents_implicit_default(field.type, visited) || default_deleted(field.type));
             })) {
           diag(begin, Diag::deleted_constructor, t);
           return fail;
