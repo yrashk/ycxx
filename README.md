@@ -328,6 +328,10 @@ On Linux x86-64, statement-position `asm("int3");` and `asm volatile("int3");` e
 a breakpoint that can resume at the next instruction.
 [#950](https://github.com/yrashk/ycxx/issues/950)
 
+On x86-64 Linux and arm64 macOS, GNU `asm volatile("" ::: "memory");` and the
+form without `volatile` give a compiler memory barrier that emits no instruction.
+[#1121](https://github.com/yrashk/ycxx/issues/1121)
+
 **Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive

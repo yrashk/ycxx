@@ -696,6 +696,7 @@ struct Ops {
   static Flow va_copy(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow va_end(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow asm_(M& m, Frame&, N n) { return constant(m) ? m.fail(Reason::asm_) : m.unsupported(n); }
+  static Flow compiler_memory_barrier(M& m, Frame& f, N n) { return asm_(m, f, n); }
 
   // ---------------------------------------------------------------- constant evaluation
 

@@ -7127,8 +7127,8 @@ public:
     if (accept(Tk::r_paren)) skip_to_semi();
   }
 
-  // [dcl.asm]: an ordinary string and a terminating semicolon. Accept the GNU
-  // volatile qualifier at statement position. Native lowering checks the instruction.
+  // [dcl.asm]: an ordinary string and a terminating semicolon. The GNU no-operand
+  // empty template with one memory clobber is implicitly volatile.
   Ex asm_declaration() {
     const u32 begin = pos();
     bump();  // asm
@@ -7147,12 +7147,35 @@ public:
       skip_rest();
       return {NodeId::none, begin, pos()};
     }
+    const bool empty_template = literal().units.empty();
     const auto text = s_->as<ast::Literal>(primary_expression());
-    if (!expect(Tk::r_paren) || !expect(Tk::semi)) {
+    u32 separators = 0;
+    while (is(Tk::colon) || is(Tk::coloncolon)) {
+      separators += is(Tk::coloncolon) ? 2 : 1;
+      bump();
+    }
+    if (separators) {
+      bool memory = false;
+      if (is(Tk::string_lit)) {
+        const auto& clobber = literal();
+        memory = !clobber.bad && clobber.encoding == lex::Encoding::ordinary &&
+                 clobber.ud_suffix == lex::no_name && std::ranges::equal(clobber.units, std::string_view("memory"));
+        bump();
+        while (is(Tk::string_lit) && tok().has(lex::tok_flag::continued)) bump();
+      }
+      if (!text || !empty_template || separators != 3 || !memory || !is(Tk::r_paren)) {
+        if (text) s_->diag(begin, Diag::not_supported, Tk::kw_asm);
+        skip_to_semi();
+        if (accept(Tk::r_paren)) accept(Tk::semi);
+        return {NodeId::none, begin, pos()};
+      }
+    }
+    if (!expect(Tk::r_paren)) {
       skip_rest();
       return {NodeId::none, begin, pos()};
     }
-    if (!text) return {NodeId::none, begin, pos()};
+    if (!expect(Tk::semi) || !text) return {NodeId::none, begin, pos()};
+    if (separators) return s_->node(ast::AsmMemoryBarrier{}, begin, pos());
     return s_->node(ast::Asm{text->value}, begin, pos());
   }
 

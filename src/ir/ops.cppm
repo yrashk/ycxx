@@ -350,6 +350,9 @@ export enum class Op : std::uint16_t {
   call_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
 
   clz [[=pure({V}, {V}).accepts({count_zero_gcc})]],  // leading zero bits of an integer
+
+  // Empty GNU extended asm with a memory clobber orders all memory accesses.
+  compiler_memory_barrier [[=state({S}, {S}).with({nonconstant})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

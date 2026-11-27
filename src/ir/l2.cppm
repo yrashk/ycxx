@@ -217,6 +217,9 @@ export enum class Op : std::uint16_t {
   int3 [[=state({S}, {S})]],
 
   clz [[=pure({V}, {V})]],  // leading zero bits; zero input yields poison
+
+  // Orders reads and writes through selection. Emits no instruction.
+  compiler_memory_barrier [[=state({S}, {S})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

@@ -227,6 +227,37 @@ func @1 {
     std::string t = a64::print(*n);
     check(t.find("LDRui") < t.find("STRui"), "the load stays before the store:\n" + t);
   }
+
+  // A memory barrier prevents folding a preceding load into the return. Both barriers
+  // survive as separate L2 state changes and emit no instructions.
+  auto with_barriers = selected(R"(
+func @1 {
+^0(%s0: !state, %p: T7):
+  %v: T1 = load %s0, %p [T1, /]
+  %s1: !state = compiler_memory_barrier %s0
+  %s2: !state = compiler_memory_barrier %s1
+  ret %s2, %v
+}
+)");
+  auto without_barriers = selected(R"(
+func @1 {
+^0(%s0: !state, %p: T7):
+  %v: T1 = load %s0, %p [T1, /]
+  ret %s0, %v
+}
+)");
+  check(with_barriers && without_barriers, "both memory barrier controls select");
+  if (with_barriers && without_barriers) {
+    const auto& with = with_barriers->blocks.front().insts;
+    const auto& without = without_barriers->blocks.front().insts;
+    const auto load_with = std::ranges::find(with, a64::Form::LDRui, &a64::MInst::form);
+    const auto load_without = std::ranges::find(without, a64::Form::LDRui, &a64::MInst::form);
+    check(load_with != with.end() && load_with->origin == 0, "the load stays before the memory barriers");
+    check(load_without != without.end() && load_without->origin == 1, "the control load folds into the return");
+    check(!with.empty() && with.back().origin == 3, "both barriers survive in L2 before the return");
+    check(std::ranges::none_of(with, [](const a64::MInst& i) { return i.origin == 1 || i.origin == 2; }),
+          "the memory barriers emit no instruction");
+  }
 }
 
 // --- Determinism -------------------------------------------------------------------------------
