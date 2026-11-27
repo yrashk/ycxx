@@ -16,7 +16,7 @@ PRINT_INCLUDE = '-print-file-name=include'
 def main():
     ycxx, = sys.argv[1:]
     ycxx = Path(ycxx).resolve()
-    with tempfile.TemporaryDirectory(prefix='ycxx-driver-queries-', dir='/tmp') as temp:
+    with tempfile.TemporaryDirectory(prefix='ycxx-driver-queries-') as temp:
         root = Path(temp)
         scope = root / 'empty'
         scope.mkdir()

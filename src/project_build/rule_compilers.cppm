@@ -41,13 +41,13 @@ fs::path anchored(const fs::path& cwd, fs::path path) {
 }
 
 bool executable(const fs::path& candidate, std::set<std::string>& observations) {
-  observations.insert(candidate.generic_native_encoded_string());
+  observations.insert(candidate.generic_string<char>());
 
   // Watch the target in addition to the invocation spelling. A previously missing tool still
   // contributes its candidate path, so its appearance can change discovery.
   std::error_code ec;
   const auto resolved = fs::weakly_canonical(candidate, ec);
-  if (!ec) observations.insert(resolved.generic_native_encoded_string());
+  if (!ec) observations.insert(resolved.generic_string<char>());
   ec.clear();
   return fs::is_regular_file(candidate, ec) && ::access(candidate.c_str(), X_OK) == 0;
 }
@@ -76,7 +76,7 @@ std::expected<RuleCompilerCandidates, std::string> discover_rule_compilers(
       const auto colon = rest.find(':');
       const auto component = rest.substr(0, colon);
       auto path = anchored(root, fs::path(component));
-      auto text = path.generic_native_encoded_string();
+      auto text = path.generic_string<char>();
       if (text.contains(':')) return std::unexpected("cannot represent rule compiler search directory in PATH: " + text);
       if (!directories.empty()) result.search_path += ':';
       result.search_path += text;
@@ -89,7 +89,7 @@ std::expected<RuleCompilerCandidates, std::string> discover_rule_compilers(
   std::set<std::string> observations;
   const auto add = [&](const fs::path& candidate, bool native) {
     if (!executable(candidate, observations)) return false;
-    result.tools.push_back({candidate.generic_native_encoded_string(), native});
+    result.tools.push_back({candidate.generic_string<char>(), native});
     return true;
   };
   const auto search = [&](std::string_view tool) {

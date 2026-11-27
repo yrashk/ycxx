@@ -8,7 +8,10 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import check_dependency_graph, compare_dependencies, dependency_edge, manifest_location
+from project_inspection import (
+    check_dependency_graph, check_target_dependencies_html, compare_dependencies,
+    dependency_edge, manifest_location, scope_state,
+)
 from project_shader_bundle import check_external_actions, publication
 from runtime_dir import runtime_root
 
@@ -322,6 +325,12 @@ def check_builds(ycxx, scope, env, journal):
     check_native_units_reused(events)
     check_program(executable, 41)
     diamond = inspect(ycxx, scope, env, journal, ORDER, owners=('left', 'right', 'common'))
+    before = scope_state(scope)
+    recorded = journal_bytes(journal)
+    result = run_client(ycxx, scope, env, 'show', 'app', '--format=html')
+    assert result.returncode == 0, result.stderr
+    check_target_dependencies_html(result.stdout, diamond)
+    assert journal_bytes(journal) == recorded and scope_state(scope) == before, 'target navigation changed state'
     baseline.write_text(json.dumps(diamond), encoding='utf-8')
 
     direct = 'a_provider'

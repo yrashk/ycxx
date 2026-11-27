@@ -9,7 +9,9 @@ import tempfile
 
 from project_build import action_keys, check_program, env_for, run_client, traced_build, tu_outcomes
 from project_build_watch import Watch, replace_source
-from project_inspection import check_dependency_graph, check_value_bindings_html, dependency_edge
+from project_inspection import (
+    check_dependency_graph, check_value_bindings_html, compare_value_bindings, dependency_edge, fact,
+)
 from runtime_dir import runtime_root
 
 
@@ -211,6 +213,49 @@ fi
     inspect(ycxx, scope, env, log, 'supported')
 
 
+def check_value_binding_rewire(ycxx, scope, env):
+    log = prepare(scope)
+    _, events = traced_build(ycxx, scope, env, 'build initial package value binding')
+    check_observation(events)
+    initial = inspect(ycxx, scope, env, log, 'supported')
+    executable = scope / '.ycxx/out/app'
+    check_program(executable, 0)
+    before = scope.parent / 'before-value-rewire.json'
+    before.write_text(json.dumps(initial), encoding='utf-8')
+
+    backup = 'wire_backup <b data-value-binding-probe="1">&'
+    for path in ('build.ycxx', 'rules/codec.cc'):
+        source = (scope / path).read_text(encoding='utf-8')
+        assert source.count('"wire"') == 2, source
+        replace_source(scope, path, source.replace('"wire"', json.dumps(backup)))
+
+    _, events = traced_build(ycxx, scope, env, 'rewire config.fast to an equal package value')
+    classified = action_keys(events, 'RuleClassifier')
+    assert classified == [f'{backup}.fast-mode'], classified
+    assert not action_keys(events, 'RuleWitness'), 'the rewire changed no witness inputs'
+    check_program(executable, 0)
+    recorded = log.read_bytes()
+    assert recorded == b'enabled\n', recorded
+    result = run_client(ycxx, scope, env, 'show', 'app', '--format=json')
+    assert result.returncode == 0, result.stderr
+    current = json.loads(result.stdout)
+    fact(current, 'value-export', backup, 'supported')
+    consumer = fact(current, 'capability-input', 'config', 'supported')
+    assert f'{backup}.fast-mode' in consumer['origin'], consumer
+    old_edge, = initial['dependency_graph']['value_edges']
+    spelling = f'value({json.dumps(backup)}, "fast-mode")'
+    new_edge = {**dependency_edge(current['definition'], 'config', backup, 'capabilities',
+                                  spelling, binding='fast'), 'export_name': 'fast-mode'}
+    check_dependency_graph(current, initial['dependency_graph']['edges'], value_edges=[new_edge])
+
+    changes = [{'before': [old_edge], 'after': []}, {'before': [], 'after': [new_edge]}]
+    diff = compare_value_bindings(ycxx, scope, env, before, current, changes)
+    assert diff['dependency_changes'] == [], diff
+    assert all(row[side]['kind'] != 'capability-input' for row in diff['changes']
+               for side in ('before', 'after') if row.get(side)), diff
+    assert log.read_bytes() == recorded, 'comparison ran the witness'
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix='ycxx-package-probe-') as directory:
@@ -228,6 +273,12 @@ def main():
                 check_manifest_edit(ycxx, edited_scope, env)
             finally:
                 run_client(ycxx, edited_scope, env, 'ctl', 'shutdown')
+
+            rewired_scope = scope.with_name('rewired-project')
+            try:
+                check_value_binding_rewire(ycxx, rewired_scope, env)
+            finally:
+                run_client(ycxx, rewired_scope, env, 'ctl', 'shutdown')
 
         shutil.rmtree(scope / '.ycxx')
         with tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime:

@@ -457,7 +457,8 @@ std::expected<StagedToolchainProbe, std::string> stage_toolchain_probe(
     staged.expected_target = target;
   }
 
-  const auto native_runtime_off = parse_target(target).format == mach_o ? "-nostdlib++" : "-nostdlib";
+  const bool darwin_executable = probe.phase == ToolchainProbePhase::executable_link && parse_target(target).format == mach_o;
+  const auto native_runtime_off = darwin_executable ? "-nostdlib++" : "-nostdlib";
   bool recipe_runtime_off = false;
   for (auto arg : probe.args) {
     if (!driver && dialect_flag(arg)) {

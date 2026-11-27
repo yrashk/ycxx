@@ -104,6 +104,9 @@ struct Evaluated {
   bool variable_instantiation_failure = false;
   // The selected callee already diagnosed its body.
   bool function_instantiation_failure = false;
+  // An `if consteval` took its consteval edge: the value holds only where the expression is
+  // manifestly constant-evaluated ([expr.const]).
+  bool observed_constant_context = false;
 
   bool diagnosed_failure() const {
     return type_trait_failure || variable_instantiation_failure || function_instantiation_failure;
@@ -132,6 +135,42 @@ public:
 
   Evaluated evaluate(Ex e) { return evaluate(e, false); }
   Evaluated evaluate_reference_initializer(Ex e) { return evaluate(e, true); }
+
+  // [expr.const.init]: test the destructor on the initialized object. Its mutable
+  // subobjects' lifetimes are external to the hypothetical destruction expression.
+  bool check_constant_destruction(QualType type, ConstId value, u32 at) {
+    const EntityId destructor = s_->destructor_of(type);
+    if (destructor == EntityId::none) return true;
+    type = Types::unqualified(type);
+    const auto fail = [&](u64 reason) {
+      s_->diag(at, Diag::not_constant, reason);
+      return false;
+    };
+    if (!q_->is_constexpr(destructor)) return fail(reason_arg({interp::Reason::not_constexpr, 0, {}}));
+    if (!s_->ins().values.is<ast::VAggregate>(value)) return fail(reason_unsupported);
+    const auto contents = s_->ins().seqs.elements(s_->ins().values.get<ast::VAggregate>(value).elems);
+    if (s_->types().is_array(type)) {
+      const auto element = s_->types().rec(type).inner;
+      for (ConstId item : contents)
+        if (!check_constant_destruction(element, item, at)) return false;
+      return true;
+    }
+    Ex initializer = s_->literal(type, value, ValueCategory::prvalue, at, at);
+    if (s_->is_union(type)) {
+      std::vector<Ex> initializers;
+      const auto variants = s_->elements(type);
+      if (variants.size() != contents.size()) return fail(reason_unsupported);
+      if (!contents.empty())
+        initializers.push_back(s_->literal(variants.front().type, contents.front(), ValueCategory::prvalue, at, at));
+      initializer = s_->list_of(type, std::move(initializers), at, at);
+    }
+    Ex object = s_->materialize(initializer, type, /*extended=*/false);
+    if (!object.ok()) return false;
+    Ex discard = s_->convert_node(object, ast::ConversionKind::to_void, s_->builtin(Builtin::void_));
+    const auto checked = evaluate(discard, false, {}, nullptr, destructor);
+    if (checked.constant) return true;
+    return checked.diagnosed_failure() ? false : fail(checked.reason);
+  }
 
   // The two accessors see the same receiver, including its original cv and value category.
   std::optional<std::string> evaluate_bytes(Ex receiver) {
@@ -172,7 +211,8 @@ private:
   // Evaluates `e` as a core constant expression, then checks the result is a permitted result
   // ([expr.const]). The result for a reference initializer is a pointer to the bound object.
   Evaluated evaluate(Ex e, bool reference_initializer,
-                     irgen::FunctionInput::InitializedFields initialized_fields = {}, ByteEvaluation* bytes = nullptr) {
+                     irgen::FunctionInput::InitializedFields initialized_fields = {}, ByteEvaluation* bytes = nullptr,
+                     EntityId constant_destructor = EntityId::none) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     if (!reference_initializer)
@@ -271,7 +311,8 @@ private:
         .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
         .virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic, bool immediate) {
           return virtual_target(selected, receiver, dynamic, immediate);
-        }};
+        },
+        .constant_destructor = constant_destructor};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
     if (out.status != interp::Outcome::Status::value) {
@@ -304,7 +345,9 @@ private:
       return {std::nullopt, reason_arg({interp::Reason::null_access, 0, {}})};
     if (reference_initializer && value.past)
       return {std::nullopt, reason_arg({interp::Reason::past_end_access, 0, {}})};
-    return constant(value);
+    Evaluated result = constant(value);
+    result.observed_constant_context = out.observed_constant_context;
+    return result;
   }
 
 public:
@@ -335,14 +378,18 @@ private:
         owner = s_->types().class_of(e.type());
       std::vector<ConstId> elements;
       elements.reserve(clauses.size());
+      bool observed = false;
       for (const Ex& element : clauses) {
         irgen::FunctionInput::InitializedFields fields;
         if (owner != EntityId::none && s_->as<ast::DefaultMemberInit>(element)) fields = {owner, elements};
         Evaluated result = evaluate_initializer(element, zero_default, fields);
         if (!result.value) return result;
+        observed |= result.observed_constant_context;
         elements.push_back(*result.value);
       }
-      return {s_->world().values.aggregate(e.type(), elements), 0, true};
+      Evaluated aggregate{s_->world().values.aggregate(e.type(), elements), 0, true};
+      aggregate.observed_constant_context = observed;
+      return aggregate;
     }
     if (auto dmi = s_->as<ast::DefaultMemberInit>(e))
       return evaluate_initializer({dmi->init.id, e.begin, e.end, e.info}, zero_default, initialized_fields);
@@ -440,13 +487,28 @@ private:
   }
 
   // The value of a zero-initialized object of type `t` ([dcl.init.general]).
-  std::optional<ConstId> zero_constant(QualType t) {
+  std::optional<ConstId> zero_constant(QualType t, bool raw_union_member = false) {
     Types& types = s_->types();
     Values& values = s_->world().values;
-    if (s_->is_aggregate(t)) {
+    // [dcl.init.general]: value-initialization by a trivial default constructor is zero-initialization.
+    const ClassRec* record = types.is_class(t) ? s_->class_rec(types.class_of(t)) : nullptr;
+    if (s_->is_aggregate(t) || (record && record->trivial_defaulted_default_ctor && constant_record_layout(t))) {
+      raw_union_member = raw_union_member || (s_->is_union(t) && s_->compatibility() == ast::Compatibility::gcc);
       std::vector<ConstId> elements;
       for (const Sema::Element& element : s_->elements(t)) {
-        auto value = zero_constant(element.type);
+        auto value = zero_constant(element.type, raw_union_member);
+        if (!value) return std::nullopt;
+        elements.push_back(*value);
+      }
+      return values.aggregate(t, elements);
+    }
+    if (raw_union_member && types.is_class(t)) {
+      const auto layout = constant_record_layout(t);
+      if (!layout) return std::nullopt;
+      std::vector<ConstId> elements;
+      elements.reserve(layout->fields.size());
+      for (const auto& field : layout->fields) {
+        auto value = zero_constant(field.type, true);
         if (!value) return std::nullopt;
         elements.push_back(*value);
       }
@@ -457,8 +519,8 @@ private:
       return s_->ins().intern_value(ast::VMemberPtr{Types::unqualified(types.canonical(t))});
     if (types.is_enum(t)) return values.integer(s_->underlying_of(t), 0);
     if (types.is_integral(t)) return values.integer(Types::unqualified(t), 0);
-    if (types.is_standard_floating(t) && ast::computes(ast::float_format(s_->ins(), s_->world().target, t)))
-      return values.floating(Types::unqualified(t), 0.0);
+    if (types.is_standard_floating(t))
+      return ast::float_value(s_->ins(), s_->world().target, Types::unqualified(t), ast::Bits128{});
     return std::nullopt;
   }
 
@@ -473,16 +535,25 @@ private:
     // ([expr.prim.lambda.capture]/15), or a class a constructor initializes ([class.ctor]): its
     // fields are its value whatever their access.
     const bool aggregate = s_->is_aggregate(type);
-    if (!record || (!aggregate && !record->closure && (!record->user_ctors || record->polymorphic)) || record->union_ ||
+    if (!record || (!aggregate && !record->closure && (!record->user_ctors || record->polymorphic)) ||
+        (record->union_ && !aggregate) ||
         !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
-        !record->destructor_usable || record->destructor != EntityId::none)
+        !record->destructor_usable || (record->destructor != EntityId::none && !q_->is_constexpr(record->destructor)))
       return std::nullopt;
     const auto layout = s_->class_layout(entity);
     if (!layout) return std::nullopt;
 
     interp::ConstantRecordLayout result{layout->size, {}};
-    result.fields.reserve(record->fields.size());
-    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+    // This profile needs only member lifetimes in complete aggregate initialization order.
+    result.flat_array_element = aggregate && !record->union_ && record->destructor == EntityId::none &&
+        !record->fields.empty() && std::ranges::all_of(record->fields, [&](const FieldRec& field) {
+          return types.is_integral(field.type) || types.is_enum(field.type);
+        });
+    // The currently supported union aggregate initializer gives a value to its first
+    // variant only. Its other variants share storage without supplying constant values.
+    const std::size_t fields = record->union_ ? std::min<std::size_t>(record->fields.size(), 1) : record->fields.size();
+    result.fields.reserve(fields);
+    for (std::size_t i = 0; i < fields; ++i) {
       const FieldRec& field = record->fields[i];
       if ((aggregate && record->access_of(field.entity) != ast::Access::public_) || field.bit_width || field.no_unique_address ||
           !constant_record_field(field.type))
@@ -592,8 +663,16 @@ private:
   bool constant_record_field(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
+    if (s_->compatibility() == ast::Compatibility::gcc || types.is_class(types.innermost_array_element(type))) {
+      while (types.is_array(type)) {
+        const auto array = types.rec(type);
+        if (array.bound_value == ConstId::none) return false;
+        type = types.canonical(array.inner);
+      }
+    }
     if (Types::is_volatile(type)) return false;
     if (types.is_array(type)) return constant_record_char_array(types, type);
+    if (types.is_class(type)) return constant_record_layout(type).has_value();
     if (types.is_pointer(type)) return true;
     if (types.is_enum(type)) {
       const EnumRec* enumeration = s_->enum_rec(types.enum_of(type));
@@ -604,7 +683,7 @@ private:
     if (!b) return false;
     const auto& target = s_->world().target;
     return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 128) ||
-           (ast::is_floating(*b) && ast::computes(target[*b].format));
+           (ast::is_floating(*b) && (ast::computes(target[*b].format) || target[*b].format == ast::FloatFormat::x87_extended));
   }
 
   struct Host {
@@ -647,7 +726,7 @@ private:
       QualType t = s_->types().is_enum(r.type) ? s_->underlying_of(r.type) : r.type;
       return {vs.integer(t, ast::Bits128{r.bits, r.hi}), 0, true};
     }
-    case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
+    case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, r.hi}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
     case K::aggregate: {
@@ -675,7 +754,7 @@ private:
           path.push_back(step.index);
         }
       }
-      return {vs.address(r.type, base, r.offset, path), 0, true};
+      return {vs.address(r.type, base, r.offset, path, r.gcc_nested_end), 0, true};
     }
     }
     return {};
@@ -686,12 +765,12 @@ private:
   std::optional<interp::Callee> closure_callee(EntityId f) {
     for (std::size_t i = 0; i < s_->closures.size(); ++i) {
       const ast::ClosureDef& c = s_->closures[i];
-      if (c.call != f && c.invoker != f) continue;
+      if (c.call != f && c.invoker != f && c.conversion != f) continue;
       if (c.flags & closure_flag::polymorphic_result)
         return interp::Callee{.is_constexpr = true, .unsupported = true};
       std::vector<ast::LocalRec> locals = s_->closure_locals[i];
       for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts
-      ast::Child body = s_->builder().commit(ast::Child{c.call == f ? c.body : c.invoker_body, 0});
+      ast::Child body = s_->builder().commit(ast::Child{Sema::closure_member_body(c, f), 0});
       Sema::ClosureMember m = Sema::closure_member_def(s_->world(), c, f, body.id, std::move(locals));
       irgen::FunctionInput input{f, m.decl, m.body, s_->item(), s_->loc_base() + c.body_begin, false, {}, m.this_type};
       EvalFacts facts(s_->world(), *q_);

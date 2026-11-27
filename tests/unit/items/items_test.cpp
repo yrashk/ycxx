@@ -361,7 +361,59 @@ void query() {
 
 }  // namespace
 
+// Local classes (#117, docs/design/local-classes.md): a class-specifier in a block is an item of
+// its own, owned by the function or declaration whose tokens hold it; elaborated-type-specifiers
+// and other class-keys in a block are not.
+void local_classes() {
+  auto s = split("int f() {\n"
+                 "  struct A { int x; ~A() { struct In { int y; }; } };\n"
+                 "  struct A2 : Base { };\n"
+                 "  const struct { int e; } t[] = {{1}};\n"
+                 "  struct X x{1}; struct Y* p; enum class E { a }; enum struct F { b };\n"
+                 "  union { int i; float g; };\n"
+                 "  auto l = []<class T>(T) -> struct R { return {}; };\n"
+                 "  return 0;\n"
+                 "}\n"
+                 "struct K { static constexpr auto v = [] { struct In { int q; } r{}; return r; }(); };\n");
+  check(s.size() == 2, "two top-level items");
+  const Item& f = s.top(0);
+  check(f.kind == ItemKind::function && f.members.size() == 3, "f owns its three local class-specifiers");
+  const Item& a = s[f.members[0]];
+  check(a.kind == ItemKind::class_def && a.local_owner == s.items.top[0] && a.parent == s.items.top[0] &&
+            names(a) == v({"A"}) && tokens(s, a.begin, a.end) == "struct A { int x ; ~ A ( ) { struct In { int y ; } ; } }",
+        "a local class: the class-specifier only, its declarators left to the block");
+  check(a.scope == "(local)" && s[a.members[0]].scope == "(local)::A", "local scopes no source name spells");
+  const Item& dtor = s[a.members[1]];
+  check(dtor.kind == ItemKind::function && dtor.members.size() == 1 && s[dtor.members[0]].local_owner == a.members[1],
+        "a class in a member function's body is that function's");
+  const Item& derived = s[f.members[1]];
+  check(names(derived) == v({"A2"}) && tokens(s, derived.begin, derived.end) == "struct A2 : Base { }", "a base-clause");
+  const Item& unnamed = s[f.members[2]];
+  check(unnamed.local_owner == s.items.top[0] && names(unnamed).empty() && tokens(s, unnamed.begin, unnamed.end) == "struct { int e ; }",
+        "an unnamed local class");
+  const Item& k = s.top(1);
+  check(k.kind == ItemKind::class_def && k.members.size() == 1, "K has its member");
+  const Item& member = s[k.members[0]];
+  check(member.kind == ItemKind::declaration && member.members.size() == 1 && s[member.members[0]].local_owner == k.members[0],
+        "a class in a lambda of a static member's initializer is the member declaration's");
+  // The owner's identity and body hash are its own tokens': unchanged by the cut.
+  auto plain = split("int f() {\n  int x;\n}\n");
+  check(plain.top(0).members.empty(), "no class-specifier, no members");
+  check(split("auto f() { auto l = []() -> const struct S { return {}; }; }").top(0).members.empty(),
+        "a cv-qualified trailing return type is no class-specifier");
+  // Same-shaped local classes of different functions, or of sibling blocks, are distinct items.
+  auto same = split("int f() { struct A { int g() { return 1; } }; return 0; }\n"
+                    "int h() { struct A { int g() { return 1; } }; { struct A { int g() { return 1; } }; } return 0; }\n");
+  const Item& fa = same[same.top(0).members[0]];
+  const Item& ha = same[same.top(1).members[0]];
+  const Item& hb = same[same.top(1).members[1]];
+  check(fa.id != ha.id && ha.id != hb.id && same[fa.members[0]].id != same[ha.members[0]].id &&
+            same[ha.members[0]].id != same[hb.members[0]].id,
+        "local items' ids include their owner's");
+}
+
 int main() {
+  local_classes();
   alpha();
   nesting();
   classes();

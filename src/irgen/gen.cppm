@@ -152,11 +152,15 @@ using std::uint32_t;
 using ast::NodeId;
 using ir::ValueId;
 
+// Only the destination walked by the local initializer carries this information.
+enum class ArrayRecordInit : std::uint8_t { none, array, element, field };
+
 // An lvalue designates an addressable object or a bit-field projected from its record pointer.
 struct Place {
   ValueId ptr{};
   ast::QualType type{};
   std::optional<std::uint32_t> bit_field{};
+  ArrayRecordInit array_record_init = ArrayRecordInit::none;
 };
 
 // A node of the tree and its item-relative token offset (the red view's position, ast.md §3.5).
@@ -266,6 +270,10 @@ class Gen {
     std::uint64_t imms[] = {word(ty(p.type)), 0};
     stateful(ir::Op::store, {}, ops, imms, access_flags(p.type) | flags);
   }
+  void store_initializer(const Place& p, ValueId value) {
+    const ir::Flags flags = p.array_record_init == ArrayRecordInit::field ? ir::bit(ir::Flag::initializing_store) : 0;
+    store(p, value, flags);
+  }
   // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
   Place initializing_place(Place p) {
     if (is_nullptr(p.type)) p.type = ast::without_cv(ty(p.type));
@@ -315,7 +323,8 @@ class Gen {
 
   Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic) {
     ir::Ty r[] = {vty(facts_.pointer_to(type))};
-    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(storage), std::to_underlying(init)};
+    // The allocated object retains its declared cv even when an access changes the glvalue type.
+    std::uint64_t imms[] = {word(in_.canonical(type)), std::to_underlying(storage), std::to_underlying(init)};
     ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms);
     return {b_.result(n, 1), type};
   }
@@ -348,7 +357,7 @@ class Gen {
     std::uint64_t imms[] = {std::to_underlying(e.storage)};
     stateful(ir::Op::dealloc, {}, ops, imms);
   }
-  void begin_bypassed(At at, const Ending& e) {
+  void begin_bypassed(At at, const Ending& e, ir::Flags flags = 0) {
     // Sema has rejected bypassing nonvacuous initialization ([stmt.dcl]/2).
     if (!e.vacuous_local) unsupported(at, "past a declaration");
     if (!planned_bypasses_) {
@@ -356,7 +365,7 @@ class Gen {
       return;
     }
     Place p = begin_object(e.place.type, ir::Init::erroneous);
-    begin_lifetime(p);
+    begin_lifetime(p, flags);
     store(jump_bindings_.at(*e.vacuous_local), p.ptr);
   }
   // Calls `destructor` on the object at `p`; an array's elements, the last first ([class.dtor]).
@@ -749,20 +758,32 @@ class Gen {
       // A void operand is evaluated and the function returns nothing ([stmt.return]); a
       // reference result is the address of its object. The operand's temporaries end first.
       At value = child(a, r.value);
+      const bool was_selecting = selecting_initializer_;
+      const bool was_selecting_return = selecting_return_;
       if (result_ && r.value.id != NodeId::none) {
+        const At written = strip_parens(value);
+        const bool selection = !F::evaluating_constants && !fn_.thunk &&
+                               is<ast::Conditional>(written) && class_prvalue(info(written));
+        const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
+                              get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
+        if (selection) {
+          selecting_initializer_ = true;
+          selecting_return_ = true;
+        }
         // A class result initializes the caller's object ([stmt.return], [dcl.init.general]/16.6).
         full_expression([&] {
-          // The immediate evaluator can return a record after sequencing a static member's receiver.
-          const At written = strip_parens(value);
-          const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
-                                get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
-          initialize(*result_, value, false, sequence);
+          // The immediate evaluator can also sequence a static member's receiver.
+          initialize(*result_, value, false, selection || sequence);
+          // The selected arm's temporaries join the condition's in this full-expression.
+          if (selection) begin_lifetime(*result_);
           return 0;
         });
       } else if (r.value.id != NodeId::none) {
         v = full_expression([&] { return is_lvalue(value) ? std::optional(address(value)) : rvalue_or_void(value); });
       }
       ret_(v);
+      selecting_initializer_ = was_selecting;
+      selecting_return_ = was_selecting_return;
     } else if (is<ast::If>(a)) {
       if_(a);
     } else if (is<ast::IfConsteval>(a)) {
@@ -843,7 +864,11 @@ class Gen {
     if (has_init && !peer_root) {
       selecting_initializer_ = selection;
       full_expression([&] {
-        initialize(initializing_place(p), initializer, zeroed, selection);
+        Place destination = initializing_place(p);
+        if (v.destructor == ast::EntityId::none && cls(p.type) == TypeClass::array &&
+            cls(facts_.element(p.type)) == TypeClass::record)
+          destination.array_record_init = ArrayRecordInit::array;
+        initialize(destination, initializer, zeroed, selection);
         if (selection) begin_lifetime(p);
         return 0;
       });
@@ -960,6 +985,8 @@ class Gen {
       return initialize(p, child(e, comma.rhs), zeroed, true);
     }
     const auto choice = get<ast::Conditional>(e);
+    if (selecting_return_ && (choice.info.flags & ast::Conditional::unchecked_class_copy))
+      unsupported(e, "with an unresolved class copy in a return selection");
     const auto then_value = child(e, choice.then_), else_value = child(e, choice.else_);
     if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
       unsupported(e, "with a non-value arm in a class initializer");
@@ -1010,7 +1037,13 @@ class Gen {
     if (step == ir::Step::field && facts_.bit_field_width(facts_.class_entity(p.type), index) != 0)
       return {p.ptr, t, index};
     std::uint64_t path[] = {1, ir::encode({step, index})};
-    return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
+    Place result{pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
+    if (p.array_record_init == ArrayRecordInit::array && step == ir::Step::elem)
+      result.array_record_init = ArrayRecordInit::element;
+    if (p.array_record_init == ArrayRecordInit::element && step == ir::Step::field &&
+        (cls(t) == TypeClass::bool_ || cls(t) == TypeClass::integer))
+      result.array_record_init = ArrayRecordInit::field;
+    return result;
   }
 
   // The enclosing object recovered by undoing a checked nonvirtual base path ([expr.static.cast]).
@@ -1072,7 +1105,7 @@ class Gen {
     Position here(*this, e.offset);
     if (!is<ast::CtorCall>(e)) unsupported(e, "as a constructor target");
     auto c = get<ast::CtorCall>(e);
-    if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
+    if (c.zero_first && !zeroed) zero_fill({object, info(e).type});
     std::vector<ValueId> args{object};
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
@@ -1088,7 +1121,8 @@ class Gen {
   void initialize_constant(const Place& p, ast::ConstId value) {
     const TypeClass kind = cls(p.type);
     if (kind != TypeClass::array && kind != TypeClass::record) {
-      store(p, constant(p.type, value));
+      store_initializer(p, constant(p.type, value));
+      if (p.array_record_init == ArrayRecordInit::field) begin_lifetime(p);
       return;
     }
     if (!in_.values.is<ast::VAggregate>(value)) throw Unsupported{"an aggregate constant of the wrong kind"};
@@ -1254,16 +1288,27 @@ class Gen {
     }
     if (is<ast::DefaultInit>(e)) return;
     if (is<ast::ValueInit>(e)) {
-      if (zeroed) return;
-      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) unsupported(e, "of an aggregate");
-      store(p, zero(p.type));
+      if (zeroed) {
+        // An omitted flat record can be represented as one ValueInit rather than a list.
+        // Commit each field's lifetime before the next array element is evaluated.
+        if (p.array_record_init == ArrayRecordInit::element) {
+          const auto owner = facts_.class_entity(p.type);
+          for (uint32_t i = 0; auto type = facts_.field_type(owner, i); ++i)
+            if (cls(*type) == TypeClass::bool_ || cls(*type) == TypeClass::integer)
+              begin_lifetime(subobject(p, ir::Step::field, i, *type));
+        }
+        return;
+      }
+      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) zero_fill(p);
+      else store_initializer(p, zero(p.type));
       return;
     }
     if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) {
       copy(p, class_source(e));
       return;
     }
-    store(p, rvalue(e));
+    // Lower the complete operand before attaching initialization authority to the store.
+    store_initializer(p, rvalue(e));
   }
 
   // An argument: a glvalue binds a reference parameter, so it passes its object's address.
@@ -1313,6 +1358,17 @@ class Gen {
     std::uint64_t imms[] = {word(ty(dst.type))};
     stateful(ir::Op::copy, {}, ops, imms);
   }
+  // Zero-initializes ([dcl.init.general]) an object whose storage was not allocated zero: copies
+  // the representation of one that is.
+  void zero_fill(const Place& p) {
+    const Place zeros = begin_object(p.type, ir::Init::zero, ir::Storage::temporary);
+    begin_lifetime(zeros);
+    copy(p, zeros);
+    ValueId ops[] = {zeros.ptr};
+    stateful(ir::Op::obj__end, {}, ops);
+    std::uint64_t imms[] = {std::to_underlying(ir::Storage::temporary)};
+    stateful(ir::Op::dealloc, {}, ops, imms);
+  }
   ValueId zero(ast::QualType t) {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) throw Unsupported{"value-initializing a pointer to member"};
     if (cls(t) == TypeClass::pointer || is_nullptr(t)) return constant(t, facts_.null_constant(t));
@@ -1347,7 +1403,7 @@ class Gen {
     ir::BlockId then_b = new_block(), join = new_block();
     ir::BlockId else_b = s.else_.id != NodeId::none ? new_block() : join;
     ir::SuccRef succs[] = {edge(s.negated ? else_b : then_b), edge(s.negated ? then_b : else_b)};
-    emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
+    emit(ir::Op::consteval_br, {}, {}, {}, ir::bit(ir::Flag::observes_context), succs);
     live_ = false;
     enter(then_b);
     substmt(child(a, s.then_));
@@ -1610,7 +1666,7 @@ class Gen {
       if (live_) br(target);
       enter(b->second);
       for (const auto& scope : entered)
-        for (const Ending& e : scope) begin_bypassed(a, e);
+        for (const Ending& e : scope) begin_bypassed(a, e, ir::bit(ir::Flag::switch_bypassed_lifetime));
       br(target);
     } else if (live_) {
       br(target);
@@ -1848,6 +1904,7 @@ class Gen {
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
+    if (is<ast::AtomicCall>(a)) return atomic_builtin(a);
     if (is<ast::Throw>(a)) {
       if (selecting_initializer_) unsupported(a, "inside a class initializer selection");
       auto expr = get<ast::Throw>(a);
@@ -1890,7 +1947,13 @@ class Gen {
       const auto args = ast_.children(b.args);
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
-        case ast::BuiltinOp::ctz: return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::ctz:
+        case ast::BuiltinOp::ctz_gcc_zero:
+        case ast::BuiltinOp::clzll: {
+          const auto op = b.op == ast::BuiltinOp::clzll ? ir::Op::clz : ir::Op::ctz;
+          const auto flags = b.op == ast::BuiltinOp::ctz ? ir::Flags{0} : ir::bit(ir::Flag::count_zero_gcc);
+          return pure(op, t, {rvalue(child(a, args[0]))}, {}, flags);
+        }
         case ast::BuiltinOp::nansl: {
           const ir::Ty result[] = {vty(t)};
           const std::uint64_t fn[] = {word(ir::BuiltinFn::nansl)};
@@ -1904,8 +1967,21 @@ class Gen {
         case ast::BuiltinOp::mul_overflow: {
           const At left = child(a, args[0]);
           const ValueId operands[] = {rvalue(left), rvalue(child(a, args[1]))};
-          const ValueId destination = rvalue(child(a, args[2]));
+          const At output = child(a, args[2]);
+          const ValueId destination = rvalue(output);
           const ast::QualType integer = info(left).type;
+          if (ast::builtin_of(in_, integer) == ast::Builtin::unsigned_int128) {
+            // Sema widened the operands to hold the exact unsigned result.
+            const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::add : ir::Op::mul;
+            const ValueId exact = pure(op, integer, {operands[0], operands[1]});
+            const ast::QualType object = facts_.pointee(info(output).type);
+            const ast::QualType narrowed_type = ast::without_cv(ty(object));
+            const ValueId narrowed = arithmetic(integer, narrowed_type, exact);
+            const ValueId restored = arithmetic(narrowed_type, integer, narrowed);
+            const ValueId overflow = pure(ir::Op::icmp, t, {exact, restored}, {word(ir::Pred::ne)});
+            store({destination, object}, narrowed, ir::bit(ir::Flag::call_body));
+            return overflow;
+          }
           const ir::Ty results[] = {vty(integer), vty(t)};
           const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::sadd_overflow : ir::Op::smul_overflow;
           const ir::NodeId checked = emit(op, results, operands);
@@ -1924,6 +2000,66 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  std::optional<ValueId> atomic_builtin(At a) {
+    const auto operation = get<ast::AtomicCall>(a);
+    const auto args = ast_.children(operation.args);
+    std::array<ValueId, 6> values;
+    for (std::size_t i = 0; i < args.size(); ++i) values[i] = rvalue(child(a, args[i]));
+    const std::uint64_t order[]{operation.order};
+    if (operation.op == ast::AtomicOp::fence) {
+      stateful(ir::Op::fence, {}, {}, order);
+      return std::nullopt;
+    }
+
+    const ast::QualType object = facts_.pointee(info(child(a, args[0])).type);
+    const auto integer = ast::without_cv(ty(object));
+    const ir::Flags flags = access_flags(object);
+    const ir::Ty word_result[]{vty(integer)};
+    const std::uint64_t access[]{word(integer), operation.order};
+    switch (operation.op) {
+      case ast::AtomicOp::load:
+        return b_.result(stateful(ir::Op::atomic__load, word_result, std::span(values).first(1), access, flags), 1);
+      case ast::AtomicOp::store:
+        stateful(ir::Op::atomic__store, {}, std::span(values).first(2), access, flags);
+        return std::nullopt;
+      case ast::AtomicOp::compare_exchange: {
+        const Place expected{values[1], facts_.pointee(info(child(a, args[1])).type)};
+        const ValueId compare = load(expected, ir::bit(ir::Flag::call_body));
+        const ValueId operands[]{values[0], compare, values[2]};
+        const ir::Ty results[]{vty(integer), vty(facts_.bool_type())};
+        const std::uint64_t orders[]{word(integer), operation.order, operation.failure_order};
+        const auto cas = stateful(ir::Op::atomic__cmpxchg, results, operands, orders, flags);
+        const auto success = b_.result(cas, 2);
+        const auto miss = new_block(), done = new_block();
+        cond_br(success, edge(done), edge(miss));
+        enter(miss);
+        store(expected, b_.result(cas, 1), ir::bit(ir::Flag::call_body));
+        br(done);
+        enter(done);
+        return success;
+      }
+      case ast::AtomicOp::rmw: {
+        const std::uint64_t update[]{word(integer), operation.update, operation.order};
+        const auto n = stateful(ir::Op::atomic__rmw, word_result, std::span(values).first(2), update, flags);
+        const auto old = b_.result(n, 1);
+        if (!operation.returns_new) return old;
+        ir::Op arithmetic;
+        switch (ir::Rmw(operation.update)) {
+          case ir::Rmw::add: arithmetic = ir::Op::add; break;
+          case ir::Rmw::sub: arithmetic = ir::Op::sub; break;
+          case ir::Rmw::and_: arithmetic = ir::Op::and_; break;
+          case ir::Rmw::or_: arithmetic = ir::Op::or_; break;
+          case ir::Rmw::xor_: arithmetic = ir::Op::xor_; break;
+          default: std::unreachable();
+        }
+        // The GNU operations use modular arithmetic even for signed operands.
+        return pure(arithmetic, integer, {old, values[1]});
+      }
+      case ast::AtomicOp::fence: std::unreachable();
+    }
+    std::unreachable();
   }
 
   // Sema proved that the fields fill both representations in target byte order. Use
@@ -2379,7 +2515,8 @@ class Gen {
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
-          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) || is<ast::BitCast>(a) ||
+          is<ast::BuiltinCall>(a) || is<ast::AtomicCall>(a) || is<ast::VariadicBuiltin>(a) ||
+          is<ast::ThreeWay>(a) || is<ast::BitCast>(a) ||
           is<ast::SourceLine>(a) || is<ast::SourceLocation>(a) || is<ast::DefaultSourceContext>(a)))
       return false;
     bool proven = true;
@@ -2957,7 +3094,8 @@ class Gen {
   // promoted type); the left is loaded once, converted to it, and the result converted back.
   Place assign(At a) {
     auto s = get<ast::Assign>(a);
-    if (cls(s.info.type) == TypeClass::record) return assign_class(a);
+    // An array is assigned as a whole only in a defaulted or implicit assignment operator's definition.
+    if (cls(s.info.type) == TypeClass::record || s.op == ast::AssignOp::trivial_class_copy) return assign_class(a);
     ValueId v = rvalue(child(a, s.rhs));
     At rhs = child(a, s.rhs);
     Place p = lvalue(child(a, s.lhs));
@@ -3061,7 +3199,8 @@ class Gen {
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
-  bool selecting_initializer_ = false;      // local class initializer selection and its cleanup
+  bool selecting_initializer_ = false;      // class initializer selection and its cleanup
+  bool selecting_return_ = false;           // a return selection requires checked class copies
   bool in_aggregate_default_ = false;        // evaluating a selected default member initializer
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
   uint32_t source_line_ = 0;                 // outermost active default argument's invocation line
