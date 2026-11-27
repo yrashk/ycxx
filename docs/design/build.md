@@ -1023,6 +1023,11 @@ features, configured and named cross-target objects, hosted and freestanding
 links, a hosted executable run, and shared-library compile, link and load. Linked artifact checks
 validate the architecture, format and kind. The load action runs only when
 the shared artifact matches the host target and calls the test entry point.
+On native arm64 macOS, `link.host-shared` uses `-shared -fPIC -nostdlib` and
+`link.host-shared.load` loads that dylib. The freestanding executable probe
+keeps its Darwin `-nostdlib++` recipe. The native leaf example pins `cxx("ycxx")`
+to witness both shared observations with the compiler that builds its package.
+[Native leaf rule example](../../examples/project-build/native-leaf-rule/README.md)
 
 The result is `supported`, `unsupported` or `indeterminate`, with the
 available evidence. A compiler rejection and a cancelled, timed-out or
