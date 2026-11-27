@@ -10,6 +10,9 @@ import tempfile
 from linux_compile import run
 from linux_peer_derived_default_construction import native_compilers
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 def check_imports(readelf, scope, env, obj, target_class):
     metadata = run([readelf, '-Wsr', obj], scope, env)
@@ -31,7 +34,7 @@ def main():
     fixture = Path(__file__).resolve().with_suffix('')
     target = [ycxx, 'cxx', '--target=x86_64-pc-linux-gnu']
     with tempfile.TemporaryDirectory(prefix='ycxx-borrowed-downcast-') as temp, \
-            tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+            tempfile.TemporaryDirectory(prefix='yd-', dir=runtime_root('yd-')) as runtime:
         scope = Path(temp).resolve()
         (scope / '.ycxx').touch()
         inputs = {scope / name: (fixture / name).read_bytes()

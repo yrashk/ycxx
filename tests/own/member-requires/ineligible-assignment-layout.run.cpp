@@ -1,6 +1,7 @@
-// #1417 review [special]/6, Itanium C++ ABI §1.1 (POD for the purpose of layout): a user-provided
-// copy assignment operator whose constraints are not satisfied is ineligible and does not keep
-// the class from being POD, so a derived class does not reuse its tail padding.
+// [special]/6: the satisfied, more-constrained defaulted copy assignment makes the
+// user-provided fallback ineligible. The spec layout reserves the base's tail padding
+// (Itanium C++ ABI §1.1 and §2.4, #1417).
+// XFAIL: clang@linux-x86_64 Clang reuses the base tail padding here and gives Derived size 8 (#1670)
 template<class T> struct A {
   int i;
   char c;

@@ -104,6 +104,8 @@ In an incomplete plan, you can also explore resolved components that are
 disconnected from the selected target.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
+The native leaf example pins `cxx("ycxx")` and measures native shared-library linking
+and loading. [Native leaf rule example](examples/project-build/native-leaf-rule/README.md)
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
@@ -195,6 +197,11 @@ The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF 
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
 It resolves PC-relative GOT words at nonzero offsets in independently assembled objects.
 [#782](https://github.com/yrashk/ycxx/issues/782)
+
+On arm64 macOS, `ycxx cxx -shared -fPIC -nostdlib leaf.cpp -o libleaf.dylib`
+builds a signed freestanding dylib with strong function exports. It can be
+loaded by a platform executable or the ycxx rule worker. Set its install name
+with `-Wl,-install_name,<name>`. [Leaf dylib support](docs/design/darwin-shared-output.md)
 
 ```sh
 tools/build
@@ -731,7 +738,8 @@ written default member initializer are value-initialized.
   own overload set with a using-declaration, including from a dependent base
   (`template<class Fn> struct D : Fn { using Fn::operator(); };`). Its own functions with the same
   parameters hide the base's. [#1150](https://github.com/yrashk/ycxx/issues/1150)
-- namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
+- namespaces, nested (`namespace a::b`) and inline ones, including namespaces inside inline
+  namespaces with inline namespaces of their own, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
   [#953](https://github.com/yrashk/ycxx/issues/953)
