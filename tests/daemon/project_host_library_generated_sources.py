@@ -15,7 +15,7 @@ from project_host_library_generated_headers import (
 )
 from project_host_planning_inputs import COPY as INVENTORY, VERIFIER, prepare as prepare_planning
 from project_inspection import (
-    check_dependency_graph, check_dependency_html, check_location, check_target_dependencies_html,
+    check_dependency_graph, check_dependency_html, check_location, check_target_dependencies_html, check_target_graph_html,
     check_value_bindings_html, dependency_edge, fact,
 )
 from project_native_host_tool import REFERENCE, SCANNER
@@ -162,6 +162,7 @@ def check_plan(ycxx, scope, env, host, other, journals, *, host_only):
         ), plan
     check_dependency_html(report, plan)
     check_target_dependencies_html(report, plan)
+    check_target_graph_html(report, plan)
     return plan
 
 

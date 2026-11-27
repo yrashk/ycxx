@@ -98,6 +98,8 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 can be compared with the checkout and rendered as a standalone HTML report.
 In the HTML report, **Target dependencies** lets you follow producers and
 open their use sites in `build.ycxx`.
+The **Graph** view lets you expand a target's dependencies and dependents
+and inspect each connection's declaration in the same standalone report.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
