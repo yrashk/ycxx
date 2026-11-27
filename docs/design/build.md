@@ -611,6 +611,32 @@ the same destination. A partial plan shows the resolved paths and marks
 the navigation incomplete. In an HTML comparison, these links navigate
 the current plan. The comparison tables carry the saved occurrence sites.
 
+### Interactive plan graph (#1604)
+
+From `examples/project-build/host-library-generated-sources`, build the
+arm64 Darwin variant and save its HTML plan.
+
+```sh
+ycxx build app --target=arm64-apple-darwin
+ycxx show app --target=arm64-apple-darwin --format=html > plan.html
+```
+
+Open **Graph** in `plan.html`. It starts at `app` with its immediate
+dependencies, `config` and `schema`. Select a node to show or hide its
+dependencies and dependents. Expand `config` to find `scanner`, then show
+the scanner's dependencies. The scanner and the app point to the same
+`schema` node.
+
+Select `schema` to inspect its generated `wire_score.cc` paths for the host
+and selected target. The details list each authored dependency's usage and
+any named output or binding. Follow the location link for the `wire_source`
+edge to open the source binding in `build.ycxx`.
+
+The graph works offline in the saved report. An incomplete plan shows the
+resolved portion and marks it incomplete. The static **Target dependencies**
+cards and dependency tables remain available alongside the graph.
+[Host library generated sources example](../../examples/project-build/host-library-generated-sources/README.md)
+
 ### Declared target catalog (#1392)
 
 Run `ycxx show --targets` from the workspace directory to see the target names
