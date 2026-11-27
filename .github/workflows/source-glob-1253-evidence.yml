@@ -1,0 +1,90 @@
+name: "Native source glob verification for #1253"
+
+on:
+  push:
+    branches: [codex/ycxx-1253-evidence-36318665]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: ubuntu-24.04
+    container: gcc:16
+    timeout-minutes: 25
+    env:
+      REVISION: 363186659ddeeae7ace7ef86443909c1c026c764
+      REVISION_TREE: 936f0bcd73ef6fde9da6f67822c4221ba847cc58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Copy the witness outside the checkout
+        shell: bash
+        run: cp -R .github/evidence/source-glob-1253 "$RUNNER_TEMP/ycxx-1253-harness"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVISION }}
+          submodules: true
+          persist-credentials: false
+      - name: Verify exact main revision
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$REVISION_TREE"
+          mkdir -p "$RUNNER_TEMP/ycxx-1253-evidence"
+          printf 'revision %s\ntree %s\n' "$REVISION" "$REVISION_TREE" > "$RUNNER_TEMP/ycxx-1253-evidence/git.txt"
+      - name: Provision the pinned CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the pinned main revision
+        shell: bash
+        run: tools/build -j 4 --no-tests 2>&1 | tee "$RUNNER_TEMP/ycxx-1253-evidence/build.log"
+      - name: Install local capture tools
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq chromium fonts-dejavu-core python3-venv >/dev/null
+          python3 -m venv "$RUNNER_TEMP/ycxx-1253-venv"
+          "$RUNNER_TEMP/ycxx-1253-venv/bin/pip" install playwright==1.56.0 pyte==0.8.2 Pillow==12.0.0
+      - name: Verify glob watch, read-only inspection, and offline HTML
+        shell: bash
+        run: |
+          python="$RUNNER_TEMP/ycxx-1253-venv/bin/python"
+          harness="$RUNNER_TEMP/ycxx-1253-harness"
+          output="$RUNNER_TEMP/ycxx-1253-evidence"
+          "$python" -B "$harness/witness.py" "$PWD/build/bin/ycxx" "$PWD" "$output" --browser 2>&1 | tee "$output/witness.log"
+          "$python" -B "$harness/interactive.py" "$PWD/build/bin/ycxx" "$PWD" "$output" 2>&1 | tee "$output/interactive.log"
+      - name: Export verified screenshot previews
+        shell: bash
+        run: |
+          python3 -B - "$RUNNER_TEMP/ycxx-1253-evidence" <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          def sources(phase):
+              plan = json.loads((root / (phase + ".json")).read_text())
+              return [r for r in plan["facts"] if r["kind"] == "source" and r["target"] == "app"]
+          added = json.loads((root / "added.json").read_text())
+          proof = {"sources": {phase:sources(phase) for phase in ("initial","added","deleted")},
+                   "header": [edge for edge in added["dependency_graph"]["edges"] if edge["producer"]=="input_header"],
+                   "interactive": json.loads((root / "interactive-proof.json").read_text())}
+          print("YCXX_VERIFICATION " + json.dumps(proof, separators=(",", ":")))
+          for name in ("watch-added-source", "watch-removed-source", "deletion-plan-diff"):
+              png = (root / (name + ".png")).read_bytes()
+              assert png.startswith(b"\x89PNG\r\n\x1a\n")
+              data = base64.b64encode(png).decode()
+              for i in range(0, len(data), 2048):
+                  print(f"YCXX_IMAGE {name} {i // 2048} {data[i:i + 2048]}")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ycxx-1253-source-globs-36318665
+          path: ${{ runner.temp }}/ycxx-1253-evidence/
+          if-no-files-found: error
+          retention-days: 7
