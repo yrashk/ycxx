@@ -7,7 +7,7 @@ else()
   set(YCXXC_DAEMON_OS os_linux.cppm)
   set(YCXXC_DAEMON_WATCH watch_linux.cppm)
 endif()
-add_library(ycxxc_daemon STATIC)
+add_library(ycxxc_daemon ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_daemon PUBLIC FILE_SET CXX_MODULES FILES
   ${YCXXC_DAEMON_OS}
   posix.cppm

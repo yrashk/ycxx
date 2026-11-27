@@ -20,7 +20,7 @@ python3 run.py --runtime-only
 python3 run.py --runtime-only --module vertex
 
 ycxx build app --trace-engine=json 2> first.jsonl
-python3 run.py 1
+python3 run.py 1 --texture-count 2
 ycxx show app
 ycxx build app --trace-engine=json 2> unchanged.jsonl
 ```
@@ -31,12 +31,23 @@ The [shader rule package](rules/shaders.cc) defines four rules.
 | --- | --- |
 | `shaders.module` | Runs `glslc` once per requested module. Each module declares a named `spirv` output. |
 | `shaders.pack` | Stages `vertex:spirv` and `fragment:spirv`, and packs their bytes into the `bundle` artifact. |
-| `shaders.reflect` | Stages the same `fragment:spirv` output for `spirv-cross --reflect` and classifies the JSON witness as a `shader.descriptors.v1` table. Each uniform block is a row with unsigned `set` and `binding` fields. |
+| `shaders.reflect` | Stages the same `fragment:spirv` output for `spirv-cross --reflect` and classifies the JSON witness as a `shader.descriptors.v2` table. Each row has a descriptor kind, set, binding, and element count. |
 | `shaders.bindings` | Consumes the `layout` value and writes `scene_bindings.hh` as the `header` artifact. |
 
-This package's table covers uniform buffers (`ubos` in the witness). It accepts
-up to 16 blocks named with ASCII letters, digits, and single interior
-underscores. Each name begins with a letter.
+The table accepts up to 16 descriptors across uniform buffers (`ubos` in the
+witness) and fixed one-dimensional `sampler2D` arrays (`textures`). Uniform
+buffers may be scalar or have a fixed one-dimensional extent. The classifier
+requires a positive literal size for each projected array. A descriptor name
+starts with an ASCII letter and may contain ASCII letters, digits, and single
+interior underscores. The fragment has one descriptor of each kind.
+
+```glsl
+layout(set = 0, binding = 1) uniform Material {
+    vec4 tint;
+} material;
+
+layout(set = 1, binding = 7) uniform sampler2D scene_textures[2];
+```
 
 `runtime_only` needs only `glslc` and Python 3 for the shader actions. Its trace
 shows the two module compiles and the pack action. Building `app` then adds the
@@ -49,16 +60,27 @@ The app receives `scene.bundle` as a published runtime asset and
 constants in the `scene` namespace.
 
 ```cpp
+enum class descriptor_kind : unsigned { uniform_buffer = 1, combined_sampler = 2 };
+
 inline constexpr unsigned descriptor_Material_set = 0u;
 inline constexpr unsigned descriptor_Material_binding = 1u;
+inline constexpr unsigned descriptor_Material_element_count = 1u;
+inline constexpr descriptor_kind descriptor_Material_kind = descriptor_kind::uniform_buffer;
+
+inline constexpr unsigned descriptor_scene_textures_set = 1u;
+inline constexpr unsigned descriptor_scene_textures_binding = 7u;
+inline constexpr unsigned descriptor_scene_textures_element_count = 2u;
+inline constexpr descriptor_kind descriptor_scene_textures_kind = descriptor_kind::combined_sampler;
 ```
 
 The launcher reads the published bundle under `.ycxx/assets/app/` and passes
-its text and the expected binding to
-`.ycxx/out/app`. The C++ code checks the set and binding on the `material`
-uniform variable in the bundled fragment against its generated `constexpr`
-values. `run.py 1` exits with status `0` when both the supplied binding and the
-published module agree with the header. Wrong bindings exit with status `4`.
+its text, the expected Material binding, and the optional sampler count
+to `.ycxx/out/app`. The C++ code checks the two variables' descriptor sets
+and bindings in the bundled fragment against its generated `constexpr`
+values. It follows the sampler's `UniformConstant` pointer to a
+one-dimensional array of sampled images and checks the literal array length.
+`python3 run.py 1` defaults to two textures. A binding or count mismatch exits
+with status `4`.
 Both executables use status `2` for a missing entry and `3` for malformed
 SPIR-V framing. The runtime-only executable checks the selected module's framing.
 
@@ -72,8 +94,14 @@ SPIR-V framing. The runtime-only executable checks the selected module's framing
    `ycxx build app --trace-engine=json 2> binding.jsonl` and `python3 run.py 3`.
    The changed table regenerates the header, recompiles the app, and publishes
    the bundle with the new binding. `python3 run.py 1` now exits with status `4`.
-3. Introduce a GLSL syntax error and rebuild. `python3 run.py 3` still runs the
-   last successful app and bundle. Restore the shader to recover the build.
+3. Change `scene_textures[2]` to `scene_textures[3]`. Run
+   `ycxx build app --trace-engine=json 2> count.jsonl` and
+   `python3 run.py 3 --texture-count 3`. The element count changes the table
+   and header, so the app rebuilds. With `--texture-count 2`, it exits with
+   status `4`.
+4. Introduce a GLSL syntax error and rebuild.
+   `python3 run.py 3 --texture-count 3` still runs the last successful app and
+   bundle. Restore the shader to recover the build.
 
 Use `ycxx build app --watch --trace-engine=interactive` to follow the edits in
 another terminal. After a successful build, save the plan with

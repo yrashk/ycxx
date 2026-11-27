@@ -34,6 +34,7 @@ struct OutputArg {
 };
 
 struct TargetTriple {};
+struct HostTriple {};
 
 struct CxxTool {
   std::optional<std::string> compiler;
@@ -56,7 +57,7 @@ using Record = std::vector<std::pair<std::string, Value>>;
 struct Value {
   SourceLocation location;
   std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool, ProbeRef, ValueRef,
-               TargetTriple> data;
+               TargetTriple, HostTriple> data;
 };
 
 struct TargetDecl {
@@ -360,9 +361,10 @@ class Parser {
       if (name == "input") return {at, InputArg{std::move(binding)}};
       return {at, OutputArg{std::move(binding)}};
     }
-    if (name == "target_triple") {
+    if (name == "target_triple" || name == "host_triple") {
       expect('(');
       expect(')');
+      if (name == "host_triple") return {at, HostTriple{}};
       return {at, TargetTriple{}};
     }
     fail(at, std::format("unknown value '{}'", name));

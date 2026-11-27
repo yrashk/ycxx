@@ -1,0 +1,14 @@
+use plugin("rules/package") as tools
+
+tools.runner "runner" {}
+
+tools.observe "observed" {}
+
+tools.header "config" {
+    facts = { score = value("observed", "score") }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

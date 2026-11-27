@@ -59,6 +59,7 @@ enum class ObjectFormat : u8 { macho, elf };
 enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
   source_location_descriptor = std::uint64_t{1} << 5,
+  gnu_atomic32 = std::uint64_t{1} << 6,
   peer_typed_dynamic_cast = std::uint64_t{1} << 1,
   hosted_trivial_class_throw = std::uint64_t{1} << 4,
   namespace_hidden_asm = std::uint64_t{1} << 2,
@@ -141,8 +142,24 @@ struct Placed {
   bool empty = false;  // an empty class ([class.prop], Itanium §1.1)
   // Its subobjects of empty class type, by class entity and offset, itself included.
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
-  u8 bit_width = 0;  // a bit-field has a width within its declared type's allocation unit
+  u8 bit_width = 0;  // bits that represent the field's value
+  bool potentially_overlapping = false;
+  u8 wide_bit_width = 0;  // storage extent for a field wider than its declared type
+  u8 wide_bit_alignment = 0;
 };
+
+constexpr u8 over_width_bit_field_alignment(const Target& target, Compatibility mode, u8 width) {
+  u8 alignment = 1;
+  // Itanium §2.4 selects the largest integral POD allocation unit that fits the width.
+  using enum Builtin;
+  for (const auto type : {unsigned_char, unsigned_short, unsigned_int, unsigned_long_long, unsigned_int128}) {
+    if (type == unsigned_int128 && mode == Compatibility::clang && target.operating_system == OperatingSystem::linux_)
+      continue;
+    const auto layout = target[type];
+    if (layout.size && layout.size * 8 <= width) alignment = std::max(alignment, layout.align);
+  }
+  return alignment;
+}
 // A scalar, pointer or reference member's.
 constexpr Placed scalar_placed(std::uint64_t size, std::uint64_t align) { return {size, align, size, align, false, {}}; }
 constexpr Placed array_placed(const Placed& e, std::uint64_t n) {
@@ -157,7 +174,7 @@ struct BitField {
   u8 width = 0;
   constexpr explicit operator bool() const { return width != 0; }
   constexpr u32 bytes() const { return (u32(shift) + width + 7) / 8; }
-  constexpr u32 mask() const { return u32(((std::uint64_t{1} << width) - 1) << shift); }
+  constexpr u64 mask() const { return width == 64 ? ~u64{0} : ((u64{1} << width) - 1) << shift; }
 };
 
 struct RecordLayout {
@@ -176,6 +193,7 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
   std::uint64_t size = polymorphic_root ? polymorphic_root->pointer_size : 0;
   std::uint64_t align = polymorphic_root ? polymorphic_root->pointer_align : 1;
   std::uint64_t dsize = size;
+  std::uint64_t overlapping_extent = 0;
   std::vector<std::pair<std::uint32_t, std::uint64_t>> empties;
   auto conflicts = [&](const Placed& d, std::uint64_t at) {
     for (auto [t, x] : d.empties)
@@ -185,19 +203,20 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
   };
   auto place = [&](const Placed& d, bool base) {
     std::uint64_t a = base ? d.nvalign : d.align;
-    std::uint64_t at = 0;
-    if (!(base && d.empty)) at = (dsize + a - 1) / a * a;
-    if (base && d.empty && conflicts(d, 0)) at = (dsize + a - 1) / a * a;
+    const bool overlapping = base || d.potentially_overlapping;
+    const bool empty = overlapping && d.empty;
+    std::uint64_t at = empty && !conflicts(d, 0) ? 0 : (dsize + a - 1) / a * a;
     while (conflicts(d, at)) at += a;
     for (auto [t, x] : d.empties) empties.push_back({t, at + x});
     align = std::max(align, a);
-    if (base && d.empty) {
+    if (empty) {
       size = std::max(size, at + d.size);
     } else {
-      std::uint64_t n = base ? d.nvsize : d.size;
+      std::uint64_t n = overlapping ? d.nvsize : d.size;
       size = std::max(size, at + n);
       dsize = at + n;
     }
+    if (d.potentially_overlapping) overlapping_extent = std::max(overlapping_extent, at + d.size);
     return at;
   };
   for (const Placed& b : bases) out.base_offsets.push_back(place(b, true));
@@ -206,15 +225,16 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
     if (f.bit_width != 0) {
       // Itanium §2.4 and the target C psABI: keep a bit-field in one aligned allocation unit of
       // its declared type. An ordinary member can start at the first whole byte after it.
-      std::uint64_t alignment = f.align * 8;
-      if (next_bit % alignment + f.bit_width > f.size * 8)
+      const auto field_alignment = f.wide_bit_width ? std::uint64_t(f.wide_bit_alignment) : f.align;
+      const std::uint64_t alignment = field_alignment * 8;
+      if (f.wide_bit_width || next_bit % alignment + f.bit_width > f.size * 8)
         next_bit = (next_bit + alignment - 1) / alignment * alignment;
       out.offsets.push_back(next_bit / 8);
       out.bit_fields.push_back({u8(next_bit % 8), f.bit_width});
-      next_bit += f.bit_width;
+      next_bit += f.wide_bit_width ? f.wide_bit_width : f.bit_width;
       dsize = (next_bit + 7) / 8;
       size = std::max(size, dsize);
-      align = std::max(align, f.align);
+      align = std::max(align, field_alignment);
       continue;
     }
     out.bit_fields.push_back({});
@@ -229,8 +249,11 @@ constexpr RecordLayout record_layout(std::span<const Placed> bases, std::span<co
     out.offsets.push_back(place(f, false));
     next_bit = dsize * 8;
   }
-  bool empty = !polymorphic_root && fields.empty() && std::ranges::all_of(bases, &Placed::empty);
+  const bool empty = !polymorphic_root && std::ranges::all_of(bases, &Placed::empty) &&
+      std::ranges::all_of(fields, [](const Placed& field) { return field.potentially_overlapping && field.empty; });
   std::uint64_t nvsize = size;
+  // Itanium §2.4 finalization preserves the extent of each complete member type.
+  size = std::max(size, overlapping_extent);
   align = std::max(align, std::uint64_t(explicit_alignment));
   out.align = align;
   out.size = size == 0 ? align : (size + align - 1) / align * align;
@@ -340,7 +363,8 @@ inline constexpr Target x86_64_linux{
                          std::to_underlying(NativeOperation::peer_typed_dynamic_cast) |
                          std::to_underlying(NativeOperation::namespace_hidden_asm) |
                          std::to_underlying(NativeOperation::breakpoint_statement_asm) |
-                         std::to_underlying(NativeOperation::source_location_descriptor),
+                         std::to_underlying(NativeOperation::source_location_descriptor) |
+                         std::to_underlying(NativeOperation::gnu_atomic32),
     .little_endian_unsigned_integers = true,
 };
 

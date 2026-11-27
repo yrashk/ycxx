@@ -5,24 +5,33 @@ add_test(NAME daemon.auto_var_init
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/auto_var_init.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.compatibility
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
-          "${CMAKE_CXX_COMPILER}")
+          "${CMAKE_CXX_COMPILER}" general)
+add_test(NAME daemon.compatibility_abi
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
+          "${CMAKE_CXX_COMPILER}" abi)
+add_test(NAME daemon.compatibility_constraints
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
+          "${CMAKE_CXX_COMPILER}" constraints)
+# Run the ABI group alongside the comparison and other mode tests on a fresh CI runner.
+set_tests_properties(daemon.compatibility_abi PROPERTIES COST 450)
+set_tests_properties(daemon.compatibility daemon.compatibility_constraints PROPERTIES COST 300)
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
 # Overlap the comparison with other tests even before CTest has timing history (#1230).
 set_tests_properties(daemon.compare PROPERTIES COST 400)
 add_test(NAME daemon.no_rtti
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_rtti.py
-          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_CXX_COMPILER}")
+          $<TARGET_FILE:ycxxc> "${YCXXC_LIBYCXX_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}")
 add_executable(ycxxc_daemon_process process_driver.cpp)
 target_link_libraries(ycxxc_daemon_process PRIVATE ycxxc_lib ycxxc_new)
 add_test(NAME daemon.process COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/process.py $<TARGET_FILE:ycxxc> $<TARGET_FILE:ycxxc_daemon_process>)
 add_test(NAME daemon.freestanding
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/freestanding.py
-          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx)
+          $<TARGET_FILE:ycxxc> "${YCXXC_LIBYCXX_SOURCE_DIR}")
 add_test(NAME daemon.aggregate_alignment
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/aggregate_alignment.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.pic
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/pic.py $<TARGET_FILE:ycxxc>
-          ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_CXX_COMPILER}" "${CMAKE_LINKER}")
+          "${YCXXC_LIBYCXX_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}" "${CMAKE_LINKER}")
 add_test(NAME daemon.lsp COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/lsp.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.trace COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/trace.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.trace_tui COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/trace_tui.py $<TARGET_FILE:ycxxc>)
@@ -31,7 +40,7 @@ add_test(NAME daemon.system_includes
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/system_includes.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.nostdincxx
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nostdincxx.py
-          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx)
+          $<TARGET_FILE:ycxxc> "${YCXXC_LIBYCXX_SOURCE_DIR}")
 add_test(NAME daemon.nostdinc
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nostdinc.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/resources/linux/include)
@@ -45,14 +54,14 @@ add_test(NAME daemon.depfiles
           $<TARGET_FILE:ycxxc> "${YCXX_DEPFILE_TEST_NINJA}")
 add_test(NAME daemon.no_exceptions
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_exceptions.py
-          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_READELF}")
+          $<TARGET_FILE:ycxxc> "${YCXXC_LIBYCXX_SOURCE_DIR}" "${CMAKE_READELF}")
 
 # PARITY: by design: checks x86-64 ELF relocation metadata and runs native mixed objects.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME daemon.weak_undefined_object
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/weak_undefined_object.py
-            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx
+            $<TARGET_FILE:ycxxc> "${YCXXC_LIBYCXX_SOURCE_DIR}"
             "${CMAKE_CXX_COMPILER}" "${CMAKE_READELF}" "${CMAKE_AR}")
   add_test(NAME daemon.derived_virtual_destructor
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor.py
@@ -91,8 +100,52 @@ add_test(NAME daemon.project_module_graph
 add_test(NAME daemon.project_link_inputs
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_link_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
 
+add_test(NAME daemon.project_host_static_archive_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_static_archive_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
+
+add_test(NAME daemon.project_host_library_static_archive_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_static_archive_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
+
+add_test(NAME daemon.project_archive_consumer_bindings
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_archive_consumer_bindings.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_foreign_make
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_foreign_make.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_staged_tool
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_tool.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_native_host_tool
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_native_host_tool.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_cxx_libraries
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_cxx_libraries.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_library_generated_headers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_headers.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_library_generated_sources
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_sources.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_generated_headers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_headers.py $<TARGET_FILE:ycxxc>)
+add_test(NAME daemon.project_host_generated_sources
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_sources.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_native_host_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_native_host_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_producer_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_producer_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_planning_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_planning_inputs.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_staged_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_witness_helpers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_witness_helpers.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_runtime_assets
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_runtime_assets.py $<TARGET_FILE:ycxxc>)

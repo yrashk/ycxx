@@ -318,6 +318,14 @@ std::string predefined_text(const ast::Target& t, bool freestanding, u8 pic, ast
   def("__GNUC__", 4);
   def("__GNUC_MINOR__", 2);
   def("__GNUC_PATCHLEVEL__", 1);
+  if (t.supports(ast::NativeOperation::gnu_atomic32)) {
+    def("__ATOMIC_RELAXED", 0);
+    def("__ATOMIC_CONSUME", 1);
+    def("__ATOMIC_ACQUIRE", 2);
+    def("__ATOMIC_RELEASE", 3);
+    def("__ATOMIC_ACQ_REL", 4);
+    def("__ATOMIC_SEQ_CST", 5);
+  }
   // [cpp.predefined]/1 and config.tex at tests/draft/PINS. GCC 16 and Clang 23 use 202400L.
   def("__cplusplus", compatibility == ast::Compatibility::spec ? "202603L" : "202400L");
   def("__STDC_EMBED_NOT_FOUND__", 0);

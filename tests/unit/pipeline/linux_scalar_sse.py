@@ -92,13 +92,13 @@ def main():
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
-        unresolved_copy = ('struct Leaf { volatile int value; };\n'
-                           'struct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n')
+        # A trivial copy ([class.copy.ctor]/11), in a nested record that calls do not lower yet.
+        nested_record = ('struct Leaf { volatile int value; };\n'
+                         'struct Wrapper { Leaf leaf; Wrapper(const Wrapper&) = default; };\n')
         cases = (
-            (unresolved_copy + 'double f(Wrapper, double value) { return value; }',
-             'defaulted copy ABI classification is unavailable for a parameter'),
-            (unresolved_copy + 'Wrapper f(double) { for (;;) {} }',
-             'defaulted copy ABI classification is unavailable for the result'),
+            (nested_record + 'double f(Wrapper, double value) { return value; }',
+             'unsupported aggregate parameter layout'),
+            (nested_record + 'Wrapper f(double) { for (;;) {} }', 'unsupported aggregate result layout'),
         )
         for source, error in cases:
             (scope / 'unsupported.cpp').write_text(source + '\n')

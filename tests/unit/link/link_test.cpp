@@ -836,8 +836,8 @@ void run_and_check(const std::filesystem::path& dir, const std::string& name, st
   const auto exe = dir / name;
   const auto out = dir / (name + ".out");
   write_executable(exe, image);
-  check(shell(std::format("codesign -v '{}'", exe.native_encoded_string())) == 0, std::format("{}: codesign -v accepts the signature", name));
-  const int rc = shell(std::format("'{}' > '{}'", exe.native_encoded_string(), out.native_encoded_string()));
+  check(shell(std::format("codesign -v '{}'", exe.native())) == 0, std::format("{}: codesign -v accepts the signature", name));
+  const int rc = shell(std::format("'{}' > '{}'", exe.native(), out.native()));
   check(rc == exit_code, std::format("{}: exits with {} (got {})", name, exit_code, rc));
   check(slurp(out) == output, std::format("{}: prints the expected output", name));
 }
@@ -975,7 +975,7 @@ extern "C" int fixture_run(void (*bridge)(int*)) {
 )cpp";
   const int compiled = shell(std::format("xcrun --sdk macosx clang++ -std=c++20 -stdlib=libc++ -arch arm64 -dynamiclib "
                                          "-compatibility_version 1.0 -current_version 1.0 -install_name '{}' '{}' -o '{}'",
-                                         peer.native_encoded_string(), source.native_encoded_string(), peer.native_encoded_string()));
+                                         peer.native(), source.native(), peer.native()));
   check(compiled == 0, "the platform compiler builds the typed-handler dylib");
   if (compiled != 0) return;
 
@@ -998,7 +998,7 @@ extern "C" int fixture_run(void (*bridge)(int*)) {
   opts.identifier = "hosted_cleanup";
   opts.dylibs = {link::libsystem(exports{"__Unwind_Resume"}),
                  {"/usr/lib/libc++.1.dylib", exports{"___gxx_personality_v0"}},
-                 {peer.native_encoded_string(), exports{"_fixture_callback", "_fixture_destroy", "_fixture_run"}}};
+                 {peer.native(), exports{"_fixture_callback", "_fixture_destroy", "_fixture_run"}}};
   const std::array inputs{std::move(entry), cleanup_bridge_object()};
   const auto image = link::link(inputs, opts);
   check(image.has_value(), "the native cleanup bridge links with the platform peer");
@@ -1027,7 +1027,7 @@ void test_mixed(const std::filesystem::path& dir, std::string_view cc) {
                         "static int counter = 19;\n"
                         "const char* greeting = \"from C\";\n"
                         "int main(void) { puts(greeting); counter += 2; return twice(counter); }\n";
-  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native_encoded_string(), o.native_encoded_string())) != 0) {
+  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native(), o.native())) != 0) {
     check(false, "the host compiler compiles mixed.c");
     return;
   }
@@ -1067,7 +1067,7 @@ void test_hosted_unwind(const std::filesystem::path& dir, std::string_view cc) {
                         "  words[1] = 42;\n"
                         "  return 5;\n"  // _URC_END_OF_STACK
                         "}\n";
-  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native_encoded_string(), path.native_encoded_string())) != 0) {
+  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native(), path.native())) != 0) {
     check(false, "the host compiler compiles the unwind callback");
     return;
   }
