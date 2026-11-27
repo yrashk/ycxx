@@ -466,6 +466,7 @@ public:
     place_sections();
     if (!errors_.empty()) return std::unexpected(std::move(errors_));
     layout();
+    if (!errors_.empty()) return std::unexpected(std::move(errors_));
     relocate();
     if (!errors_.empty()) return std::unexpected(std::move(errors_));
     return write();
@@ -518,8 +519,8 @@ private:
   }
   static constexpr std::uint32_t synthetic_obj = ~0u;
 
-  // Leaf dylibs have no bindings or rebases at load time. The supported inputs are arm64
-  // instructions and their read-only constants; every relocated address is image-relative.
+  // Leaf dylibs have no bindings or rebases at load time. Direct page references can reach
+  // private zero-initialized storage as well as read-only constants.
   void validate_dylib() {
     if (opts_.install_name->empty() || opts_.install_name->contains('\0'))
       fail("Mach-O dylib output needs a nonempty install name without NUL bytes");
@@ -528,6 +529,9 @@ private:
       for (const auto& section : o.sections) {
         using namespace obj::section_flags;
         if (section.is_eh_frame()) continue;  // place_sections validates every frame record and relocation together
+        if (section.segment == "__DATA" && section.name == "__bss" && section.flags == zerofill &&
+            section.align_log2 <= 14 && section.bytes.empty() && section.relocs.empty())
+          continue;
         const bool code = section.name == "__text" && (section.flags & pure_instructions) &&
                           !(section.flags & ~(pure_instructions | some_instructions));
         const bool constant = section.name == "__const" && section.flags == regular;
@@ -736,10 +740,14 @@ private:
         }
         const std::uint64_t a = frame_size ? 4 : std::uint64_t{1} << align;
         out.align_log2 = std::max(out.align_log2, align);
-        out.size = align_up(out.size, a);
+        const auto offset = align_up(out.size, a);
         const auto size = frame_size ? *frame_size : s.size();
-        placed_[i][j] = place{k, out.size, size};
-        out.size += size;
+        if (offset < out.size || size > std::numeric_limits<std::uint64_t>::max() - offset) {
+          fail(std::format("{}: Mach-O section {},{} size overflows", o.name, s.segment, s.name));
+          return;
+        }
+        placed_[i][j] = place{k, offset, size};
+        out.size = offset + size;
       }
     }
     // A single terminator follows the complete record stream.
@@ -758,6 +766,13 @@ private:
           if (!check_placed(i, r.symbol) || (r.minus && !check_placed(i, *r.minus))) continue;
           if (r.kind == reloc_kind::branch26) {
             const auto key = got_key(i, r.symbol);
+            if (opts_.install_name && !key.is_import) {
+              const auto& owner = objs_[key.a];
+              if (owner.sections[*owner.symbols[key.b].section].is_zerofill()) {
+                fail(std::format("{}: BRANCH26 target is in non-executable zero-fill storage", o.name));
+                continue;
+              }
+            }
             if (key.is_import && !stub_of_.contains(key.a)) {
               stub_of_.emplace(key.a, static_cast<std::uint32_t>(stub_imports_.size()));
               stub_imports_.push_back(key.a);
@@ -881,10 +896,15 @@ private:
       for (std::uint32_t k = 0; k < sections_.size(); ++k) {
         auto& o = sections_[k];
         if (o.segment != sg) continue;
-        cursor = align_up(cursor, std::uint64_t{1} << o.align_log2);
-        o.addr = vm + cursor;
-        o.fileoff = o.zerofill() ? 0 : file + cursor;
-        cursor += o.size;
+        const auto offset = align_up(cursor, std::uint64_t{1} << o.align_log2);
+        const auto available = std::numeric_limits<std::uint64_t>::max() - vm;
+        if (offset < cursor || offset > available || o.size > available - offset) {
+          fail(std::format("Mach-O segment {} virtual address range overflows", info.name));
+          return;
+        }
+        o.addr = vm + offset;
+        o.fileoff = o.zerofill() ? 0 : file + offset;
+        cursor = offset + o.size;
         if (!o.zerofill()) {
           file_end = cursor;
           o.bytes.assign(o.size, 0);
@@ -893,6 +913,10 @@ private:
       }
       if (info.sections.empty() && sg != seg::text) continue;
       info.vmsize = align_up(cursor, page);
+      if (info.vmsize < cursor || info.vmsize > std::numeric_limits<std::uint64_t>::max() - vm) {
+        fail(std::format("Mach-O segment {} virtual address range overflows", info.name));
+        return;
+      }
       info.filesize = align_up(file_end, page);
       vm += info.vmsize;
       file += info.filesize;
@@ -965,13 +989,16 @@ private:
           };
           switch (r.kind) {
             case reloc_kind::branch26: {
-              const std::uint64_t dest = def ? SA : sections_[*stubs_].addr + stub_size * stub_of_.at(std::get<imported>(target).index) +
-                                                        static_cast<std::uint64_t>(r.addend);
-              const auto delta = static_cast<std::int64_t>(dest - P);
-              if (delta % 4 != 0 || delta < -(std::int64_t{1} << 27) || delta >= (std::int64_t{1} << 27)) {
+              const auto base = def ? S : sections_[*stubs_].addr + stub_size * stub_of_.at(std::get<imported>(target).index);
+              const auto dest = base + static_cast<std::uint64_t>(r.addend);
+              const bool forward = dest >= P;
+              const auto distance = forward ? dest - P : P - dest;
+              const auto limit = forward ? (1u << 27) - 4 : 1u << 27;
+              if ((r.addend < 0 ? dest > base : dest < base) || distance % 4 != 0 || distance > limit) {
                 fail(std::format("{}: branch target out of range", where));
                 break;
               }
+              const auto delta = forward ? static_cast<std::int64_t>(distance) : -static_cast<std::int64_t>(distance);
               set_insn((insn() & 0xfc000000) | (static_cast<std::uint32_t>(delta >> 2) & 0x03ffffff));
               break;
             }
@@ -981,7 +1008,7 @@ private:
               if (r.kind == reloc_kind::got_page21) dest = got_address(i, r.symbol);
               else if (needs_definition()) dest = SA;
               else break;
-              const auto pages = static_cast<std::int64_t>((dest & ~std::uint64_t{0xfff}) - (P & ~std::uint64_t{0xfff})) >> 12;
+              const auto pages = static_cast<std::int64_t>(dest >> 12) - static_cast<std::int64_t>(P >> 12);
               if (pages < -(std::int64_t{1} << 20) || pages >= (std::int64_t{1} << 20)) {
                 fail(std::format("{}: ADRP target out of range", where));
                 break;
@@ -1137,7 +1164,7 @@ private:
     }
   }
 
-  std::vector<std::uint8_t> write() {
+  std::expected<std::vector<std::uint8_t>, std::vector<error>> write() {
     using mo::byte_writer;
     // The symbol table: locals (named, non-temporary), external definitions, imports.
     struct sym_entry {
@@ -1231,6 +1258,8 @@ private:
     auto& linkedit = segments_.back();
     linkedit.filesize = le.size() + sig_size;
     linkedit.vmsize = align_up(linkedit.filesize, page);
+    if (linkedit.vmsize > std::numeric_limits<std::uint64_t>::max() - linkedit.vmaddr)
+      return std::unexpected(std::vector<error>{{"Mach-O segment __LINKEDIT virtual address range overflows"}});
 
     // The header and load commands.
     byte_writer h;
