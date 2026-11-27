@@ -832,6 +832,8 @@ written default member initializer are value-initialized.
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Named `const_cast` changes cv-qualification on matching ordinary pointer types and scalar
+  glvalues while retaining the original address.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
   [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
