@@ -125,6 +125,10 @@ public:
   // A direct call to a non-constexpr function cannot initialize a constexpr reference
   // ([expr.const]). This also applies when its class argument cannot yet be evaluated (#25).
   void check_constexpr_call(Ex e) {
+    while (auto paren = s_->as<ast::Paren>(e)) {
+      e.id = paren->operand.id;
+      e.begin += paren->operand.at;
+    }
     EntityId f = EntityId::none;
     if (auto call = s_->as<ast::Call>(e)) f = call->function;
     if (auto call = s_->as<ast::MemberCall>(e)) f = call->function;
@@ -135,6 +139,18 @@ public:
 
   Evaluated evaluate(Ex e) { return evaluate(e, false); }
   Evaluated evaluate_reference_initializer(Ex e) { return evaluate(e, true); }
+
+  void check_local_reference_initializer(Ex e, const Evaluated& result) {
+    if (result.constant || result.dependent || result.diagnosed_failure()) return;
+    // A referent in this function can be constexpr-referenceable ([expr.const.init]) even
+    // though the evaluator cannot export an address for its automatic storage.
+    if (result.reason == reason_arg({interp::Reason::local_address, 0, {}})) return;
+    if (result.reason == reason_unsupported) {
+      check_constexpr_call(e);
+      return;
+    }
+    s_->diag(e.begin, Diag::not_constant, result.reason);
+  }
 
   // [expr.const.init]: test the destructor on the initialized object. Its mutable
   // subobjects' lifetimes are external to the hypothetical destruction expression.
@@ -224,6 +240,7 @@ private:
       e = s_->node(ast::Unary{info, ast::UnaryOp::address_of, Sema::at(e, e.begin)}, e.begin, e.end, info);
     } else if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
+    if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     ast::Interners& in = s_->ins();
     if (s_->types().is_member_pointer(e.type())) {
       // Read a direct member pointer constant from the expression. Its value retains the field

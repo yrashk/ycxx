@@ -245,7 +245,7 @@ struct ClosureDef {
   // function's constants it names without capturing them are `consts` with `const_values`.
   SeqId<TemplateParamSema> template_params;
   SeqId<LocalRec> consts;
-  SeqId<ConstId> const_values;
+  SeqId<ConstId> const_values;  // object values or VEntity referents for constexpr references
   SeqId<NameId> captures;  // the names its body knows its closure's fields by
   constexpr bool operator==(const ClosureDef&) const = default;
 };

@@ -4315,6 +4315,7 @@ public:
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures)), asm_hidden_symbol_, asm_directive_at_,
                     b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
+    s_.check_enclosing_locals(out_.value.tree, 0);
     s_.check_immediate_addresses(out_.value.tree);
     if (!s_.closures.empty()) s_.check_labels();
     for (const ast::ClosureDef& c : p_->world().ins.seqs.elements(out_.value.closures))
@@ -12904,6 +12905,7 @@ public:
                     b_.seq(std::span<const ast::ClosureDef>(s_.closures)),
                     b_.seq(std::span<const ast::TemplateTypeSpelling>(s_.template_type_spellings))};
     out_.value = b_.commit(v);
+    s_.check_enclosing_locals(out_.value.tree, root.begin);
     // A dependent invocation in a constexpr template can supply its immediate context
     // when the function specializes. Its instantiated body checks the addresses.
     if (!keeps || !f || !(f->flags & sema::decl_flag::constexpr_))
@@ -12985,7 +12987,12 @@ public:
     // Innermost first: the first of a name is the one its definition saw.
     for (std::size_t i = std::min(gi.g.consts.size(), gi.g.const_values.size()); i-- > 0;) {
       u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
-      if (gi.g.const_values[i] != ast::ConstId::none) s_.set_local_value(l, gi.g.const_values[i]);
+      const ConstId value = gi.g.const_values[i];
+      if (value == ConstId::none) continue;
+      if (s_.types().is_reference(gi.g.consts[i].type) && s_.ins().values.is<ast::VEntity>(value))
+        s_.set_local_constant_referent(l, s_.ins().values.get<ast::VEntity>(value).entity);
+      else
+        s_.set_local_value(l, value);
     }
     if (!gi.g.expansions.empty() || gi.g.part) s_.expansions_override = &gi.g.expansions;
     s_.open_generic(gi.g, gi.spec, gi.spec_type, gi.args);

@@ -59,7 +59,7 @@ struct GenericClosure {
   u32 body_begin = 0;
   u16 flags = 0;
   std::vector<ast::LocalRec> consts;
-  std::vector<ConstId> const_values;
+  std::vector<ConstId> const_values;  // object values or VEntity referents for constexpr references
   std::vector<Expansion> expansions;  // the pack expansions of its body, which its specializations expand
   // Where it is defined: the template-heads around it and their arguments, and the block-scope
   // type aliases its body can name.
@@ -132,6 +132,7 @@ struct OuterBlock {
     QualType type{};
     std::vector<ast::DeclSema> decls;
     EntityId ns = EntityId::none;
+    EntityId referent = EntityId::none;
   };
   EntityId function = EntityId::none;  // the enclosing function, or lambda's function call operator
   EntityId cls = EntityId::none;       // the class the function is a member of, if any
@@ -4899,6 +4900,7 @@ public:
   // A local usable in constant expressions ([expr.const]): constexpr, or const integral with a
   // constant initializer; its value.
   void set_local_value(u32 local, ConstId v) { local_values_[local] = v; }
+  void set_local_constant_referent(u32 local, EntityId entity) { local_referents_[local] = entity; }
   void set_local_value_dependent(u32 local) { locals_[local].flags |= local_flag::value_dependent; }
   std::span<const std::optional<ConstId>> local_values() const { return local_values_; }
   const ast::LocalRec& local(u32 i) const { return locals_[i]; }
@@ -4913,6 +4915,7 @@ public:
   void discard_local_declarations(std::size_t first) {
     locals_.resize(first);
     local_values_.resize(first);
+    local_referents_.erase(local_referents_.lower_bound(u32(first)), local_referents_.end());
   }
   // The function's parameters are in the scope at this depth; its body's outermost block is the
   // next one.
@@ -5739,6 +5742,7 @@ public:
     // The enclosing context's state.
     std::vector<ast::LocalRec> outer_locals;
     std::vector<std::optional<ConstId>> outer_values;
+    std::map<u32, EntityId> outer_referents;
     QualType return_type{};
     QualType declared_return{};
     bool return_deduced = false;
@@ -5799,9 +5803,29 @@ public:
     return m;
   }
 
-  // `name`, resolved at context `ctx` to `key`, used in the current context: captured by each
-  // lambda from `ctx` inwards, or, for a constant of an enclosing function, its value: naming it
-  // is not an odr-use ([basic.def.odr]/5, [expr.prim.lambda.capture]/8).
+  // An enclosing name with no ordinary runtime slot in this context. A constexpr reference can
+  // designate its static referent directly. An object must pass the use-site [basic.def.odr] check.
+  Ex inaccessible_local(const ast::LocalRec& local, std::optional<ConstId> value, EntityId referent,
+                        bool local_class, u32 begin, u32 end) {
+    QualType declared = local_declared_type(local);
+    ExprInfo info{types().referee(declared), ValueCategory::lvalue, 0};
+    Ex result;
+    if (referent != EntityId::none) {
+      result = node(ast::DeclRef{info, referent}, begin, end, info);
+    } else if (!types().is_reference(declared) && !types().is_dependent(declared) &&
+               (value || (in_pattern() && (local.flags & local_flag::value_dependent)))) {
+      has_enclosing_locals_ = true;
+      result = node(ast::EnclosingLocal{info, local.name, value.value_or(ConstId::none), local_class}, begin, end, info);
+    } else {
+      diag(begin, local_class ? Diag::local_class_odr_use : Diag::not_captured, local.name);
+      return {NodeId::none, begin, end};
+    }
+    declared_types_[std::to_underlying(result.id)] = declared;
+    return result;
+  }
+
+  // A name resolved to `key` in outer context `ctx`: capture it through the intervening lambdas
+  // when their captures allow it ([expr.prim.lambda.capture]/8).
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
     const ast::LocalRec* local = nullptr;
     if (!(key & capture_bit)) local = ctx == lambdas_.size() ? &locals_[key] : &lambdas_[ctx].outer_locals[key];
@@ -5835,17 +5859,20 @@ public:
       declared_types_[std::to_underlying(e.id)] = declared;
       return e;
     }
-    // A constant the innermost lambda cannot capture (no capture-default, not captured
-    // explicitly) is named for its value, which is no odr-use ([basic.def.odr]/5); one it can is
-    // captured, so that it is an lvalue where one is needed.
-    if (!(key & capture_bit)) {
+    // When the usual capture path is unavailable, keep the enclosing name's lvalue type
+    // until a selected conversion or reference binding determines whether it odr-uses it.
+    if (local) {
       const LambdaFrame& owner = lambdas_[ctx];
-      const ast::LocalRec& l = owner.outer_locals[key];
-      const LambdaFrame& inner = lambdas_.back();
-      bool capturable = inner.default_capture != 0 ||
-                        std::ranges::any_of(inner.captures, [&](const Capture& c) { return c.ctx == ctx && c.key == key; });
-      if (!capturable && owner.outer_values[key] && !types().is_reference(l.type) && types().is_scalar(l.type))
-        return literal(Types::unqualified(l.type), *owner.outer_values[key], ValueCategory::prvalue, begin, end);
+      const bool capturable = std::ranges::all_of(std::span(lambdas_).subspan(ctx), [&](const LambdaFrame& frame) {
+        return frame.default_capture != 0 ||
+               std::ranges::any_of(frame.captures, [&](const Capture& c) { return c.ctx == ctx && c.key == key; });
+      });
+      if (!capturable) {
+        auto referent = owner.outer_referents.find(key);
+        return inaccessible_local(*local, owner.outer_values[key],
+                                  referent == owner.outer_referents.end() ? EntityId::none : referent->second,
+                                  false, begin, end);
+      }
     }
     std::optional<u32> field;
     for (u32 j = ctx; j < lambdas_.size(); ++j) {
@@ -6141,6 +6168,7 @@ public:
     // The enclosing context's state, until the body ends.
     f.outer_locals = std::exchange(locals_, {});
     f.outer_values = std::exchange(local_values_, {});
+    f.outer_referents = std::exchange(local_referents_, {});
     f.return_type = return_type_;
     f.declared_return = declared_return_;
     f.return_deduced = return_deduced_;
@@ -6222,6 +6250,8 @@ public:
     // No return statement deduces `void` ([dcl.type.auto.deduct]/2), unless a template's
     // definition left the type to its instantiations.
     const bool generic = !f.head.empty();
+    bool pending_enclosing_read = false;
+    if (!check_enclosing_locals(body, &pending_enclosing_read)) body = {};
     if (body.ok() && deduces_return() && !return_deduced_ && !return_seen_ && !in_pattern())
       if (!deduce_return(nullptr, end > 0 ? end - 1 : 0)) body = {};
     // A generic lambda's operator keeps its declared type: each specialization deduces its own.
@@ -6239,6 +6269,7 @@ public:
     lambdas_.pop_back();
     locals_ = std::move(fr.outer_locals);
     local_values_ = std::move(fr.outer_values);
+    local_referents_ = std::move(fr.outer_referents);
     return_type_ = fr.return_type;
     declared_return_ = fr.declared_return;
     return_deduced_ = fr.return_deduced;
@@ -6251,6 +6282,7 @@ public:
     if (!body.ok() || !(fr.polymorphic_result ? require_supported_virtual_parameters(signature, fr.begin)
                                               : require_supported_virtual_signature(signature, fr.begin)))
       return {NodeId::none, fr.begin, end};
+    if (pending_enclosing_read) pending_enclosing_read_calls_.insert(fr.call);
     // The closure type ([expr.prim.lambda.closure]): its captures' fields, its function call
     // operator, and for a lambda without a lambda-capture the static invoker its conversion to a
     // pointer to function returns (/8–9).
@@ -6298,7 +6330,10 @@ public:
           if ((p->second & capture_bit) || p->first == no_name() || !seen.insert(std::to_underlying(p->first)).second) continue;
           consts.push_back(locals_[p->second]);
           consts.back().decl = NodeId::none;
-          values.push_back(p->second < local_values_.size() && local_values_[p->second] ? *local_values_[p->second] : ConstId::none);
+          if (auto referent = local_referents_.find(p->second); referent != local_referents_.end())
+            values.push_back(w_->values.entity(referent->second));
+          else
+            values.push_back(p->second < local_values_.size() ? local_values_[p->second].value_or(ConstId::none) : ConstId::none);
         }
       for (const BlockType& t : block_types_)
         if (t.depth < scopes_.size()) aliases.push_back({t.name, t.type});
@@ -6454,6 +6489,7 @@ public:
       }
     f.outer_locals = std::exchange(locals_, {});
     f.outer_values = std::exchange(local_values_, {});
+    f.outer_referents = std::exchange(local_referents_, {});
     f.return_type = return_type_;
     f.declared_return = declared_return_;
     f.return_deduced = return_deduced_;
@@ -6494,13 +6530,14 @@ public:
     if (body.ok() && deduces_return() && !return_deduced_ && !return_seen_)
       if (!deduce_return(nullptr, end > 0 ? end - 1 : 0)) {}
     std::optional<GenericBody> r;
-    if (body.ok() && (return_deduced_ || !deduces_return()))
+    if (body.ok() && check_enclosing_locals(body) && (return_deduced_ || !deduces_return()))
       r = GenericBody{deduces_return() ? with_return(f.call_type, return_type_) : f.call_type, locals_};
     pop_scope();
     LambdaFrame fr = std::move(lambdas_.back());
     lambdas_.pop_back();
     locals_ = std::move(fr.outer_locals);
     local_values_ = std::move(fr.outer_values);
+    local_referents_ = std::move(fr.outer_referents);
     return_type_ = fr.return_type;
     declared_return_ = fr.declared_return;
     return_deduced_ = fr.return_deduced;
@@ -7034,6 +7071,36 @@ public:
     return true;
   }
 
+  // Check the selected tree after semantic conversions. A marker can survive in a rejected
+  // expression, but has no local slot or runtime meaning.
+  bool check_enclosing_locals(NodeId root, u32 offset, bool* pending_read = nullptr) {
+    if (!has_enclosing_locals_ || root == NodeId::none) return true;
+    bool valid = true;
+    auto check = [&](this const auto& self, const ast::Red& node) -> void {
+      if (node.is<ast::EnclosingLocal>()) {
+        auto local = node.get<ast::EnclosingLocal>();
+        diag(node.offset(), local.local_class ? Diag::local_class_odr_use : Diag::not_captured, local.name);
+        valid = false;
+      }
+      if (pending_read && !*pending_read) {
+        if (node.is<ast::Dependent>())
+          *pending_read = (node.get<ast::Dependent>().info.flags & ast::Dependent::enclosing_local_read) != 0;
+        else if (node.is<ast::MemberCall>())
+          *pending_read = pending_enclosing_read_calls_.contains(node.get<ast::MemberCall>().function);
+        else if (node.is<ast::Call>())
+          *pending_read = pending_enclosing_read_calls_.contains(node.get<ast::Call>().function);
+      }
+      node.for_each_child(self);
+    };
+    check(ast::Red(ins().ast, root, offset));
+    return valid;
+  }
+
+  bool check_enclosing_locals(const Ex& root, bool* pending_read = nullptr) {
+    return !has_enclosing_locals_ || !root.ok() ||
+           check_enclosing_locals(b_->commit(Child{root.id, 0}).id, root.begin, pending_read);
+  }
+
   // An immediate function may be named within an immediate invocation ([expr.const]). Wait
   // until the completed tree, where a folded invocation no longer contains the address operand.
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
@@ -7132,6 +7199,8 @@ public:
         n.local.decl = NodeId::none;
         const auto& values = ctx == lambdas_.size() ? local_values_ : lambdas_[ctx].outer_values;
         if (p->second < values.size()) n.value = values[p->second];
+        const auto& referents = ctx == lambdas_.size() ? local_referents_ : lambdas_[ctx].outer_referents;
+        if (auto referent = referents.find(p->second); referent != referents.end()) n.referent = referent->second;
         b.names.push_back(std::move(n));
       }
       for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
@@ -7189,10 +7258,7 @@ public:
         declared_types_[std::to_underlying(e.id)] = declared;
         return e;
       }
-      if (n.value && !types().is_reference(l.type) && types().is_scalar(l.type))
-        return literal(Types::unqualified(l.type), *n.value, ValueCategory::prvalue, begin, end);
-      diag(begin, Diag::local_class_odr_use, name);
-      return Ex{NodeId::none, begin, end};
+      return inaccessible_local(l, n.value, n.referent, true, begin, end);
     }
     for (EntityId e : b.using_enums)
       if (auto r = find_enumerator(e, name, begin, end)) return *r;
@@ -8036,6 +8102,7 @@ public:
                               DefaultArgumentOrigin::interned, fe);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
+    if (pending_enclosing_read_calls_.contains(fe)) info.flags |= expr_flag::dependent;
     if (d->is_static) {
       // The object expression is evaluated, then discarded ([expr.ref]).
       Ex call = node(ast::Call{info, fe, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -9145,7 +9212,10 @@ public:
     if (direct_cat && types().function_pointer_conversion(e.type(), t))
       return convert_node(e, ast::ConversionKind::qualification, t, e.cat());
     if (direct_cat && same_unqualified(e.type(), t)) {
-      if (cv_within(object_cv(e.type()), object_cv(t))) return extend ? extended(e) : e;
+      if (cv_within(object_cv(e.type()), object_cv(t))) {
+        if (!check_enclosing_locals(e)) return fail;
+        return extend ? extended(e) : e;
+      }
       diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
@@ -9162,6 +9232,7 @@ public:
         }
         if (!e.glvalue())
           return to_base(materialize(e, types().add_cv(e.type(), object_cv(t)), extend), types().class_of(t), at_);
+        if (!check_enclosing_locals(e)) return fail;
         const bool binding_lvalue_reference = !rr.rvalue_ref && e.cat() == ValueCategory::lvalue;
         Ex b = to_base(e, types().class_of(t), at_, binding_lvalue_reference);
         return b.ok() && extend ? extended(b) : b;
@@ -10567,6 +10638,7 @@ public:
 
   // An expression statement's expression, a discarded-value expression ([expr.context]).
   Ex discarded(Ex e) {
+    if (auto replacement = discard_enclosing_local(e)) return *replacement;
     if (address_set(e)) return rvalue(e);
     if (is_bound_member(e)) {
       diag(e.begin, Diag::bound_member_not_called, w_->entities.rec(as<ast::Member>(e)->member).name);
@@ -10613,7 +10685,124 @@ public:
 
   // ------------------------------------------------------------ conversions ([conv])
 
+  Ex enclosing_local_operand(const Ex& parent, Child child) {
+    u32 begin = parent.begin + child.at;
+    const NodeId adopted = b_->adopted_node(child.id);
+    u32 width = adopted == NodeId::none ? b_->width(child.id) : ins().ast.width(adopted);
+    return {child.id, begin, begin + width, expression_info(child.id, true)};
+  }
+
+  // The original object, including subobjects other than the one selected for this read, must
+  // have no mutable subobjects ([basic.def.odr]/5).
+  bool no_mutable_subobjects(QualType type) {
+    if (types().is_dependent(type)) return false;
+    if (types().is_array(type)) return no_mutable_subobjects(types().rec(type).inner);
+    if (!types().is_class(type)) return true;
+    const ClassRec* record = class_rec(types().class_of(type));
+    if (!record || !record->defined) return false;
+    return std::ranges::all_of(record->bases, [&](const BaseRec& base) {
+             return !base.dependent_in_pattern && no_mutable_subobjects(types().class_type(base.cls));
+           }) &&
+           std::ranges::all_of(record->fields, [&](const FieldRec& field) {
+             return !field.mutable_ && no_mutable_subobjects(field.type);
+           });
+  }
+
+  // Follow potential results through parentheses and ordinary dot-member access. The optional
+  // distinguishes an ordinary glvalue from a known enclosing object whose value awaits replay.
+  std::optional<ConstId> enclosing_local_value(Ex e) {
+    if (b_->adopted_node(e.id) != NodeId::none) return std::nullopt;
+    if (auto local = as<ast::EnclosingLocal>(e)) {
+      if (no_mutable_subobjects(e.type())) return local->value;
+    } else if (auto p = as<ast::Paren>(e)) {
+      return enclosing_local_value(enclosing_local_operand(e, p->operand));
+    } else if (auto member = as<ast::Member>(e); member && !member->arrow && !member->reference) {
+      Ex object = enclosing_local_operand(e, member->object);
+      auto value = enclosing_local_value(object);
+      if (!value) return std::nullopt;
+      const ClassRec* record = class_rec(types().class_of(object.type()));
+      if (!record || record->union_ || !record->bases.empty()) return std::nullopt;
+      if (*value == ConstId::none) return value;
+      if (!ins().values.is<ast::VAggregate>(*value)) return std::nullopt;
+      auto fields = ins().seqs.elements(ins().values.get<ast::VAggregate>(*value).elems);
+      if (member->field < fields.size()) return fields[member->field];
+    }
+    return std::nullopt;
+  }
+
+  std::optional<Ex> enclosing_local_read(Ex e, QualType type) {
+    if (b_->adopted_node(e.id) != NodeId::none) return std::nullopt;
+    if (auto p = as<ast::Paren>(e)) {
+      if (auto value = enclosing_local_read(enclosing_local_operand(e, p->operand), type)) {
+        return node(ast::Paren{value->info, at(*value, e.begin)}, e.begin, e.end, value->info);
+      }
+    } else if (auto comma = as<ast::OrderedBinary>(e); comma && comma->op == ast::OrderedOp::comma) {
+      if (auto rhs = enclosing_local_read(enclosing_local_operand(e, comma->rhs), type))
+        return node(ast::OrderedBinary{rhs->info, ast::OrderedOp::comma, comma->lhs, at(*rhs, e.begin)},
+                    e.begin, e.end, rhs->info);
+    } else if (auto conditional = as<ast::Conditional>(e)) {
+      Ex lhs = enclosing_local_operand(e, conditional->then_);
+      Ex rhs = enclosing_local_operand(e, conditional->else_);
+      auto l = enclosing_local_read(lhs, type);
+      auto r = enclosing_local_read(rhs, type);
+      if (l || r) {
+        if (l) lhs = *l;
+        else if (lhs.glvalue()) lhs = convert_node(lhs, ast::ConversionKind::lvalue_to_rvalue, type);
+        if (r) rhs = *r;
+        else if (rhs.glvalue()) rhs = convert_node(rhs, ast::ConversionKind::lvalue_to_rvalue, type);
+        const u8 flags = u8((lhs.info.flags | rhs.info.flags | e.info.flags) & expr_flag::dependent);
+        ExprInfo info{type, ValueCategory::prvalue, flags};
+        return node(ast::Conditional{info, conditional->condition, at(lhs, e.begin), at(rhs, e.begin)}, e.begin, e.end, info);
+      }
+    } else if (auto value = enclosing_local_value(e)) {
+      if (*value == ConstId::none)
+        return dependent_node({}, e.begin, e.end, type, ValueCategory::prvalue, ast::Dependent::enclosing_local_read);
+      ExprInfo info{type, ValueCategory::prvalue, ast::Literal::from_enclosing_local, e.info.bit_width};
+      return node(ast::Literal{info, *value}, e.begin, e.end, info);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<Ex> discard_enclosing_local(Ex e) {
+    if (!has_enclosing_locals_ || !e.ok() || !e.glvalue() || Types::is_volatile(types().canonical(e.type())))
+      return std::nullopt;
+    if (b_->adopted_node(e.id) != NodeId::none) return std::nullopt;
+    const QualType void_type = builtin(Builtin::void_);
+    const ExprInfo info{void_type, ValueCategory::prvalue, 0};
+    if (auto p = as<ast::Paren>(e)) {
+      if (auto operand = discard_enclosing_local(enclosing_local_operand(e, p->operand)))
+        return node(ast::Paren{info, at(*operand, e.begin)}, e.begin, e.end, info);
+    } else if (auto comma = as<ast::OrderedBinary>(e); comma && comma->op == ast::OrderedOp::comma) {
+      if (auto rhs = discard_enclosing_local(enclosing_local_operand(e, comma->rhs)))
+        return node(ast::OrderedBinary{info, ast::OrderedOp::comma, comma->lhs, at(*rhs, e.begin)}, e.begin, e.end, info);
+    } else if (auto conditional = as<ast::Conditional>(e)) {
+      Ex then_ = enclosing_local_operand(e, conditional->then_);
+      Ex else_ = enclosing_local_operand(e, conditional->else_);
+      auto discarded_then = discard_enclosing_local(then_);
+      auto discarded_else = discard_enclosing_local(else_);
+      if (discarded_then || discarded_else) {
+        if (discarded_then) then_ = *discarded_then;
+        else then_ = convert_node(then_, ast::ConversionKind::to_void, void_type);
+        if (discarded_else) else_ = *discarded_else;
+        else else_ = convert_node(else_, ast::ConversionKind::to_void, void_type);
+        return node(ast::Conditional{info, conditional->condition, at(then_, e.begin), at(else_, e.begin)}, e.begin, e.end, info);
+      }
+    } else if (enclosing_local_value(e)) {
+      // Only the name's effects are omitted. The enclosing comma and conditional still run.
+      const QualType integer = builtin(Builtin::int_);
+      Ex zero = literal(integer, w_->values.integer(integer, 0), ValueCategory::prvalue, e.begin, e.end);
+      return convert_node(zero, ast::ConversionKind::to_void, void_type);
+    }
+    return std::nullopt;
+  }
+
   Ex convert_node(Ex e, ast::ConversionKind k, QualType to, ValueCategory cat = ValueCategory::prvalue) {
+    if (k == ast::ConversionKind::to_void)
+      if (auto replacement = discard_enclosing_local(e)) return *replacement;
+    if (has_enclosing_locals_ && k == ast::ConversionKind::lvalue_to_rvalue && e.ok() && e.glvalue() &&
+        types().is_scalar(to) && !Types::is_volatile(types().canonical(e.type()))) {
+      if (auto value = enclosing_local_read(e, to)) return *value;
+    }
     // The underlying value of an enum literal can be folded directly to an integer constant.
     if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) && types().is_integral(to) &&
                                         (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
@@ -10980,8 +11169,9 @@ public:
     // ([lex.icon]); a character or bool literal is not an integer-literal.
     auto b = types().builtin_of(e.type());
     if (!b || !ast::is_integral(*b) || *b == Builtin::bool_ || rank_below_int(*b) || is_character(*b)) return false;
-    const ConstId value = b_->get<ast::Literal>(n).value;
-    return ins().values.is<ast::VInt>(value) && ast::wide::is_zero(ast::int_bits(ins(), value));
+    const auto literal = b_->get<ast::Literal>(n);
+    return !(literal.info.flags & ast::Literal::from_enclosing_local) &&
+           ins().values.is<ast::VInt>(literal.value) && ast::wide::is_zero(ast::int_bits(ins(), literal.value));
   }
   bool is_data_member_pointer(QualType t) {
     return types().is_member_pointer(t) && !types().is_function(types().rec(t).inner);
@@ -13265,6 +13455,7 @@ public:
       diag(op_at, Diag::bit_field_address);
       return {NodeId::none, begin, end};
     }
+    if (!check_enclosing_locals(e)) return {NodeId::none, begin, end};
     QualType pointee = e.type();
     if (is_bound_member(e) && address_set(e)) pointee = builtin(Builtin::overload_set);
     else if (!e.glvalue()) {
@@ -13475,7 +13666,9 @@ public:
       // [expr.comma]: the left operand is discarded. Only the right produces the result.
       if (!l.glvalue() && (!require_concrete_call_result(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
         return {NodeId::none, begin, end};
-      return ordered(ast::OrderedOp::comma, discard_gcc_reinterpretation(l), r, r.info);
+      if (auto replacement = discard_enclosing_local(l)) l = *replacement;
+      else l = discard_gcc_reinterpretation(l);
+      return ordered(ast::OrderedOp::comma, l, r, r.info);
     case shl:
     case shr: {
       Ex a = promote(l), c = promote(r);
@@ -15064,7 +15257,8 @@ private:
   };
   std::vector<ParamPack> param_packs_;
   std::vector<std::optional<ConstId>> local_values_;  // by local
-  std::vector<bool> initialized_;                     // by local (`set_initialized`)
+  std::map<u32, EntityId> local_referents_;           // constexpr references to complete static objects
+  std::vector<bool> initialized_;                    // by local (`set_initialized`)
   std::vector<std::pair<std::size_t, u32>> barriers_; // (scope depth, id), `jump_barrier`
   u32 next_barrier_ = 0;
   struct LabelPoint {
@@ -15136,6 +15330,8 @@ private:
   bool return_seen_ = false;
   std::vector<LambdaFrame> lambdas_;  // outermost first
   std::vector<std::pair<EntityId, Fp128>> completed_closures_;  // (enclosing entity, signature)
+  bool has_enclosing_locals_ = false;
+  std::set<EntityId> pending_enclosing_read_calls_;  // a closure's known result type has a dependent value
   std::map<u32, QualType> closure_calls_;  // by operator() entity: its type, the return type deduced
   // The function call operators, in a template's definition, whose noexcept-specifier depends on
   // the template's parameters.
