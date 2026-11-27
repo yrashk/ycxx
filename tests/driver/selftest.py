@@ -62,11 +62,14 @@ option(YCXXC_BUILD_TESTS "Build the test" ON)
 option(REGISTER_TEST "Register the test" ON)
 add_custom_target(ycxxc ALL COMMAND "${CMAKE_COMMAND}" -E touch compiler-built)
 if(YCXXC_BUILD_TESTS)
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ycxx-ctests-enabled" CONTENT "1\\n")
   add_custom_target(smoke ALL COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/smoke.cmake" .)
   enable_testing()
   if(REGISTER_TEST)
     add_test(NAME smoke COMMAND "${CMAKE_COMMAND}" -P smoke.cmake)
   endif()
+else()
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ycxx-ctests-enabled" CONTENT "0\\n")
 endif()
 ''')
             (root / 'smoke.cmake').write_text('file(TOUCH test-ran)\n')
@@ -79,14 +82,27 @@ endif()
                 return subprocess.run([tools / 'build', *opts], env={**os.environ, 'YCXX_BUILD_DIR': str(build)},
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
 
+            def require_disabled(build):
+                disabled = run(build)
+                self.assertNotEqual(disabled.returncode, 0, disabled.stdout)
+                self.assertIn('-DYCXXC_BUILD_TESTS=ON', disabled.stdout)
+                self.assertFalse((build / 'test-ran').exists())
+
             warm = root / 'warm'
             enabled = run(warm)
             self.assertEqual(enabled.returncode, 0, enabled.stdout)
             (warm / 'test-ran').unlink()
             registration = warm / 'CTestTestfile.cmake'
             stale_registration = registration.read_bytes()
-            configure(warm, '-DYCXXC_BUILD_TESTS=OFF')
+            override = root / 'disable-tests.cmake'
+            override.write_text('set(YCXXC_BUILD_TESTS OFF)\n')
+            configure(warm, f'-DCMAKE_PROJECT_INCLUDE={override}')
+            self.assertIn('YCXXC_BUILD_TESTS:BOOL=ON', (warm / 'CMakeCache.txt').read_text().splitlines())
             # Reproduce the stale registration even if a newer CMake cleans up its old file.
+            registration.write_bytes(stale_registration)
+            require_disabled(warm)
+
+            configure(warm, '-DCMAKE_PROJECT_INCLUDE=', '-DYCXXC_BUILD_TESTS=OFF')
             registration.write_bytes(stale_registration)
             self.assertTrue((warm / 'smoke.cmake').is_file())
 
@@ -94,10 +110,7 @@ endif()
             configure(fresh, '-DYCXXC_BUILD_TESTS=OFF')
             for build in (fresh, warm):
                 with self.subTest(build=build.name):
-                    disabled = run(build)
-                    self.assertNotEqual(disabled.returncode, 0, disabled.stdout)
-                    self.assertIn('-DYCXXC_BUILD_TESTS=ON', disabled.stdout)
-                    self.assertFalse((build / 'test-ran').exists())
+                    require_disabled(build)
 
             empty = root / 'empty'
             configure(empty, '-DREGISTER_TEST=OFF')

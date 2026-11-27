@@ -37,9 +37,9 @@ if [ ! -f "$dir/build.ninja" ]; then
 fi
 cmake --build "$dir" ${jobs:+-j "$jobs"} ${target:+--target "$target"}
 if [ "$smoke" = 1 ]; then
-  # A tests-disabled reconfiguration can leave old CTest registrations and binaries behind.
-  if LC_ALL=C grep -Eiq '^YCXXC_BUILD_TESTS:[^=]*=(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND|.*-NOTFOUND)?$' "$dir/CMakeCache.txt"; then
-    echo "build: CTests are disabled in $dir. Reconfigure with -DYCXXC_BUILD_TESTS=ON to run them." >&2
+  # CMake records the effective setting, which a normal variable can override.
+  if ! grep -Fxq 1 "$dir/ycxx-ctests-enabled" 2>/dev/null; then
+    echo "build: Enable CTests in $dir before running them. Reconfigure with -DYCXXC_BUILD_TESTS=ON and check any project override." >&2
     exit 1
   fi
   ctest --test-dir "$dir" --no-tests=error --output-on-failure ${jobs:+-j "$jobs"}
