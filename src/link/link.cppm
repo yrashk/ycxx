@@ -55,6 +55,7 @@ struct options {
   std::vector<dylib> dylibs = {libsystem()};
   std::uint32_t min_os = 0x000c0000;  // macOS 12.0, as xxxx.yy.zz
   std::uint32_t sdk = 0x000f0000;     // 15.0
+  std::optional<std::string> install_name = std::nullopt;  // emit a leaf MH_DYLIB with this LC_ID_DYLIB
 };
 
 struct error {
@@ -93,7 +94,6 @@ namespace {
 namespace mo = ycxx::obj::macho;
 using obj::reloc_kind;
 
-constexpr std::uint64_t image_base = 0x100000000;  // __PAGEZERO's size: the low 4 GiB are unmapped
 constexpr std::uint64_t page = 0x4000;              // arm64 macOS pages
 constexpr std::uint64_t sign_page = 0x1000;         // code directory pages
 constexpr std::uint32_t stub_size = 12;
@@ -324,7 +324,7 @@ std::optional<std::uint64_t> cleanup_table_size(const obj::object& o, const obj:
 
 // Preserve version 1 zR and cleanup-only zPLR DWARF records. Validate ownership of all
 // relocatable fields before section placement. CFI instructions are preserved as supplied.
-std::optional<std::uint32_t> unwind_frame_size(const obj::object& o, std::uint32_t si) {
+std::optional<std::uint32_t> unwind_frame_size(const obj::object& o, std::uint32_t si, bool allow_cleanup) {
   const auto& section = o.sections[si];
   const std::span<const std::uint8_t> bytes = section.bytes;
   constexpr std::uint32_t coalesced = 0x0b;  // S_COALESCED, used by Darwin assemblers
@@ -376,6 +376,7 @@ std::optional<std::uint32_t> unwind_frame_size(const obj::object& o, std::uint32
     const auto cie = mo::load32(record, 4);
     if (cie == 0) {
       if (record.size() >= 25 && std::ranges::equal(record.subspan(8, sizeof(cleanup_cie_prefix)), cleanup_cie_prefix)) {
+        if (!allow_cleanup) return std::nullopt;
         // L and R are direct, pointer-sized PC-relative encodings. P is an indirect
         // PC-relative signed word to the GOT entry of the Darwin C++ personality.
         if (record[23] != 0x10 || record[24] != 0x10) return std::nullopt;
@@ -457,6 +458,7 @@ public:
 
   std::expected<std::vector<std::uint8_t>, std::vector<error>> run() {
     resolve();
+    if (errors_.empty() && opts_.install_name) validate_dylib();
     if (!errors_.empty()) return std::unexpected(std::move(errors_));
     place_sections();
     if (!errors_.empty()) return std::unexpected(std::move(errors_));
@@ -469,6 +471,7 @@ public:
 private:
   std::span<const obj::object> objs_;
   const options& opts_;
+  const std::uint64_t image_base_ = opts_.install_name ? 0 : 0x100000000;  // executables reserve the low 4 GiB
   std::vector<error> errors_;
 
   std::map<std::string, symref, std::less<>> globals_;
@@ -507,8 +510,70 @@ private:
   static bool is_common(const obj::object& o, const obj::symbol& s) { return linker_is_common(o, s); }
 
   // Symbols the linker defines when no object does: both name the Mach-O header.
-  static bool synthetic(std::string_view name) { return name == "__mh_execute_header" || name == "___dso_handle"; }
+  bool synthetic(std::string_view name) const {
+    return !opts_.install_name && (name == "__mh_execute_header" || name == "___dso_handle");
+  }
   static constexpr std::uint32_t synthetic_obj = ~0u;
+
+  // Leaf dylibs have no bindings or rebases at load time. The supported inputs are arm64
+  // instructions and their read-only constants; every relocated address is image-relative.
+  void validate_dylib() {
+    if (opts_.install_name->empty() || opts_.install_name->contains('\0'))
+      fail("Mach-O dylib output needs a nonempty install name without NUL bytes");
+    if (!opts_.dylibs.empty()) fail("Mach-O leaf dylib output does not support library dependencies");
+    for (const auto& o : objs_) {
+      for (const auto& section : o.sections) {
+        using namespace obj::section_flags;
+        if (section.is_eh_frame()) continue;  // place_sections validates every frame record and relocation together
+        const bool code = section.name == "__text" && (section.flags & pure_instructions) &&
+                          !(section.flags & ~(pure_instructions | some_instructions));
+        const bool constant = section.name == "__const" && section.flags == regular;
+        const bool string = section.name == "__cstring" && section.flags == cstring_literals;
+        if (section.segment != "__TEXT" || !(code || constant || string) || section.zerofill_size ||
+            section.align_log2 > 14 || (code && section.size() % 4 != 0)) {
+          fail(std::format("{}: unsupported Mach-O dylib section {},{}", o.name, section.segment, section.name));
+          continue;
+        }
+        for (const auto& r : section.relocs) {
+          if (!code || r.minus || (r.kind != reloc_kind::branch26 && r.kind != reloc_kind::page21 &&
+                                   r.kind != reloc_kind::pageoff12)) {
+            fail(std::format("{}: unsupported relocation for Mach-O leaf dylib output in {}", o.name, section.name));
+            continue;
+          }
+          if (r.symbol >= o.symbols.size() || r.offset % 4 != 0 ||
+              r.offset > section.size() || section.size() - r.offset < 4) {
+            fail(std::format("{}: invalid Mach-O dylib relocation in {}", o.name, section.name));
+            continue;
+          }
+          const auto& symbol = o.symbols[r.symbol];
+          if (symbol.bind != obj::binding::local && exported_.contains(symbol.name_view()))
+            fail(std::format("{}: Mach-O dylib reference to interposable symbol {} is unsupported", o.name, symbol.name_view()));
+          const auto instruction = mo::load32(section.bytes, r.offset);
+          if (r.kind == reloc_kind::branch26 && (instruction & 0x7c000000) != 0x14000000)
+            fail(std::format("{}: BRANCH26 dylib relocation requires a B or BL instruction", o.name));
+          if (r.kind == reloc_kind::pageoff12 && is_add_immediate(instruction) && (instruction & (1u << 22)))
+            fail(std::format("{}: PAGEOFF12 dylib relocation requires an unshifted ADD immediate", o.name));
+        }
+      }
+      for (const auto& s : o.symbols) {
+        const auto name = s.name_view();
+        if (s.weak || name.contains('\0') || (s.bind != obj::binding::local && name.empty()) ||
+            (!s.defined() && s.bind == obj::binding::local)) {
+          fail(std::format("{}: unsupported Mach-O dylib symbol '{}'", o.name, name));
+          continue;
+        }
+        if (!s.defined()) continue;
+        const auto& section = o.sections[*s.section];  // resolve checked each definition's section
+        if (s.offset > section.size()) {
+          fail(std::format("{}: Mach-O dylib symbol {} lies outside its section", o.name, name));
+          continue;
+        }
+        if (s.bind == obj::binding::global &&
+            (section.name != "__text" || s.object_size || s.offset % 4 != 0 || section.size() - s.offset < 4))
+          fail(std::format("{}: Mach-O dylib export {} must be a strong function in executable code", o.name, name));
+      }
+    }
+  }
 
   // 1. Symbol resolution.
   void resolve() {
@@ -540,7 +605,7 @@ private:
         }
       }
     }
-    if (!globals_.contains(opts_.entry)) fail(std::format("entry point {} is not defined", opts_.entry));
+    if (!opts_.install_name && !globals_.contains(opts_.entry)) fail(std::format("entry point {} is not defined", opts_.entry));
 
     // Undefined names, weak only if every reference is weak, with the first referencing object.
     std::map<std::string, std::pair<bool, std::uint32_t>, std::less<>> undefined;
@@ -578,7 +643,7 @@ private:
     if (!s.defined() || s.bind != obj::binding::local) {
       const auto name = s.name_view();
       if (auto it = globals_.find(name); it != globals_.end()) def = it->second;
-      else if (synthetic(name)) return defined_at{image_base};
+      else if (synthetic(name)) return defined_at{image_base_};
       else return imported{import_index_.at(name)};
     }
     const auto& d = objs_[def.obj].symbols[def.sym];
@@ -625,7 +690,11 @@ private:
       const bool one_unwind = std::ranges::count_if(o.sections, &obj::section::is_eh_frame) == 1;
       for (std::uint32_t j = 0; j < o.sections.size(); ++j) {
         const auto& s = o.sections[j];
-        const auto frame_size = one_unwind && s.is_eh_frame() ? unwind_frame_size(o, j) : std::nullopt;
+        const auto frame_size = one_unwind && s.is_eh_frame() ? unwind_frame_size(o, j, !opts_.install_name) : std::nullopt;
+        if (opts_.install_name && s.is_eh_frame() && (!frame_size || s.zerofill_size != 0)) {
+          fail(std::format("{}: Mach-O leaf dylib requires a single ordinary zR unwind section per input", o.name));
+          continue;
+        }
         if (dropped(s) && !frame_size) {
           if (s.is_eh_frame() && has_cleanup_cie(s.bytes))
             fail(std::format("{}: invalid cleanup-only DWARF frame, personality, or LSDA", o.name));
@@ -728,18 +797,31 @@ private:
   }
 
   // 3. Addresses: sections sorted within each segment, segments page-aligned.
+  std::span<const dylib> load_dylibs() const {
+    if (!opts_.install_name) return opts_.dylibs;
+    // dyld requires a libSystem load command even for an import-free leaf. This metadata
+    // does not participate in symbol resolution.
+    static const std::array leaf_loads{libsystem({})};
+    return leaf_loads;
+  }
+
+  static std::uint32_t dylib_command_size(std::string_view name) {
+    return static_cast<std::uint32_t>(align_up(24 + name.size() + 1, 8));
+  }
+
   std::uint32_t load_commands_size(std::size_t nsegments_with_sections) const {
-    std::uint32_t n = static_cast<std::uint32_t>(mo::segment_command_64_size * (nsegments_with_sections + 2) +
+    const auto segments = nsegments_with_sections + (opts_.install_name ? 1 : 2);  // __LINKEDIT and executable __PAGEZERO
+    std::uint32_t n = static_cast<std::uint32_t>(mo::segment_command_64_size * segments +
                                                  mo::section_64_size * sections_.size());
-    n += 16 + 16 + 24 + 80;               // chained fixups, exports trie, symtab, dysymtab
-    n += align_up(12 + 14, 8);            // LC_LOAD_DYLINKER "/usr/lib/dyld"
-    n += 24 + 24 + 24;                    // uuid, build version, main
-    for (const auto& d : opts_.dylibs) n += static_cast<std::uint32_t>(align_up(24 + d.install_name.size() + 1, 8));
-    n += 16;                              // code signature
+    n += 16 + 16 + 24 + 80 + 24 + 24 + 16;  // fixups, exports, symtab, dysymtab, UUID, build version, signature
+    n += opts_.install_name ? dylib_command_size(*opts_.install_name) : 32 + 24;  // ID or dyld + main
+    for (const auto& d : load_dylibs()) n += dylib_command_size(d.install_name);
     return n;
   }
 
-  std::uint32_t command_count() const { return static_cast<std::uint32_t>(segments_.size()) + 9 + static_cast<std::uint32_t>(opts_.dylibs.size()); }
+  std::uint32_t command_count() const {
+    return static_cast<std::uint32_t>(segments_.size() + (opts_.install_name ? 8 : 9) + load_dylibs().size());
+  }
 
   void layout() {
     // Section order inside each segment: fixed leaders, then first appearance; zero-fill last.
@@ -777,8 +859,8 @@ private:
     }
     header_size_ = static_cast<std::uint32_t>(mo::mach_header_64_size) + load_commands_size(used);
 
-    segments_.push_back({"__PAGEZERO", 0, image_base, 0, 0, 0, 0, {}});
-    std::uint64_t vm = image_base, file = 0;
+    if (!opts_.install_name) segments_.push_back({"__PAGEZERO", 0, image_base_, 0, 0, 0, 0, {}});
+    std::uint64_t vm = image_base_, file = 0;
     for (std::size_t s = 0; s < 3; ++s) {
       const auto sg = static_cast<seg>(s);
       segment_info info{std::string(seg_names[s]), vm, 0, file, 0, 0, 0, {}};
@@ -832,7 +914,7 @@ private:
     if (const auto* d = std::get_if<defined_at>(&target)) {
       // A rebase keeps the pointer's top byte apart (`high8`), such as the bit Apple's arm64 C++
       // ABI sets on a non-unique RTTI name pointer.
-      const std::uint64_t off = d->addr + static_cast<std::uint64_t>(addend) - image_base;
+      const std::uint64_t off = d->addr + static_cast<std::uint64_t>(addend) - image_base_;
       const std::uint64_t low = off & ((std::uint64_t{1} << 56) - 1);
       if (low >> 36) fail(std::format("{}: pointer target out of range", where));
       fixups_.push_back({addr, false, low, static_cast<std::uint8_t>(off >> 56)});
@@ -962,7 +1044,7 @@ private:
       auto& g = sections_[*got_];
       for (std::uint32_t k = 0; k < got_entries_.size(); ++k) {
         const auto& e = got_entries_[k];
-        const resolved t = e.is_import ? resolved{imported{e.a}} : e.a == synthetic_obj ? resolved{defined_at{image_base}} : resolve_symbol(e.a, e.b);
+        const resolved t = e.is_import ? resolved{imported{e.a}} : e.a == synthetic_obj ? resolved{defined_at{image_base_}} : resolve_symbol(e.a, e.b);
         add_fixup(g.addr + 8 * k, t, 0, "__DATA_CONST,__got");
       }
     }
@@ -995,7 +1077,7 @@ private:
       w.u32(22 + 2u * page_count);  // size of dyld_chained_starts_in_segment with its page_start array
       w.u16(static_cast<std::uint16_t>(page));
       w.u16(6);  // DYLD_CHAINED_PTR_64_OFFSET
-      w.u64(sg.vmaddr - image_base);
+      w.u64(sg.vmaddr - image_base_);
       w.u32(0);  // max_valid_pointer
       w.u16(page_count);
       std::vector<std::uint16_t> starts(page_count, 0xffff);  // DYLD_CHAINED_PTR_START_NONE
@@ -1075,10 +1157,10 @@ private:
         else locals.push_back(e);
       }
     }
-    if (!globals_.contains("__mh_execute_header")) {
-      extdefs.push_back({"__mh_execute_header", static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), 1, mo::referenced_dynamically, image_base});
+    if (!opts_.install_name && !globals_.contains("__mh_execute_header")) {
+      extdefs.push_back({"__mh_execute_header", static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), 1, mo::referenced_dynamically, image_base_});
     }
-    if (!globals_.contains("___dso_handle")) locals.push_back({"___dso_handle", mo::n_sect, 1, 0, image_base});
+    if (!opts_.install_name && !globals_.contains("___dso_handle")) locals.push_back({"___dso_handle", mo::n_sect, 1, 0, image_base_});
     std::ranges::sort(extdefs, {}, &sym_entry::name);
     for (const auto& im : imports_) {
       undefs.push_back({im.name, static_cast<std::uint8_t>(mo::n_undf | mo::n_ext), 0,
@@ -1107,7 +1189,7 @@ private:
     for (const auto& e : extdefs) {
       const bool weak = (e.desc & mo::n_weak_def) != 0;
       weak_defines = weak_defines || weak;
-      exported.push_back({e.name, e.value - image_base, weak ? export_weak_definition : 0u});
+      exported.push_back({e.name, e.value - image_base_, weak ? export_weak_definition : 0u});
     }
     const auto trie = exports_trie(exported);
     const std::uint64_t trie_off = le_off + le.size();
@@ -1145,10 +1227,11 @@ private:
     h.u32(mo::mh_magic_64);
     h.u32(mo::cpu_type_arm64);
     h.u32(mo::cpu_subtype_arm64_all);
-    h.u32(mo::mh_execute);
+    h.u32(opts_.install_name ? mo::mh_dylib : mo::mh_execute);
     h.u32(command_count());
     h.u32(header_size_ - static_cast<std::uint32_t>(mo::mach_header_64_size));
-    h.u32(mo::mh_noundefs | mo::mh_dyldlink | mo::mh_twolevel | mo::mh_pie | (weak_defines ? mo::mh_weak_defines : 0));
+    h.u32(mo::mh_noundefs | mo::mh_dyldlink | mo::mh_twolevel |
+          (opts_.install_name ? mo::mh_no_reexported_dylibs : mo::mh_pie) | (weak_defines ? mo::mh_weak_defines : 0));
     h.u32(0);
     for (const auto& sg : segments_) {
       h.u32(mo::lc_segment_64);
@@ -1212,11 +1295,13 @@ private:
     h.u32(0);
     h.u32(0);  // local relocations
     h.u32(0);
-    h.u32(mo::lc_load_dylinker);
-    h.u32(32);
-    h.u32(12);
-    h.raw("/usr/lib/dyld");
-    h.zeros(32 - 12 - 13);
+    if (!opts_.install_name) {
+      h.u32(mo::lc_load_dylinker);
+      h.u32(32);
+      h.u32(12);
+      h.raw("/usr/lib/dyld");
+      h.zeros(32 - 12 - 13);
+    }
     const std::size_t uuid_at = h.size() + 8;
     h.u32(mo::lc_uuid);
     h.u32(24);
@@ -1227,21 +1312,28 @@ private:
     h.u32(opts_.min_os);
     h.u32(opts_.sdk);
     h.u32(0);
-    h.u32(mo::lc_main);
-    h.u32(24);
-    h.u64(std::get<defined_at>(resolve_symbol(globals_.at(opts_.entry).obj, globals_.at(opts_.entry).sym)).addr - image_base);
-    h.u64(0);
-    for (const auto& d : opts_.dylibs) {
-      const auto size = static_cast<std::uint32_t>(align_up(24 + d.install_name.size() + 1, 8));
-      h.u32(mo::lc_load_dylib);
+    auto dylib_command = [&](std::uint32_t cmd, std::string_view name, std::uint32_t timestamp,
+                             std::uint32_t current, std::uint32_t compatibility) {
+      const auto size = dylib_command_size(name);
+      h.u32(cmd);
       h.u32(size);
       h.u32(24);
-      h.u32(2);  // timestamp
-      h.u32(d.current_version);
-      h.u32(d.compatibility_version);
-      h.raw(d.install_name);
-      h.zeros(size - 24 - d.install_name.size());
+      h.u32(timestamp);
+      h.u32(current);
+      h.u32(compatibility);
+      h.raw(name);
+      h.zeros(size - 24 - name.size());
+    };
+    if (opts_.install_name) dylib_command(mo::lc_id_dylib, *opts_.install_name, 1, 0x10000, 0x10000);
+    else {
+      h.u32(mo::lc_main);
+      h.u32(24);
+      const auto entry = globals_.at(opts_.entry);
+      h.u64(std::get<defined_at>(resolve_symbol(entry.obj, entry.sym)).addr - image_base_);
+      h.u64(0);
     }
+    for (const auto& d : load_dylibs())
+      dylib_command(mo::lc_load_dylib, d.install_name, 2, d.current_version, d.compatibility_version);
     h.u32(mo::lc_code_signature);
     h.u32(16);
     h.u32(static_cast<std::uint32_t>(sig_off));
@@ -1319,10 +1411,10 @@ private:
     be32(0);                       // teamOffset
     be32(0);                       // spare3
     be64(0);                       // codeLimit64
-    const auto& text = segments_[1];
+    const auto& text = segments_[opts_.install_name ? 0 : 1];
     be64(text.fileoff);            // execSegBase
     be64(text.filesize);           // execSegLimit
-    be64(1);                       // CS_EXECSEG_MAIN_BINARY
+    be64(opts_.install_name ? 0 : 1);  // CS_EXECSEG_MAIN_BINARY
     s.insert(s.end(), opts_.identifier.begin(), opts_.identifier.end());
     s.push_back(0);
     for (std::uint64_t p = 0; p < nslots; ++p) {

@@ -91,6 +91,10 @@ struct RuleToolchain {
   std::optional<std::string> path;
 };
 
+// Successful content reads shared by compiler aliases and packages in one validation pass.
+// Start a new pass after an effect and for each watch poll.
+using RuleCompilerFingerprints = std::map<std::string, Fp128>;
+
 struct RulePackageAction {
   Action action;
   std::string tool_fingerprint;
@@ -124,7 +128,8 @@ std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rule
 std::expected<RulePackageRef, std::string> capability_package(std::string_view package);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
-    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr);
+    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr,
+    RuleCompilerFingerprints* compiler_fingerprints = nullptr);
 // Reobserve the reachable producers of a rule's generated planning inputs.
 // Include paths observed before an incomplete plan.
 std::expected<RuleInputPlan, std::string> plan_rule_inputs(
@@ -267,14 +272,19 @@ RulePackageRef resolve_capability_package(std::string_view text, SourceLocation 
   return workspace_package(text, at);
 }
 
-std::string read_file(const fs::path& path, SourceLocation at) {
+template<class ReadBlock>
+void read_file_blocks(const fs::path& path, SourceLocation at, ReadBlock read_block) {
   std::ifstream in(path, std::ios::binary);
   if (!in) fail(at, std::format("cannot open '{}'", path_text(path)));
-  std::string contents;
   std::array<char, 16384> buffer;
   while (in.read(buffer.data(), buffer.size()) || in.gcount() != 0)
-    contents.append(buffer.data(), static_cast<std::size_t>(in.gcount()));
+    read_block(std::string_view{buffer.data(), static_cast<std::size_t>(in.gcount())});
   if (!in.eof() || in.bad()) fail(at, std::format("cannot read '{}'", path_text(path)));
+}
+
+std::string read_file(const fs::path& path, SourceLocation at) {
+  std::string contents;
+  read_file_blocks(path, at, [&](std::string_view block) { contents.append(block); });
   return contents;
 }
 
@@ -331,6 +341,7 @@ struct CxxTargetPlan {
   std::vector<IncludeOrigin> origins;
   std::vector<const CxxTargetPlan*> dependencies;
   std::vector<TargetLinkInput> link_inputs;
+  bool role_bound_includes = false;
 };
 
 struct CxxTraversal {
@@ -342,7 +353,31 @@ struct CxxTraversal {
   std::size_t next_order = 0;
 };
 
-std::string artifact_origin(const ArtifactRef& ref) {
+struct ArtifactOperand {
+  const ArtifactRef& ref;
+  SourceLocation location;
+  std::optional<std::string_view> binding = std::nullopt;
+};
+
+ArtifactOperand artifact_operand(const Value& value, std::string_view binding_field, bool for_host) {
+  if (const auto* choices = binding_field.empty() ? nullptr : std::get_if<Record>(&value.data)) {
+    const auto* host = field(*choices, "host");
+    const auto* target = field(*choices, "target");
+    if (choices->size() != 2 || !host || !target)
+      fail(value.location, std::format("{} binding requires exactly 'host' and 'target' fields", binding_field));
+    const auto* host_ref = std::get_if<ArtifactRef>(&host->data);
+    const auto* target_ref = std::get_if<ArtifactRef>(&target->data);
+    if (!host_ref) fail(host->location, std::format("expected an artifact reference for 'host' in {}", binding_field));
+    if (!target_ref)
+      fail(target->location, std::format("expected an artifact reference for 'target' in {}", binding_field));
+    return for_host ? ArtifactOperand{*host_ref, host->location, "host"}
+                    : ArtifactOperand{*target_ref, target->location, "target"};
+  }
+  return {as<ArtifactRef>(value, "an artifact reference"), value.location};
+}
+
+std::string artifact_origin(const ArtifactRef& ref, std::optional<std::string_view> binding = std::nullopt) {
+  if (binding) return std::format("{} = artifact({:?}, {:?})", *binding, ref.target, ref.output);
   return std::format("artifact({:?}, {:?})", ref.target, ref.output);
 }
 
@@ -645,7 +680,7 @@ class Planner {
 
   RulePackagePlan package(std::string_view target, std::string_view sdk_header,
                           const fs::path& invoking_directory, const RuleToolchain& toolchain,
-                          std::span<const EmbeddedInput> embedded = {}) {
+                          std::span<const EmbeddedInput> embedded, RuleCompilerFingerprints& compiler_fingerprints) {
     const auto declaration = declarations_.find(target);
     if (declaration == declarations_.end()) fail({}, std::format("unknown target '{}'", target));
     const auto& decl = *declaration->second;
@@ -709,7 +744,7 @@ class Planner {
         fingerprint = std::format("ycxx:{:016x}", toolchain.executable_build);
       } else {
         try {
-          fingerprint = fingerprint_tool(action.tool, tool.location);
+          fingerprint = fingerprint_tool(action.tool, tool.location, &compiler_fingerprints);
         } catch (const PlanningError&) {
           // An executable without a readable identity is unavailable for a tracked action.
           continue;
@@ -809,7 +844,8 @@ class Planner {
     watch_->paths.insert(path_text(normalized));
   }
 
-  const ExecutableObservation& observe_tool(std::string_view spelling, SourceLocation at) {
+  const ExecutableObservation& observe_tool(std::string_view spelling, SourceLocation at,
+                                           RuleCompilerFingerprints* compiler_fingerprints = nullptr) {
     if (const auto known = tools_.find(spelling); known != tools_.end())
       return known->second;
     std::error_code ec;
@@ -818,14 +854,25 @@ class Planner {
     observe(tool_path);
     const auto status = regular_file(tool_path, at);
     if (!executable(status.permissions())) fail(at, std::format("tool '{}' is not executable", spelling));
-    const auto fp = Hasher{}.bytes(read_file(tool_path, at)).finish();
+    auto canonical = path_text(tool_path);
+    const auto fp = [&] {
+      if (!compiler_fingerprints) return Hasher{}.bytes(read_file(tool_path, at)).finish();
+      if (const auto cached = compiler_fingerprints->find(canonical); cached != compiler_fingerprints->end()) {
+        if (!std::ifstream(tool_path, std::ios::binary)) fail(at, std::format("cannot open '{}'", canonical));
+        return cached->second;
+      }
+      Hasher contents;
+      read_file_blocks(tool_path, at, [&](std::string_view block) { contents.bytes(block); });
+      return compiler_fingerprints->emplace(canonical, contents.finish()).first->second;
+    }();
     if (watch_) watch_->values.push_back(fp);
-    return tools_.emplace(std::string(spelling), ExecutableObservation{path_text(tool_path), fp}).first->second;
+    return tools_.emplace(std::string(spelling), ExecutableObservation{std::move(canonical), fp}).first->second;
   }
 
-  std::string fingerprint_tool(std::string_view spelling, SourceLocation at) {
+  std::string fingerprint_tool(std::string_view spelling, SourceLocation at,
+                               RuleCompilerFingerprints* compiler_fingerprints = nullptr) {
     observe(spelling);
-    return tool_digest(observe_tool(spelling, at).contents);
+    return tool_digest(observe_tool(spelling, at, compiler_fingerprints).contents);
   }
 
   std::vector<HelperToolIdentity> observe_helper_tools(const TargetDecl& decl, const Value& field) {
@@ -1255,9 +1302,10 @@ class Planner {
   }
 
   std::string native_artifact(const ArtifactRef& ref, const TargetDecl& consumer, std::string_view usage,
-                              SourceLocation at, bool emit_edge) {
+                              SourceLocation at, bool emit_edge,
+                              std::optional<std::string_view> binding = std::nullopt) {
     const auto requested = artifact(ref, at);
-    if (emit_edge) artifact_dependency(consumer, requested, usage, at);
+    if (emit_edge) artifact_dependency(consumer, requested, usage, at, binding);
     const auto [producer, output] = requested;
     auto& gen = plan_.generators[producer];
     gen.native_outputs = true;
@@ -1272,9 +1320,10 @@ class Planner {
   }
 
   std::string host_artifact(const ArtifactRef& ref, const TargetDecl& consumer, HostExecutablePlan& host,
-                            std::string_view usage, SourceLocation at, bool emit_edge) {
+                            std::string_view usage, SourceLocation at, bool emit_edge,
+                            std::optional<std::string_view> binding = std::nullopt) {
     const auto requested = resolve_host_artifact(ref, host, usage == "sources" ? "source" : "header", at);
-    if (emit_edge) artifact_dependency(consumer, requested, usage, at);
+    if (emit_edge) artifact_dependency(consumer, requested, usage, at, binding);
     host.generated_inputs.push_back(requested);
     const auto& generator = plan_.generators[requested.producer];
     return host_generated_path(cwd_, generator.name, generator.action.outputs[requested.output].filename);
@@ -1292,7 +1341,7 @@ class Planner {
 
   void append_sources(const TargetDecl& decl, const std::vector<std::string>& includes,
                       std::vector<SourcePlan>& sources, HostExecutablePlan* host, bool emit_facts,
-                      bool emit_generated_facts) {
+                      bool emit_generated_facts, bool allow_role_bindings) {
     std::set<std::string> source_paths;
     const auto add = [&](std::string path, SourceLocation at, std::string_view origin, bool generated = false) {
       if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
@@ -1327,10 +1376,14 @@ class Planner {
             add(path_text(absolute), value.location, "declared in sources");
           } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
             add_glob(*glob, value.location);
-          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
-            auto path = host ? host_artifact(*ref, decl, *host, "sources", value.location, emit_facts)
-                             : native_artifact(*ref, decl, "sources", value.location, emit_facts);
-            add(std::move(path), value.location, emit_generated_facts ? artifact_origin(*ref) : std::string{}, true);
+          } else if (std::holds_alternative<ArtifactRef>(value.data) ||
+                     (allow_role_bindings && std::holds_alternative<Record>(value.data))) {
+            const auto [ref, location, binding] = artifact_operand(value, "sources", host != nullptr);
+            const bool emit_edge = binding ? emit_generated_facts : emit_facts;
+            auto path = host ? host_artifact(ref, decl, *host, "sources", location, emit_edge, binding)
+                             : native_artifact(ref, decl, "sources", location, emit_edge, binding);
+            const auto origin = emit_generated_facts ? artifact_origin(ref, binding) : std::string{};
+            add(std::move(path), location, origin, true);
           } else {
             fail(value.location, "expected a source path, glob or artifact reference");
           }
@@ -1394,6 +1447,21 @@ class Planner {
     }
   }
 
+  void append_include_facts(const CxxTargetPlan& target, Primitive kind, bool for_host,
+                            bool emit_facts, bool emit_role_facts) {
+    if (!inspection_) return;
+    const bool separate_roles = kind == Primitive::library && target.role_bound_includes;
+    const bool host_library = kind == Primitive::library && for_host;
+    for (std::size_t i = 0; i < target.paths.size(); ++i) {
+      const auto& origin = target.origins[i];
+      const bool emit = (separate_roles || origin.generated) ? emit_role_facts : emit_facts;
+      if (!emit) continue;
+      auto name = std::to_string(i);
+      if (separate_roles || (host_library && origin.generated)) name.insert(0, for_host ? "host " : "target ");
+      fact("include", *target.declaration, name, display_path(target.paths[i]), origin.text, origin.location);
+    }
+  }
+
   const CxxTargetPlan& cxx_target(const TargetDecl& decl, Primitive kind, CxxTraversal& traversal) {
     if (const auto it = traversal.finished.find(decl.name); it != traversal.finished.end()) return it->second;
     if (!traversal.active.insert(decl.name).second)
@@ -1421,64 +1489,72 @@ class Planner {
     if (const auto* inputs = public_inputs ? public_inputs : private_inputs) {
       const auto field_name = public_inputs ? "public_link_inputs" : "link_inputs";
       for (const auto& value : as<List>(*inputs, "a list of linker archive inputs")) {
-        const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
-                                        : std::string{};
-        const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", value.location)
-                                              : artifact(ref, value.location);
-        if (emit_facts) artifact_dependency(decl, requested, field_name, value.location);
-        target.link_inputs.push_back({requested, origin, value.location});
+        const auto [ref, location, binding] = artifact_operand(value, public_inputs ? field_name : "",
+                                                               traversal.host != nullptr);
+        const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", location)
+                                              : artifact(ref, location);
+        if (binding ? emit_generated_facts : emit_facts)
+          artifact_dependency(decl, requested, field_name, location, binding);
+        auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref, binding))
+                                  : std::string{};
+        target.link_inputs.push_back({requested, std::move(origin), location});
       }
     }
     const auto include = [&](std::string path, std::string_view origin, SourceLocation location, bool generated = false) {
       if (std::ranges::contains(target.paths, path)) return;
-      if (inspection_) {
-        if (generated ? emit_generated_facts : emit_facts) {
-          auto name = std::to_string(target.paths.size());
-          if (generated && traversal.host && kind == Primitive::library) name.insert(0, "host ");
-          fact("include", decl, name, display_path(path), origin, location);
-        }
-        target.origins.push_back({std::string(origin), location, generated});
-      }
+      if (inspection_) target.origins.push_back({std::string(origin), location, generated});
       target.paths.push_back(std::move(path));
     };
-    for_each_include_dir(decl, include);
-    if (const auto* headers = field(decl, "generated_headers")) {
-      for (const auto& value : as<List>(*headers, "a list of generated headers")) {
-        const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto path = traversal.host
-            ? host_artifact(ref, decl, *traversal.host, "generated_headers", value.location, emit_facts)
-            : native_artifact(ref, decl, "generated_headers", value.location, emit_facts);
-        include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref) : std::string{},
-                value.location, true);
-      }
-    }
-    if (const auto* deps = field(decl, "deps")) {
-      std::size_t position = 0;
-      for (const auto& value : as<List>(*deps, "a list of dependencies")) {
-        const auto [dep, dep_kind] = find(as<std::string>(value, "a library target name"), value.location);
-        if (dep_kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
-        if (emit_facts) {
-          fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
-          dependency(decl, dep.name, "deps", value.location);
+    try {
+      for_each_include_dir(decl, include);
+      constexpr std::string_view header_field = "generated_headers";
+      if (const auto* headers = field(decl, header_field)) {
+        for (const auto& value : as<List>(*headers, "a list of generated headers")) {
+          const auto [ref, location, binding] = artifact_operand(value, kind == Primitive::library ? header_field : "",
+                                                                 traversal.host != nullptr);
+          const bool emit_edge = binding ? emit_generated_facts : emit_facts;
+          target.role_bound_includes |= binding.has_value();
+          const auto path = traversal.host
+              ? host_artifact(ref, decl, *traversal.host, header_field, location, emit_edge, binding)
+              : native_artifact(ref, decl, header_field, location, emit_edge, binding);
+          include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref, binding) : std::string{},
+                  location, true);
         }
-        ++position;
-        const auto& inherited = cxx_target(dep, dep_kind, traversal);
-        target.dependencies.push_back(&inherited);
-        for (std::size_t i = 0; i < inherited.paths.size(); ++i) {
-          if (inspection_) {
-            const auto& from = inherited.origins[i];
-            include(inherited.paths[i], std::format("inherited from {} ({})", dep.name, from.text),
-                    from.location, from.generated);
-          } else {
-            include(inherited.paths[i], {}, {});
+      }
+      if (const auto* deps = field(decl, "deps")) {
+        std::size_t position = 0;
+        for (const auto& value : as<List>(*deps, "a list of dependencies")) {
+          const auto [dep, dep_kind] = find(as<std::string>(value, "a library target name"), value.location);
+          if (dep_kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
+          if (emit_facts) {
+            fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
+            dependency(decl, dep.name, "deps", value.location);
+          }
+          ++position;
+          const auto& inherited = cxx_target(dep, dep_kind, traversal);
+          target.dependencies.push_back(&inherited);
+          target.role_bound_includes |= inherited.role_bound_includes;
+          for (std::size_t i = 0; i < inherited.paths.size(); ++i) {
+            if (inspection_) {
+              const auto& from = inherited.origins[i];
+              include(inherited.paths[i], std::format("inherited from {} ({})", dep.name, from.text),
+                      from.location, from.generated);
+            } else {
+              include(inherited.paths[i], {}, {});
+            }
           }
         }
       }
+    } catch (const RuleDemand&) {
+      // A partial report still shows the prefix resolved before the rule was needed.
+      append_include_facts(target, kind, traversal.host != nullptr, emit_facts, emit_generated_facts);
+      throw;
     }
 
+    append_include_facts(target, kind, traversal.host != nullptr, emit_facts, emit_generated_facts);
     if (kind == Primitive::host_executable) traversal.host->first_own_source = traversal.sources.size();
-    append_sources(decl, target.paths, traversal.sources, traversal.host, emit_facts, emit_generated_facts);
+    append_sources(decl, target.paths, traversal.sources, traversal.host, emit_facts, emit_generated_facts,
+                   kind == Primitive::library);
     if (assets) {
       std::set<std::string> filenames;
       for (const auto& value : as<List>(*assets, "a list of runtime assets")) {
@@ -1638,17 +1714,21 @@ std::expected<RulePackageRef, std::string> capability_package(std::string_view p
 
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const fs::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
-    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths) {
+    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths,
+    RuleCompilerFingerprints* compiler_fingerprints) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
   WatchObservations observed;
+  RuleCompilerFingerprints local_fingerprints;
+  auto& fingerprints = compiler_fingerprints ? *compiler_fingerprints : local_fingerprints;
   try {
     const auto lower = [&](const fs::path& directory, std::string_view target, std::string_view text,
                            std::span<const EmbeddedInput> inputs) {
       auto manifest = parse_manifest(text);
       if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
-      auto result = Planner(directory, *manifest, &observed, nullptr).package(target, sdk_header, root, toolchain, inputs);
+      auto result = Planner(directory, *manifest, &observed, nullptr).package(
+          target, sdk_header, root, toolchain, inputs, fingerprints);
       result.observed_paths.assign(observed.paths.begin(), observed.paths.end());
       return result;
     };
