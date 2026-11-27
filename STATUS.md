@@ -2483,12 +2483,15 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - A mem-initializer followed by `...` is a mem-initializer-list expansion. The definition
   records it, and an instantiation reads it once for each element, as `expandable` does. Its
   mem-initializer-id must name a pack of base classes ([class.base.init]); `B(t)...` and
-  `m(t)...` are diagnosed, as Clang and GCC do. A dependent base named as a template parameter,
-  `B(x)`, is checked in the instantiation instead of reported as no member.
-- Nested expansions: an instantiation's element of an expansion no longer notes its packs to the
-  enclosing operand (`Sema::end_element`), so `h(g(args...))` works in bodies and initializers.
-- Tests: `tests/own/mem-initializer-packs/` (spec-only author, plus `nested-expansion` and
-  `dependent-targets`): 8 pass. The base-pack cases are XFAIL: `struct D : Bs...` itself is
+  `m(t)...` are diagnosed, as Clang and GCC do. A base named by a template parameter, `B(x)`,
+  `T(t)` or `Ts(ts)...`, is checked in the instantiation; while one is written, the definition
+  default-initializes no base. An element that is no direct base is reported by its type.
+- Nested expansions: an instantiation's element of an expansion or fold no longer notes its
+  packs to the enclosing operand (`Sema::end_element`), and a binary fold's operand probe keeps
+  its packs, so `h(g(args...))`, `s((a + ...))` and `id((a + ...))` work in bodies and
+  initializers.
+- Tests: `tests/own/mem-initializer-packs/` (spec-only author, plus the regression tests and
+  the review's): 11 pass. The base-pack cases are XFAIL: `struct D : Bs...` itself is
   #308. Not yet: `V v(args...)` as a declaration's initializer (#1596), and a template-id
   mem-initializer-id such as libycxx's `__tuple_leaf<_Ip, _Ts>(…)...` (#308).
 - `<iostream>` hello (#776): 2,468 errors at `07e6d567` → 2,435. No errors remain at
