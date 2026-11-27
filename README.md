@@ -100,6 +100,8 @@ In the HTML report, **Target dependencies** lets you follow producers and
 open their use sites in `build.ycxx`.
 The **Graph** view lets you expand a target's dependencies and dependents
 and inspect each connection's declaration in the same standalone report.
+In an incomplete plan, you can also explore resolved components that are
+disconnected from the selected target.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
@@ -781,6 +783,8 @@ written default member initializer are value-initialized.
 - Dependent `alignof(type-id)` and `sizeof(type-id)` arguments to namespace variable templates
   replay when an initializer or a nested record's direct field array bound needs them. This
   includes pack expansions. [#1371](https://github.com/yrashk/ycxx/issues/1371)
+- A class template's non-static array member can use `sizeof(T)` as its bound. The bound is
+  checked when the specialization is completed. [#1191](https://github.com/yrashk/ycxx/issues/1191)
 - `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
   and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
@@ -902,13 +906,17 @@ written default member initializer are value-initialized.
   `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   The checked add and multiply builtins report overflow and store the converted signed
-  `intmax_t` result during constant evaluation. [#1077](https://github.com/yrashk/ycxx/issues/1077)
+  `intmax_t` result during constant evaluation. In constant expressions and native code they also accept
+  standard unsigned operands and a writable unsigned destination with widths up to 64 bits.
+  [#1077](https://github.com/yrashk/ycxx/issues/1077) [#1636](https://github.com/yrashk/ycxx/issues/1636)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
   Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
   expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
   `__builtin_ctz`, used by libycxx's `<charconv>`, converts its argument to `unsigned int`
   and counts trailing zero bits as an `int`. [#1479](https://github.com/yrashk/ycxx/issues/1479)
+  `__builtin_clzll` converts its argument to `unsigned long long` and counts leading zero bits
+  as an `int` in constant expressions and native code. [#1539](https://github.com/yrashk/ycxx/issues/1539)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the

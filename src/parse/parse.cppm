@@ -474,6 +474,7 @@ public:
   }
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
+  const std::set<EntityId>& unapplied_declaration_attributes() const { return unapplied_declaration_attributes_; }
   bool class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 item, bool friend_declaration) const;
   bool peer_root_vtable_visible(EntityId cls) const;
   bool plain_class_template_type(EntityId cls) const;
@@ -1424,6 +1425,20 @@ public:
       if (Program::passes(*ix_, Probe::declares, path, j, k) && !after_running_member(j)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
+  }
+  // Native ABI checks run after semantic analysis. Materialize late declarations
+  // of the class and slots through the same recorded name queries as ordinary lookup.
+  void ensure_virtual_abi_declarations(EntityId cls) {
+    ensure_declared(cls, end());
+    const auto* record = classes_.find(cls);
+    if (!record) return;
+    for (const auto& member : record->members)
+      if (member.is_virtual) ensure_declared(member.entity, end());
+    for (const auto& base : record->bases) ensure_virtual_abi_declarations(base.cls);
+  }
+  std::optional<ItemId> class_definition_item(EntityId cls) const {
+    const auto found = class_items_.find(std::to_underlying(cls));
+    return found == class_items_.end() ? std::nullopt : std::optional(id(found->second));
   }
   std::optional<ast::DeclSema> declaration(EntityId e, u32 item) {
     ensure_declared(e, item);
@@ -6679,12 +6694,14 @@ private:
       auto exception = class_member;
       if (p_->defaulted_body(k_)) exception = defaulted_assignment;
       else if (member_template_) exception = member_template;
-      const bool replay_array_bounds = !spec.is_static && !member_template_ && !conversion &&
-                                       s_.templated() && p_->named_nested_class(it_->parent);
+      auto array_bounds = Parser::MemberArrayBounds::none;
+      if (!spec.is_static && !member_template_ && !conversion && s_.templated())
+        array_bounds = p_->named_nested_class(it_->parent) ? Parser::MemberArrayBounds::nested_layout
+                                                         : Parser::MemberArrayBounds::sizeof_type;
       parse::Declarator d = [&] {
         const Parser::GccSignatureScope spelling{ps_, member_template_};
         return ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, replay_array_bounds);
+                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, array_bounds);
       }();
       if (d.ok && d.function && member_template_ && s_.compatibility() == ast::Compatibility::gcc)
         d.type = ps_.retain_gcc_signature_transforms(d.type);

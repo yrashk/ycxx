@@ -950,6 +950,14 @@ static_assert(__builtin_memcmp(past, past, 5) == 0);
     ctz_cases = ('zero-literal.cpp', 'zero-parameter.cpp')
     for case in ctz_cases:
         shutil.copyfile(ctz_fixtures / case, world.scope / case)
+    clzll_fixtures = Path(__file__).with_name('builtin_clzll')
+    clzll_zero = 'oracle-clzll-zero-constexpr.cpp'
+    shutil.copyfile(clzll_fixtures / clzll_zero, world.scope / clzll_zero)
+    for arity in ('few', 'many'):
+        case = f'clzll-too-{arity}.cpp'
+        shutil.copyfile(clzll_fixtures / case, world.scope / case)
+        diagnostic = invoke('-fsyntax-only', case, status=1)[2]
+        assert f'too {arity} arguments in call'.encode() in diagnostic, diagnostic
     (world.scope / 'void-cast.cpp').write_text('''\
 #ifdef SINGLETON
 constexpr int value = 37;
@@ -1267,6 +1275,11 @@ int use() { return transform(7); }
                 diagnostic = invoke(target, *flags, '-fsyntax-only', case, status=mode != 'gcc')[2]
                 if mode != 'gcc':
                     assert b'counting trailing zeros with a zero operand' in diagnostic, diagnostic
+            if mode == 'gcc':
+                invoke(target, *flags, '-DEXPECT_CLZLL_ZERO=64', '-fsyntax-only', clzll_zero)
+            else:
+                diagnostic = invoke(target, *flags, '-fsyntax-only', clzll_zero, status=1)[2]
+                assert b'counting leading zeros with a zero operand' in diagnostic, diagnostic
             invoke(target, *flags, '-DNULL_ZERO', '-fsyntax-only', 'memcmp-identity.cpp')
             for case in ('', 'NULL_RANGE', 'INT_RANGE', 'PAST_END', 'LOCAL'):
                 case_flags = ['-D' + case] if case else []

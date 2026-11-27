@@ -675,12 +675,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     `TuFront(TU)` places its messages in files from `pp`'s full region, so an edit that changes
     no token (a comment, blank lines) stops at `PpTokens` and analysis does not run again (#947,
     slice 0).
-    - A unit whose tokens never say `virtual` is analysed a group at a time (#947, slice 1;
+    - Units are analysed a group at a time (#947, #978;
       `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
       headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
-      other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
+      other items only as the group asks. With specialization-heavy headers, a short run of
+      main-file items shares a Program. Cache misses run on the session pool, and their results
+      merge in source order. `unit_of` makes each group's `UnitPart`, and
       `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
-      hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+      hidden declarations anywhere, unwind checks, virtual table ownership and RTTI).
+      Peer ABI checks record the late declarations they read and merge layout uncertainty and
+      ownership in source order.
     - The unit combines layout uncertainty from all groups before the native ABI checks class
       shapes and chooses base-object constructor and destructor variants.
       [#992](https://github.com/yrashk/ycxx/issues/992)
@@ -2363,6 +2367,12 @@ template's tokens again with the arguments bound.
   ([temp.deduct.type]/8) and mangled as `A T_ _`; the reference tie-break of
   [temp.deduct.partial]/9. Reference binding reads an array's cv-qualifiers from its elements
   ([basic.type.qualifier]/3), for templates and other code.
+- A whole `sizeof(type-id)` bound with a dependent type operand stays dependent in a
+  class template's non-static array member. Completing a specialization replays the member's
+  declaration and checks
+  the ordinary layout and bound there. Merely naming a pointer to the specialization leaves
+  the operand unchecked until a completion demand ([dcl.array], [expr.sizeof], [temp.inst],
+  [#1191](https://github.com/yrashk/ycxx/issues/1191)).
 - Tests: `tests/own/templates/f1-*` (spec-only, plus ten from the review): 47 of 48 pass; the
   other calls through a function pointer (#24). 9 more draft examples pass ([temp.over], [temp.deduct.general],
   [temp.deduct.partial], [temp.arg.general], [temp.deduct.type]).
@@ -2929,6 +2939,14 @@ modes diagnose a reached zero operand in a required constant expression. GCC mod
 width of `unsigned int` during constant evaluation. At run time the GNU builtin's zero
 operand has undefined behavior. The other fixed-width spellings remain in #248.
 
+## Leading-zero count builtin (#1539)
+
+`__builtin_clzll` implicitly converts one argument to `unsigned long long`, evaluates it once
+and counts its leading zero bits as an `int`. Constant evaluation uses the target operand width.
+Spec and Clang modes diagnose a reached zero operand in a required constant expression. GCC
+mode returns the operand width during constant evaluation. Runtime zero has undefined behavior.
+Native lowering uses BSR on x86-64 and CLZ on AArch64. `__has_builtin` answers 1.
+
 ## C library string and memory builtins (#248, #1093, #1170)
 
 `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
@@ -2986,13 +3004,15 @@ Calls to user functions and values from the active constexpr frame remain outsid
 proof domain. `__has_builtin` answers 0 while support is partial.
 [Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
 
-## Checked signed integer builtins (#1077)
+## Checked integer builtins (#1077, #1636)
 
 The direct GNU `__builtin_add_overflow` and `__builtin_mul_overflow` calls accept matching
-signed target-`intmax_t` operands with a writable destination of the same type. Constant
-evaluation writes the width-converted result on both outcomes and returns whether the
-mathematical result exceeds the signed range. The destination uses the usual object and
-lifetime rules. `__has_builtin` answers 0 for the partial domain.
+signed target-`intmax_t` operands with a writable destination of the same type during
+constant evaluation. Constant evaluation and native code also accept differing standard
+unsigned integer operand and destination types up to 64 bits. The call evaluates each argument
+once, stores the converted result once and returns whether it differs from the exact arithmetic
+result. The destination uses the usual object and lifetime rules. `__has_builtin` answers 0 for
+the partial domain. [#1636](https://github.com/yrashk/ycxx/issues/1636)
 
 Native emission can omit an unreferenced immediate function template specialization. A named
 namespace-scope specialization with checked arithmetic that is retained by the reference
@@ -3565,6 +3585,14 @@ The **Target dependencies** panel in standalone HTML plans and comparisons
 starts at the selected target (#1499). Artifact and value uses link to the
 producer's card and to their sites in `build.ycxx`. Shared producers have
 one card, and incomplete plans show the links resolved so far.
+
+The explorable **Graph** in standalone HTML plans and comparisons opens
+at the selected target and its immediate inputs (#1604). Its buttons expand
+dependencies and dependents, with one node per target. The sidebar links
+the selected target's facts and authored edges to `build.ycxx`. Targets
+with identical visible labels keep distinct details (#1611). Incomplete
+plans also show an entry point and its resolved inputs in each component
+disconnected from the selected target.
 
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
