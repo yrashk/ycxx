@@ -3765,6 +3765,13 @@ target retains its distinct target include view. Plans show both include
 paths and one dependency edge for the authored header binding.
 [Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
 
+Host-linked libraries can mix generated C++ source artifacts and disk
+sources (#1600). Each generated main keeps its own producer's siblings
+available for quoted includes. The library's public search directories
+continue to come from its headers and dependencies. Inspection shows
+the host and selected-target source paths with one authored source edge.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
