@@ -1102,6 +1102,7 @@ public:
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
     if (auto block = block_type_template(name); block.found) return block.declaration;
+    if (injected_class_template(name) != EntityId::none) return class_template(name);
     bool found_member = false;
     if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
@@ -1163,15 +1164,27 @@ public:
                                                  bool initializer = false) {
     return named_template(name, ast::DeclKind::variable, at, initializer);
   }
+  // The template whose name `name` is in the current class, or none. In a class template, or a
+  // specialization of one, its injected-class-name followed by `<` is the template's name
+  // ([temp.local]/1): `A<U>` in `A` names the specialization `A<U>`. The class's constructors
+  // share the name but are not found by lookup ([class.ctor]/1), so they do not hide it; nor can
+  // another member be named as the class ([class.mem.general]).
+  EntityId injected_class_template(NameId name) {
+    if (current_class == EntityId::none) return EntityId::none;
+    const EntityRec& c = w_->entities.rec(current_class);
+    return c.name == name ? c.templ : EntityId::none;
+  }
+
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
   // every earlier declaration of it ([temp.param]/12).
   std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind,
                                              std::optional<u32> at = std::nullopt, bool initializer = false) {
-    if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return std::nullopt;
     if (template_param(name)) return std::nullopt;
+    const EntityId injected = kind == ast::DeclKind::class_ ? injected_class_template(name) : EntityId::none;
+    if (injected == EntityId::none && names_member(name)) return std::nullopt;
     std::optional<ast::DeclSema> found;
     // Block-scope using-declarations, innermost first ([namespace.udecl]).
     for (auto u = block_usings_.rbegin(); u != block_usings_.rend() && !found; ++u)
@@ -1198,6 +1211,11 @@ public:
       if (matching != decls.rend()) found = *matching;
     }
     if (!found && !decls.empty()) found = decls.back();
+    if (injected != EntityId::none && (!found || found->entity != injected)) {
+      // The template ordinary lookup outside the class would not find (a member template).
+      found = q_->template_decl(injected);
+      if (!found) return std::nullopt;
+    }
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
     // The deferred argument retains no entity. Ordinary lookup at the initializer must
     // determine one before replay. A tag from another namespace can make the name ambiguous.
