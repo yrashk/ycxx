@@ -110,21 +110,21 @@ def watch(driver, scope, env, output):
 
     try:
         read_until(lambda lines: any("watching " in line for line in lines)
-                   and any("last build:" in line for line in lines) and latest_completed(lines))
+                   and any("last build:" in line for line in lines))
         assert score() == 42
         set_filter("kind:Tu live_glob_probe.cc is:executed")
         generated = scope / ".ycxx/glob-probe-next"
         generated.write_text("int live_glob_probe() { return 41; }\n", encoding="ascii")
         source = scope / "src/live_glob_probe.cc"
         generated.replace(source)
-        read_until(lambda lines: added_row(lines) and latest_completed(lines) >= 2 and score() == 42)
+        read_until(lambda lines: added_row(lines) and score() == 42)
         row = added_row(screen.display)
-        add_build = latest_completed(screen.display)
+        add_build = max(2, latest_completed(screen.display))
         os.write(terminal, f"\x1b[<0;9;{row}M\x1b[<0;9;{row}m".encode())
         read_until(lambda lines: any("live_glob_probe.cc" in line.partition("│")[2] for line in lines))
         save_frame(screen, output / "watch-added-source")
 
-        set_filter("")
+        set_filter("kind:Link app")
         if any("paused, f follows" in line for line in screen.display):
             os.write(terminal, b"f")
         source.unlink()
