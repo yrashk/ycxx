@@ -90,6 +90,23 @@ def main():
             original = build_both('1D')
             run_peers()
 
+            # The cast in a namespace initializer is emitted in the merged startup function.
+            (scope / 'global-cast.cpp').write_text('#include "classes.hpp"\nextern B* input;\n'
+                                                  'D* result = dynamic_cast<D*>(input);\n')
+            for env in (cold, resident):
+                run([*target, '-fno-exceptions', '-c', 'global-cast.cpp', '-o', 'global-cast.o'], scope, env)
+                check_imports(readelf, scope, cold, 'global-cast.o', '1D')
+
+            # A later startup cast must not hide the preceding written cast's diagnostic.
+            (scope / 'repeated-cast.cpp').write_text(
+                '#include "classes.hpp"\nnamespace user {\n'
+                'D* cast(B* input) { return dynamic_cast<D*>(input); }\n'
+                'extern B* input;\nD* result = dynamic_cast<D*>(input);\n}\n'
+                'int D::f() { return 3; }\n')
+            for env in (cold, resident):
+                run([*target, '-fno-exceptions', '-c', 'repeated-cast.cpp', '-o', 'repeated-cast.o'],
+                    scope, env, error='repeated-cast.cpp:3:28: error: typed dynamic_cast')
+
             override = b'    int f() override;\n'
             assert inputs[header].count(override) == 1
             header.write_bytes(inputs[header].replace(override, b''))

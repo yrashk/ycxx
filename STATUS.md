@@ -675,12 +675,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     `TuFront(TU)` places its messages in files from `pp`'s full region, so an edit that changes
     no token (a comment, blank lines) stops at `PpTokens` and analysis does not run again (#947,
     slice 0).
-    - A unit whose tokens never say `virtual` is analysed a group at a time (#947, slice 1;
+    - Units are analysed a group at a time (#947, #978;
       `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
       headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
-      other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
+      other items only as the group asks. With specialization-heavy headers, a short run of
+      main-file items shares a Program. Cache misses run on the session pool, and their results
+      merge in source order. `unit_of` makes each group's `UnitPart`, and
       `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
-      hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+      hidden declarations anywhere, unwind checks, virtual table ownership and RTTI).
+      Peer ABI checks record the late declarations they read and merge layout uncertainty and
+      ownership in source order.
     - The unit combines layout uncertainty from all groups before the native ABI checks class
       shapes and chooses base-object constructor and destructor variants.
       [#992](https://github.com/yrashk/ycxx/issues/992)
