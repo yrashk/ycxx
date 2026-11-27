@@ -315,7 +315,8 @@ class Gen {
 
   Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic) {
     ir::Ty r[] = {vty(facts_.pointer_to(type))};
-    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(storage), std::to_underlying(init)};
+    // The allocated object retains its declared cv even when an access changes the glvalue type.
+    std::uint64_t imms[] = {word(in_.canonical(type)), std::to_underlying(storage), std::to_underlying(init)};
     ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms);
     return {b_.result(n, 1), type};
   }
