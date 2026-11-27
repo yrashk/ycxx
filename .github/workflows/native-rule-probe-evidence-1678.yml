@@ -1,0 +1,106 @@
+name: Native arm64 rule-package probe evidence
+
+on:
+  push:
+    branches: [codex/ycxx-native-rule-probe-evidence-1678]
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      CANDIDATE: 464ec2f6ac8947b667084b0baddf876c570b278e
+      CANDIDATE_TREE: 7dd7c44dd826cbd72f4c5736c31441e792c646ce
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify the exact merge candidate and select the macOS SDK
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-native-rule-probe-1678"
+          mkdir -p "$output"
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git -C deps/libycxx rev-parse HEAD)" = "$(git rev-parse "$CANDIDATE:deps/libycxx")"
+          git diff --exit-code HEAD --
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          test -d "$sdk"
+          printf 'SDKROOT=%s\n' "$sdk" >> "$GITHUB_ENV"
+          {
+            git show --no-patch --format='%H %T %P' HEAD
+            git -C deps/libycxx rev-parse HEAD
+            printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            sw_vers
+            uname -a
+            xcodebuild -version
+            printf 'SDKROOT=%s\n' "$sdk"
+            xcrun --sdk macosx --show-sdk-version
+          } | tee "$output/provenance.txt"
+          cp -R examples/project-build/native-leaf-rule "$output/example"
+      - name: Provision the candidate CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the exact merge candidate
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-native-rule-probe-1678"
+          unset YCXX_ROOT
+          cmake --version | tee -a "$output/provenance.txt"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$output/build.log"
+          shasum -a 256 build/bin/ycxx | tee -a "$output/provenance.txt"
+          git diff --exit-code HEAD --
+      - name: Run the native example and its package and toolchain regressions
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-native-rule-probe-1678"
+          export YCXX_NATIVE_RULE_PROBE_RECEIPTS="$output/native-rule-probe-receipts"
+          unset YCXX_ROOT
+          suite='^daemon\.project_(native_rule_probe|toolchain_probe|rule_package)$'
+          ctest --test-dir build --show-only=json-v1 -R "$suite" > "$output/roster.json"
+          python3 -B - "$output/roster.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          expected = {
+              'daemon.project_native_rule_probe',
+              'daemon.project_toolchain_probe',
+              'daemon.project_rule_package',
+          }
+          actual = [record['name'] for record in json.loads(Path(sys.argv[1]).read_text())['tests']]
+          assert len(actual) == len(expected) and set(actual) == expected, actual
+          PY
+          set +e
+          ctest --test-dir build --output-on-failure --no-tests=error -j 1 -R "$suite" 2>&1 | tee "$output/ctest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$output/ctest-exit.txt"
+          if test -d build/Testing; then cp -R build/Testing "$output/Testing"; fi
+          test "$status" = 0
+          for receipt in commands.jsonl cold-build.stderr warm-build.stderr cold-show.stdout show.stdout app app.json \
+                         replay-rules.so replay-rules.json replay-request.json replay-plan.ycxx; do
+            test -s "$YCXX_NATIVE_RULE_PROBE_RECEIPTS/$receipt"
+          done
+          find "$YCXX_NATIVE_RULE_PROBE_RECEIPTS" -type f -print | tee "$output/receipt-files.txt"
+          (
+            cd "$YCXX_NATIVE_RULE_PROBE_RECEIPTS"
+            shasum -a 256 app replay-rules.so replay-request.json replay-plan.ycxx | tee "$output/receipt-digests.txt"
+            printf '\nWorker-emitted replay-plan.ycxx\n'
+            cat replay-plan.ycxx
+            printf '\n'
+          )
+      - name: Upload actual command receipts and native execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-1678-arm64-native-rule-probe
+          path: ${{ runner.temp }}/ycxx-native-rule-probe-1678/
+          if-no-files-found: error
+          retention-days: 14
