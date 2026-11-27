@@ -7420,19 +7420,25 @@ public:
     if (s_->types().is_reference(target)) {
       QualType object = s_->types().referee(target);
       const bool function = s_->types().is_function(object);
-      if (!(function ? check_immediate : is_constexpr)) return;
-      auto value = sema::Evaluator(*s_, questions()).evaluate_reference_initializer(init).value;
-      if (!value) return;
+      if (!is_constexpr && !(function && check_immediate)) return;
+      sema::Evaluator evaluator(*s_, questions());
+      const auto evaluation = evaluator.evaluate_reference_initializer(init);
+      if (!evaluation.value) {
+        if (is_constexpr && evaluation.dependent) s_->set_local_value_dependent(local);
+        else if (is_constexpr) evaluator.check_local_reference_initializer(init, evaluation);
+        return;
+      }
+      const auto value = *evaluation.value;
       if (function) {
-        if (!reject_escape || s_->check_immediate_initializer(*value, init.begin))
-          s_->permit_constant_initializer(declaration, target, *value);
+        if (check_immediate && (!reject_escape || s_->check_immediate_initializer(value, init.begin)))
+          s_->permit_constant_initializer(declaration, target, value);
         return;
       }
       // A constexpr reference to a complete static object can be named from an enclosing
       // scope without odr-using the reference itself ([basic.def.odr]/5).
       const auto& in = s_->ins();
-      if (!in.values.is<ast::VLvalue>(*value)) return;
-      const auto address = in.values.get<ast::VLvalue>(*value);
+      if (!in.values.is<ast::VLvalue>(value)) return;
+      const auto address = in.values.get<ast::VLvalue>(value);
       if (address.offset || in.seqs.size(address.path) || !in.values.is<ast::VEntity>(address.base)) return;
       auto entity = in.values.get<ast::VEntity>(address.base).entity;
       const auto& referent = s_->world().entities.rec(entity);
@@ -7708,7 +7714,7 @@ public:
     } else if (init.ok() && spec.is_constexpr) {
       // A built-in dereference reads the non-constexpr iterator even for a reference.
       // For a class iterator, check the direct call while full evaluation waits for #25.
-      if (types.is_pointer(s_->local(bv->first).type)) constant_local(local, d.type, true, init);
+      if (types.is_pointer(s_->local(bv->first).type)) record_local_constant_initializer(local, dbegin, init, true);
       else sema::Evaluator(*s_, questions()).check_constexpr_call(deref);
     }
     s_->check_destructor_access(d.type, d.name_at);

@@ -5809,15 +5809,19 @@ public:
                         bool local_class, u32 begin, u32 end) {
     QualType declared = local_declared_type(local);
     ExprInfo info{types().referee(declared), ValueCategory::lvalue, 0};
-    if (referent != EntityId::none)
-      return node(ast::DeclRef{info, referent}, begin, end, info);
-    if (!types().is_reference(declared) && !types().is_dependent(declared) &&
-        (value || (in_pattern() && (local.flags & local_flag::value_dependent)))) {
+    Ex result;
+    if (referent != EntityId::none) {
+      result = node(ast::DeclRef{info, referent}, begin, end, info);
+    } else if (!types().is_reference(declared) && !types().is_dependent(declared) &&
+               (value || (in_pattern() && (local.flags & local_flag::value_dependent)))) {
       has_enclosing_locals_ = true;
-      return node(ast::EnclosingLocal{info, local.name, value.value_or(ConstId::none), local_class}, begin, end, info);
+      result = node(ast::EnclosingLocal{info, local.name, value.value_or(ConstId::none), local_class}, begin, end, info);
+    } else {
+      diag(begin, local_class ? Diag::local_class_odr_use : Diag::not_captured, local.name);
+      return {NodeId::none, begin, end};
     }
-    diag(begin, local_class ? Diag::local_class_odr_use : Diag::not_captured, local.name);
-    return {NodeId::none, begin, end};
+    declared_types_[std::to_underlying(result.id)] = declared;
+    return result;
   }
 
   // A name resolved to `key` in outer context `ctx`: capture it through the intervening lambdas
@@ -10762,11 +10766,34 @@ public:
   std::optional<Ex> discard_enclosing_local(Ex e) {
     if (!has_enclosing_locals_ || !e.ok() || !e.glvalue() || Types::is_volatile(types().canonical(e.type())))
       return std::nullopt;
-    if (!enclosing_local_value(e)) return std::nullopt;
-    // A discarded nonvolatile glvalue is not read. Its enclosing name is not odr-used.
-    const QualType integer = builtin(Builtin::int_);
-    Ex zero = literal(integer, w_->values.integer(integer, 0), ValueCategory::prvalue, e.begin, e.end);
-    return convert_node(zero, ast::ConversionKind::to_void, builtin(Builtin::void_));
+    if (b_->adopted_node(e.id) != NodeId::none) return std::nullopt;
+    const QualType void_type = builtin(Builtin::void_);
+    const ExprInfo info{void_type, ValueCategory::prvalue, 0};
+    if (auto p = as<ast::Paren>(e)) {
+      if (auto operand = discard_enclosing_local(enclosing_local_operand(e, p->operand)))
+        return node(ast::Paren{info, at(*operand, e.begin)}, e.begin, e.end, info);
+    } else if (auto comma = as<ast::OrderedBinary>(e); comma && comma->op == ast::OrderedOp::comma) {
+      if (auto rhs = discard_enclosing_local(enclosing_local_operand(e, comma->rhs)))
+        return node(ast::OrderedBinary{info, ast::OrderedOp::comma, comma->lhs, at(*rhs, e.begin)}, e.begin, e.end, info);
+    } else if (auto conditional = as<ast::Conditional>(e)) {
+      Ex then_ = enclosing_local_operand(e, conditional->then_);
+      Ex else_ = enclosing_local_operand(e, conditional->else_);
+      auto discarded_then = discard_enclosing_local(then_);
+      auto discarded_else = discard_enclosing_local(else_);
+      if (discarded_then || discarded_else) {
+        if (discarded_then) then_ = *discarded_then;
+        else then_ = convert_node(then_, ast::ConversionKind::to_void, void_type);
+        if (discarded_else) else_ = *discarded_else;
+        else else_ = convert_node(else_, ast::ConversionKind::to_void, void_type);
+        return node(ast::Conditional{info, conditional->condition, at(then_, e.begin), at(else_, e.begin)}, e.begin, e.end, info);
+      }
+    } else if (enclosing_local_value(e)) {
+      // Only the name's effects are omitted. The enclosing comma and conditional still run.
+      const QualType integer = builtin(Builtin::int_);
+      Ex zero = literal(integer, w_->values.integer(integer, 0), ValueCategory::prvalue, e.begin, e.end);
+      return convert_node(zero, ast::ConversionKind::to_void, void_type);
+    }
+    return std::nullopt;
   }
 
   Ex convert_node(Ex e, ast::ConversionKind k, QualType to, ValueCategory cat = ValueCategory::prvalue) {
