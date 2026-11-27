@@ -3800,6 +3800,10 @@ inconclusive evidence across target reporting, dialects, headers, language and
 library features, objects, executable links, and shared-library compile, link and
 load. The resident engine reuses typed receipts for unchanged inputs. Read-only
 inspection shows the admitted observations and their provenance. [#1289](https://github.com/yrashk/ycxx/issues/1289)
+On arm64 macOS, the native `link.host-shared` probe uses the freestanding Mach-O
+dylib recipe. `link.host-shared.load` calls the rule entry point through the
+worker. The [native leaf example](examples/project-build/native-leaf-rule/README.md)
+pins ycxx for both its package and these measurements. [#1678](https://github.com/yrashk/ycxx/issues/1678)
 
 The optional `builtin:capabilities` rule package consumes declared
 `probe(package, id)` bindings and emits a named C++ header artifact. The worker
