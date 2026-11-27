@@ -106,6 +106,9 @@ add_test(NAME daemon.project_host_static_archive_inputs
 add_test(NAME daemon.project_host_library_static_archive_inputs
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_static_archive_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
 
+add_test(NAME daemon.project_archive_consumer_bindings
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_archive_consumer_bindings.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_foreign_make
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_foreign_make.py $<TARGET_FILE:ycxxc>)
 
