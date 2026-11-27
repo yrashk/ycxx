@@ -3733,8 +3733,15 @@ public:
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
+      const std::size_t before = s_->diag_count();
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
+      if (!n && s_->diag_count() != before) {  // packs of different lengths, diagnosed: no operand
+        i_ = begin_ + e.end;
+        expect(Tk::ellipsis);
+        out.push_back({NodeId::none, begin, pos()});
+        return out;
+      }
       if (!n) {
         // A pack not bound yet (an enclosing template's): the expansion stays dependent.
         if (unexpanded) *unexpanded = true;

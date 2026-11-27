@@ -2489,11 +2489,13 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - Nested expansions: an instantiation's element of an expansion or fold no longer notes its
   packs to the enclosing operand (`Sema::end_element`), and a binary fold's operand probe keeps
   its packs, so `h(g(args...))`, `s((a + ...))` and `id((a + ...))` work in bodies and
-  initializers.
+  initializers. Packs of different lengths are reported once, without a second error for the
+  pattern.
 - Tests: `tests/own/mem-initializer-packs/` (spec-only author, plus the regression tests and
   the review's): 11 pass. The base-pack cases are XFAIL: `struct D : Bs...` itself is
   #308. Not yet: `V v(args...)` as a declaration's initializer (#1596), and a template-id
-  mem-initializer-id such as libycxx's `__tuple_leaf<_Ip, _Ts>(…)...` (#308).
+  mem-initializer-id such as libycxx's `__tuple_leaf<_Ip, _Ts>(…)...` or a base named by a
+  member alias (#1267).
 - `<iostream>` hello (#776): 2,468 errors at `07e6d567` → 2,435. No errors remain at
   `optional.hpp:107`, `:201`, `:205`, `:234`, `tuple.hpp:35`–`49`, `:338`, or `pair.hpp:226`.
 
