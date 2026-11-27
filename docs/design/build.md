@@ -436,6 +436,30 @@ including disk directories, and links generated entries to their
 authored artifact sites.
 [Generated header roles example](../../examples/project-build/role-bound-library-headers/README.md)
 
+### Explicit generated sources by link role (#1647)
+
+```text
+cpp.library "bridge" {
+    sources = [
+        "bridge.cc",
+        { host = artifact("host_impl", "source"), target = artifact("app_impl", "source") }
+    ]
+}
+```
+
+Each record requires both artifact references. The host tool and selected
+app resolve their own arm, even when the triples match. The chosen source
+takes its declared position alongside disk paths, globs, and plain
+generated sources. A duplicate effective source is diagnosed in the
+traversal that selects it.
+
+The generated source retains its logical path and can include its
+producer's declared siblings with quotes. The source's directory stays
+private to that include lookup unless an explicit header binding makes
+it visible elsewhere. Plan facts show each selected source path and link
+its role-labeled dependency edge to the inner artifact reference.
+[Generated source roles example](../../examples/project-build/role-bound-library-sources/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and

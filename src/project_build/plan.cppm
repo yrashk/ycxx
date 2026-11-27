@@ -1319,7 +1319,7 @@ class Planner {
 
   void append_sources(const TargetDecl& decl, const std::vector<std::string>& includes,
                       std::vector<SourcePlan>& sources, HostExecutablePlan* host, bool emit_facts,
-                      bool emit_generated_facts) {
+                      bool emit_generated_facts, bool allow_role_bindings) {
     std::set<std::string> source_paths;
     const auto add = [&](std::string path, SourceLocation at, std::string_view origin, bool generated = false) {
       if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
@@ -1354,10 +1354,14 @@ class Planner {
             add(path_text(absolute), value.location, "declared in sources");
           } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
             add_glob(*glob, value.location);
-          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
-            auto path = host ? host_artifact(*ref, decl, *host, "sources", value.location, emit_facts)
-                             : native_artifact(*ref, decl, "sources", value.location, emit_facts);
-            add(std::move(path), value.location, emit_generated_facts ? artifact_origin(*ref) : std::string{}, true);
+          } else if (std::holds_alternative<ArtifactRef>(value.data) ||
+                     (allow_role_bindings && std::holds_alternative<Record>(value.data))) {
+            const auto [ref, location, binding] = artifact_operand(value, "sources", host != nullptr);
+            const bool emit_edge = binding ? emit_generated_facts : emit_facts;
+            auto path = host ? host_artifact(ref, decl, *host, "sources", location, emit_edge, binding)
+                             : native_artifact(ref, decl, "sources", location, emit_edge, binding);
+            const auto origin = emit_generated_facts ? artifact_origin(ref, binding) : std::string{};
+            add(std::move(path), location, origin, true);
           } else {
             fail(value.location, "expected a source path, glob or artifact reference");
           }
@@ -1527,7 +1531,8 @@ class Planner {
 
     append_include_facts(target, kind, traversal.host != nullptr, emit_facts, emit_generated_facts);
     if (kind == Primitive::host_executable) traversal.host->first_own_source = traversal.sources.size();
-    append_sources(decl, target.paths, traversal.sources, traversal.host, emit_facts, emit_generated_facts);
+    append_sources(decl, target.paths, traversal.sources, traversal.host, emit_facts, emit_generated_facts,
+                   kind == Primitive::library);
     if (assets) {
       std::set<std::string> filenames;
       for (const auto& value : as<List>(*assets, "a list of runtime assets")) {
