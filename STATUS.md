@@ -2423,9 +2423,10 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   the alias and its arguments, not the shared placeholder, so `gt<T> f(T)` and `lt<T> f(T)` are
   different templates. Substituting concrete arguments replays the alias, also for a function
   specialization's parameter types; deduction binds a bare parameter to the deferred alias itself,
-  which keeps partial ordering of a partial specialization like `P<T, gt<T>>` exact. Such a
-  signature has no symbol yet, and member alias templates and function signatures that write the
-  comparison directly still reject it (#209).
+  which keeps partial ordering of a partial specialization like `P<T, gt<T>>` exact. Two
+  different aliases with token-identical comparisons stay distinct, though [temp.over.link]/5 makes
+  them equivalent (#209). A signature through such an alias has no symbol yet. Member alias
+  templates and function signatures that write the comparison directly still reject it (#209).
 - `C<I> && D<I>` of concept-ids is a `VDepOp` conjunction, as for variable templates; `||` waits for
   the replay. A conjunction in a signature has no symbol yet (#209).
 - Tests: `tests/own/templates/concept-id-alias-argument.{accept,reject}.cpp`,
