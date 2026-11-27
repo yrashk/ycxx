@@ -44,6 +44,9 @@ struct dylib {
   std::uint32_t compatibility_version = 0x00010000;
 };
 
+// The install identity, versions and strong function exports of a leaf arm64 macOS dylib.
+std::expected<dylib, std::string> read_dylib(std::span<const std::uint8_t> bytes, std::string_view path);
+
 // /usr/lib/libSystem.B.dylib with the given export list (see `tbd_exports`).
 dylib libsystem(std::optional<std::set<std::string, std::less<>>> exports = std::nullopt) {
   return {"/usr/lib/libSystem.B.dylib", std::move(exports), 0x05470000, 0x00010000};
@@ -631,7 +634,14 @@ private:
       if (ordinal) wanted.emplace(name, std::pair{*ordinal, weak});
       else fail(std::format("undefined symbol {}, referenced from {}", name, objs_[first].name));
     }
+    constexpr std::size_t max_name_bytes = 1u << 23;  // dyld_chained_import::name_offset
+    std::size_t name_bytes = 1;  // the pool begins with a NUL
     for (const auto& [name, info] : wanted) {
+      if (name.size() >= max_name_bytes - name_bytes) {
+        fail("Mach-O chained import name pool exceeds the 23-bit limit of 8388608 bytes");
+        return;
+      }
+      name_bytes += name.size() + 1;
       import_index_.emplace(name, static_cast<std::uint32_t>(imports_.size()));
       imports_.push_back({name, info.first, info.second});
     }
@@ -1502,6 +1512,9 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
 }
 
 std::expected<std::vector<std::uint8_t>, std::vector<error>> link(std::span<const obj::object> objects, const options& opts) {
+  // dyld_chained_import's 8-bit library ordinal reserves 0xf1..0xff for special ordinals.
+  if (opts.dylibs.size() > 0xf0)
+    return std::unexpected(std::vector<error>{{"Mach-O link supports at most 240 dylib dependencies"}});
   for (const obj::object& o : objects) {
     if (o.arch != obj::target::aarch64_macos)
       return std::unexpected(std::vector<error>{{std::format("{}: expected an arm64 Mach-O object", o.name)}});
