@@ -368,7 +368,8 @@ private:
   Flow read_record_byte(const Value& base, std::vector<u64> path, const RecordStorage& record, u64 offset, u8& out);
   Value byte_pointer(const Bytes& b, u64 i);
   Flow find_byte(const Value& s, const Value& c, u64 n, Value& out);
-  Flow compare_bytes(const Value& a, const Value& b, u64 n, Value& out);
+  bool is_initialized_global_row_start(const Value& p);
+  Flow compare_bytes(const Value& a, const Value& b, u64 n, bool distinct_row_operands, Value& out);
 
   // ------------------------------------------------------------ execution
 

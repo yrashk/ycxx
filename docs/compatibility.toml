@@ -367,17 +367,18 @@ evidence = ["tests/daemon/compatibility.py"]
 
 [[divergence]]
 id = "constexpr-memcmp-equal-address-distinct-paths"
-status = "selectable"
-mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
-reference = "[expr.const], [basic.compound]"
-prior = "Apply the byte-access checks to an equal address reached through different subobject paths."
+status = "partial"
+mode_status = { spec = "supported", gcc = "partial", clang = "supported" }
+reference = "[expr.const], [basic.compound], #1484, #1489"
+prior = "Apply byte-access checks to equal addresses reached through distinct subobject paths. A next-row cast can make the paths identical and incorrectly skip the check."
 spec = "Reject the tested invalid reads. A count of zero needs no reads."
-gcc = "Fold a scalar array's address and the address of its first element to zero at any count. At the common boundary of two nested char rows, use the following row's length. Comparing a complete nested array to its first row or first byte uses the row's length."
+gcc = "Use the following row's length at the common boundary of two nested character rows. Comparing a complete nested array to its first row or first byte also uses the row's length. The scalar-array shortcut folds the array address and its first element. In a directly evaluated constant expression, check the range when a named array's written row decay and a loaded pointer denote the same first element of an initialized two-dimensional global character array, including a pointer rebound from the prior row's one-past position."
 clang = "Same as spec."
-gcc_observed = "For the equal addresses at the end of one char row and the beginning of the next, accepts comparison counts of one and two in either argument order and rejects counts three through five. An array of scalars and its first element compare equal even at larger counts. The complete nested array address and its first row or first byte compare equal only for one and two bytes in the probes. Equal addresses across adjacent record fields or reached by moving back from a row's start are rejected."
+gcc_observed = "At the bare boundary between two nested character rows, GCC accepts counts one and two in either argument order and rejects counts three through five. After a next-row cast, a rebound pointer compared with the written row decay accepts counts one and two and rejects three. The tested identical forms still fold. A scalar array address compared with direct array decay folds at larger counts. An explicit first-element address instead uses the bounds. A complete nested array compared with its first row or first byte folds only through the row length in the probes. Equal addresses across adjacent record fields or reached by moving back from a row's start are rejected."
 clang_observed = "Rejects the tested positive counts and accepts zero on Linux x86-64 and Darwin arm64."
-probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; static_assert(__builtin_memcmp(a[0] + 2, a[1], 2) == 0);'
-evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
+limits = "Equal byte offsets alone do not determine the GCC fold. The direct constant-expression check recognizes transparent pointer casts and literal zero offsets. Authored function bodies, forwarded pointers and other operand forms remain partial. The scalar-array shortcut currently also folds an explicit first-element address where GCC checks bounds."
+probe = 'constexpr char a[2][2] = {{1, 2}, {3, 4}}; constexpr const char* row = static_cast<const char*>(static_cast<const void*>(a[0] + 2)); static_assert(__builtin_memcmp(a[0] + 2, a[1], 2) == 0); static_assert(__builtin_memcmp(row, a[1], 2) == 0);'
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/builtin_memcmp/row-memcmp-2.cpp", "tests/daemon/builtin_memcmp/row-memcmp-3.cpp", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -pedantic-errors -fsyntax-only probes with counts zero through five"]
 
 [[divergence]]
 id = "constexpr-memory-array-object-pointer"

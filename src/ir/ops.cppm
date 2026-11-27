@@ -61,7 +61,7 @@ export enum class Init : std::uint8_t { erroneous, indeterminate, zero };
 //     n bytes at `a` and at `b`, as unsigned char, or 0; both must hold n bytes.
 //   - `nansl` (!state) -> (!state, long double): the reached operation diagnoses unavailable
 //     signaling NaN value support.
-export enum class BuiltinFn : std::uint8_t { memchr, memcmp, nansl };
+export enum class BuiltinFn : std::uint8_t { memchr, memcmp, nansl, memcmp_distinct_row_operands };
 
 // The semantic call forms represented by call_virtual. A qualified ordinary member call is
 // a direct call, including during constant evaluation.

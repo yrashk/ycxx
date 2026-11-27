@@ -634,6 +634,21 @@ static_assert(!__is_same(Identity<Original>, Selected<Owner>));
 ''')
     (world.scope / 'memchr.cpp').write_text('static_assert(__builtin_memchr("abc", \'a\', 10) != nullptr);\n')
     (world.scope / 'memcmp.cpp').write_text('static_assert(__builtin_memcmp("abc", "bbc", 10) < 0);\n')
+    memcmp_fixtures = Path(__file__).with_name('builtin_memcmp')
+    row_cases = {
+        'row-dereference.cpp': {'gcc'},
+        'row-direct-control.cpp': set(MODES),
+        'authored-row-stored.cpp': {'gcc'},
+        'direct-row-identical.cpp': {'gcc'},
+        'direct-row-stored.cpp': set(),
+        'rebound-direct-cast.cpp': {'gcc'},
+        'rebound-identical.cpp': {'gcc'},
+        'row-memcmp-1.cpp': {'gcc'},
+        'row-memcmp-2.cpp': {'gcc'},
+        'row-memcmp-3.cpp': set(),
+    }
+    for case in row_cases:
+        shutil.copyfile(memcmp_fixtures / case, world.scope / case)
     (world.scope / 'memcmp-identity.cpp').write_text('''\
 #if defined(NULL_ZERO)
 static_assert(__builtin_memcmp(nullptr, nullptr, 0) == 0);
@@ -1280,6 +1295,10 @@ int use() { return transform(7); }
             else:
                 diagnostic = invoke(target, *flags, '-fsyntax-only', clzll_zero, status=1)[2]
                 assert b'counting leading zeros with a zero operand' in diagnostic, diagnostic
+            for case, accepted in row_cases.items():
+                diagnostic = invoke(target, *flags, '-fsyntax-only', case, status=mode not in accepted)[2]
+                if mode == 'gcc' and case in ('direct-row-stored.cpp', 'row-memcmp-3.cpp'):
+                    assert b'pointer past the end of an object' in diagnostic, diagnostic
             invoke(target, *flags, '-DNULL_ZERO', '-fsyntax-only', 'memcmp-identity.cpp')
             for case in ('', 'NULL_RANGE', 'INT_RANGE', 'PAST_END', 'LOCAL'):
                 case_flags = ['-D' + case] if case else []

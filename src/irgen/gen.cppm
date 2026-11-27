@@ -2701,20 +2701,75 @@ class Gen {
       args.push_back(argument(x));
     }
     if (through) return call_pointer(*through, result_type(c.info), args, byval, into ? 1 : 0);
-    if (c.builtin != ast::LibraryBuiltin::none) return library_builtin(c, args);
+    if (c.builtin != ast::LibraryBuiltin::none) return library_builtin(a, c, args);
     return call_fn(c.function, result_type(c.info), args, ImplicitObject::none, false, byval, into ? 1 : 0);
   }
+  enum class MemcmpOperand { unknown, written_row, pointer_load };
+
+  // Retain the direct argument form before pointer conversions erase it. Only classify cases
+  // where a written subscript or a named pointer load remains visible through the conversions.
+  MemcmpOperand memcmp_operand(At a) {
+    using enum ast::ConversionKind;
+    for (;;) {
+      a = strip_parens(a);
+      if (is<ast::Binary>(a)) {
+        const auto binary = get<ast::Binary>(a);
+        if (binary.op != ast::BinaryOp::add && binary.op != ast::BinaryOp::sub) break;
+        At base = child(a, binary.lhs), index = child(a, binary.rhs);
+        if (binary.op == ast::BinaryOp::add && cls(info(index).type) == TypeClass::pointer)
+          std::swap(base, index);
+        index = strip_parens(index);
+        if (!is<ast::Literal>(index)) break;
+        const auto constant = get<ast::Literal>(index).value;
+        if (!in_.values.is<ast::VInt>(constant)) break;
+        const auto bits = in_.values.get<ast::VInt>(constant).bits;
+        if (bits.lo != 0 || bits.hi != 0) break;
+        a = base;
+        continue;
+      }
+      if (!is<ast::ImplicitConversion>(a)) break;
+      const auto conversion = get<ast::ImplicitConversion>(a);
+      const At operand = strip_parens(child(a, conversion.operand));
+      if (conversion.conversion == pointer || conversion.conversion == qualification) {
+        a = operand;
+        continue;
+      }
+      if (conversion.conversion == lvalue_to_rvalue && cls(info(operand).type) == TypeClass::pointer &&
+          (is<ast::DeclRef>(operand) || is<ast::LocalRef>(operand)))
+        return MemcmpOperand::pointer_load;
+      if (conversion.conversion != array_to_pointer || !is<ast::Subscript>(operand)) break;
+      const At base = strip_parens(child(operand, get<ast::Subscript>(operand).base));
+      if (!is<ast::ImplicitConversion>(base)) break;
+      const auto decay = get<ast::ImplicitConversion>(base);
+      if (decay.conversion != array_to_pointer) break;
+      const At array = strip_parens(child(base, decay.operand));
+      if (is<ast::DeclRef>(array) || is<ast::LocalRef>(array)) return MemcmpOperand::written_row;
+      break;
+    }
+    return MemcmpOperand::unknown;
+  }
+
   // A builtin's call of a C library function, its arguments evaluated: in constant evaluation the
   // interpreter reads the bytes (`ir::BuiltinFn`); at run time it is the library call, and `lower`
   // keeps only that edge.
-  ValueId library_builtin(const ast::Call& c, std::span<const ValueId> args) {
+  ValueId library_builtin(At a, const ast::Call& c, std::span<const ValueId> args) {
     const ast::QualType result = result_type(c.info);
     const ir::BlockId evaluated = new_block(), library = new_block(), join = new_block({result});
     const ir::SuccRef succs[] = {edge(evaluated), edge(library)};
     emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
     enter(evaluated);
     const ir::Ty value[] = {vty(result)};
-    const auto fn = c.builtin == ast::LibraryBuiltin::memchr ? ir::BuiltinFn::memchr : ir::BuiltinFn::memcmp;
+    auto fn = c.builtin == ast::LibraryBuiltin::memchr ? ir::BuiltinFn::memchr : ir::BuiltinFn::memcmp;
+    // GCC may fold differently in an authored constexpr function body. Keep the distinction at
+    // the synthetic entry used to evaluate a written constant expression.
+    if (fn_.thunk && fn == ir::BuiltinFn::memcmp) {
+      const auto written = ast_.children(c.args);
+      const auto left = memcmp_operand(child(a, written[0]));
+      const auto right = memcmp_operand(child(a, written[1]));
+      const bool distinct = (left == MemcmpOperand::written_row && right == MemcmpOperand::pointer_load) ||
+                            (right == MemcmpOperand::written_row && left == MemcmpOperand::pointer_load);
+      fn = distinct ? ir::BuiltinFn::memcmp_distinct_row_operands : ir::BuiltinFn::memcmp;
+    }
     const std::uint64_t imms[] = {word(fn)};
     const ValueId computed = b_.result(stateful(ir::Op::builtin, value, args, imms), 1);
     br(join, {computed});

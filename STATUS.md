@@ -3064,8 +3064,13 @@ objects of narrow character type, and elements of arrays of them, as `unsigned c
 interpreter's access, lifetime and initialization checks (`Machine::bytes_at`, `read_byte`); any
 other object is `Reason::byte_type`. In spec mode, `memchr` reads in order up to the match and
 `memcmp` checks that both objects hold all `n` bytes before reading up to the first difference.
-GCC mode reads the full range for both, and Clang mode checks bytes as read. The `memchr-*`
-fixtures mark the oracle disagreements, and the compatibility test exercises the selected modes.
+GCC mode reads the full range for both, and Clang mode checks bytes as read. A direct GCC-mode
+`memcmp` in a constant-expression entry checks the row bounds when a written array-row decay
+and a loaded pointer resolve to the first element of an initialized two-dimensional global array
+of narrow characters
+([#1484](https://github.com/yrashk/ycxx/issues/1484)). Identical-pointer folds retain their existing
+behavior. The `memchr-*` fixtures mark the oracle disagreements, and the compatibility test
+exercises the selected modes.
 
 ## Pack expansions in builtin arguments (#1099)
 
