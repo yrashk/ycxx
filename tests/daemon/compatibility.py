@@ -4449,6 +4449,30 @@ def skipped_quote_diagnostics(world):
                 assert (b'missing terminating' in warm[2]) == diagnosed, (mode, target, warning, source, warm)
 
 
+def flat_record_array_lifetime(world):
+    scope = world.scope
+    fixtures = Path(__file__).with_name('flat_record_array')
+    for source in sorted(fixtures.glob('*.reject.cpp')):
+        name = source.name
+        contents = source.read_bytes()
+        (scope / name).write_bytes(contents)
+        valid = 'valid-' + name
+        lines = contents.splitlines(keepends=True)
+        (call_line,) = (i for i, line in enumerate(lines, 1) if b'// CALL' in line)
+        (scope / valid).write_bytes(b''.join(line for line in lines if b'// CALL' not in line))
+        for mode in MODES:
+            for target in (LINUX, DARWIN):
+                args = [target, '-fcompat=' + mode, '-fsyntax-only']
+                for env in (world.cold, world.daemon):
+                    result = world.cxx([*args, valid], scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, valid, result)
+                cold, warm = (world.cxx([*args, name], scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] != 0, (mode, target, name, cold, warm)
+                assert f'{name}:{call_line}:'.encode() in warm[2], (mode, target, warm)
+                assert b'access to an object outside its lifetime' in warm[2], (mode, target, warm)
+
+
 def general_mode_tests(world, gxx):
     pid = preprocess_and_syntax(world)
     mangling(world)
@@ -4465,6 +4489,7 @@ def general_mode_tests(world, gxx):
     placeholder_template_prefixes(world, gxx)
     concrete_transform_signatures(world)
     immediate_template_escalation(world)
+    flat_record_array_lifetime(world)
     historical_syntax_modes(world, gxx)
     skipped_quote_diagnostics(world)
     compile_database(world)
