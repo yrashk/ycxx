@@ -4755,11 +4755,22 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   declarations in different scopes have their own. A copy or move constructor's other parameters
   may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
   forbid them (`defaults_allowed`, `defaults_trail`).
-- Omitted scalar defaults on free function templates replay with the selected bindings at the
-  written declaration. Explicit arguments bypass replay.
-- Not yet: other dependent defaults (#356); defaults added by an out-of-class
+- Omitted defaults of function templates replay with the selected bindings at the written
+  declaration, for any parameter type. Explicit arguments bypass replay.
+- **Class templates (#356):** member defaults, member templates' included, wait for the complete
+  class in the template's definition and in each specialization (the `member_template_name`
+  gate in `ItemAnalysis`). The definition checks them unbound (`bind_member_default` with the
+  enclosing heads). A specialization keeps each as a pending `DefaultArg` marker
+  (`Program::pend_member_defaults`). `AtItem::replay_member_default` analyses it for the call that
+  uses it ([temp.inst]/12), with the class's arguments bound and the definition's dependent calls
+  completed by argument-dependent lookup at the point of instantiation. Member function templates
+  replay in `replay_function_default` with the class's arguments at the enclosing levels. In a
+  template's definition, a call that selects a dependent default is itself dependent.
+- Not yet: lambdas in deferred member defaults (#338); a nested class's defaults naming later
+  members of the enclosing class (#1602); defaults added by an out-of-class
   or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
-- Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #356, #357 and #102).
+- Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #357 and #102), including
+  `class-template-*` and `function-template-*` for #356.
 
 ## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
 

@@ -598,7 +598,9 @@ written default member initializer are value-initialized.
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
-  Free function templates can instantiate omitted dependent scalar defaults after overload selection.
+  Default arguments that depend on template parameters are instantiated only when a call uses
+  them. This holds for function templates, member function templates, and members and constructors
+  of class templates, including virtual functions.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
   nonmember candidates at instantiation. Unary operators, prefix increment and compound
@@ -609,7 +611,7 @@ written default member initializer are value-initialized.
   and ordinary aggregates with arithmetic fields. A braced argument to a known function can
   initialize a class temporary for a reference parameter, including `const std::initializer_list<int>&`
   with libycxx. A pointer or reference target type can select a free or static member overload.
-  Ordinary non-template member defaults can refer to members declared later in the class.
+  Member defaults of classes and class templates can refer to members declared later in the class.
   Namespace function definitions can inherit C language linkage from a matching earlier
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
