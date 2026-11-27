@@ -672,13 +672,33 @@ pipeline::TuId register_project_unit(pipeline::Session& session, const std::stri
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
 
+HostInputOverlay host_library_overlay(const std::vector<std::string>& includes, const HostInputOverlay& staged) {
+  // An empty view still owns misses in the reserved host directory.
+  static const auto empty = std::make_shared<const pp::HostOverlay>(pp::HostOverlay::Files{});
+  if (!staged) return empty;
+  pp::HostOverlay::Files files;
+  for (const auto& [path, bytes] : staged->files())
+    if (std::ranges::contains(includes, native(fs::path(path).parent_path())))
+      files.emplace(path, bytes);
+  if (files.empty()) return empty;
+  if (files.size() == staged->files().size()) return staged;
+  return std::make_shared<const pp::HostOverlay>(std::move(files));
+}
+
 pipeline::RequestId register_host_executable(pipeline::Session& session, const std::string& cwd,
                                              const HostExecutablePlan& executable, const ast::Target* host_target,
                                              const HostInputOverlay& overlay) {
   pipeline::BuildKey build;
-  for (const auto& [index, source] : std::views::enumerate(executable.sources))
-    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk,
-        static_cast<std::size_t>(index) >= executable.first_own_source ? overlay : nullptr));
+  std::map<std::vector<std::string>, HostInputOverlay> library_overlays;
+  for (const auto& [index, source] : std::views::enumerate(executable.sources)) {
+    auto visible = overlay;
+    if (static_cast<std::size_t>(index) < executable.first_own_source) {
+      auto [view, inserted] = library_overlays.try_emplace(source.includes);
+      if (inserted) view->second = host_library_overlay(source.includes, overlay);
+      visible = view->second;
+    }
+    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk, std::move(visible)));
+  }
   build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name});
   return session.request(std::move(build));
 }

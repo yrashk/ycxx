@@ -285,8 +285,8 @@ compiles the executable for the host.
 Each admitted producer directory exposes the declared output names and
 their exact bytes through the executable's own include configuration.
 The immutable snapshot uses stable logical paths under `.ycxx/host/virtual`.
-Host sources, inherited library includes, and other real paths keep the
-ordinary disk view. The selected app has its own generated include view.
+Disk sources and real include directories use ordinary disk lookup.
+The selected app has its own generated include view.
 Equal visible files preserve the host compile, and equal linked executable
 bytes preserve consuming generator receipts. The coordinator shares staged
 producer outputs across ordinary builds, planning inputs, and witnesses.
@@ -300,6 +300,21 @@ order. Diagnostics refer to the logical source path and use the snapshot
 bytes. Planning and witness receipts observe real disk includes, including
 misses, and can persist an empty disk observation when the tool is generated.
 [Generated host source example](../../examples/project-build/host-generated-sources/README.md)
+
+### Generated headers in native host library dependencies (#1588)
+
+A disk-backed `cpp.library` can declare `generated_headers` when it is
+linked into a native host executable. The host tool stages the reachable
+ordinary producers once. Each library unit's immutable file view exposes
+the declared siblings in its own and inherited generated include
+directories. An out-of-scope host virtual path resolves as a miss. Edits
+to a sibling's generated files preserve the unit's compile identity,
+and real disk includes continue to drive watch.
+
+The same library declaration can serve the selected target, with the
+target's generated include paths and compile identity. Inspection shows
+both resolved include views and links them to the authored header binding.
+[Generated host library header example](../../examples/project-build/host-library-generated-headers/README.md)
 
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
