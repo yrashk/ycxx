@@ -2167,6 +2167,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   observe the union and member destructor effects independently.
 - An omitted aggregate member of union type is initialized from an empty braced list,
   so its first variant can run a constructor.
+- In GCC mode, a direct empty union allocation walks ordinary variant members and bases.
+  A proven public trivial defaulted constructor leaves the enclosing variant eligible,
+  while a user-provided default constructor still triggers the deleted-default diagnostic
+  without a default member initializer. Nested union declarations and initializers on
+  later variants remain in #203. [#1483](https://github.com/yrashk/ycxx/issues/1483)
 - A union constructor that selects a nontrivially destructible member can use the hosted
   Linux cleanup subset above or a nonthrowing exception specification. A potentially
   throwing delegating constructor with a nontrivial variant receives a diagnostic.
