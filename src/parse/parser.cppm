@@ -7413,14 +7413,37 @@ public:
   }
 
   void record_local_constant_initializer(u32 local, u32 declaration, Ex init, bool is_constexpr) {
+    if (!init.ok()) return;
     const bool reject_escape = is_constexpr && s_->compatibility() != ast::Compatibility::spec;
-    if ((!s_->needs_immediate_reference_check() && !reject_escape) || !init.ok()) return;
+    const bool check_immediate = s_->needs_immediate_reference_check() || reject_escape;
     QualType target = s_->local(local).type;
-    if (s_->types().is_reference(target) && s_->types().is_function(s_->types().referee(target))) {
-      auto v = sema::Evaluator(*s_, questions()).evaluate_reference_initializer(init);
-      if (v.value && (!reject_escape || s_->check_immediate_initializer(*v.value, init.begin)))
-        s_->permit_constant_initializer(declaration, target, *v.value);
-    } else if (auto value = s_->local_values()[local]) {
+    if (s_->types().is_reference(target)) {
+      QualType object = s_->types().referee(target);
+      const bool function = s_->types().is_function(object);
+      if (!(function ? check_immediate : is_constexpr)) return;
+      auto value = sema::Evaluator(*s_, questions()).evaluate_reference_initializer(init).value;
+      if (!value) return;
+      if (function) {
+        if (!reject_escape || s_->check_immediate_initializer(*value, init.begin))
+          s_->permit_constant_initializer(declaration, target, *value);
+        return;
+      }
+      // A constexpr reference to a complete static object can be named from an enclosing
+      // scope without odr-using the reference itself ([basic.def.odr]/5).
+      const auto& in = s_->ins();
+      if (!in.values.is<ast::VLvalue>(*value)) return;
+      const auto address = in.values.get<ast::VLvalue>(*value);
+      if (address.offset || in.seqs.size(address.path) || !in.values.is<ast::VEntity>(address.base)) return;
+      auto entity = in.values.get<ast::VEntity>(address.base).entity;
+      const auto& referent = s_->world().entities.rec(entity);
+      auto& types = s_->types();
+      if (referent.kind == sema::EntityKind::variable &&
+          sema::Types::unqualified(types.canonical(referent.type)) == sema::Types::unqualified(types.canonical(object)))
+        s_->set_local_constant_referent(local, entity);
+      return;
+    }
+    if (!check_immediate) return;
+    if (auto value = s_->local_values()[local]) {
       s_->permit_constant_initializer(declaration, target, *value);
     } else if (sema::Types::is_const(target) && !sema::Types::is_volatile(target) &&
                (s_->types().is_integral(target) || s_->types().is_enum(target))) {
@@ -7432,6 +7455,7 @@ public:
   // A local usable in constant expressions ([expr.const]): constexpr, or a const integral one
   // with a constant initializer; a constexpr one must have one ([dcl.constexpr]).
   void constant_local(u32 local, QualType t, bool is_constexpr, Ex& init, bool memberwise = false) {
+    if (s_->types().is_reference(t)) return;  // recorded from the initializer's address
     bool usable_kind = sema::Types::is_const(t) && !sema::Types::is_volatile(t) && s_->types().is_integral(t);
     if (!init.ok() || !(is_constexpr || usable_kind)) return;
     sema::Evaluator evaluator(*s_, questions());

@@ -18,6 +18,8 @@ export namespace ycxx::ast {
 
 // A literal; its value is a constant (§5.5).
 struct Literal {
+  // A folded enclosing-variable read is not an integer-literal token ([conv.ptr]).
+  static constexpr u8 from_enclosing_local = 0x80;
   ExprInfo info;
   ConstId value;
 };
@@ -34,6 +36,15 @@ struct DeclRef {
 struct LocalRef {
   ExprInfo info;
   u32 local;
+};
+
+// An enclosing automatic object inaccessible by identity. Sema must replace its permitted
+// non-odr-uses and diagnose any remaining occurrence before the body can be lowered.
+struct EnclosingLocal {
+  ExprInfo info;
+  NameId name;
+  ConstId value;  // none while a template initializer is value-dependent
+  bool local_class;
 };
 
 // Parentheses change meaning (`decltype((x))`, `(f)(x)`), so they are a kind (§3.4).
@@ -400,6 +411,7 @@ struct DefaultMemberInit {
 // analysing their tokens again with the template arguments bound (ast.md §6.4 as amended by #88),
 // so this kind needs no payload beyond its operands.
 struct Dependent {
+  static constexpr u8 enclosing_local_read = 0x80;
   ExprInfo info;
   [[=indeterminately_sequenced]] ChildList operands;
 };
@@ -674,7 +686,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
                           ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation,
-                          ImmediateVirtualCall, BitCast, AtomicCall>;
+                          ImmediateVirtualCall, BitCast, AtomicCall, EnclosingLocal>;
 
 static_assert(Nodes::size < max_node_kinds);
 

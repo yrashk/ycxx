@@ -224,6 +224,7 @@ private:
       e = s_->node(ast::Unary{info, ast::UnaryOp::address_of, Sema::at(e, e.begin)}, e.begin, e.end, info);
     } else if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
+    if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     ast::Interners& in = s_->ins();
     if (s_->types().is_member_pointer(e.type())) {
       // Read a direct member pointer constant from the expression. Its value retains the field
