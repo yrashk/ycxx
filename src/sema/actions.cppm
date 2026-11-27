@@ -1167,6 +1167,15 @@ public:
   // every earlier declaration of it ([temp.param]/12).
   std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind,
                                              std::optional<u32> at = std::nullopt, bool initializer = false) {
+    // A static data member template of the class or a base ([temp.mem]); any other member hides
+    // the namespace's templates ([basic.scope.class]).
+    if (kind == ast::DeclKind::variable && current_class != EntityId::none && !template_param(name)) {
+      bool local = false;
+      for (auto s = scopes_.rbegin(); s != scopes_.rend() && !local; ++s)
+        for (auto p = s->rbegin(); p != s->rend() && !local; ++p) local = p->first == name;
+      if (!local)
+        if (auto member = member_variable_template(current_class, name, /*unqualified=*/true)) return member;
+    }
     if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
@@ -1443,6 +1452,12 @@ public:
   // the specialization, of the template's type with the arguments substituted. Its entity is the
   // template and the canonical arguments (§B1.5), as a function template specialization's is.
   Ex variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    // A static data member template of the current instantiation is value-dependent: each
+    // specialization of the class names its own ([temp.dep.constexpr]/2.3, [temp.inst]/3).
+    if (const EntityId owner = w_->entities.rec(tmpl.entity).scope;
+        owner != EntityId::none && w_->entities.rec(owner).kind == EntityKind::class_ &&
+        types().is_dependent(types().class_type(owner)))
+      return dependent_variable_template_id(tmpl, args, begin, end);
     auto full = template_arguments(tmpl, args, begin);
     if (!full) return {NodeId::none, begin, end};
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
@@ -3283,6 +3298,65 @@ public:
     }
     return std::nullopt;
   }
+  static bool is_variable_template(const ast::DeclSema& d) {
+    return d.kind == ast::DeclKind::variable && (d.flags & decl_flag::template_);
+  }
+  // The static data member template `n` of class `c` or of a base ([temp.mem],
+  // [class.static.data]): from its record where it is complete, or in the class being defined or
+  // instantiated, among the members declared so far ([basic.scope.class]). None when the name
+  // finds anything else.
+  std::optional<ast::DeclSema> member_variable_template(EntityId c, NameId n, bool unqualified = false) {
+    if (class_rec(c)) {
+      auto found = find_member(c, n, unqualified);
+      if (!found || found->ambiguous || !found->member || found->member->is_function || !found->member->is_template)
+        return std::nullopt;
+      return q_->template_decl(found->member->entity);
+    }
+    if (c != current_class) return std::nullopt;
+    if (auto m = q_->earlier_member(n))  // any earlier member of the name hides the bases'
+      return is_variable_template(*m) ? std::optional(*m) : std::nullopt;
+    // [temp.dep.general]: a dependent base is not searched.
+    for (const BaseRec& b : q_->defining_base_records(c))
+      if (!b.dependent_in_pattern)
+        if (auto r = member_variable_template(b.cls, n, unqualified)) return r;
+    return std::nullopt;
+  }
+  // `object.v<args>` or `pointer->v<args>` naming a static data member template v of the
+  // object's class ([expr.ref], [temp.mem]): its declaration, none otherwise.
+  std::optional<ast::DeclSema> object_variable_template(const Ex& object, bool arrow, NameId name) {
+    if (!object.ok() || dependent(object)) return std::nullopt;
+    QualType t = object.type();
+    if (arrow) {
+      if (!types().is_pointer(t)) return std::nullopt;
+      t = types().pointee(t);
+    }
+    if (!types().is_class(t)) return std::nullopt;
+    return member_variable_template(types().class_of(t), name);
+  }
+  // The specialization `object.v<args>` names: the object expression is evaluated, then
+  // discarded, as for any static data member ([expr.ref]/2).
+  Ex object_variable_template_id(const Ex& object, bool arrow, const ast::DeclSema& tmpl,
+                                 std::span<const TemplateArg> args, u32 name_at, u32 end) {
+    const u32 begin = object.begin;
+    QualType t = arrow ? types().pointee(object.type()) : object.type();
+    const NameId name = w_->entities.rec(tmpl.entity).name;
+    check_member_template_access(types().class_of(t), tmpl.entity, name, name_at);
+    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); }))
+      return dependent_node({object}, begin, end);
+    Ex ref = variable_template_id(tmpl, args, name_at, end);
+    if (!ref.ok()) return {NodeId::none, begin, end};
+    ExprInfo info = ref.info;
+    Ex discarded = convert_node(object, ast::ConversionKind::to_void, builtin(Builtin::void_));
+    return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(ref, begin)}, begin, end, info);
+  }
+  // `C::v<args>` naming a static data member template of class C ([temp.mem]): its declaration.
+  // A dependent C other than the current instantiation is known only once it is substituted.
+  std::optional<ast::DeclSema> scope_variable_template(const Scope& s, NameId name) {
+    if (!s.type || !types().is_class(*s.type)) return std::nullopt;
+    const EntityId c = types().class_of(*s.type);
+    if (types().is_dependent(*s.type) && c != current_class) return std::nullopt;
+    return member_variable_template(c, name);
+  }
   // Unqualified lookup skips the current class's dependent direct bases even during replay.
   // A non-template member or an ambiguous lookup still hides outer declarations
   // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
@@ -3875,8 +3949,9 @@ public:
     const ClassRec* r = class_rec(c);
     if (!r && c != EntityId::none && c == current_class) {  // the class being defined: its members so far
       std::vector<ast::DeclSema> functions;
-      q_->earlier_member(name, /*type_only=*/false, &functions);
-      return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
+      const auto last = q_->earlier_member(name, /*type_only=*/false, &functions);
+      return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; }) ||
+             (last && is_variable_template(*last));
     }
     return r && std::ranges::any_of(std::array{std::span(r->members), std::span(r->introduced)} | std::views::join,
                                     [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
@@ -5290,12 +5365,17 @@ public:
         if (p->first == name) return false;
     if (template_param(name)) return false;
     // A member template of the class whose member is being analysed ([temp.mem]).
+    // Of a complete class, the member its lookup finds, perhaps in a base ([class.member.lookup]).
+    if (current_class != EntityId::none && class_rec(current_class))
+      if (auto member = find_member(current_class, name, /*unqualified=*/true);
+          member && !member->ambiguous && member->member && member->member->is_template)
+        return true;
     if (names_member(name)) {
       if (class_has_member_template(current_class, name)) return true;
       const auto bases = class_prefix_bases(current_class);
       if (!bases.empty() && !static_initializer_has_own_name(name) && !q_->earlier_member(name))
         if (auto member = find_base_member(bases, name, /*unqualified=*/true);
-            member && !member->ambiguous && member->member && member->member->is_function)
+            member && !member->ambiguous && member->member && (member->member->is_function || member->member->is_template))
           return class_has_member_template(member->owner, name);
       return false;
     }

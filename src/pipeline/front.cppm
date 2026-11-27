@@ -1787,7 +1787,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const ast::DeclSema& d = decls[i];
       if (!declarators[i] || d.kind != ast::DeclKind::variable || d.entity == EntityId::none ||
-          !(d.flags & sema::decl_flag::definition))
+          !(d.flags & sema::decl_flag::definition) || (d.flags & sema::decl_flag::template_))
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
       tu.variables.back().coalesced = weak_inline_variable(d);
@@ -1903,7 +1903,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       auto dr = ins.ast.get<ast::Declarator>(c.id);
       if (dr.decl >= ins.seqs.size(is.decls)) continue;
       ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
-      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
+      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition) ||
+          (d.flags & sema::decl_flag::template_))  // a static data member template's specializations are instantiated
+        continue;
       // The checked declaration can survive even when its replayed initializer has no native use.
       const bool lazy = program.is_lazy_member(d.entity);
       if (lazy && !program.used_member(d.entity)) continue;
