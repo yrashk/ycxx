@@ -1,0 +1,209 @@
+name: Arm64 Mach-O dylib-input evidence
+
+on:
+  push:
+    branches: [codex/ycxx-arm64-dylib-input-evidence-392]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  darwin-dylib:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      CANDIDATE: c78eca1de1de7144a0f1e2a77f97cfcb88e31ec9
+      CANDIDATE_TREE: 96e43396c81332f4cd113a8955cccec477313677
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify the exact merge candidate and select the macOS SDK
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-arm64-dylib-input-392"
+          mkdir -p "$output"
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git -C deps/libycxx rev-parse HEAD)" = "$(git rev-parse "$CANDIDATE:deps/libycxx")"
+          git diff --exit-code HEAD --
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          test -d "$sdk"
+          printf 'SDKROOT=%s\n' "$sdk" >> "$GITHUB_ENV"
+          {
+            git show --no-patch --format='%H %T %P' HEAD
+            git -C deps/libycxx rev-parse HEAD
+            printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            sw_vers
+            uname -a
+            xcodebuild -version
+            printf 'SDKROOT=%s\n' "$sdk"
+            xcrun --sdk macosx --show-sdk-version
+            /usr/bin/cc --version
+          } | tee "$output/provenance.txt"
+      - name: Provision the candidate CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the exact merge candidate
+        id: build
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-arm64-dylib-input-392"
+          unset YCXX_ROOT
+          cmake --version | tee -a "$output/provenance.txt"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$output/build.log"
+          shasum -a 256 build/bin/ycxx | tee -a "$output/provenance.txt"
+          git diff --exit-code HEAD --
+      - name: Run dylib input, shared output, and Mach-O regressions
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-arm64-dylib-input-392"
+          export YCXX_DARWIN_DYLIB_INPUT_RECEIPTS="$output/darwin-dylib-input-receipts"
+          unset YCXX_ROOT
+          suite='^unit\.(darwin_dylib_input|darwin_shared_output|link|macho_obj|darwin_runtime)$'
+          ctest --test-dir build --show-only=json-v1 -R "$suite" > "$output/roster.json"
+          python3 -B - "$output/roster.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          expected = {'unit.' + name for name in (
+              'darwin_dylib_input', 'darwin_shared_output', 'link', 'macho_obj', 'darwin_runtime',
+          )}
+          actual = [row['name'] for row in json.loads(Path(sys.argv[1]).read_text())['tests']]
+          assert len(actual) == len(expected) and set(actual) == expected, actual
+          PY
+          set +e
+          ctest --test-dir build --output-on-failure --no-tests=error -j 1 -R "$suite" 2>&1 | tee "$output/ctest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$output/ctest-exit.txt"
+          if test -d build/Testing; then cp -R build/Testing "$output/Testing"; fi
+          test "$status" = 0
+      - name: Verify and summarize raw native evidence
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-arm64-dylib-input-392"
+          cd "$output/darwin-dylib-input-receipts"
+          for receipt in commands.jsonl provider-native.dylib provider-platform.dylib \
+                         provider-native-replaced.dylib provider-identities.json \
+                         client-cold client-cold.json client-daemon client-daemon.json \
+                         client-after-replacement client-after-replacement.json client-runtime client-runtime.json; do
+            test -s "$receipt"
+          done
+          shasum -a 256 provider-native.dylib provider-platform.dylib provider-native-replaced.dylib \
+            client-cold client-daemon client-after-replacement client-runtime | tee "$output/receipt-digests.txt"
+          python3 -B - <<'PY' | tee "$output/native-evidence.log"
+          import json
+          import shlex
+          from pathlib import Path
+
+          journal = [json.loads(line) for line in Path('commands.jsonl').read_text().splitlines()]
+          native = [row for row in journal if row['argv'][1:3] == ['cxx', '--no-daemon']
+                    and '-shared' in row['argv'] and 'staged/native-input.dylib' in row['argv']
+                    and row['status'] == 0]
+          host = [row for row in journal if row['argv'][0] == '/usr/bin/cc' and '-dynamiclib' in row['argv']
+                  and 'staged/platform-input.dylib' in row['argv'] and row['status'] == 0]
+          assert len(native) == len(host) == 1, (native, host)
+          for name, row in (('ycxx native provider', native[0]), ('system cc provider', host[0])):
+              print(name, shlex.join(row['argv']), f"exit={row['status']}")
+          print('Provider identities', Path('provider-identities.json').read_text().strip())
+          for name in ('client-cold', 'client-daemon', 'client-after-replacement', 'client-runtime'):
+              print(name, Path(name + '.json').read_text().strip())
+
+          signatures = [row for row in journal if Path(row['argv'][0]).name == 'codesign'
+                        and '--verify' in row['argv'] and '--strict' in row['argv']]
+          signed_paths = {Path(row['argv'][-1]).name for row in signatures if row['status'] == 0}
+          assert {'libfixture-native.dylib', 'libfixture-platform.dylib', 'client', 'client-runtime'} <= signed_paths
+          for row in signatures:
+              print('strict signature', shlex.join(row['argv']), f"exit={row['status']}")
+
+          runs = [row for row in journal if row['argv'][0] in ('./client', './client-runtime')]
+          assert {row['status'] for row in runs} >= {41, 42}, runs
+          for row in runs:
+              print('native runtime', shlex.join(row['argv']), f"exit={row['status']}")
+          for row in journal:
+              args = row['argv']
+              if Path(args[0]).name == 'otool' and '-L' in args:
+                  print('platform load commands', Path(row['stdout']).read_text().strip())
+              if '--trace-engine=json' in args:
+                  trace = [json.loads(line) for line in Path(row['stderr']).read_text().splitlines()]
+                  events = [{'kind': entry['kind'], 'outcome': entry['outcome']}
+                            for entry in trace if entry.get('kind') in ('Build', 'Link')]
+                  print('resident client trace', row['stderr'], json.dumps(events, separators=(',', ':')))
+          PY
+      - name: Download the exact native #393 provider archive
+        id: archived-dylib
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ycxx-393-arm64-darwin-shared-candidate
+          repository: yrashk/ycxx
+          run-id: '46051593182'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/ycxx-393-input-archive
+      - name: Link and execute against the unchanged archived #393 dylib
+        if: ${{ !cancelled() && steps.archived-dylib.outcome == 'success' }}
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-arm64-dylib-input-392"
+          witness="$output/archived-393-round-trip"
+          driver="$GITHUB_WORKSPACE/build/bin/ycxx"
+          source="$RUNNER_TEMP/ycxx-393-input-archive/darwin-shared-receipts/provider-cold.dylib"
+          expected=b46ff5d2a1f43865ef504aca368ecb38190f762b8fd049930666e6b8f3032df9
+          install_name='@loader_path/installed/libycxx-leaf.dylib'
+          mkdir -p "$witness/staged" "$witness/installed"
+          cd "$witness"
+          {
+            printf 'repository yrashk/ycxx\nproducer run 46051593182\nproducer artifact ID 15225583579\n'
+            printf 'producer artifact ycxx-393-arm64-darwin-shared-candidate\n'
+            printf 'producer path darwin-shared-receipts/provider-cold.dylib\n'
+            printf 'candidate %s\ncandidate tree %s\nSDKROOT %s\n' "$CANDIDATE" "$CANDIDATE_TREE" "$SDKROOT"
+            shasum -a 256 "$driver"
+          } | tee provenance.txt
+          cat > client.cc <<'CPP'
+          extern "C" int score(int);
+          int main() { return score(35); }
+          CPP
+          run() {
+            local name="$1" want="$2" status=0
+            shift 2
+            { printf '$'; printf ' %q' "$@"; printf '\n'; } | tee -a commands.log
+            "$@" > "$name.stdout" 2> "$name.stderr" || status=$?
+            printf '%s\n' "$status" > "$name.exit"
+            printf '%s expected=%s actual=%s\n' "$name" "$want" "$status" | tee -a commands.log
+            if [[ "$status" != "$want" ]]; then
+              cat "$name.stdout" "$name.stderr" >&2
+              return 1
+            fi
+          }
+          cp "$source" staged/provider-cold.dylib
+          printf '%s  staged/provider-cold.dylib\n' "$expected" > staged.sha256
+          run staged-checksum 0 shasum -a 256 -c staged.sha256
+          run staged-signature 0 /usr/bin/codesign --verify --strict --verbose=4 staged/provider-cold.dylib
+          run provider-load-commands 0 /usr/bin/otool -L staged/provider-cold.dylib
+          grep -F -- "$install_name" provider-load-commands.stdout
+          run candidate-link 0 "$driver" cxx --no-daemon --trace-engine=json --target=arm64-apple-darwin \
+            -nostdlib++ client.cc staged/provider-cold.dylib -o client
+          run client-signature 0 /usr/bin/codesign --verify --strict --verbose=4 client
+          run client-load-commands 0 /usr/bin/otool -L client
+          grep -F -- "$install_name" client-load-commands.stdout
+          mv staged/provider-cold.dylib installed/libycxx-leaf.dylib
+          printf '%s  installed/libycxx-leaf.dylib\n' "$expected" > installed.sha256
+          run installed-checksum 0 shasum -a 256 -c installed.sha256
+          run installed-signature 0 /usr/bin/codesign --verify --strict --verbose=4 installed/libycxx-leaf.dylib
+          shasum -a 256 installed/libycxx-leaf.dylib client | tee actual-digests.txt
+          cat client-load-commands.stdout
+          run native-client 42 /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C ./client
+      - name: Upload native binaries, receipts, and candidate gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-392-arm64-dylib-input-evidence
+          path: ${{ runner.temp }}/ycxx-arm64-dylib-input-392/
+          if-no-files-found: error
+          retention-days: 14
