@@ -826,6 +826,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Naturally aligned 32-bit GNU atomics on Linux x86-64 use stateful L1 and L2 nodes
+  for loads, stores, exchange, compare-exchange, additive and bitwise updates, and
+  thread fences. The target defines the six GNU order macros and supports the null
+  alignment lock-free query for sizes 3 and 4. See [Extensions](docs/EXTENSIONS.md#gnu-atomics-on-linux-x86-64).
+  [#1293](https://github.com/yrashk/ycxx/issues/1293) · [#328](https://github.com/yrashk/ycxx/issues/328)
 - Fixed-prototype definitions and direct calls also transport `float` and `double` constants,
   loads, stores and results. INTEGER registers and XMM registers are assigned independently.
   `unit.linux_scalar_sse` exchanges objects with a native peer, checks exact bits, mixed spills

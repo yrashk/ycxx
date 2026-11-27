@@ -14,6 +14,7 @@ export module ycxx.sema:actions;
 import std;
 import ycxx.ast;
 import ycxx.engine;
+import ycxx.ir;
 import ycxx.interp;
 import ycxx.lex;
 import :types;
@@ -9271,16 +9272,22 @@ public:
 
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular
   // a probe cannot instantiate a speculative callee or run a write in a constexpr frame.
-  bool constant_probe_safe(const ast::Red& expression) {
+  bool constant_probe_safe(const ast::Red& expression, bool runtime_invariant) {
     if (expression.is<ast::Literal>() || expression.is<ast::ConstantProbe>()) return true;
     if (expression.is<ast::ValueInit>()) return types().is_scalar(expression.get<ast::ValueInit>().info.type);
     const auto known_scalar = [&](QualType t) {
       t = types().canonical(t);
       return Types::is_const(t) && !Types::is_volatile(t) &&
-          (types().is_arithmetic(t) || types().is_enum(t) || types().is(t, Builtin::nullptr_t));
+          (types().is_arithmetic(t) || types().is_enum(t) || types().is(t, Builtin::nullptr_t) ||
+           (runtime_invariant && types().is_pointer(t)));
     };
     if (expression.is<ast::LocalRef>()) {
       const auto ref = expression.get<ast::LocalRef>();
+      // Ordinary const locals can also have a speculative value recorded by the evaluator.
+      // Pointer values in this table are from constant initialization, and nullptr_t has
+      // only one value. Other local reads need not use their speculative value at runtime.
+      if (runtime_invariant && !types().is(ref.info.type, Builtin::nullptr_t) &&
+          !(types().is_pointer(ref.info.type) && !types().is_reference(locals_[ref.local].type))) return false;
       return known_scalar(ref.info.type) && local_values_[ref.local].has_value();
     }
     if (expression.is<ast::DeclRef>()) {
@@ -9288,7 +9295,8 @@ public:
       if (ref.entity == EntityId::none || ref.reference || !known_scalar(ref.info.type)) return false;
       const auto& entity = w_->entities.rec(ref.entity);
       return entity.templ == EntityId::none &&
-          (entity.scope == EntityId::none || w_->entities.rec(entity.scope).kind == EntityKind::namespace_);
+          (entity.scope == EntityId::none || w_->entities.rec(entity.scope).kind == EntityKind::namespace_) &&
+          (!runtime_invariant || q_->constant_value(ref.entity).has_value());
     }
     if (expression.is<ast::Unary>()) {
       using enum ast::UnaryOp;
@@ -9301,6 +9309,9 @@ public:
       switch (expression.get<ast::ImplicitConversion>().conversion) {
       case lvalue_to_rvalue: case integral: case floating: case floating_integral:
       case boolean: case null_pointer: case qualification: case array_to_pointer: break;
+      case pointer:
+        if (!runtime_invariant) return false;
+        break;
       default: return false;
       }
     } else if (!expression.is<ast::Paren>() && !expression.is<ast::Binary>() &&
@@ -9308,11 +9319,13 @@ public:
       return false;
     }
     bool safe = true;
-    expression.for_each_child([&](const ast::Red& child) { safe = safe && constant_probe_safe(child); });
+    expression.for_each_child([&](const ast::Red& child) {
+      safe = safe && constant_probe_safe(child, runtime_invariant);
+    });
     return safe;
   }
 
-  std::optional<ConstId> constant_probe_value(Ex operand) {
+  std::optional<ConstId> constant_probe_value(Ex operand, bool runtime_invariant = false) {
     while (const auto paren = as<ast::Paren>(operand))
       operand = {paren->operand.id, operand.begin + paren->operand.at, operand.end, paren->info};
     if (const auto lit = as<ast::Literal>(operand)) return lit->value;
@@ -9323,21 +9336,23 @@ public:
     };
     if (const auto logical = as<ast::OrderedBinary>(operand);
         logical && (logical->op == ast::OrderedOp::logical_and || logical->op == ast::OrderedOp::logical_or)) {
-      const auto lhs = constant_probe_value(child(logical->lhs, boolean));
+      const auto lhs = constant_probe_value(child(logical->lhs, boolean), runtime_invariant);
       if (lhs && ins().values.is<ast::VInt>(*lhs)) {
         const bool truth = ins().values.get<ast::VInt>(*lhs).bits.lo != 0;
         return truth == (logical->op == ast::OrderedOp::logical_or)
-            ? lhs : constant_probe_value(child(logical->rhs, boolean));
+            ? lhs : constant_probe_value(child(logical->rhs, boolean), runtime_invariant);
       }
       return std::nullopt;
     }
     if (const auto cond = as<ast::Conditional>(operand)) {
-      const auto choice = constant_probe_value(child(cond->condition, boolean));
+      const auto choice = constant_probe_value(child(cond->condition, boolean), runtime_invariant);
       if (!choice || !ins().values.is<ast::VInt>(*choice)) return std::nullopt;
-      return constant_probe_value(child(ins().values.get<ast::VInt>(*choice).bits.lo ? cond->then_ : cond->else_, cond->info));
+      return constant_probe_value(child(ins().values.get<ast::VInt>(*choice).bits.lo ? cond->then_ : cond->else_, cond->info),
+                                  runtime_invariant);
     }
     const auto root = b_->commit(ast::Child{operand.id, 0});
-    if (!constant_of || !constant_probe_safe(ast::Red(ins().ast, root.id, operand.begin))) return std::nullopt;
+    if (!constant_of || !constant_probe_safe(ast::Red(ins().ast, root.id, operand.begin), runtime_invariant))
+      return std::nullopt;
     const auto diagnostics = diag_count();
     auto value = constant_of(operand);
     if (diag_count() != diagnostics) {
@@ -9456,9 +9471,166 @@ public:
     return literal(type, source_location_address(descriptor, site), ValueCategory::prvalue, begin, end);
   }
 
+  // GNU requires a constant size and uses a null alignment argument for typical alignment.
+  Ex builtin_atomic_lock_free(std::span<const Ex> args, u32 begin, u32 end) {
+    const auto fail = [&] {
+      diag(begin, Diag::builtin_atomic_lock_free);
+      return Ex{NodeId::none, begin, end};
+    };
+    const Ex width = convert(args[0], builtin(w_->target.size_type), args[0].begin);
+    const QualType cv_void = types().add_cv(builtin(Builtin::void_), Cv(3));
+    const Ex address = convert(args[1], types().pointer(cv_void), args[1].begin);
+    if (!width.ok() || !address.ok()) return {NodeId::none, begin, end};
+    const auto value = constant_probe_value(width, /*runtime_invariant=*/true);
+    const auto alignment = constant_probe_value(address, /*runtime_invariant=*/true);
+    if (!value || !ins().values.is<ast::VInt>(*value) ||
+        !alignment || !ins().values.is<ast::VNullptr>(*alignment)) return fail();
+    const auto size = ast::int_bits(ins(), *value);
+    if (size.hi || (size.lo != 3 && size.lo != 4)) return fail();
+    // A three-byte object has no native atomic width on the target. Other widths
+    // still need native support or a measured target guarantee.
+    return bool_literal(size.lo == 4, begin, end);
+  }
+
+  // A nonconstant order is carried as an operand for its effects and uses seq_cst at runtime.
+  bool builtin_atomic_order(Ex& argument, std::optional<ir::MemOrder>& order) {
+    argument = convert(argument, builtin(Builtin::int_), argument.begin);
+    if (!argument.ok()) return false;
+    // Evaluating a call in the constexpr interpreter could select its if-consteval
+    // arm even though the order argument executes at runtime.
+    const auto value = constant_probe_value(argument, /*runtime_invariant=*/true);
+    if (!value) return true;
+    if (ins().values.is<ast::VInt>(*value)) {
+      const auto bits = ast::int_bits(ins(), *value);
+      if (bits.hi == 0 && bits.lo <= std::to_underlying(ir::MemOrder::seq_cst)) {
+        order = ir::MemOrder(bits.lo);
+        return true;
+      }
+    }
+    diag(argument.begin, Diag::builtin_atomic_order);
+    return false;
+  }
+
+  Ex builtin_atomic_call(lex::AtomicBuiltin kind, std::vector<Ex>& args, u32 begin, u32 end) {
+    using enum lex::AtomicBuiltin;
+    using ir::MemOrder;
+    using ir::Rmw;
+    const Ex invalid{NodeId::none, begin, end};
+    if (!w_->target.supports(ast::NativeOperation::gnu_atomic32)) {
+      diag(begin, Diag::builtin_atomic_target);
+      return invalid;
+    }
+    const bool cas = kind == compare_exchange;
+    const std::size_t arity = cas ? 6 : kind == fence ? 1 : kind == load || kind == always_lock_free ? 2 : 3;
+    if (!builtin_arity(arity, args.size(), begin) ||
+        std::ranges::any_of(args, [](const Ex& arg) { return !arg.ok(); })) return invalid;
+
+    const bool dependent_args = any_dependent(args);
+    if (kind == always_lock_free)
+      return dependent_args ? dependent_node(args, begin, end, builtin(Builtin::bool_))
+                            : builtin_atomic_lock_free(args, begin, end);
+
+    std::optional<QualType> result;
+    if (cas) result = builtin(Builtin::bool_);
+    else if (kind == store || kind == fence) result = builtin(Builtin::void_);
+    if (kind != fence && !dependent(args[0])) {
+      args[0] = rvalue(args[0]);  // includes the ordinary array-to-pointer conversion
+      if (!args[0].ok()) return invalid;
+      if (!types().is_pointer(args[0].type())) {
+        diag(args[0].begin, Diag::builtin_atomic_pointer);
+        return invalid;
+      }
+    }
+    if (dependent_args) {
+      if (!result && types().is_pointer(args[0].type()))
+        result = Types::unqualified(types().pointee(args[0].type()));
+      return dependent_node(args, begin, end, result);
+    }
+
+    ast::AtomicOp operation = ast::AtomicOp::rmw;
+    Rmw update = Rmw::xchg;
+    bool returns_new = false;
+    switch (kind) {
+      case load: operation = ast::AtomicOp::load; break;
+      case store: operation = ast::AtomicOp::store; break;
+      case compare_exchange: operation = ast::AtomicOp::compare_exchange; break;
+      case fence: operation = ast::AtomicOp::fence; break;
+      case exchange: break;
+      case add_fetch: returns_new = true; [[fallthrough]];
+      case fetch_add: update = Rmw::add; break;
+      case sub_fetch: returns_new = true; [[fallthrough]];
+      case fetch_sub: update = Rmw::sub; break;
+      case and_fetch: returns_new = true; [[fallthrough]];
+      case fetch_and: update = Rmw::and_; break;
+      case or_fetch: returns_new = true; [[fallthrough]];
+      case fetch_or: update = Rmw::or_; break;
+      case xor_fetch: returns_new = true; [[fallthrough]];
+      case fetch_xor: update = Rmw::xor_; break;
+      case always_lock_free: std::unreachable();
+    }
+
+    if (kind != fence) {
+      const QualType pointee = types().canonical(types().pointee(args[0].type()));
+      const QualType element = Types::unqualified(pointee);
+      if (!types().is(element, Builtin::int_) && !types().is(element, Builtin::unsigned_int)) {
+        diag(args[0].begin, Diag::builtin_atomic_pointer);
+        return invalid;
+      }
+      if (kind != load && Types::is_const(pointee)) {
+        diag(args[0].begin, Diag::builtin_atomic_const);
+        return invalid;
+      }
+      if (!result) result = element;
+      if (cas) {
+        args[1] = rvalue(args[1]);
+        if (!args[1].ok()) return invalid;
+        if (!types().is_pointer(args[1].type()) ||
+            !same_unqualified(types().pointee(args[1].type()), element) ||
+            Types::cv(types().canonical(types().pointee(args[1].type()))) != Cv::none) {
+          diag(args[1].begin, Diag::builtin_atomic_expected, element);
+          return invalid;
+        }
+        args[3] = convert(args[3], builtin(Builtin::bool_), args[3].begin);
+        if (!args[3].ok()) return invalid;
+      }
+      if (kind != load) {
+        Ex& value = args[cas ? 2 : 1];
+        value = convert(value, element, value.begin);
+        if (!value.ok()) return invalid;
+      }
+    }
+
+    Ex& order_arg = args[cas ? 4 : arity - 1];
+    std::optional<MemOrder> order;
+    if (!builtin_atomic_order(order_arg, order)) return invalid;
+    if (order && ((kind == load && !ir::atomic_load_order(*order)) ||
+                  (kind == store && !ir::atomic_store_order(*order)))) {
+      diag(order_arg.begin, Diag::builtin_atomic_order);
+      return invalid;
+    }
+    std::optional<MemOrder> failure;
+    if (cas) {
+      if (!builtin_atomic_order(args[5], failure)) return invalid;
+      if (failure && (!ir::atomic_load_order(*failure) ||
+                      (order && !ir::atomic_failure_order(*order, *failure)))) {
+        diag(args[5].begin, Diag::builtin_atomic_failure_order);
+        return invalid;
+      }
+      if (!failure || !order) order = failure = MemOrder::seq_cst;
+    }
+    std::vector<Child> children;
+    children.reserve(arity);
+    for (const Ex& arg : args) children.push_back(at(arg, begin));
+    const ExprInfo info{*result, ValueCategory::prvalue, 0};
+    return node(ast::AtomicCall{info, operation, std::to_underlying(order.value_or(MemOrder::seq_cst)),
+                               std::to_underlying(failure.value_or(MemOrder::relaxed)), std::to_underlying(update),
+                               returns_new, b_->list(children)}, begin, end, info);
+  }
+
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end, u32 paren_at) {
     using enum lex::BuiltinFunction;
+    if (b.function == atomic) return builtin_atomic_call(b.atomic_op, args, begin, end);
     if (b.function == source_location) {
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_source_location(begin, end, q_->compatibility() == ast::Compatibility::gcc ? paren_at : begin);
@@ -9556,6 +9728,7 @@ public:
     }
     switch (b.function) {
       case addressof:
+      case atomic:
       case source_line:
       case source_location:
       case trap:
