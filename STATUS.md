@@ -3767,6 +3767,22 @@ including those for early planning and witnesses. Read-only plans show each
 authored archive reference and its host path.
 [Native host archive example](examples/project-build/host-static-archive-inputs/README.md)
 
+A host-linked `cpp.library` can export ordinary generated archives through
+`public_link_inputs` (#1622). The host link orders direct archives first
+and emits a shared library's operands once in a diamond, retaining explicit
+repeats. Host and selected links use the same bytes for a shared reference
+and report their own effective paths. Archive-only edits reuse the host's
+translation unit inputs.
+[Inherited host archive example](examples/project-build/host-library-static-archive-inputs/README.md)
+
+A `cpp.library.public_link_inputs` position can choose explicit `host`
+and `target` artifact references (#1629). The host tool and selected app
+resolve their own role, including when both links use the host triple.
+They can inherit one library while using distinct archive formats, or
+select two named outputs of one ordinary producer. Plans report each
+active role, resolved path, and authored site.
+[Archive roles example](examples/project-build/archive-consumer-bindings/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
