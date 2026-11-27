@@ -950,6 +950,14 @@ static_assert(__builtin_memcmp(past, past, 5) == 0);
     ctz_cases = ('zero-literal.cpp', 'zero-parameter.cpp')
     for case in ctz_cases:
         shutil.copyfile(ctz_fixtures / case, world.scope / case)
+    clzll_fixtures = Path(__file__).with_name('builtin_clzll')
+    clzll_zero = 'oracle-clzll-zero-constexpr.cpp'
+    shutil.copyfile(clzll_fixtures / clzll_zero, world.scope / clzll_zero)
+    for arity in ('few', 'many'):
+        case = f'clzll-too-{arity}.cpp'
+        shutil.copyfile(clzll_fixtures / case, world.scope / case)
+        diagnostic = invoke('-fsyntax-only', case, status=1)[2]
+        assert f'too {arity} arguments in call'.encode() in diagnostic, diagnostic
     (world.scope / 'void-cast.cpp').write_text('''\
 #ifdef SINGLETON
 constexpr int value = 37;
@@ -1267,6 +1275,11 @@ int use() { return transform(7); }
                 diagnostic = invoke(target, *flags, '-fsyntax-only', case, status=mode != 'gcc')[2]
                 if mode != 'gcc':
                     assert b'counting trailing zeros with a zero operand' in diagnostic, diagnostic
+            if mode == 'gcc':
+                invoke(target, *flags, '-DEXPECT_CLZLL_ZERO=64', '-fsyntax-only', clzll_zero)
+            else:
+                diagnostic = invoke(target, *flags, '-fsyntax-only', clzll_zero, status=1)[2]
+                assert b'counting leading zeros with a zero operand' in diagnostic, diagnostic
             invoke(target, *flags, '-DNULL_ZERO', '-fsyntax-only', 'memcmp-identity.cpp')
             for case in ('', 'NULL_RANGE', 'INT_RANGE', 'PAST_END', 'LOCAL'):
                 case_flags = ['-D' + case] if case else []
@@ -2028,6 +2041,16 @@ extern "C" Count observed() { return seen; }
 def empty_union(world, gxx):
     scope = world.scope
     (scope / 'empty-union.cpp').write_text(EMPTY_UNION)
+    nested_cases = {
+        'union-written-holder-dtor-base-defaulted.accept.cpp': None,
+        'union-written-holder-dtor-base-user-provided.cpp': 16,
+        'union-written-holder-dtor-member-defaulted.accept.cpp': None,
+        'union-written-holder-dtor-member-user-provided.cpp': 17,
+        'union-written-holder-dtor-explicit-first.accept.cpp': None,
+    }
+    fixtures = Path(__file__).with_name('empty_union')
+    for case in nested_cases:
+        shutil.copyfile(fixtures / case, scope / case)
     for mode in MODES:
         flags = ['-fcompat=' + mode] + (['-DGCC_MODE'] if mode == 'gcc' else [])
         for target in (LINUX, DARWIN):
@@ -2047,6 +2070,16 @@ def empty_union(world, gxx):
                 assert cold == warm and warm[0] == rejected, (mode, target, kind, cold, warm)
                 if rejected:
                     assert warm[2].count(b'deleted') == 2, (mode, target, warm)
+            for case, reject_line in nested_cases.items():
+                rejected = mode == 'gcc' and reject_line is not None
+                args = [target, *flags, '-c', case, '-o', 'nested-empty-union.o']
+                cold = world.cxx(args, scope, world.cold, timeout=40)
+                warm = world.cxx(args, scope, world.daemon, timeout=40)
+                assert cold == warm and warm[0] == rejected, (mode, target, case, cold, warm)
+                if rejected:
+                    location = f'{case}:{reject_line}:'.encode()
+                    assert warm[2].count(b'error:') == 1 and location in warm[2], warm
+                    assert b'calls a deleted constructor' in warm[2], warm
         native_cases = [[], ['-DALLOCATE_CONTROL']]
         if mode != 'gcc':
             native_cases.append(['-DALLOCATE'])
@@ -4429,6 +4462,30 @@ def skipped_quote_diagnostics(world):
                 assert (b'missing terminating' in warm[2]) == diagnosed, (mode, target, warning, source, warm)
 
 
+def flat_record_array_lifetime(world):
+    scope = world.scope
+    fixtures = Path(__file__).with_name('flat_record_array')
+    for source in sorted(fixtures.glob('*.cpp')):
+        name = source.name
+        contents = source.read_bytes()
+        (scope / name).write_bytes(contents)
+        valid = 'valid-' + name
+        lines = contents.splitlines(keepends=True)
+        (call_line,) = (i for i, line in enumerate(lines, 1) if b'// CALL' in line)
+        (scope / valid).write_bytes(b''.join(line for line in lines if b'// CALL' not in line))
+        for mode in MODES:
+            for target in (LINUX, DARWIN):
+                args = [target, '-fcompat=' + mode, '-fsyntax-only']
+                for env in (world.cold, world.daemon):
+                    result = world.cxx([*args, valid], scope, env, timeout=40)
+                    assert result == (0, b'', b''), (mode, target, valid, result)
+                cold, warm = (world.cxx([*args, name], scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] != 0, (mode, target, name, cold, warm)
+                assert f'{name}:{call_line}:'.encode() in warm[2], (mode, target, warm)
+                assert b'access to an object outside its lifetime' in warm[2], (mode, target, warm)
+
+
 def general_mode_tests(world, gxx):
     pid = preprocess_and_syntax(world)
     mangling(world)
@@ -4445,6 +4502,7 @@ def general_mode_tests(world, gxx):
     placeholder_template_prefixes(world, gxx)
     concrete_transform_signatures(world)
     immediate_template_escalation(world)
+    flat_record_array_lifetime(world)
     historical_syntax_modes(world, gxx)
     skipped_quote_diagnostics(world)
     compile_database(world)

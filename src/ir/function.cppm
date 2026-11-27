@@ -228,6 +228,19 @@ std::optional<std::string> check_imms(const Function& f, NodeId n) {
     }
   }
   if (at != words.size()) return "too many immediates";
+  switch (node.op) {
+    case Op::atomic__load:
+      if (!atomic_load_order(MemOrder(words[1]))) return "invalid atomic load order";
+      break;
+    case Op::atomic__store:
+      if (!atomic_store_order(MemOrder(words[1]))) return "invalid atomic store order";
+      break;
+    case Op::atomic__cmpxchg:
+      if (!atomic_failure_order(MemOrder(words[1]), MemOrder(words[2])))
+        return "invalid compare-exchange failure order";
+      break;
+    default: break;
+  }
   return std::nullopt;
 }
 

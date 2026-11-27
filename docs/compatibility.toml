@@ -166,6 +166,21 @@ probe = 'namespace Outer { namespace Inner { template<class T> constexpr bool va
 evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp", "Black-box GCC 16.2 and Clang 23.1.6 symbol probes with namespace aliases, earlier declarations and uninstantiated template bodies on ELF and Mach-O"]
 
 [[divergence]]
+id = "dependent-concept-symbol"
+status = "partial"
+mode_status = { spec = "pending", gcc = "supported", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.2, [temp.names]/8, [temp.dep.constexpr]/2, #1548, #1589"
+prior = "A value-dependent concept-id as a template argument of a declaration was rejected."
+spec = "Uses GCC's unqualified concept name and the written arguments (DECISIONS §1.7) until #1589 decides the spec form."
+gcc = "Use the unqualified concept name and the arguments, X <source-name> <template-args> E."
+clang = "Uses GCC's form. Clang's form is pending in #1589."
+gcc_observed = "Writes the bare concept name for every spelling: qualified, `::`-qualified, through a namespace alias, inline namespaces and unqualified inside the namespace."
+clang_observed = "Writes sr, the enclosing non-inline namespaces and E before the name for any concept outside the global namespace, whatever the spelling, with no gs for a leading `::`. A concept in the global namespace has the bare name, as in GCC."
+limits = "Covers concept-ids in dependent class template arguments of function template signatures. Concepts in the global namespace agree in every mode."
+probe = 'namespace a::b { template<class T> concept V = sizeof(T) >= 4; } template<bool> struct Box {}; template<class T> void f(Box<a::b::V<T>>) {}'
+evidence = ["tests/own/abi/dependent-concept-args.run.cpp", "Black-box GCC 16 and Clang 23.1.5 symbol probes on Mach-O (#1589)"]
+
+[[divergence]]
 id = "dependent-variable-template-redeclaration"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -567,6 +582,20 @@ limits = "Runtime zero has undefined behavior. Unary __builtin_ctzg retains its 
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/builtin_ctz/zero-literal.cpp", "tests/daemon/builtin_ctz/zero-parameter.cpp"]
 
 [[divergence]]
+id = "constexpr-clzll-zero"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "GNU bit operation builtins: __builtin_clzll, [expr.const], #1539"
+prior = "The GNU spelling was unavailable."
+spec = "A reached zero operand fails constant evaluation."
+gcc = "A reached zero operand yields the width of unsigned long long during constant evaluation."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 returned 64 on x86-64 Linux for a literal zero and a zero consteval function argument."
+clang_observed = "Clang 23.1 rejected a literal zero on x86-64 Linux and arm64 Darwin."
+limits = "Runtime zero has undefined behavior."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/builtin_clzll/oracle-clzll-zero-constexpr.cpp"]
+
+[[divergence]]
 id = "constexpr-nan-operand"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -958,6 +987,45 @@ limits = "Covers direct pointer template arguments, including targetless address
 evidence = ["tests/draft/expr/expr.const.imm-2.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 Linux and upstream Clang 23.1.6 Linux and Darwin direct, typed and aggregate template arguments, ordinary address controls, and immediate-escalation probes"]
 
 [[divergence]]
+id = "constexpr-const-cast-volatile-access"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const.cast], [expr.const.core], [dcl.type.cv], #1424"
+prior = "Named const_cast lacked front-end support."
+spec = "Allow address-only casts and reject reading or writing a genuinely volatile object through a non-volatile glvalue in constant evaluation."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Accepts the tested read and write through non-volatile glvalues."
+clang_observed = "Rejects both accesses."
+evidence = ["tests/own/casts/const-cast-constexpr.accept.cpp", "tests/own/casts/const-cast-constexpr-volatile.reject.cpp"]
+
+[[divergence]]
+id = "constexpr-const-record-array-member-write"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.type.cv]/4, [expr.const.core], #1659"
+prior = "Constant evaluation did not reach these writes through automatic record-array elements."
+spec = "Reject the cast write to a non-mutable member of an actually const record array element."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts the write to the inherited-const member, and rejects the control with a declared const field."
+clang_observed = "Clang 23.1.6 rejects both writes on Linux x86-64 and Darwin arm64."
+evidence = ["tests/own/consteval/flat-record-array/constexpr-array-const-object-member.reject.cpp", "tests/own/consteval/flat-record-array/constexpr-array-declared-const-member.reject.cpp"]
+
+[[divergence]]
+id = "constexpr-by-value-class-parameter-cv"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
+reference = "[dcl.fct]/5, [expr.call]/7, [dcl.type.cv]/4, [expr.const.core], #1424"
+prior = "Constant evaluation used the argument object's call-site type for class parameters."
+spec = "Use the definition's declared cv for the by-value class parameter object. A cast can change the view, and writes to a const object's non-mutable fields are rejected."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Accepts the writes with const parameters, both with and without a prior unqualified declaration."
+clang_observed = "Rejects the write with a const parameter and no prior declaration. Accepts it when the prior declaration's parameter is unqualified. Rejects the write to an unqualified parameter when the prior declaration's parameter is const."
+evidence = ["tests/own/casts/const-cast-constexpr-const-parameter.reject.cpp", "tests/own/casts/const-cast-constexpr-const-parameter-definition.reject.cpp", "tests/own/casts/const-cast-constexpr-mutable-parameter-definition.accept.cpp", "tests/own/casts/const-cast-constexpr-const-parameter-mutable.accept.cpp"]
+
+[[divergence]]
 id = "constexpr-void-cast-one-past"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1179,18 +1247,19 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 readonly
 
 [[divergence]]
 id = "empty-union-new-list"
-status = "selectable"
-mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
-reference = "[dcl.init.aggr], [expr.new]"
+status = "partial"
+mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+reference = "[dcl.init.aggr], [expr.new], [class.default.ctor], #1483"
 prior = "Use the ordinary aggregate list initializer for the allocation."
 spec = "Initialize the first variant in the tested named union with a written destructor and a nontrivial first variant."
-gcc = "Diagnose the deleted union default constructor in the tested allocations with a nontrivial variant anywhere in the union and no default member initializer. A written default member initializer keeps the allocation valid."
+gcc = "Diagnose the deleted union default constructor in the tested direct empty allocations with a nontrivial variant and no default member initializer. An ordinary member or base with a proven usable trivial defaulted constructor does not make its enclosing variant nontrivial. A first scalar default member initializer keeps the tested allocation valid."
 clang = "Same as spec."
 spec_observed = "Empty list-initialization through new copy-list-initializes the first variant under the same rules as for an automatic object."
 gcc_observed = "Rejects new U{} because the union default constructor is deleted, even though U u{} is accepted and skips the variant constructor. A default member initializer on either variant makes both forms valid in the probes."
 clang_observed = "Both targets accept new U{} and apply the same variant initialization checks as for an automatic object. The native executable runs the first variant's default constructor."
 probe = 'struct A { A() noexcept {} ~A() noexcept {} }; union U { A first; char other; ~U() {} }; U* create() { return new U{}; }'
-evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes, plus native Clang and ycxx executable checks"]
+limits = "Nested union variants that fail earlier member declaration checks and initializers on later variants remain in #203. Omitting a union member of another allocated aggregate remains in #1481."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/empty_union/union-written-holder-dtor-member-defaulted.accept.cpp", "tests/daemon/empty_union/union-written-holder-dtor-base-defaulted.accept.cpp"]
 
 [[divergence]]
 id = "class-head-alignment"
@@ -1305,6 +1374,32 @@ template<class... Ts> int enu(Ts...[N::first]) { return 2; }
 int call() { return var<int>(0) + enu<int>(0); }
 '''
 evidence = ["STATUS.md", "tests/daemon/compatibility.py"]
+
+[[divergence]]
+id = "trivially-copyable-no-eligible-copy"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[class.prop]/1.1, [special]/6, #1417"
+prior = "Special members with unsatisfied trailing requires-clauses were not supported."
+spec = "A class whose copy and move constructors and assignment operators are all ineligible (unsatisfied constraints) is not trivially copyable. Type-trait built-ins do not classify class template specializations yet (#218)."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Reports such a class as trivially copyable."
+clang_observed = "Reports such a class as not trivially copyable, as the draft says."
+evidence = ["tests/own/member-requires/no-eligible-copy.accept.cpp"]
+
+[[divergence]]
+id = "member-declarator-requires-clause"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[class.mem.general], #1417"
+prior = "A member-declarator's trailing requires-clause was not supported."
+spec = "Each member-declarator has its own requires-clause: in `int f() requires C, g();` only `f` is constrained."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Same as spec."
+clang_observed = "Gives `g` the requires-clause written for `f`."
+evidence = ["tests/own/member-requires/separate-declarators.run.cpp"]
 
 [[divergence]]
 id = "pack-index-written-operator-symbol"
@@ -1488,6 +1583,31 @@ clang = "Accept the tested default on a named or abstract function pointer in an
 evidence = ["tests/own/block-try-catch/named-function-pointer-default.reject.cpp", "tests/own/block-try-catch/abstract-function-pointer-default.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 exception-declaration probes"]
 
 [[divergence]]
+id = "class-template-default-uses-later-default"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "supported" }
+reference = "[class.mem.general], [dcl.fct.default], [temp.inst]/12, #356"
+prior = "Reject the class template's default argument with \"default arguments of templates are not supported yet\" or an undeclared later member."
+spec = "Reject a member default that calls a later member of the same class template and takes that member's default, with \"the selected default argument has not yet been defined\". A later member template's default is instantiated per call and is accepted. The draft does not settle when a later default becomes usable."
+gcc = "Accept the tested static member function and member template defaults that take a later member's default. ycxx rejects them, as in spec mode."
+clang = "Reject them, as spec mode does. Accept a later member template's default."
+probe = 'template<class U> struct S { static constexpr int f(int x = g()) { return x; } static constexpr int g(int y = sizeof(U)) { return y; } }; static_assert(S<long>::f() == 8);'
+limits = "Ordinary classes reject the same uses in every mode. An ordinary class's member template default cannot name a later member yet (#1607)."
+evidence = ["GCC 16.2 and upstream Clang 23.1.5 later-default probes from the #356 review"]
+
+[[divergence]]
+id = "default-argument-substitution-in-requires"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "supported", clang = "pending" }
+reference = "[temp.inst]/12, [temp.deduct.general], [expr.prim.req], #356"
+prior = "Reject every call that takes a dependent member default with \"default arguments of templates are not supported yet\"."
+spec = "Treat an ill-formed default argument instantiated by a call in a requires-expression as an unsatisfied requirement."
+gcc = "Same as spec for the tested `requires { S<T>::f(); }` whose member default `T::v` is ill-formed for `int`."
+clang = "Diagnose the ill-formed default argument as a hard error outside the immediate context. ycxx still yields false here."
+probe = 'template<class T> struct S { static int f(int x = T::v) { return x; } }; template<class T> concept C = requires { S<T>::f(); }; static_assert(!C<int>);'
+evidence = ["GCC 16.2 and upstream Clang 23.1.5 requires-expression probes from the #356 review"]
+
+[[divergence]]
 id = "equivalent-inherited-type-aliases"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1613,3 +1733,71 @@ clang = "Same as spec."
 gcc_observed = "GCC 16.2 rejects the built-in template spelling and its feature query yields zero."
 clang_observed = "Upstream Clang 23.1.6 exposes the built-in template and accepts the tested alias chain and sequence values on both targets."
 evidence = ["tests/own/templates/t8-make-integer-seq.run.cpp", "tests/own/templates/t8-mangling.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]
+
+[[divergence]]
+id = "gnu-checked-overflow-result-type"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "GNU Integer Overflow Builtins (https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html), #1636, #1640"
+prior = "Require matching signed target-intmax_t operands and result."
+spec = "Reject boolean and enumerated result pointers for these builtins, following the documented GNU operand rules."
+gcc = "Same as spec."
+clang = "Accept bool* and pointers to an enum with an unsigned char underlying type in the tested add and multiply calls."
+limits = "ycxx rejects the two tested result pointer types in every mode. The unsigned slice accepts standard unsigned integer operands and a writable standard unsigned integer result up to 64 bits."
+probe = 'enum E : unsigned char { zero = 0 }; bool f(bool* b, E* e) { return __builtin_add_overflow(1u, 2u, b) || __builtin_add_overflow(1u, 2u, e) || __builtin_mul_overflow(1u, 2u, b) || __builtin_mul_overflow(1u, 2u, e); }'
+evidence = ["GCC 16.2.0 Linux x86-64 and upstream Clang 23.1.6 Linux x86-64 and arm64 Darwin strict C++26 syntax probes for both operations and both result types", "docs/EXTENSIONS.md"]
+
+[[divergence]]
+id = "gnu-atomic-lock-free-zero-size"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "pending" }
+reference = "GNU __atomic_always_lock_free, #1293, #328"
+prior = "GNU lock-free queries were unsupported."
+spec = "Diagnose size zero in the limited null alignment query."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 returns false for `__atomic_always_lock_free(0, nullptr)` on Linux x86-64."
+clang_observed = "Clang 23.1.6 returns true for `__atomic_always_lock_free(0, nullptr)` on Linux x86-64."
+limits = "Native parity for size zero is outside the first 32-bit slice."
+probe = 'constexpr bool zero_is_lock_free = __atomic_always_lock_free(0, nullptr);'
+evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]
+
+[[divergence]]
+id = "gnu-atomic-compare-exchange-expected-signedness"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "GNU __atomic_compare_exchange_n, #1293, #328"
+prior = "GNU compare-exchange was unsupported."
+spec = "Require the expected pointer to point to the same unqualified integer type as the atomic object's pointer."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 accepts an unsigned int expected pointer for a signed int atomic object's pointer."
+clang_observed = "Clang 23.1.6 rejects the unsigned int expected pointer when the atomic object's pointer is int*."
+probe = 'bool f(int* p, unsigned* expected) { return __atomic_compare_exchange_n(p, expected, 1, false, 0, 0); }'
+evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]
+
+[[divergence]]
+id = "constexpr-flat-record-array-future-read"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1642"
+spec = "Reject a read before initialization completes for a later scalar member of the current array element or a scalar member of a later element."
+gcc = "Preserve the draft rejection for the first flat-record-array slice. The observed GCC acceptance is pending."
+clang = "Same as spec."
+gcc_observed = "Strict GCC 16.2.0 on x86-64 Linux accepts the fixed-bound future reads and observes 7 for the later member and 11 for the later element."
+clang_observed = "Strict Clang 23.1.6 on Linux x86-64 and arm64 Darwin rejects these reads because the object's lifetime has not begun."
+limits = "The observations cover fixed-bound automatic flat non-union aggregate arrays in immediate evaluation."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-future-member.cpp", "tests/daemon/flat_record_array/flat-record-array-future-element.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "constexpr-flat-record-array-initialization-write"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1642"
+spec = "Reject ordinary assignment to a scalar field whose lifetime has not begun, including through an int reference."
+gcc = "The draft rejection is the first-slice expectation. GCC acceptance is pending."
+clang = "Same as spec."
+gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future element's field evaluates to 29 after direct and reference-parameter stores despite a later initializer of 17. The field assigned within its own initializer evaluates to 3."
+clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
+limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]

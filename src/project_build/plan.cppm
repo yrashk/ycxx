@@ -55,6 +55,7 @@ struct HostExecutablePlan {
   std::vector<SourcePlan> sources;
   std::vector<ArtifactOutputPlan> generated_inputs = {};
   std::size_t first_own_source = 0;
+  std::vector<ArtifactOutputPlan> link_inputs = {};
 };
 
 using LinkInputPlan = ArtifactOutputPlan;
@@ -330,6 +331,7 @@ struct CxxTargetPlan {
   std::vector<IncludeOrigin> origins;
   std::vector<const CxxTargetPlan*> dependencies;
   std::vector<TargetLinkInput> link_inputs;
+  bool role_bound_includes = false;
 };
 
 struct CxxTraversal {
@@ -341,7 +343,31 @@ struct CxxTraversal {
   std::size_t next_order = 0;
 };
 
-std::string artifact_origin(const ArtifactRef& ref) {
+struct ArtifactOperand {
+  const ArtifactRef& ref;
+  SourceLocation location;
+  std::optional<std::string_view> binding = std::nullopt;
+};
+
+ArtifactOperand artifact_operand(const Value& value, std::string_view binding_field, bool for_host) {
+  if (const auto* choices = binding_field.empty() ? nullptr : std::get_if<Record>(&value.data)) {
+    const auto* host = field(*choices, "host");
+    const auto* target = field(*choices, "target");
+    if (choices->size() != 2 || !host || !target)
+      fail(value.location, std::format("{} binding requires exactly 'host' and 'target' fields", binding_field));
+    const auto* host_ref = std::get_if<ArtifactRef>(&host->data);
+    const auto* target_ref = std::get_if<ArtifactRef>(&target->data);
+    if (!host_ref) fail(host->location, std::format("expected an artifact reference for 'host' in {}", binding_field));
+    if (!target_ref)
+      fail(target->location, std::format("expected an artifact reference for 'target' in {}", binding_field));
+    return for_host ? ArtifactOperand{*host_ref, host->location, "host"}
+                    : ArtifactOperand{*target_ref, target->location, "target"};
+  }
+  return {as<ArtifactRef>(value, "an artifact reference"), value.location};
+}
+
+std::string artifact_origin(const ArtifactRef& ref, std::optional<std::string_view> binding = std::nullopt) {
+  if (binding) return std::format("{} = artifact({:?}, {:?})", *binding, ref.target, ref.output);
   return std::format("artifact({:?}, {:?})", ref.target, ref.output);
 }
 
@@ -1254,21 +1280,28 @@ class Planner {
   }
 
   std::string native_artifact(const ArtifactRef& ref, const TargetDecl& consumer, std::string_view usage,
-                              SourceLocation at, bool emit_edge) {
+                              SourceLocation at, bool emit_edge,
+                              std::optional<std::string_view> binding = std::nullopt) {
     const auto requested = artifact(ref, at);
-    if (emit_edge) artifact_dependency(consumer, requested, usage, at);
+    if (emit_edge) artifact_dependency(consumer, requested, usage, at, binding);
     const auto [producer, output] = requested;
     auto& gen = plan_.generators[producer];
     gen.native_outputs = true;
     return generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_);
   }
 
-  std::string host_artifact(const ArtifactRef& ref, const TargetDecl& consumer, HostExecutablePlan& host,
-                            std::string_view usage, SourceLocation at, bool emit_edge) {
-    const HostGeneratedInput input{host.name, usage == "sources" ? "source" : "header"};
+  ArtifactOutputPlan resolve_host_artifact(const ArtifactRef& ref, const HostExecutablePlan& host,
+                                           std::string_view kind, SourceLocation at) {
+    const HostGeneratedInput input{host.name, kind};
     const RestoreHostGeneratedInput restore{host_generated_input_, std::exchange(host_generated_input_, &input)};
-    const auto requested = artifact(ref, at);
-    if (emit_edge) artifact_dependency(consumer, requested, usage, at);
+    return artifact(ref, at);
+  }
+
+  std::string host_artifact(const ArtifactRef& ref, const TargetDecl& consumer, HostExecutablePlan& host,
+                            std::string_view usage, SourceLocation at, bool emit_edge,
+                            std::optional<std::string_view> binding = std::nullopt) {
+    const auto requested = resolve_host_artifact(ref, host, usage == "sources" ? "source" : "header", at);
+    if (emit_edge) artifact_dependency(consumer, requested, usage, at, binding);
     host.generated_inputs.push_back(requested);
     const auto& generator = plan_.generators[requested.producer];
     return host_generated_path(cwd_, generator.name, generator.action.outputs[requested.output].filename);
@@ -1286,7 +1319,7 @@ class Planner {
 
   void append_sources(const TargetDecl& decl, const std::vector<std::string>& includes,
                       std::vector<SourcePlan>& sources, HostExecutablePlan* host, bool emit_facts,
-                      bool emit_generated_facts) {
+                      bool emit_generated_facts, bool allow_role_bindings) {
     std::set<std::string> source_paths;
     const auto add = [&](std::string path, SourceLocation at, std::string_view origin, bool generated = false) {
       if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
@@ -1321,10 +1354,14 @@ class Planner {
             add(path_text(absolute), value.location, "declared in sources");
           } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
             add_glob(*glob, value.location);
-          } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
-            auto path = host ? host_artifact(*ref, decl, *host, "sources", value.location, emit_facts)
-                             : native_artifact(*ref, decl, "sources", value.location, emit_facts);
-            add(std::move(path), value.location, emit_generated_facts ? artifact_origin(*ref) : std::string{}, true);
+          } else if (std::holds_alternative<ArtifactRef>(value.data) ||
+                     (allow_role_bindings && std::holds_alternative<Record>(value.data))) {
+            const auto [ref, location, binding] = artifact_operand(value, "sources", host != nullptr);
+            const bool emit_edge = binding ? emit_generated_facts : emit_facts;
+            auto path = host ? host_artifact(ref, decl, *host, "sources", location, emit_edge, binding)
+                             : native_artifact(ref, decl, "sources", location, emit_edge, binding);
+            const auto origin = emit_generated_facts ? artifact_origin(ref, binding) : std::string{};
+            add(std::move(path), location, origin, true);
           } else {
             fail(value.location, "expected a source path, glob or artifact reference");
           }
@@ -1337,7 +1374,7 @@ class Planner {
     const auto existing = std::ranges::find(plan_.host_executables, decl.name, &HostExecutablePlan::name);
     if (existing != plan_.host_executables.end())
       return static_cast<std::size_t>(existing - plan_.host_executables.begin());
-    check_fields(decl, {"sources", "public_include_dirs", "deps", "generated_headers"});
+    check_fields(decl, {"sources", "public_include_dirs", "deps", "generated_headers", "link_inputs"});
     const auto* host = pp::native_target;
     if (!host) fail(decl.location, "no default native target for this host");
     if (inspection_) {
@@ -1347,8 +1384,9 @@ class Planner {
     }
     HostExecutablePlan tool{decl.name, {}};
     CxxTraversal traversal{tool.sources, false, &tool};
-    cxx_target(decl, Primitive::host_executable, traversal);
+    const auto& native = cxx_target(decl, Primitive::host_executable, traversal);
     if (tool.sources.empty()) fail(decl.location, "host executable has no C++ source files");
+    append_link_inputs(native, traversal);
     const auto index = plan_.host_executables.size();
     plan_.host_executables.push_back(std::move(tool));
     return index;
@@ -1360,6 +1398,7 @@ class Planner {
     std::vector<std::size_t> consumers(traversal.finished.size());
     for (const auto& [name, target] : traversal.finished)
       for (const auto* dep : target.dependencies) ++consumers[dep->order];
+    auto& inputs = traversal.host ? traversal.host->link_inputs : plan_.link_inputs;
 
     // A shared dependency must follow all its consumers. Among ready targets, keep the
     // order in which the dependency traversal first reached them.
@@ -1371,17 +1410,33 @@ class Planner {
         if (inspection_) {
           const auto [producer, output] = input.artifact;
           const auto& generator = plan_.generators[producer];
-          const auto path = generated_path(cwd_, generator.name, generator.action.outputs[output].filename,
-                                           native_triple_);
+          const auto& filename = generator.action.outputs[output].filename;
+          const auto path = traversal.host ? host_generated_path(cwd_, generator.name, filename)
+                                          : generated_path(cwd_, generator.name, filename, native_triple_);
           auto origin = target == &root ? input.origin :
               std::format("inherited from {} ({})", target->declaration->name, input.origin);
-          fact("link-input", *root.declaration, std::to_string(plan_.link_inputs.size()), display_path(path),
+          fact("link-input", *root.declaration, std::to_string(inputs.size()), display_path(path),
                origin, input.location);
         }
-        plan_.link_inputs.push_back(input.artifact);
+        inputs.push_back(input.artifact);
       }
       for (const auto* dep : target->dependencies)
         if (--consumers[dep->order] == 0) ready.emplace(dep->order, dep);
+    }
+  }
+
+  void append_include_facts(const CxxTargetPlan& target, Primitive kind, bool for_host,
+                            bool emit_facts, bool emit_role_facts) {
+    if (!inspection_) return;
+    const bool separate_roles = kind == Primitive::library && target.role_bound_includes;
+    const bool host_library = kind == Primitive::library && for_host;
+    for (std::size_t i = 0; i < target.paths.size(); ++i) {
+      const auto& origin = target.origins[i];
+      const bool emit = (separate_roles || origin.generated) ? emit_role_facts : emit_facts;
+      if (!emit) continue;
+      auto name = std::to_string(i);
+      if (separate_roles || (host_library && origin.generated)) name.insert(0, for_host ? "host " : "target ");
+      fact("include", *target.declaration, name, display_path(target.paths[i]), origin.text, origin.location);
     }
   }
 
@@ -1395,7 +1450,7 @@ class Planner {
     const auto* assets = field(decl, "runtime_assets");
     if (assets && kind != Primitive::executable) fail(assets->location, "runtime_assets requires an executable target");
     const auto* private_inputs = field(decl, "link_inputs");
-    if (private_inputs && kind != Primitive::executable)
+    if (private_inputs && kind != Primitive::executable && kind != Primitive::host_executable)
       fail(private_inputs->location, "link_inputs requires an executable target");
     const auto* public_inputs = field(decl, "public_link_inputs");
     if (public_inputs && kind != Primitive::library)
@@ -1412,65 +1467,72 @@ class Planner {
     if (const auto* inputs = public_inputs ? public_inputs : private_inputs) {
       const auto field_name = public_inputs ? "public_link_inputs" : "link_inputs";
       for (const auto& value : as<List>(*inputs, "a list of linker archive inputs")) {
-        if (!traversal.generated)
-          fail(value.location, std::format("{} is not supported in host executable dependencies", field_name));
-        const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
-                                        : std::string{};
-        const auto requested = artifact(ref, value.location);
-        artifact_dependency(decl, requested, field_name, value.location);
-        target.link_inputs.push_back({requested, origin, value.location});
+        const auto [ref, location, binding] = artifact_operand(value, public_inputs ? field_name : "",
+                                                               traversal.host != nullptr);
+        const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", location)
+                                              : artifact(ref, location);
+        if (binding ? emit_generated_facts : emit_facts)
+          artifact_dependency(decl, requested, field_name, location, binding);
+        auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref, binding))
+                                  : std::string{};
+        target.link_inputs.push_back({requested, std::move(origin), location});
       }
     }
     const auto include = [&](std::string path, std::string_view origin, SourceLocation location, bool generated = false) {
       if (std::ranges::contains(target.paths, path)) return;
-      if (inspection_) {
-        if (generated ? emit_generated_facts : emit_facts) {
-          auto name = std::to_string(target.paths.size());
-          if (generated && traversal.host && kind == Primitive::library) name.insert(0, "host ");
-          fact("include", decl, name, display_path(path), origin, location);
-        }
-        target.origins.push_back({std::string(origin), location, generated});
-      }
+      if (inspection_) target.origins.push_back({std::string(origin), location, generated});
       target.paths.push_back(std::move(path));
     };
-    for_each_include_dir(decl, include);
-    if (const auto* headers = field(decl, "generated_headers")) {
-      for (const auto& value : as<List>(*headers, "a list of generated headers")) {
-        const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto path = traversal.host
-            ? host_artifact(ref, decl, *traversal.host, "generated_headers", value.location, emit_facts)
-            : native_artifact(ref, decl, "generated_headers", value.location, emit_facts);
-        include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref) : std::string{},
-                value.location, true);
-      }
-    }
-    if (const auto* deps = field(decl, "deps")) {
-      std::size_t position = 0;
-      for (const auto& value : as<List>(*deps, "a list of dependencies")) {
-        const auto [dep, dep_kind] = find(as<std::string>(value, "a library target name"), value.location);
-        if (dep_kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
-        if (emit_facts) {
-          fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
-          dependency(decl, dep.name, "deps", value.location);
+    try {
+      for_each_include_dir(decl, include);
+      constexpr std::string_view header_field = "generated_headers";
+      if (const auto* headers = field(decl, header_field)) {
+        for (const auto& value : as<List>(*headers, "a list of generated headers")) {
+          const auto [ref, location, binding] = artifact_operand(value, kind == Primitive::library ? header_field : "",
+                                                                 traversal.host != nullptr);
+          const bool emit_edge = binding ? emit_generated_facts : emit_facts;
+          target.role_bound_includes |= binding.has_value();
+          const auto path = traversal.host
+              ? host_artifact(ref, decl, *traversal.host, header_field, location, emit_edge, binding)
+              : native_artifact(ref, decl, header_field, location, emit_edge, binding);
+          include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref, binding) : std::string{},
+                  location, true);
         }
-        ++position;
-        const auto& inherited = cxx_target(dep, dep_kind, traversal);
-        target.dependencies.push_back(&inherited);
-        for (std::size_t i = 0; i < inherited.paths.size(); ++i) {
-          if (inspection_) {
-            const auto& from = inherited.origins[i];
-            include(inherited.paths[i], std::format("inherited from {} ({})", dep.name, from.text),
-                    from.location, from.generated);
-          } else {
-            include(inherited.paths[i], {}, {});
+      }
+      if (const auto* deps = field(decl, "deps")) {
+        std::size_t position = 0;
+        for (const auto& value : as<List>(*deps, "a list of dependencies")) {
+          const auto [dep, dep_kind] = find(as<std::string>(value, "a library target name"), value.location);
+          if (dep_kind != Primitive::library) fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
+          if (emit_facts) {
+            fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
+            dependency(decl, dep.name, "deps", value.location);
+          }
+          ++position;
+          const auto& inherited = cxx_target(dep, dep_kind, traversal);
+          target.dependencies.push_back(&inherited);
+          target.role_bound_includes |= inherited.role_bound_includes;
+          for (std::size_t i = 0; i < inherited.paths.size(); ++i) {
+            if (inspection_) {
+              const auto& from = inherited.origins[i];
+              include(inherited.paths[i], std::format("inherited from {} ({})", dep.name, from.text),
+                      from.location, from.generated);
+            } else {
+              include(inherited.paths[i], {}, {});
+            }
           }
         }
       }
+    } catch (const RuleDemand&) {
+      // A partial report still shows the prefix resolved before the rule was needed.
+      append_include_facts(target, kind, traversal.host != nullptr, emit_facts, emit_generated_facts);
+      throw;
     }
 
+    append_include_facts(target, kind, traversal.host != nullptr, emit_facts, emit_generated_facts);
     if (kind == Primitive::host_executable) traversal.host->first_own_source = traversal.sources.size();
-    append_sources(decl, target.paths, traversal.sources, traversal.host, emit_facts, emit_generated_facts);
+    append_sources(decl, target.paths, traversal.sources, traversal.host, emit_facts, emit_generated_facts,
+                   kind == Primitive::library);
     if (assets) {
       std::set<std::string> filenames;
       for (const auto& value : as<List>(*assets, "a list of runtime assets")) {

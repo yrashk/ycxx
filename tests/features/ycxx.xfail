@@ -12,7 +12,6 @@ draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'auto' is not supported
 draft/basic/basic.def.odr-8.accept.cpp '[' not supported yet
 draft/basic/basic.fundamental-2.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.life-2.accept.cpp preprocessing directives are not supported yet
-draft/basic/basic.life-5.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.link-1.accept.cpp 'extern' not supported yet
 draft/basic/basic.lookup.argdep-3.accept.cpp 'namespace' not supported yet
 draft/basic/basic.lookup.elab-1.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -311,7 +310,6 @@ draft/temp/temp.constr.decl-2.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.call-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.call-5.accept.cpp 'template' not supported yet
-draft/temp/temp.deduct.call-9.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-10.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.deduct.general-11.accept.cpp 'template' not supported yet
 draft/temp/temp.deduct.general-12.accept.cpp 'template' not supported yet
@@ -352,7 +350,6 @@ draft/temp/temp.friend-1.accept.cpp 'template' not supported yet
 draft/temp/temp.friend-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.func.order-6.accept.cpp 'template' not supported yet
 draft/temp/temp.inst-1.accept.cpp 'template' not supported yet
-draft/temp/temp.inst-11.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.inst-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.inst-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.inst-6.reject.cpp errors elsewhere: 'template' not supported yet
@@ -370,7 +367,6 @@ draft/temp/temp.names-1.reject.cpp errors elsewhere: preprocessing directives ar
 draft/temp/temp.names-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/temp/temp.names-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.names-5.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.over.link-4.accept.cpp 'template' not supported yet
 draft/temp/temp.param-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.param-2.accept.cpp 'class' not supported yet
 draft/temp/temp.param-4.reject.cpp errors elsewhere: 'using' not supported yet
@@ -396,7 +392,6 @@ own/three-way-comparison/defaulted-mixed.run.cpp no matching constructor: a conv
 own/three-way-comparison/implicit-equality.run.cpp invalid operands: the '==' a defaulted '<=>' declares implicitly (#1196)
 own/three-way-comparison/library.accept.cpp <type_traits> before <compare> (#1082, #1091, #1172, #308, #340)
 own/function-pointers/iota-template-argument.run.cpp function pointers and references as constant template arguments (#406)
-own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/local-classes/consteval-dtor.run.cpp the interpreter does not evaluate 'alloc' yet (#1140)
 own/local-classes/consteval-table.run.cpp the interpreter does not evaluate 'alloc' yet: class arrays and array members (#1140)
 own/local-classes/enclosing-types.run.cpp 'enum' is not supported yet: block-scope enumerations (#1442)

@@ -68,6 +68,7 @@ struct ConstantRecordLayout {
   std::vector<ConstantRecordField> fields{};
   bool dynamic = false;
   std::optional<ConstantRecordBase> primary_base{};
+  bool flat_array_element = false;
 };
 
 struct VirtualTarget {
@@ -134,6 +135,7 @@ struct Callee {
   bool is_constexpr = false;           // a constexpr or consteval function ([dcl.constexpr])
   bool unsupported = false;            // defined, but its body has no L1 yet
   EntityId default_constructs = EntityId::none;  // owner of a supported implicit default constructor
+  EntityId lifetime_class = EntityId::none;      // owner of a constructor or destructor
 };
 
 // Where an evaluation was: the function and the node, innermost first. The caller maps each to a
@@ -229,6 +231,7 @@ private:
     std::vector<Field> fields;
     bool dynamic;
     std::optional<ConstantRecordBase> primary_base;
+    bool flat_array_element;
   };
   struct Object {
     QualType type{};
@@ -244,10 +247,13 @@ private:
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
     const RecordStorage* array_record = nullptr;
+    u32 initialized_array_fields = 0;  // direct fields completed in element and declaration order
     Life record_life = Life::before;        // distinct from the lifetimes of its subobjects
     Life primary_base_life = Life::before;
     bool dynamic_initialized = false;     // set only by a completed constructor
     bool unknown_reference = false;       // an opaque referent can alias another outside object
+
+    bool local_record_array() const { return origin == Origin::automatic && array_record; }
   };
   struct StorageExtent {
     u64 cells;
@@ -269,6 +275,7 @@ private:
     u64 leaves = 0;    // cells of an object of this type
     u64 size = 0;      // bytes ([basic.types.general]); 0 for a function type
     bool is_const = false;
+    bool is_volatile = false;
   };
   struct Frame {
     const ir::Function* fn = nullptr;
@@ -276,6 +283,7 @@ private:
     std::vector<Value> regs;
     u32 node = 0;
     std::optional<Value> initializing_dynamic_subobject{};
+    std::optional<u32> cv_inactive_object{};  // complete receiver under construction or destruction
   };
   // A designated subobject: its object, its cells and its type.
   struct Place {
@@ -322,6 +330,7 @@ private:
   bool fill_record_constant(const RecordStorage& record, u32 cell, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
+  bool pending_array_field(const Place& p) const;
   void set_lifetime(const Place& p, bool complete, Life life);
   Flow read_cell(QualType type, u32 cell, Value& out);
   Flow copy_record(const Place& dst, const Place& src);
@@ -374,8 +383,9 @@ private:
     return Flow::next;
   }
   Flow jump(Frame& f, NodeId n, u32 succ);
+  Flow bind_parameter(Frame& f, ir::ValueId parameter, const Value& value);
   Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args,
-             std::optional<Value> adjusted_receiver = {});
+             std::optional<Value> adjusted_receiver, EntityId lifetime_class);
 
   // Integer helpers: `x` normalized to an integer type of `width` bits.
   static u64 norm(u64 x, u32 width, bool is_signed);
@@ -452,7 +462,9 @@ const Machine::Shape& Machine::shape(QualType q) {
   u32 key = std::to_underlying(c);
   if (auto it = shapes_.find(key); it != shapes_.end()) return it->second;
   Shape s;
-  s.is_const = (std::to_underlying(ast::cv_of(c)) & 1) != 0;
+  const auto cv = std::to_underlying(ast::cv_of(c));
+  s.is_const = (cv & std::to_underlying(ast::Cv::const_)) != 0;
+  s.is_volatile = (cv & std::to_underlying(ast::Cv::volatile_)) != 0;
   auto b = ast::builtin_of(*in_, c);
   if (config_.enum_layout && in_->types.is<ast::TEnum>(c)) {
     if (auto layout = config_.enum_layout(in_->types.get<ast::TEnum>(c).entity)) {
@@ -494,6 +506,7 @@ const Machine::Shape& Machine::shape(QualType q) {
     // An array's elements carry its cv ([basic.type.qualifier]); `canonical` pushed it there.
     Shape e = shape(a.elem);
     s.is_const = e.is_const;
+    s.is_volatile = e.is_volatile;
     s.leaves = e.leaves * s.bound;
     s.size = e.size * s.bound;
   } else if (in_->types.is<ast::TFunction>(c)) {
@@ -566,7 +579,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
     if (layout) known = &*layout;
   }
   if (!known) return nullptr;
-  RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base};
+  RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base, known->flat_array_element};
   record.fields.reserve(known->fields.size());
   for (const auto& field : known->fields) {
     QualType leaf = field.type;
@@ -586,7 +599,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
 Machine::StorageExtent Machine::storage_extent(QualType t, const RecordStorage* array_record) {
   const Shape& s = shape(t);
   if (!array_record) return {s.leaves, s.size};
-  if (t == array_record->type) return {array_record->ncells, array_record->size};
+  if (similar(t, array_record->type)) return {array_record->ncells, array_record->size};
   if (s.kind != Kind::array) return {s.leaves, s.size};
   const auto e = storage_extent(s.inner, array_record);
   if (e.bytes == 0 || s.bound > std::numeric_limits<u32>::max() ||
@@ -625,7 +638,7 @@ void Machine::fill_zero(QualType t, u32 cell, const RecordStorage* record) {
     for (u64 i = 0; i < s.bound; ++i) fill_zero(s.inner, u32(cell + i * n), record);
     return;
   }
-  if (record && t == record->type) {
+  if (record && similar(t, record->type)) {
     for (const auto& field : record->fields) fill_zero(field.layout.type, cell + field.cell, field.nested);
     return;
   }
@@ -662,7 +675,7 @@ bool Machine::fill_constant(QualType t, u32 cell, ConstId value, const RecordSto
     if (!vs.is<ast::VNullptr>(value) && (s.is_nullptr || !vs.is<ast::VLvalue>(value))) return false;
     break;
   default:
-    return array_record && t == array_record->type && fill_record_constant(*array_record, cell, value);
+    return array_record && similar(t, array_record->type) && fill_record_constant(*array_record, cell, value);
   }
   cells_[cell] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(value)}};
   return true;
@@ -703,7 +716,8 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
       continue;
     }
     const auto* record = pl.record;
-    if (path[i].step == ir::Step::field && record && pl.type == record->type) {
+    // The layout describes the class independently of cv.
+    if (path[i].step == ir::Step::field && record && similar(pl.type, record->type)) {
       const auto index = path[i].index;
       if (index >= record->fields.size()) return std::nullopt;
       const auto& field = record->fields[index];
@@ -737,7 +751,6 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
                               Place& out) {
   if (p.kind == VKind::null) return fail(Reason::null_access);
   if (p.kind != VKind::object) return fail(p.kind == VKind::function ? Reason::access_type : Reason::ill_formed);
-  if (volatile_ && config_.mode == Mode::constant) return fail(Reason::volatile_access);
   const Object& ob = objects_[p.ref];
   if (!ob.storage && use != Use::gcc_member_receiver) return fail(Reason::storage_ended);
   bool past = false;
@@ -756,35 +769,48 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     Life life = cells_[c].life;
     if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
   }
+  const Life life = pl->ncells == 0 ? record_life : cells_[pl->cell0].life;
   const bool writing = use == Use::write || use == Use::callee_write;
   if (ob.mutable_lifetimes_outside && pl->mutable_field)
     return fail(writing ? Reason::modify_outside : Reason::not_usable);
+  // An ordinary initializing store precedes the lifetime's start.
+  const bool initializing = use == Use::write && life == Life::before;
+  const bool constant = config_.mode == Mode::constant;
+  if (constant && volatile_ && !initializing) return fail(Reason::volatile_access);
+  const auto& object_type = shape(ob.type);
+  // The complete object's cv applies between construction and destruction ([class.ctor], [class.dtor]).
+  const bool cv_inactive = ob.record && (object_type.is_const || object_type.is_volatile) &&
+      std::ranges::any_of(frames_, [object = pl->obj](const Frame& frame) { return frame.cv_inactive_object == object; });
+  const bool subobject = p.bits != 0 || !extra.empty();
+  const auto& place_type = shape(pl->type);
+  const bool actual_volatile = (subobject && place_type.is_volatile) || (object_type.is_volatile && !cv_inactive);
+  if (constant && !initializing && use != Use::callee_write && actual_volatile)
+    return fail(Reason::volatile_object_access);
   if (writing) {
     if (ob.read_only) return fail(Reason::modify_const);
-    // The initializing store comes before `obj.begin`; a const object is not modified after it.
-    const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
-    if (shape(pl->type).is_const && life == Life::alive)
+    const bool actual_const = (subobject && place_type.is_const) ||
+                              (object_type.is_const && !cv_inactive && !pl->mutable_field);
+    if (life == Life::alive && actual_const)
       return fail(Reason::modify_const);
-    if (use == Use::callee_write) {
-      // A cast can remove the destination's volatile qualification but does not change the
-      // object it designates, including a subobject of a volatile object ([dcl.type.cv]).
-      const auto cv = [&](QualType type) { return std::to_underlying(ast::cv_of(in_->canonical(type))); };
-      if ((cv(pl->type) | cv(ob.type)) & std::to_underlying(ast::Cv::volatile_))
-        return fail(Reason::volatile_object_access);
-    }
-    if (config_.mode == Mode::constant &&
-        (ob.outside || (ob.switch_bypassed && config_.compatibility == ast::Compatibility::gcc)))
+    if (use == Use::callee_write && actual_volatile) return fail(Reason::volatile_object_access);
+    if (constant && (ob.outside || (ob.switch_bypassed && config_.compatibility == ast::Compatibility::gcc)))
       return fail(Reason::modify_outside);
-  } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
+  } else if (constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
     return fail(Reason::not_usable, 0, global);
   }
   return use == Use::callee_read || use == Use::callee_write ? Flow::next : note_access(*pl, writing);
 }
 
+bool Machine::pending_array_field(const Place& p) const {
+  const Object& object = objects_[p.obj];
+  return object.record_life == Life::before && p.ncells == 1 && !p.record &&
+         p.cell0 - object.cell0 == object.initialized_array_fields && cells_[p.cell0].life == Life::before;
+}
+
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {
   Object& ob = objects_[p.obj];
-  if (complete && ob.record) ob.record_life = life;
+  if (complete && (ob.record || ob.local_record_array())) ob.record_life = life;
   if (p.primary_base || (complete && life == Life::after)) ob.primary_base_life = life;
   if ((complete || p.primary_base) && life == Life::after) ob.dynamic_initialized = false;
   for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
@@ -1546,7 +1572,7 @@ Machine::Flow Machine::bytes_at(const Value& p, Bytes& out, bool allow_represent
   if (!character) {
     if (!allow_representation || !target_->little_endian_unsigned_integers) return fail(Reason::byte_type);
     const auto& scalar = shape(out.type);
-    if (record && record->type == out.type && object.origin == Origin::global) {
+    if (record && similar(record->type, out.type) && object.origin == Origin::global) {
       out.record = record;
       out.width = record->size;
     } else if (scalar.kind == Kind::integer || scalar.kind == Kind::floating ||
@@ -1789,15 +1815,59 @@ Machine::Flow Machine::jump(Frame& f, NodeId n, u32 succ) {
   return Flow::jumped;
 }
 
+Machine::Flow Machine::bind_parameter(Frame& f, ir::ValueId parameter, const Value& value) {
+  const ir::Value& slot = f.fn->value(parameter);
+  if (slot.index > 0 && slot.index == f.fn->result_param && value.kind == VKind::object &&
+      value.ref < objects_.size() && objects_[value.ref].local_record_array())
+    return fail(Reason::unsupported_constant);
+  if (slot.index > 0 && slot.index <= 32 && (f.fn->byval_params & (u32{1} << (slot.index - 1)))) {
+    if (slot.index == f.fn->result_param || slot.type.kind != ir::TyKind::cxx ||
+        value.kind != VKind::object || value.past || value.bits != 0 || value.displacement() != 0 ||
+        value.ref >= objects_.size())
+      return fail(Reason::ill_formed);
+    const Shape& address = shape(slot.type.type);
+    if (address.kind != Kind::pointer || address.is_nullptr) return fail(Reason::ill_formed);
+    const QualType type = in_->canonical(address.inner);
+    Object& object = objects_[value.ref];
+    if (object.origin != Origin::automatic || object.outside || !object.record)
+      return fail(Reason::ill_formed);
+    if (!object.storage) return fail(Reason::storage_ended);
+    if (object.record_life != Life::alive) return fail(Reason::outside_lifetime);
+    if (!in_->types.is<ast::TClass>(type) || ast::without_cv(type) != ast::without_cv(object.type))
+      return fail(Reason::access_type);
+    // The caller initialized the parameter object using the function type. Its cv-qualification
+    // comes from the declared parameter of the selected definition ([dcl.fct], [expr.call]).
+    object.type = type;
+  }
+  reg(f, parameter) = value;
+  return Flow::next;
+}
+
 // Pushes the callee's frame; its entry block takes the state, then the arguments.
 Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityId callee,
-                             std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver) {
+                             std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver,
+                             EntityId lifetime_class) {
   if (frames_.size() >= config_.depth_limit) return fail(Reason::depth_limit, config_.depth_limit);
   if (body->blocks.empty() || body->block(ir::BlockId(0)).nparams != args.size() + 1) return fail(Reason::ill_formed);
   Frame callee_frame{body, callee, std::vector<Value>(body->values.size()), body->block(ir::BlockId(0)).node0};
   const auto parameters = body->params_of(ir::BlockId(0));
-  for (std::size_t i = 0; i < args.size(); ++i)
-    callee_frame.regs[ir::raw(parameters[i + 1])] = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const Value& value = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+    if (Flow fl = bind_parameter(callee_frame, parameters[i + 1], value); fl != Flow::next) return fl;
+  }
+  if (lifetime_class != EntityId::none && !args.empty()) {
+    const Value& receiver = reg(callee_frame, parameters[1]);
+    if (receiver.kind == VKind::object && receiver.ref < objects_.size() &&
+        objects_[receiver.ref].local_record_array())
+      return fail(Reason::unsupported_constant);
+    if (receiver.kind == VKind::object && !receiver.past && receiver.bits == 0 &&
+        receiver.displacement() == 0 && receiver.ref < objects_.size()) {
+      const Object& object = objects_[receiver.ref];
+      if (object.origin == Origin::automatic && !object.outside && object.storage && object.record &&
+          object.record_life != Life::after && in_->types.get<ast::TClass>(object.record->type).entity == lifetime_class)
+        callee_frame.cv_inactive_object = receiver.ref;
+    }
+  }
   // The destruction thunk materializes a folded value, then calls the destructor.
   // The non-mutable lifetimes belong to this evaluation, while mutable ones do not.
   if (config_.compatibility != ast::Compatibility::gcc && callee != EntityId::none &&
@@ -1838,8 +1908,9 @@ void Machine::start(const ir::Function& entry, EntityId name, std::span<const Va
     entry_result_ = make_object(result_address.inner, Origin::automatic, record);
   }
   for (u32 i = 1, arg = 0; i < params.size(); ++i) {
-    if (capture && i == entry.result_param) fr.regs[ir::raw(params[i])] = {VKind::object, false, *entry_result_, 0};
-    else fr.regs[ir::raw(params[i])] = args[arg++];
+    const Value value = capture && i == entry.result_param ? Value{VKind::object, false, *entry_result_, 0}
+                                                          : args[arg++];
+    if (bind_parameter(fr, params[i], value) != Flow::next) return;
   }
 }
 
@@ -1872,7 +1943,7 @@ Result Machine::describe(const Value& v, QualType t) {
 
 Machine::Flow Machine::capture_element(QualType t, u32 cell, Result& result, const RecordStorage* record) {
   const Shape& s = shape(t);
-  if (record && t == record->type) {
+  if (record && similar(t, record->type)) {
     result.kind = Result::Kind::aggregate;
     result.type = t;
     result.elements.resize(record->fields.size());
