@@ -358,6 +358,33 @@ without running their producers. The plan shows each archive operand's host
 path, output binding, and manifest location.
 [Host archive example](../../examples/project-build/host-static-archive-inputs/README.md)
 
+### Archives inherited by native host tools (#1622)
+
+```text
+cpp.library "scanner_codec" {
+    sources = ["codec.cc"]
+    public_link_inputs = [artifact("codec_archive", "archive")]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["scanner_codec"]
+}
+```
+
+The host link puts direct archives before inherited archives. Each library
+contributes its authored operands after all of its reachable consumers,
+so a shared library contributes once in a diamond. Explicit repeats retain
+their positions and use the same staged archive bytes.
+
+The host tool and selected executable can inherit from the same library.
+Each authored reference selects one ordinary producer receipt. Both links
+read those bytes and check them against their own object formats. A project
+that needs separate formats can bind distinct outputs through separate
+library declarations. The plan shows each link's resolved operand sequence
+and paths alongside the shared authored edge.
+[Inherited host archive example](../../examples/project-build/host-library-static-archive-inputs/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
