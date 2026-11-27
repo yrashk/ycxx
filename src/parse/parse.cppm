@@ -15156,6 +15156,9 @@ interp::Callee Program::function_ir(EntityId f, u32 item, bool* diagnosed_failur
   if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
+  const auto& entity = w_->entities.rec(f);
+  if (entity.kind == sema::EntityKind::constructor || entity.kind == sema::EntityKind::destructor)
+    c.lifetime_class = entity.scope;
   if (auto constructor = dynamic_synthesized_.find(f); constructor != dynamic_synthesized_.end()) {
     if (!c.is_constexpr) return c;
     const std::size_t index = constructor->second;
@@ -15212,7 +15215,6 @@ interp::Callee Program::function_ir(EntityId f, u32 item, bool* diagnosed_failur
   // A specialization needed for constant evaluation uses the same instantiated body as
   // native lowering ([temp.inst]/8).
   const u32 key = std::to_underlying(f);
-  const auto& entity = w_->entities.rec(f);
   const EntityId templ = entity.templ;
   const bool member_instance = member_patterns_.contains(key);
   const bool specialized_destructor = member_instance && entity.kind == sema::EntityKind::destructor &&

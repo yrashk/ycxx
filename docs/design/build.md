@@ -316,6 +316,126 @@ target's generated include paths and compile identity. Inspection shows
 both resolved include views and links them to the authored header binding.
 [Generated host library header example](../../examples/project-build/host-library-generated-headers/README.md)
 
+### Generated sources in native host library dependencies (#1600)
+
+A host-linked library can put an artifact reference in `sources`
+alongside disk paths and globs. The library's generated main sees the
+output siblings of its producer at their host logical paths. The main's
+directory participates in quoted include lookup through the includer's
+path. Adding the source leaves the library's public include search
+unchanged. Other units can see that producer's directory when a
+generated header binding makes it visible to them.
+
+Both the selected target and the host tool can compile the shared
+library. The planner stages the ordinary source producers before the
+native host compile and reports the two logical source paths against
+one authored binding. Watch and early planning continue to observe the
+real includes used by each generated main.
+[Generated host library source example](../../examples/project-build/host-library-generated-sources/README.md)
+
+### Direct generated archives for native host tools (#1616)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    link_inputs = [artifact("scanner_archive", "archive")]
+}
+```
+
+The coordinator stages the ordinary archive producer chain together with
+generated host sources and headers before registering the host build. The
+archive chain must be independent of project-built host tools. Its actions
+keep the selected target's argument selectors, and the native linker reads
+archives in the host format. The host's source objects precede the archive
+operands. Authored order and repeated references are preserved.
+
+The archive names and exact bytes enter the host program key. Archive-only
+producers stay outside the preprocessor's host file view, so an archive
+edit can relink without recompiling the host sources. Equal host images
+reuse consumer receipts. Before admitting a result against a revised
+plan, the coordinator can compare the staged inputs with existing receipts
+without running their producers. The plan shows each archive operand's host
+path, output binding, and manifest location.
+[Host archive example](../../examples/project-build/host-static-archive-inputs/README.md)
+
+### Archives inherited by native host tools (#1622)
+
+```text
+cpp.library "scanner_codec" {
+    sources = ["codec.cc"]
+    public_link_inputs = [artifact("codec_archive", "archive")]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["scanner_codec"]
+}
+```
+
+The host link puts direct archives before inherited archives. Each library
+contributes its authored operands after all of its reachable consumers,
+so a shared library contributes once in a diamond. Explicit repeats retain
+their positions and use the same staged archive bytes.
+
+The host tool and selected executable can inherit from the same library.
+Each plain artifact reference selects one ordinary producer receipt. Both
+links read those bytes and check them against their own object formats.
+The plan shows each link's resolved operand sequence and paths alongside
+the shared authored edge.
+[Inherited host archive example](../../examples/project-build/host-library-static-archive-inputs/README.md)
+
+### Explicit archive choices by link role (#1629)
+
+```text
+cpp.library "archive_bridge" {
+    public_link_inputs = [{
+        host = artifact("host_archive", "archive")
+        target = artifact("target_archive", "archive")
+    }]
+}
+```
+
+The record occupies one position in the ordered list and requires both
+artifact references. The host-tool link resolves `host` and the selected
+app link resolves `target`, even when they use the same target triple.
+Each traversal plans only its chosen output. The two references can use
+distinct producers or name two outputs of one ordinary action. A plain
+artifact reference still shares its receipt across both links.
+
+Direct inputs come first and explicit repeats retain their positions.
+The coordinator stages the host choice through the existing
+host-independent producer path. `host_triple()` and `target_triple()`
+keep their existing meanings. The plan links each active role to its
+resolved archive path, operand position, and authored reference.
+[Archive roles example](../../examples/project-build/archive-consumer-bindings/README.md)
+
+### Explicit generated headers by link role (#1637)
+
+```text
+cpp.library "bridge" {
+    generated_headers = [{
+        host = artifact("host_config", "header")
+        target = artifact("target_config", "header")
+    }]
+}
+```
+
+Each position requires both artifact references. A host-tool traversal
+resolves `host` and the selected app traversal resolves `target`, even
+when the triples match. A plain artifact reference retains its shared
+behavior. The generators still receive the existing triple selectors,
+and the host choice uses the ordinary host-independent producer path.
+Separate producers can supply a different version of `config.hh` for
+each role. Declared siblings of one producer remain in the same directory.
+
+Both traversals keep the first occurrence of a directory and inherit
+their dependency's search order. A role choice can make one traversal
+deduplicate a directory that the other keeps. For libraries with owned
+or inherited choices, the plan records each role's full include sequence,
+including disk directories, and links generated entries to their
+authored artifact sites.
+[Generated header roles example](../../examples/project-build/role-bound-library-headers/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
@@ -593,6 +713,32 @@ Each target has one card, so all occurrences of a shared producer lead to
 the same destination. A partial plan shows the resolved paths and marks
 the navigation incomplete. In an HTML comparison, these links navigate
 the current plan. The comparison tables carry the saved occurrence sites.
+
+### Interactive plan graph (#1604)
+
+From `examples/project-build/host-library-generated-sources`, build the
+arm64 Darwin variant and save its HTML plan.
+
+```sh
+ycxx build app --target=arm64-apple-darwin
+ycxx show app --target=arm64-apple-darwin --format=html > plan.html
+```
+
+Open **Graph** in `plan.html`. It starts at `app` with its immediate
+dependencies, `config` and `schema`. Select a node to show or hide its
+dependencies and dependents. Expand `config` to find `scanner`, then show
+the scanner's dependencies. The scanner and the app point to the same
+`schema` node.
+
+Select `schema` to inspect its generated `wire_score.cc` paths for the host
+and selected target. The details list each authored dependency's usage and
+any named output or binding. Follow the location link for the `wire_source`
+edge to open the source binding in `build.ycxx`.
+
+The graph works offline in the saved report. An incomplete plan shows the
+resolved portion and marks it incomplete. The static **Target dependencies**
+cards and dependency tables remain available alongside the graph.
+[Host library generated sources example](../../examples/project-build/host-library-generated-sources/README.md)
 
 ### Declared target catalog (#1392)
 

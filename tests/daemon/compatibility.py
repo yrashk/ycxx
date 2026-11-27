@@ -2028,6 +2028,16 @@ extern "C" Count observed() { return seen; }
 def empty_union(world, gxx):
     scope = world.scope
     (scope / 'empty-union.cpp').write_text(EMPTY_UNION)
+    nested_cases = {
+        'union-written-holder-dtor-base-defaulted.accept.cpp': None,
+        'union-written-holder-dtor-base-user-provided.cpp': 16,
+        'union-written-holder-dtor-member-defaulted.accept.cpp': None,
+        'union-written-holder-dtor-member-user-provided.cpp': 17,
+        'union-written-holder-dtor-explicit-first.accept.cpp': None,
+    }
+    fixtures = Path(__file__).with_name('empty_union')
+    for case in nested_cases:
+        shutil.copyfile(fixtures / case, scope / case)
     for mode in MODES:
         flags = ['-fcompat=' + mode] + (['-DGCC_MODE'] if mode == 'gcc' else [])
         for target in (LINUX, DARWIN):
@@ -2047,6 +2057,16 @@ def empty_union(world, gxx):
                 assert cold == warm and warm[0] == rejected, (mode, target, kind, cold, warm)
                 if rejected:
                     assert warm[2].count(b'deleted') == 2, (mode, target, warm)
+            for case, reject_line in nested_cases.items():
+                rejected = mode == 'gcc' and reject_line is not None
+                args = [target, *flags, '-c', case, '-o', 'nested-empty-union.o']
+                cold = world.cxx(args, scope, world.cold, timeout=40)
+                warm = world.cxx(args, scope, world.daemon, timeout=40)
+                assert cold == warm and warm[0] == rejected, (mode, target, case, cold, warm)
+                if rejected:
+                    location = f'{case}:{reject_line}:'.encode()
+                    assert warm[2].count(b'error:') == 1 and location in warm[2], warm
+                    assert b'calls a deleted constructor' in warm[2], warm
         native_cases = [[], ['-DALLOCATE_CONTROL']]
         if mode != 'gcc':
             native_cases.append(['-DALLOCATE'])
