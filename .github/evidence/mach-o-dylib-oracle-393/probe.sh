@@ -47,6 +47,7 @@ int main() {
 EOF
 
 cxx=$(xcrun --find clang++)
+export SDKROOT="$(xcrun --show-sdk-path)"
 {
   uname -a
   sw_vers

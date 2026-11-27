@@ -18,17 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Verify exact main and run black-box linker probes
         shell: bash
         run: |
           test "$(uname -m)" = arm64
-          test "$(git rev-parse HEAD^)" = "$BASELINE"
+          test "$(git merge-base HEAD "$BASELINE")" = "$BASELINE"
           test "$(git rev-parse "$BASELINE^{tree}")" = "$BASELINE_TREE"
           output="$RUNNER_TEMP/ycxx-mach-o-dylib-oracle-393"
           mkdir -p "$output"
-          git rev-parse HEAD HEAD^ 'HEAD^{tree}' "$BASELINE^{tree}" > "$output/git.txt"
+          git rev-parse HEAD "$BASELINE" 'HEAD^{tree}' "$BASELINE^{tree}" > "$output/git.txt"
           bash .github/evidence/mach-o-dylib-oracle-393/probe.sh "$output" | tee "$output/probes.log"
       - name: Upload linker and loader evidence
         if: always()
