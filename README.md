@@ -913,6 +913,8 @@ written default member initializer are value-initialized.
   and counts trailing zero bits as an `int`. [#1479](https://github.com/yrashk/ycxx/issues/1479)
   `__builtin_clzll` converts its argument to `unsigned long long` and counts leading zero bits
   as an `int` in constant expressions and native code. [#1539](https://github.com/yrashk/ycxx/issues/1539)
+  `__builtin_clz` provides the same count for a nonzero argument converted to `unsigned int`.
+  [#1654](https://github.com/yrashk/ycxx/issues/1654)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
