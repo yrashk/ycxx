@@ -852,6 +852,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `= X::none` (or intern the empty list as index 0), and test with the argument declared first.
   - Rule: AGENTS.md, "While working".
   - Learned on #25 and #88 steps 6 and 8.
+- **The global namespace is `EntityId::none`.** On #1549 a fallback owner bailed out when its
+  scope was `EntityId::none`, meaning "no scope". That guard silently dropped every case at global
+  namespace scope, which was most of the tests.
+  - Do: before treating `EntityId::none` as "nothing there", check whether the place can mean the
+    global namespace (an enclosing namespace, a scope, a lookup context). Test at global scope and
+    inside a named namespace.
 - **Test blocked storage past its first block.** #107's chunked pools passed a concurrency test
   that never left block 0; the review found that any list longer than the next block aborted,
   which one 3,000-statement function triggers.
