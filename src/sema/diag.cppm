@@ -419,6 +419,8 @@ enum class Diag : std::uint32_t {
   builtin_addressof_pack [[=message{Severity::error, "'__builtin_addressof' cannot use a pack expansion in GCC compatibility mode"}]],
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   builtin_overflow_operand [[=message{Severity::error, "checked integer builtin requires an argument of type '{0:t}', got '{1:t}'"}]],
+  builtin_overflow_unsigned_operand [[=message{Severity::error, "checked unsigned integer builtin requires a standard unsigned integer operand up to 64 bits, got '{0:t}'"}]],
+  builtin_overflow_unsigned_result [[=message{Severity::error, "checked unsigned integer builtin requires a pointer to a writable standard unsigned integer type up to 64 bits, got '{0:t}'"}]],
   builtin_ctzg_operand [[=message{Severity::error, "the supported form of '__builtin_ctzg' requires an 'unsigned int' operand but got '{0:t}'"}]],
   builtin_ctzg_fallback [[=message{Severity::error, "'__builtin_ctzg' with a fallback argument is not supported yet"}]],
   builtin_atomic_target [[=message{Severity::error, "GNU atomics are not supported on this target"}]],
