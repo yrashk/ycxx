@@ -3667,8 +3667,10 @@ public:
   // ([dcl.ambig.res]/2, `tentative_type_argument`).
   bool starts_type_id(bool template_argument = false, bool* trial = nullptr) {
     if (transform_trait_ahead()) return true;
-    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren)
-      return function_type_argument_ahead(1, trial);
+    if (template_argument && simple_type_keyword(kind())) {
+      if (kind(1) == Tk::l_brace) return false;
+      if (kind(1) == Tk::l_paren) return function_type_argument_ahead(1, trial);
+    }
     // `typename N::T{1}` and `typename N::T(2)` are functional casts too ([expr.type.conv]/1).
     if (template_argument && is(Tk::kw_typename)) {
       const u32 next = past_typename_specifier();

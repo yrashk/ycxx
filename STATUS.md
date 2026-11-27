@@ -4218,6 +4218,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   are expressions, while `int(&)[3]`, `U(int)` and `int(*(int))` stay types (#1190, #810).
   `bool(S{})` with a conversion function parses, but conversion functions are #339. `R(A...)` with
   a type parameter `R` is #1186.
+- **Braced conversions in class-template bases:** `Base<int{4}>`, `Base<T{4}>`, and
+  `Base<typename T::type{4}>` keep their argument braces inside the template-id
+  in a class-template base clause ([expr.type.conv], [class.derived.general], #1454).
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;

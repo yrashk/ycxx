@@ -240,6 +240,10 @@ A template argument is a type-id only when it parses as one. Functional casts su
 are constant expressions, while `F<int(int)>`, `F<U (&)[3]>` and `F<typename T::type(T)>` stay
 types. [#1190](https://github.com/yrashk/ycxx/issues/1190) · [#810](https://github.com/yrashk/ycxx/issues/810)
 
+A class template's base can use a braced conversion in a template argument, including
+`Base<int{4}>` and `Base<typename T::type{4}>`.
+[#1454](https://github.com/yrashk/ycxx/issues/1454)
+
 Fixed reference and single-pointer arguments can deduce through a unique most-derived
 base that matches a named class-template parameter.
 [#1144](https://github.com/yrashk/ycxx/issues/1144)

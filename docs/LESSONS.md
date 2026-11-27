@@ -1090,6 +1090,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     by each thing that can come next (a requires-clause, `noexcept`, `->`, `= 0`, `= delete`, a
     body, another member).
   - Rule: AGENTS.md ("While working"). Learned on #211 and #311.
+- **Bound splitter lookahead at the delimiter it classifies.** Two base-clause prototypes in
+  #1454 searched for a matching closing angle. Repeated failures rescanned the suffix, and a
+  false match skipped a real class body and reached a trailing declarator. For the supported
+  braced casts, the tokens immediately before the brace cannot end a valid base-specifier.
+  Restrict the scan to that brace group and stop at another opening brace. Keep a valid class
+  with a relational base argument and a trailing declarator in the recovery checks. Count token
+  reads on repeated unsuccessful comparisons before extending an ambiguous scan.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address

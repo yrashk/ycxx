@@ -233,8 +233,8 @@ private:
   }
 
   // After the group opening at `j`. When a close is required, return `none` on a mismatch
-  // or at eof.
-  u32 match(u32 j, bool require_close = false) const {
+  // or at eof. A lookahead for a simple braced initializer also stops at a nested brace or semicolon.
+  u32 match(u32 j, bool require_close = false, bool stop_at_nested_brace_or_semi = false) const {
     Tk open = kind(j);
     if (!require_close && open == Tk::l_square && kind(j + 1) == Tk::l_square)
       if (auto end = standard_attribute_end(r_, j, u32(r_.tokens.size()))) return *end;
@@ -242,6 +242,7 @@ private:
     std::vector<Tk> stack{close};
     for (++j; kind(j) != Tk::eof; ++j) {
       Tk k = kind(j);
+      if (stop_at_nested_brace_or_semi && (k == Tk::l_brace || k == Tk::semi)) return none;
       if (!require_close && k == Tk::l_square && kind(j + 1) == Tk::l_square)
         if (auto end = standard_attribute_end(r_, j, u32(r_.tokens.size()))) {
           j = *end - 1;
@@ -282,6 +283,23 @@ private:
       }
     }
     return require_close ? none : j;
+  }
+
+  // A complete base cannot end in either of these prefixes before its class body.
+  // Recognize a direct braced conversion at the start of a template argument list.
+  u32 braced_base_argument_end(u32 open) const {
+    if (open < 3) return none;
+    const Tk type = kind(open - 1);
+    const bool direct = (type == Tk::kw_int || type == Tk::identifier) &&
+                        kind(open - 2) == Tk::less && kind(open - 3) == Tk::identifier;
+    const bool qualified = type == Tk::identifier && open >= 6 && kind(open - 2) == Tk::coloncolon &&
+                           kind(open - 3) == Tk::identifier && kind(open - 4) == Tk::kw_typename &&
+                           kind(open - 5) == Tk::less && kind(open - 6) == Tk::identifier;
+    if (!direct && !qualified) return none;
+    // Stopping at the next opening brace keeps successive lookaheads disjoint.
+    const u32 end = match(open, /*require_close=*/true, /*stop_at_nested_brace_or_semi=*/true);
+    const Tk next = kind(end);
+    return next == Tk::greater || next == Tk::greatergreater ? end : none;
   }
 
   u32 item(u32 parent, const std::string& scope, u32& unnamed_types);
@@ -736,6 +754,12 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       if (initializer || braced_auto_argument) {
         j = match(j);
         continue;
+      }
+      if (base_clause && kind(class_key) != Tk::kw_enum) {
+        if (const u32 end = braced_base_argument_end(j); end != none) {
+          j = end;
+          continue;
+        }
       }
       if (class_key != none && (base_clause || (!params && is_class_head(class_key, j)))) {
         // A class or enum body; declarators may follow it.
