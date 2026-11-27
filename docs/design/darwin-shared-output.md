@@ -18,7 +18,8 @@ the output basename by default. An explicit name may be absolute or contain a
 dyld path token. The program's link query includes the name and the output
 basename used as the signature identifier. The driver accepts source and
 ordinary arm64 object inputs. Runtime archives and other shared inputs are
-outside this leaf contract. The native dylib consumer is tracked in #392.
+outside this leaf contract. The native executable linker accepts
+[explicit leaf dylib inputs](darwin-dylib-input.md) in #392.
 Use `-nostdinc++ -ffreestanding` for a rule provider that includes `rule_api.h`,
 as the bundled rule package does for native compilation. This selects the
 platform C headers and avoids introducing libycxx runtime references.
