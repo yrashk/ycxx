@@ -1,0 +1,67 @@
+name: Linux evidence for role-bound library sources
+
+on:
+  push:
+    branches: [codex/ycxx-1647-evidence-f0de5ff0]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: ubuntu-24.04
+    container: gcc:16
+    timeout-minutes: 35
+    env:
+      PREVIEW: f0de5ff02d4f66c273f7abf492f953d9a967cbe5
+      PREVIEW_TREE: a93445c9fe77838472bc38431462c4df98559ea1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Copy the harness outside the source checkout
+        shell: bash
+        run: cp .github/evidence/role-bound-library-sources/capture.py "$RUNNER_TEMP/ycxx-1647-capture.py"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PREVIEW }}
+          submodules: true
+          persist-credentials: false
+      - name: Verify the exact PR preview
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+          test "$(git rev-parse HEAD)" = "$PREVIEW"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PREVIEW_TREE"
+          mkdir -p "$RUNNER_TEMP/ycxx-1647-evidence"
+          printf 'preview %s\ntree %s\n' "$PREVIEW" "$PREVIEW_TREE" > "$RUNNER_TEMP/ycxx-1647-evidence/git.txt"
+      - name: Provision the preview's CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the exact preview
+        shell: bash
+        run: tools/build -j 4 --no-smoke 2>&1 | tee "$RUNNER_TEMP/ycxx-1647-evidence/build.log"
+      - name: Install local capture tools
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq chromium fonts-dejavu-core file python3-venv >/dev/null
+          python3 -m venv "$RUNNER_TEMP/ycxx-1647-venv"
+          "$RUNNER_TEMP/ycxx-1647-venv/bin/pip" install playwright==1.56.0 pyte==0.8.2 Pillow==12.0.0
+      - name: Run the role-bound sources sample and capture offline evidence
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/ycxx-1647-venv/bin/python" -u "$RUNNER_TEMP/ycxx-1647-capture.py" \
+            "$GITHUB_WORKSPACE/build/bin/ycxx" \
+            "$GITHUB_WORKSPACE/examples/project-build/role-bound-library-sources" \
+            "$RUNNER_TEMP/ycxx-1647-evidence" 2>&1 | tee "$RUNNER_TEMP/ycxx-1647-evidence/capture.log"
+      - name: Upload reports and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-1647-linux-f0de5ff0
+          path: ${{ runner.temp }}/ycxx-1647-evidence/
+          if-no-files-found: error
+          retention-days: 7
