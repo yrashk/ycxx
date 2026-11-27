@@ -675,6 +675,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **A replay skips what the template's analysis measured; it does not re-scan tokens.** On #340,
+  a class template specialization skipped a static data member template's initializer by
+  balancing `()[]{}` up to `;` or `,`, so `P<N, 1>::value` ended at the comma (a review P0). The
+  splitter cannot tell `<` from less-than either.
+  - Do: record the extent in the pattern's analysis (`Program::set_static_initializer`) and
+    `seek` to it in the replay, as lazy static members do.
 - **A point is not an item.** `Program::is_complete(c, item)` and its kin also get points past
   the item table (`end()`, an instantiation point). On #117 a helper that walked `items[k].parent`
   from such a point read past the table, and the `<iostream>` run segfaulted with no diagnostic
