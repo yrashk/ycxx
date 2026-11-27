@@ -16,6 +16,7 @@ import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.ast.target;
+import ycxx.hash;
 
 export namespace ycxx::compile {
 
@@ -262,6 +263,7 @@ struct Options {
   std::vector<std::string> archives;
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
+  std::vector<std::string> dylibs;  // explicit Mach-O dylib inputs in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
 };
 
@@ -410,8 +412,11 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.interpreter && (!linux_link || o.shared))
     return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");
   for (std::string_view path : other_inputs) {
-    if (is_shared_object(path) || o.interpreter || (o.shared && path.ends_with(".dylib")))
+    if (darwin_link && !o.shared && path.ends_with(".dylib")) o.dylibs.emplace_back(path);
+    else if (is_shared_object(path) || o.interpreter || (o.shared && path.ends_with(".dylib")))
       o.libraries.emplace_back(path);
+    else if (path.ends_with(".dylib"))
+      return std::unexpected("Mach-O dylib inputs require an arm64 Darwin executable link");
     else return std::unexpected(std::format("'{}': unknown kind of input file", path));
   }
   if (o.shared) {
@@ -1008,6 +1013,23 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         dynamic->libraries.push_back(std::move(*library));
       }
     }
+    std::vector<pipeline::DarwinDylibInput> darwin_dylibs;
+    if (!bad_input) {
+      for (const std::string& path : opts->dylibs) {
+        auto text = read_disk(in_cwd(r, path));
+        if (!text) {
+          bad_input = std::format("cannot read '{}'", path);
+          break;
+        }
+        const std::span bytes(reinterpret_cast<const std::uint8_t*>(text->data()), text->size());
+        auto library = link::read_dylib(bytes, path);
+        if (!library) {
+          bad_input = std::move(library.error());
+          break;
+        }
+        darwin_dylibs.push_back({path, std::move(*library), fingerprint128(bytes)});
+      }
+    }
     std::optional<pipeline::ArchiveLinkInputs> archive_link;
     if (!archives.empty())
       archive_link.emplace(pipeline::ArchiveLinkInputs{
@@ -1017,7 +1039,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     else key.program = session.program(
         {key.units, std::move(objects), out.filename().native(), std::move(dynamic),
          std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization,
-         std::move(opts->install_name)});
+         std::move(opts->install_name), std::move(darwin_dylibs)});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
