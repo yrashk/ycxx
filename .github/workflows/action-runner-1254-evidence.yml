@@ -1,0 +1,97 @@
+name: "Named artifact and rollback verification for #1254"
+
+on:
+  push:
+    branches: [codex/ycxx-1254-evidence-36318665]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: ubuntu-24.04
+    container: gcc:16
+    timeout-minutes: 25
+    env:
+      REVISION: 363186659ddeeae7ace7ef86443909c1c026c764
+      REVISION_TREE: 936f0bcd73ef6fde9da6f67822c4221ba847cc58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Copy the witness outside the checkout
+        shell: bash
+        run: cp -R .github/evidence/action-runner-1254 "$RUNNER_TEMP/ycxx-1254-harness"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVISION }}
+          submodules: true
+          persist-credentials: false
+      - name: Verify exact main revision
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$REVISION_TREE"
+          mkdir -p "$RUNNER_TEMP/ycxx-1254-evidence"
+          printf 'revision %s\ntree %s\n' "$REVISION" "$REVISION_TREE" > "$RUNNER_TEMP/ycxx-1254-evidence/git.txt"
+      - name: Provision the pinned CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the pinned main revision
+        shell: bash
+        run: tools/build -j 4 --no-tests 2>&1 | tee "$RUNNER_TEMP/ycxx-1254-evidence/build.log"
+      - name: Install local capture tools
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq chromium fonts-dejavu-core python3-venv >/dev/null
+          python3 -m venv "$RUNNER_TEMP/ycxx-1254-venv"
+          "$RUNNER_TEMP/ycxx-1254-venv/bin/pip" install playwright==1.56.0 pyte==0.8.2 Pillow==12.0.0
+      - name: Verify sibling artifacts, rollback, and offline HTML
+        shell: bash
+        run: |
+          python="$RUNNER_TEMP/ycxx-1254-venv/bin/python"
+          harness="$RUNNER_TEMP/ycxx-1254-harness"
+          output="$RUNNER_TEMP/ycxx-1254-evidence"
+          "$python" -B "$harness/witness.py" "$PWD/build/bin/ycxx" "$PWD" "$output" --browser 2>&1 | tee "$output/witness.log"
+      - name: Capture the actual interactive trace
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/ycxx-1254-venv/bin/python" -B "$RUNNER_TEMP/ycxx-1254-harness/interactive.py" \
+            "$PWD/build/bin/ycxx" "$PWD" "$RUNNER_TEMP/ycxx-1254-evidence" 2>&1 | tee "$RUNNER_TEMP/ycxx-1254-evidence/interactive.log"
+      - name: Export screenshot previews
+        shell: bash
+        run: |
+          python3 -B - "$RUNNER_TEMP/ycxx-1254-evidence" <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          interactive = json.loads((root / "interactive-proof.json").read_text())
+          assert interactive["exit_after_source_edit"] == 21 and interactive["exit_after_failure"] == 21
+          assert len(interactive["published_sha256_preserved"]) == 3
+          witness = json.loads((root / "evidence.json").read_text())
+          keys = ("application_exit_statuses", "failed_tool_exit_status", "main_translation_unit_outcomes",
+                  "publication_stamp_preserved", "restore_actions_executed", "independent_sha256",
+                  "restored_receipt_trace_labels", "manifest_dependency_edges")
+          proof = {key: witness[key] for key in keys}
+          proof["trace_counts"] = {phase: len(rows) for phase, rows in witness["action_receipt_events"].items()}
+          proof["interactive"] = interactive
+          print("YCXX_VERIFICATION " + json.dumps(proof, separators=(",", ":")))
+          for name in ("watch-source-edit", "watch-failed-action", "generator-outputs"):
+              png = (root / (name + ".png")).read_bytes()
+              assert png.startswith(b"\x89PNG\r\n\x1a\n")
+              encoded = base64.b64encode(png).decode()
+              for i in range(0, len(encoded), 2048):
+                  print(f"YCXX_IMAGE {name} {i // 2048} {encoded[i:i + 2048]}")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ycxx-1254-runner-36318665
+          path: ${{ runner.temp }}/ycxx-1254-evidence/
+          if-no-files-found: error
+          retention-days: 7
