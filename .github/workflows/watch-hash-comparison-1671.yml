@@ -1,0 +1,155 @@
+name: Arm64 rule compiler hashing comparison
+
+on:
+  push:
+    branches: [codex/ycxx-watch-hash-comparison-1671]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watch-hash-comparison-1671
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CANDIDATE: 6c11f61485c7bbc2045f30ba8ff5dd1f184c819a
+      CANDIDATE_TREE: f3c1e1ebe74b877f3bd87dcf1e9936d549e7f246
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Copy the scratch harness outside the candidate checkout
+        shell: bash
+        run: |
+          EVIDENCE="$RUNNER_TEMP/ycxx-hash-comparison-1671"
+          HARNESS="$RUNNER_TEMP/ycxx-hash-comparison-harness-1671"
+          mkdir -p "$EVIDENCE/watch"
+          cp -R .github/evidence/watch-hash-comparison-1671 "$HARNESS"
+          printf 'EVIDENCE=%s\nHARNESS=%s\n' "$EVIDENCE" "$HARNESS" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify the production checkout and unchanged 25-second deadline
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git -C deps/libycxx rev-parse HEAD)" = "$(git rev-parse "$CANDIDATE:deps/libycxx")"
+          git diff --exit-code "$CANDIDATE" --
+          grep -F 'deadline = time.monotonic() + 25' tests/daemon/project_build_watch.py
+          {
+            git rev-parse HEAD 'HEAD^{tree}'
+            git -C deps/libycxx rev-parse HEAD
+            printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            sw_vers
+            uname -a
+            sysctl hw.ncpu hw.memsize
+            uptime
+            shasum -a 256 tests/daemon/project_build_watch.py
+          } | tee "$EVIDENCE/provenance.txt"
+      - uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
+      - name: Build and check the uninstrumented candidate
+        shell: bash
+        run: |
+          unset YCXX_ROOT
+          test "$(cmake --version | head -n 1)" = 'cmake version 4.4.5'
+          test "$(ctest --version | head -n 1)" = 'ctest version 4.4.5'
+          {
+            xcodebuild -version
+            xcrun --show-sdk-path
+            xcrun --show-sdk-version
+            cmake --version
+            python3 --version
+            printf 'conformance PATH=%s\nSDKROOT=%s\n' "$PATH" "${SDKROOT:-unset}"
+            command -v c++ clang++ g++
+          } | tee -a "$EVIDENCE/provenance.txt"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$EVIDENCE/production-build.log"
+          shasum -a 256 build/bin/ycxx | tee "$EVIDENCE/production-binary.txt"
+          suite='^daemon\.project_(build_watch|capability_header|package_probe|rule_package|staged_witness|toolchain_probe|witness_helpers)$'
+          ctest --test-dir build --show-only=json-v1 -R "$suite" > "$EVIDENCE/validation-roster.json"
+          python3 -B - "$EVIDENCE/validation-roster.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          tests = {test['name'] for test in json.loads(Path(sys.argv[1]).read_text())['tests']}
+          assert tests == {'daemon.project_' + name for name in (
+              'build_watch', 'capability_header', 'package_probe', 'rule_package',
+              'staged_witness', 'toolchain_probe', 'witness_helpers',
+          )}, tests
+          PY
+          set +e
+          ctest --test-dir build --output-on-failure -j 1 -R "$suite" 2>&1 | tee "$EVIDENCE/validation-ctest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" | tee "$EVIDENCE/validation-exit.txt"
+          if test -d build/Testing; then mv build/Testing "$EVIDENCE/validation-Testing"; fi
+          git diff --exit-code "$CANDIDATE" --
+      - name: Apply the scratch measurement overlay and run staged witness
+        shell: bash
+        run: |
+          export YCXX_CI_CMAKE_BIN="$(dirname "$(command -v cmake)")"
+          source deps/libycxx/tools/toolchain/activate.sh
+          unset YCXX_ROOT
+          test "$(ctest --version | head -n 1)" = 'ctest version 4.4.5'
+          test "$(command -v clang++)" = "$YCXX_CLANGXX"
+          {
+            "$YCXX_GXX" --version
+            "$YCXX_CLANGXX" --version
+            printf 'measurement PATH=%s\nSDKROOT=%s\n' "$PATH" "$SDKROOT"
+          } | tee -a "$EVIDENCE/provenance.txt"
+          git apply --check "$HARNESS/measurement.patch"
+          git apply "$HARNESS/measurement.patch"
+          test "$(git diff --name-only)" = src/project_build/plan.cppm
+          git diff --exit-code "$CANDIDATE" -- tests/daemon
+          git diff "$CANDIDATE" -- src/project_build/plan.cppm | tee "$EVIDENCE/instrumentation.diff"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$EVIDENCE/instrumented-build.log"
+          shasum -a 256 build/bin/ycxx | tee "$EVIDENCE/instrumented-binary.txt"
+          export PYTHONPATH="$HARNESS"
+          export YCXX_WATCH_EVIDENCE="$EVIDENCE/watch"
+          export YCXX_COMPILER_HASH_EVIDENCE="$EVIDENCE/compiler-hash.tsv"
+          uptime | tee -a "$EVIDENCE/provenance.txt"
+          set +e
+          ctest --test-dir build --output-on-failure -j 1 -R '^daemon\.project_staged_witness$' 2>&1 | tee "$EVIDENCE/ctest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" | tee "$EVIDENCE/ctest-exit.txt"
+          unset YCXX_WATCH_EVIDENCE
+          if test -d build/Testing; then cp -R build/Testing "$EVIDENCE/Testing"; fi
+          python3 -B - <<'PY' | tee "$EVIDENCE/candidate-files.json"
+          from hashlib import file_digest
+          from pathlib import Path
+          from shutil import which
+          import json
+          records = []
+          for name in ('c++', 'clang++', 'g++'):
+              spelling = which(name)
+              if spelling is None:
+                  continue
+              path = Path(spelling).resolve()
+              with path.open('rb') as binary:
+                  records.append(dict(name=name, spelling=spelling, resolved=str(path),
+                                      bytes=path.stat().st_size, sha256=file_digest(binary, 'sha256').hexdigest()))
+          print(json.dumps(records, indent=2))
+          PY
+          python3 -B "$HARNESS/report.py" "$EVIDENCE" | tee "$EVIDENCE/measurements.log"
+          test "$status" = 0
+          test "$(cat "$EVIDENCE/validation-exit.txt")" = 0
+      - name: Upload exact diff, watch traces and measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-1671-arm64-hash-comparison
+          path: ${{ runner.temp }}/ycxx-hash-comparison-1671/
+          if-no-files-found: error
+          retention-days: 14

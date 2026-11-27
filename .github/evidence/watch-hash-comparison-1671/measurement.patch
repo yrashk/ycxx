@@ -1,0 +1,67 @@
+--- a/src/project_build/plan.cppm
++++ b/src/project_build/plan.cppm
+@@ -726,8 +726,17 @@
+       for (const auto& value : as<List>(*native_args, "a list of native compiler arguments"))
+         prefix.push_back({literal, as<std::string>(value, "a native compiler argument")});
+     }
++    const auto discovery_started = std::chrono::steady_clock::now();
+     const auto compilers = discover_rule_compilers(invoking_directory, toolchain.path,
+                                                   toolchain.executable, selector->compiler);
++    if (const auto* trace = std::getenv("YCXX_COMPILER_HASH_EVIDENCE")) {
++      const auto elapsed = std::chrono::steady_clock::now() - discovery_started;
++      const auto ended = std::chrono::system_clock::now().time_since_epoch();
++      std::ofstream(trace, std::ios::app) << std::format("discovery\t{}\t{}\t{}\t{}\t{}\n",
++          std::chrono::duration_cast<std::chrono::nanoseconds>(ended).count(),
++          path_text(cwd_), target, compilers ? compilers->tools.size() : 0,
++          std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
++    }
+     if (!compilers) fail(tool.location, compilers.error());
+     if (watch_) watch_->paths.insert(compilers->observed_paths.begin(), compilers->observed_paths.end());
+     if (toolchain.path && std::ranges::none_of(plan.action.environment, [](const auto& variable) {
+@@ -858,12 +867,44 @@
+     const auto fp = [&] {
+       if (!compiler_fingerprints) return Hasher{}.bytes(read_file(tool_path, at)).finish();
+       if (const auto cached = compiler_fingerprints->find(canonical); cached != compiler_fingerprints->end()) {
++        const auto opening = std::chrono::steady_clock::now();
+         if (!std::ifstream(tool_path, std::ios::binary)) fail(at, std::format("cannot open '{}'", canonical));
++        if (const auto* trace = std::getenv("YCXX_COMPILER_HASH_EVIDENCE")) {
++          const auto elapsed = std::chrono::steady_clock::now() - opening;
++          const auto ended = std::chrono::system_clock::now().time_since_epoch();
++          std::ofstream(trace, std::ios::app) << std::format("cache-hit\t{}\t{}\t{}\t{}\t{}\t{}\n",
++              std::chrono::duration_cast<std::chrono::nanoseconds>(ended).count(),
++              path_text(cwd_), spelling, canonical,
++              std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count(), tool_digest(cached->second));
++        }
+         return cached->second;
+       }
++      const auto* trace = std::getenv("YCXX_COMPILER_HASH_EVIDENCE");
++      const auto reading = std::chrono::steady_clock::now();
++      auto hashing_time = std::chrono::steady_clock::duration::zero();
++      std::size_t count = 0;
+       Hasher contents;
+-      read_file_blocks(tool_path, at, [&](std::string_view block) { contents.bytes(block); });
+-      return compiler_fingerprints->emplace(canonical, contents.finish()).first->second;
++      read_file_blocks(tool_path, at, [&](std::string_view block) {
++        const auto before = std::chrono::steady_clock::now();
++        contents.bytes(block);
++        if (trace) {
++          hashing_time += std::chrono::steady_clock::now() - before;
++          count += block.size();
++        }
++      });
++      const auto finishing = std::chrono::steady_clock::now();
++      const auto digest = contents.finish();
++      const auto finished = std::chrono::steady_clock::now();
++      if (trace) {
++        hashing_time += finished - finishing;
++        const auto ended = std::chrono::system_clock::now().time_since_epoch();
++        std::ofstream(trace, std::ios::app) << std::format("hash\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
++            std::chrono::duration_cast<std::chrono::nanoseconds>(ended).count(),
++            path_text(cwd_), spelling, canonical, count,
++            std::chrono::duration_cast<std::chrono::nanoseconds>(finished - reading - hashing_time).count(),
++            std::chrono::duration_cast<std::chrono::nanoseconds>(hashing_time).count(), tool_digest(digest));
++      }
++      return compiler_fingerprints->emplace(canonical, digest).first->second;
+     }();
+     if (watch_) watch_->values.push_back(fp);
+     return tools_.emplace(std::string(spelling), ExecutableObservation{std::move(canonical), fp}).first->second;
