@@ -5,7 +5,16 @@ add_test(NAME daemon.auto_var_init
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/auto_var_init.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.compatibility
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
-          "${CMAKE_CXX_COMPILER}")
+          "${CMAKE_CXX_COMPILER}" general)
+add_test(NAME daemon.compatibility_abi
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
+          "${CMAKE_CXX_COMPILER}" abi)
+add_test(NAME daemon.compatibility_constraints
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
+          "${CMAKE_CXX_COMPILER}" constraints)
+# Run the ABI group alongside the comparison and other mode tests on a fresh CI runner.
+set_tests_properties(daemon.compatibility_abi PROPERTIES COST 450)
+set_tests_properties(daemon.compatibility daemon.compatibility_constraints PROPERTIES COST 300)
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
 # Overlap the comparison with other tests even before CTest has timing history (#1230).
 set_tests_properties(daemon.compare PROPERTIES COST 400)
@@ -91,8 +100,46 @@ add_test(NAME daemon.project_module_graph
 add_test(NAME daemon.project_link_inputs
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_link_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
 
+add_test(NAME daemon.project_host_static_archive_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_static_archive_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
+
 add_test(NAME daemon.project_foreign_make
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_foreign_make.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_staged_tool
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_tool.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_native_host_tool
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_native_host_tool.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_cxx_libraries
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_cxx_libraries.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_library_generated_headers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_headers.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_library_generated_sources
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_sources.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_generated_headers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_headers.py $<TARGET_FILE:ycxxc>)
+add_test(NAME daemon.project_host_generated_sources
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_sources.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_native_host_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_native_host_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_producer_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_producer_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_host_planning_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_planning_inputs.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_staged_witness
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_staged_witness.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_witness_helpers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_witness_helpers.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_runtime_assets
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_runtime_assets.py $<TARGET_FILE:ycxxc>)

@@ -383,6 +383,10 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       }
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
         for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
+      if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.wide_bit_width != 0; }))
+        for (const sema::FieldRec& f : fields)
+          shape.wide_bit_fields.push_back({f.wide_bit_width,
+              ast::over_width_bit_field_alignment(world.target, program.compatibility(), f.wide_bit_width)});
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.explicit_alignment != 0; }))
         for (const sema::FieldRec& f : fields) shape.field_alignments.push_back(f.explicit_alignment);
       shape.union_ = record.union_;
@@ -395,6 +399,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       if (record.destructor_noexcept.value_or(false)) shape.nonthrowing_destructor = record.destructor;
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
+      shape.clang_weak_alignment = record.clang_weak_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
       const auto call_rule = unit_source.config.calls();
       const bool gcc_differs = classes.trivial_for_calls(c, ast::CallTriviality::gcc) &&
@@ -415,8 +420,12 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         // A class with virtual functions has no trivial copy or move constructor ([class.copy.ctor]/11).
         // Clang allows callers to reserve result storage for an abstract class with a known layout.
         const bool abstract_result = unit_source.config.compatibility == ast::Compatibility::clang && record.is_abstract();
-        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
-        shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && (!known || !nontrivial) &&
+        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown,
+        // and so does a nontrivial copy or move constructor defaulted in the class (#157).
+        const bool defaulted_nontrivial = std::ranges::any_of(record.members, [&](const sema::MemberDeclRec& m) {
+          return m.is_ctor && m.defaulted == sema::CopyState::nontrivial && m.entity != record.defaulted_default_ctor;
+        });
+        shape.calls_abi_uncertain = !shape.trivial_calls && !gcc_differs && !defaulted_nontrivial && (!known || !nontrivial) &&
                                     !abstract_result && !(target_is_linux && nontrivial_destructor(c));
       }
       // Only a class outside the general dynamic layout lacks a native complete-object type.

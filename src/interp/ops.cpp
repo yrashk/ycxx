@@ -123,7 +123,13 @@ struct Ops {
     const Value arg = m.operand(f, n, 0);
     if (arg.kind != VKind::integer) return m.fail(Reason::ill_formed);
     const ast::Bits128 bits{arg.bits, arg.hi};
-    if (ast::wide::is_zero(bits)) return m.fail(Reason::ctz_zero);
+    if (ast::wide::is_zero(bits)) {
+      if (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc || !has(f, n, ir::Flag::ctz_gcc_zero))
+        return m.fail(Reason::ctz_zero);
+      const M::Shape* type;
+      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), type); fl != Flow::next) return fl;
+      return m.set(f, n, Value::integer(type->width));
+    }
     return m.set(f, n, Value::integer(ast::wide::countr_zero(bits)));
   }
 
@@ -261,6 +267,7 @@ struct Ops {
     const auto at = M::signed_offset(ast::wide::add(bits_of(index), bits_of(by)));
     if (!at || !std::in_range<i64>(bound)) return m.fail(Reason::pointer_bounds);
     const i64 limit = i64(bound);
+    if (p.gcc_nested_end && *at < limit) return m.fail(Reason::pointer_bounds);
     const bool displaced = *at < 0 || *at > limit;
     if (displaced && (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc))
       return m.fail(Reason::pointer_bounds);
@@ -268,6 +275,7 @@ struct Ops {
     // valid element, so store the displacement separately from the path to that array.
     const i64 anchor = single && displaced ? 0 : std::clamp(*at, i64{0}, limit);
     Value r{VKind::object, false, p.ref, 0};
+    r.gcc_nested_end = p.gcc_nested_end;
     if (single) {
       r.bits = base;
       r.past = anchor == 1;
@@ -353,6 +361,11 @@ struct Ops {
               const i64 offset = m.offset_of(p);
               if (offset >= 0 && u64(offset) < m.complete_size(object)) {
                 if (Flow fl = m.address(p.ref, to, offset, p); fl != Flow::next) return fl;
+              } else if (offset >= 0 && u64(offset) == m.complete_size(object) &&
+                         p.bits != 0 && m.paths_[u32(p.bits)].parent != 0) {
+                // The terminal position has no following row. Preserve the equal byte address
+                // and row distance, but reject going back into the preceding row.
+                p.gcc_nested_end = true;
               }
             }
           }
@@ -373,7 +386,8 @@ struct Ops {
     auto storage = ir::Storage(imms(f, n)[1]);
     auto init = ir::Init(imms(f, n)[2]);
     if (storage != ir::Storage::automatic && storage != ir::Storage::temporary) return m.unsupported(n);
-    const auto* record = constant(m) ? m.record_storage(t) : nullptr;
+    // Lay out the record independently of cv. The object below retains it for access checks.
+    const auto* record = constant(m) ? m.record_storage(ast::without_cv(t)) : nullptr;
     const u64 leaves = record ? record->ncells : m.shape(t).leaves;
     if (!m.can_allocate(leaves) || (leaves == 0 && !record)) return m.unsupported(n);
     u32 o = m.make_object(t, M::Origin::automatic, record);
@@ -422,6 +436,7 @@ struct Ops {
       object.usable = !unknown;
       object.unknown_reference = unknown && has(f, n, ir::Flag::unknown_reference);
     }
+    if (has(f, n, ir::Flag::switch_bypassed_lifetime)) m.objects_[pl.obj].switch_bypassed = true;
     m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }
@@ -447,11 +462,14 @@ struct Ops {
         !m.in_->types.is<ast::TClass>(m.in_->canonical(pointer.inner)))
       return m.fail(Reason::ill_formed);
     const Value receiver = m.operand(f, n, 1);
-    if (Flow fl = m.locate(receiver, {}, pointer.inner, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+    const bool gcc = m.config_.compatibility == ast::Compatibility::gcc;
+    const auto use = gcc ? M::Use::gcc_member_receiver : M::Use::lifetime;
+    if (Flow fl = m.locate(receiver, {}, pointer.inner, use, false, place); fl != Flow::next) return fl;
     // [class.cdtor] permits calls during construction and destruction. Check a completed
     // lifetime independently of the fields, which the call need not read.
     const auto& object = m.objects_[place.obj];
-    if (object.record_life == M::Life::after || (place.primary_base && object.primary_base_life == M::Life::after))
+    if (!gcc && (object.record_life == M::Life::after ||
+                 (place.primary_base && object.primary_base_life == M::Life::after)))
       return m.fail(Reason::outside_lifetime);
     return Flow::next;
   }
@@ -563,7 +581,7 @@ struct Ops {
         return m.unsupported(n);
       initializing = receiver;
     }
-    const Flow flow = m.enter(f, n, it->second.body, e, args, adjusted_receiver);
+    const Flow flow = m.enter(f, n, it->second.body, e, args, adjusted_receiver, it->second.lifetime_class);
     if (flow == Flow::called) m.frames_.back().initializing_dynamic_subobject = initializing;
     return flow;
   }
@@ -704,7 +722,11 @@ struct Ops {
     }
     return m.jump(f, n, 0);
   }
-  static Flow consteval_br(M& m, Frame& f, N n) { return m.jump(f, n, constant(m) ? 0 : 1); }
+  static Flow consteval_br(M& m, Frame& f, N n) {
+    // `if consteval` lets the program see that it is constant-evaluated ([stmt.if]/5).
+    if (constant(m) && has(f, n, ir::Flag::observes_context)) m.observed_constant_context_ = true;
+    return m.jump(f, n, constant(m) ? 0 : 1);
+  }
 
   // Returns to the caller, whose call node receives the state, then the values.
   static Flow ret(M& m, Frame& f, N n) {

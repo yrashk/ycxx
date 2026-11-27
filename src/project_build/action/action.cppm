@@ -35,13 +35,20 @@ struct ActionOutput {
 };
 
 struct ActionArg {
-  enum class Kind : std::uint8_t { literal, input, output, target_triple };
+  enum class Kind : std::uint8_t { literal, input, output, target_triple, host_triple };
   Kind kind = Kind::literal;
   std::string value;  // an argument word or the name of a declared input or output
 };
 
+constexpr std::string_view triple_arg_selector(ActionArg::Kind kind) {
+  using enum ActionArg::Kind;
+  if (kind == target_triple) return "target_triple()";
+  if (kind == host_triple) return "host_triple()";
+  return {};
+}
+
 struct Action {
-  std::string tool;  // resolved absolute host executable
+  std::string tool;  // absolute host executable or normalized path to a staged input under inputs/
   std::vector<ActionArg> args;
   std::vector<std::pair<std::string, std::string>> environment;
   std::vector<ActionOutput> outputs;
@@ -98,18 +105,24 @@ struct Command {
 };
 
 std::expected<Command, std::string> prepare(const Action& action, std::span<const ActionInput> inputs) {
-  if (action.tool.empty() || action.tool.contains('\0') || !fs::path(action.tool).is_absolute())
-    return std::unexpected("action tool must be an absolute executable path");
+  if (action.tool.empty() || action.tool.contains('\0'))
+    return std::unexpected("action tool must be an absolute executable path or a declared staged input");
 
+  const Artifact* staged_tool = nullptr;
   std::map<std::string_view, std::string> input_paths;
   std::set<std::string> paths;
   for (const auto& input : inputs) {
     if (!valid_path(input.path)) return std::unexpected("invalid action input path: " + input.path);
     auto path = (fs::path("inputs") / fs::path(input.path).lexically_normal()).native();
+    if (path == action.tool) staged_tool = &input.contents;
     if (input.name.empty() || !input_paths.emplace(input.name, path).second)
       return std::unexpected("empty or duplicate action input name: " + input.name);
     if (!paths.insert(std::move(path)).second)
       return std::unexpected("duplicate action input path: " + input.path);
+  }
+  if (!fs::path(action.tool).is_absolute()) {
+    if (!staged_tool) return std::unexpected("staged action tool is not a declared input: " + action.tool);
+    if (!staged_tool->executable) return std::unexpected("staged action tool is not executable: " + action.tool);
   }
 
   std::map<std::string_view, std::string> output_paths;
@@ -125,7 +138,7 @@ std::expected<Command, std::string> prepare(const Action& action, std::span<cons
 
   Command cmd{{action.tool}, {}};
   for (const auto& arg : action.args) {
-    if (arg.kind == ActionArg::Kind::literal || arg.kind == ActionArg::Kind::target_triple) {
+    if (arg.kind == ActionArg::Kind::literal || !triple_arg_selector(arg.kind).empty()) {
       if (arg.value.contains('\0')) return std::unexpected("action argument contains NUL");
       cmd.args.push_back(arg.value);
       continue;
@@ -225,8 +238,10 @@ std::expected<pid_t, std::string> spawn(const fs::path& cwd, Command& command) {
 
   auto args = argv(command.args);
   auto env = argv(command.environment);
+  // Resolve staged executables independently of when the child changes its working directory.
+  const auto tool = cwd / command.args.front();
   pid_t pid;
-  if (int error = ::posix_spawn(&pid, args.front(), &files.state, &flags.state, args.data(), env.data()))
+  if (int error = ::posix_spawn(&pid, tool.c_str(), &files.state, &flags.state, args.data(), env.data()))
     return std::unexpected(os_error("cannot start action tool " + command.args.front(), error));
   return pid;
 }

@@ -1519,6 +1519,23 @@ public:
     for (auto&& k : keys) cells.push_back(db_->cell_for<Q>(k));
     return {*db_, *frame_, std::move(cells)};
   }
+  // Direct input keys in the fetched parent's dependency order. Inspection records no reads.
+  // Fetch the returned inputs to track their changes when the parent's value stays equal.
+  template <InputKind Input, MemoQuery Parent>
+    requires (!InputKind<Parent>)
+  std::vector<typename Input::Key> observed_input_keys(const typename Parent::Key& k) const {
+    const auto parent = db_->find_cell<Parent>(k);
+    if (!parent || frame_->position_of(*parent) == ~0u || !db_->is_current(*parent))
+      throw std::logic_error("observed_input_keys requires a fetched current parent");
+
+    std::vector<typename Input::Key> keys;
+    const auto kind = kind_slot<Input>();
+    for (const std::uint32_t marked : db_->cells_[*parent].deps) {
+      const CellId dependency = marked & ~group_start;
+      if (db_->cells_[dependency].kind == kind) keys.push_back(db_->key_of<Input>(dependency));
+    }
+    return keys;
+  }
   // A key for `DiagsOf`; records nothing.
   template <MemoQuery Q>
   CellRef cell_of(const typename Q::Key& k) {

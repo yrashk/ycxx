@@ -315,7 +315,8 @@ class Gen {
 
   Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic) {
     ir::Ty r[] = {vty(facts_.pointer_to(type))};
-    std::uint64_t imms[] = {word(ty(type)), std::to_underlying(storage), std::to_underlying(init)};
+    // The allocated object retains its declared cv even when an access changes the glvalue type.
+    std::uint64_t imms[] = {word(in_.canonical(type)), std::to_underlying(storage), std::to_underlying(init)};
     ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms);
     return {b_.result(n, 1), type};
   }
@@ -348,7 +349,7 @@ class Gen {
     std::uint64_t imms[] = {std::to_underlying(e.storage)};
     stateful(ir::Op::dealloc, {}, ops, imms);
   }
-  void begin_bypassed(At at, const Ending& e) {
+  void begin_bypassed(At at, const Ending& e, ir::Flags flags = 0) {
     // Sema has rejected bypassing nonvacuous initialization ([stmt.dcl]/2).
     if (!e.vacuous_local) unsupported(at, "past a declaration");
     if (!planned_bypasses_) {
@@ -356,7 +357,7 @@ class Gen {
       return;
     }
     Place p = begin_object(e.place.type, ir::Init::erroneous);
-    begin_lifetime(p);
+    begin_lifetime(p, flags);
     store(jump_bindings_.at(*e.vacuous_local), p.ptr);
   }
   // Calls `destructor` on the object at `p`; an array's elements, the last first ([class.dtor]).
@@ -1086,7 +1087,7 @@ class Gen {
     Position here(*this, e.offset);
     if (!is<ast::CtorCall>(e)) unsupported(e, "as a constructor target");
     auto c = get<ast::CtorCall>(e);
-    if (c.zero_first && !zeroed) unsupported(e, "value-initializing an object that is not new");
+    if (c.zero_first && !zeroed) zero_fill({object, info(e).type});
     std::vector<ValueId> args{object};
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
@@ -1269,8 +1270,8 @@ class Gen {
     if (is<ast::DefaultInit>(e)) return;
     if (is<ast::ValueInit>(e)) {
       if (zeroed) return;
-      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) unsupported(e, "of an aggregate");
-      store(p, zero(p.type));
+      if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) zero_fill(p);
+      else store(p, zero(p.type));
       return;
     }
     if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) {
@@ -1327,6 +1328,17 @@ class Gen {
     std::uint64_t imms[] = {word(ty(dst.type))};
     stateful(ir::Op::copy, {}, ops, imms);
   }
+  // Zero-initializes ([dcl.init.general]) an object whose storage was not allocated zero: copies
+  // the representation of one that is.
+  void zero_fill(const Place& p) {
+    const Place zeros = begin_object(p.type, ir::Init::zero, ir::Storage::temporary);
+    begin_lifetime(zeros);
+    copy(p, zeros);
+    ValueId ops[] = {zeros.ptr};
+    stateful(ir::Op::obj__end, {}, ops);
+    std::uint64_t imms[] = {std::to_underlying(ir::Storage::temporary)};
+    stateful(ir::Op::dealloc, {}, ops, imms);
+  }
   ValueId zero(ast::QualType t) {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) throw Unsupported{"value-initializing a pointer to member"};
     if (cls(t) == TypeClass::pointer || is_nullptr(t)) return constant(t, facts_.null_constant(t));
@@ -1361,7 +1373,7 @@ class Gen {
     ir::BlockId then_b = new_block(), join = new_block();
     ir::BlockId else_b = s.else_.id != NodeId::none ? new_block() : join;
     ir::SuccRef succs[] = {edge(s.negated ? else_b : then_b), edge(s.negated ? then_b : else_b)};
-    emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
+    emit(ir::Op::consteval_br, {}, {}, {}, ir::bit(ir::Flag::observes_context), succs);
     live_ = false;
     enter(then_b);
     substmt(child(a, s.then_));
@@ -1624,7 +1636,7 @@ class Gen {
       if (live_) br(target);
       enter(b->second);
       for (const auto& scope : entered)
-        for (const Ending& e : scope) begin_bypassed(a, e);
+        for (const Ending& e : scope) begin_bypassed(a, e, ir::bit(ir::Flag::switch_bypassed_lifetime));
       br(target);
     } else if (live_) {
       br(target);
@@ -1904,7 +1916,11 @@ class Gen {
       const auto args = ast_.children(b.args);
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
-        case ast::BuiltinOp::ctz: return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::ctz:
+        case ast::BuiltinOp::ctz_gcc_zero: {
+          const auto flags = b.op == ast::BuiltinOp::ctz_gcc_zero ? ir::bit(ir::Flag::ctz_gcc_zero) : ir::Flags{0};
+          return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))}, {}, flags);
+        }
         case ast::BuiltinOp::nansl: {
           const ir::Ty result[] = {vty(t)};
           const std::uint64_t fn[] = {word(ir::BuiltinFn::nansl)};
@@ -2916,7 +2932,8 @@ class Gen {
   // promoted type); the left is loaded once, converted to it, and the result converted back.
   Place assign(At a) {
     auto s = get<ast::Assign>(a);
-    if (cls(s.info.type) == TypeClass::record) return assign_class(a);
+    // An array is assigned as a whole only in a defaulted or implicit assignment operator's definition.
+    if (cls(s.info.type) == TypeClass::record || s.op == ast::AssignOp::trivial_class_copy) return assign_class(a);
     ValueId v = rvalue(child(a, s.rhs));
     At rhs = child(a, s.rhs);
     Place p = lvalue(child(a, s.lhs));
