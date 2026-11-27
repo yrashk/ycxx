@@ -3788,6 +3788,14 @@ select two named outputs of one ordinary producer. Plans report each
 active role, resolved path, and authored site.
 [Archive roles example](examples/project-build/archive-consumer-bindings/README.md)
 
+A `cpp.library.generated_headers` position can select explicit `host`
+and `target` artifact references (#1637). A host tool and selected app
+can share a library while seeing different versions of an include.
+Each traversal keeps its own first-use include order and generated file
+paths. Plan facts preserve both role-specific sequences and the authored
+sites, including inherited directories whose positions differ.
+[Generated header roles example](examples/project-build/role-bound-library-headers/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.
