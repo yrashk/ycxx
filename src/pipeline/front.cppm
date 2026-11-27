@@ -190,7 +190,7 @@ namespace ycxx::pipeline {
 struct Dynamic {
   EntityId variable;
   QualType type;
-  ast::NodeId init;
+  ast::Child init;  // initializer root and its token offset in the item
   EntityId destructor;
   ast::ItemId item;
 };
@@ -448,7 +448,7 @@ void init_function(sema::World& world, TranslationUnit& tu, std::span<const Dyna
     ast::Builder b(ins);
     std::vector<ast::Child> stmts;
     for (const Dynamic& x : dynamic.subspan(first, last - first)) {
-      ast::Child init{x.init == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init), 0};
+      ast::Child init{x.init.id == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init.id), 0};
       stmts.push_back({b.add(ast::StaticInit{x.variable, x.type, init, x.destructor, atexit, dso}, 0), 0});
     }
     ast::Child root = b.commit(ast::Child{b.add(ast::Compound{b.list(stmts)}, 0), 0});
@@ -1943,14 +1943,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if (!declarators[i] || d.kind != ast::DeclKind::variable || d.entity == EntityId::none ||
           !(d.flags & sema::decl_flag::definition))
         continue;
-      tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
+      const ast::Declarator& declarator = *declarators[i];
+      tu.variables.push_back({d.entity, d.type, declarator.value, at[i]});
       tu.variables.back().coalesced = weak_inline_variable(d);
       // Not constant-initialized: initialized dynamically, in order ([basic.start.dynamic]); a
       // destructor runs at exit ([basic.start.term]).
-      ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
+      ast::Child init = declarator.value == ast::ConstId::none ? declarator.init : ast::Child{};
+      if (init.id != ast::NodeId::none) init.at += at[i]->offset;
       EntityId dtor = world.types.is_reference(d.type) ? EntityId::none : program.classes().destructor_of(d.type);
       if (dtor != EntityId::none && !tu.namespace_destruction) tu.namespace_destruction = at[i];
-      if (init != ast::NodeId::none || dtor != EntityId::none) {
+      if (init.id != ast::NodeId::none || dtor != EntityId::none) {
         dynamic.push_back({d.entity, d.type, init, dtor, program.id(k)});
         tu.variables.back().dynamic = true;  // written at run time: by its initialization or its destructor
       }
@@ -2115,7 +2117,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     // selected by the Program that holds their instantiated definitions.
     std::vector<EntityId> refs;
     for (const auto& initializer : dynamic) {
-      if (initializer.init != ast::NodeId::none) program.references(initializer.init, refs);
+      if (initializer.init.id != ast::NodeId::none) program.references(initializer.init.id, refs);
       if (initializer.destructor != EntityId::none) refs.push_back(initializer.destructor);
     }
     used.insert(refs.begin(), refs.end());
@@ -2244,7 +2246,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       };
       collect(ast::Red(ins.ast, tree, offset));
     };
-    for (const auto& initializer : part.dynamic) scan_casts(initializer.item, initializer.init, 0);
+    for (const auto& initializer : part.dynamic)
+      scan_casts(initializer.item, initializer.init.id, initializer.init.at);
     for (const FunctionDef& f : tu.functions) scan_casts(f.item, f.body.tree, f.body_offset);
   }
   // Written declarations have already supplied their locations and definitions. For the
