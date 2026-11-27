@@ -183,6 +183,7 @@ enum class Diag : std::uint32_t {
   conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
   expected_namespace_name [[=message{Severity::error, "expected a namespace name"}]],
   nested_namespace_inline [[=message{Severity::error, "a nested namespace definition cannot be 'inline'"}]],
+  namespace_reopened_inline [[=message{Severity::error, "namespace '{0:n}' was first defined without 'inline' and cannot be made inline when reopened"}]],
   nested_namespace_attributes [[=message{Severity::error, "a nested namespace definition takes no attributes"}]],
   overload_not_supported [[=message{Severity::error, "overloading '{0:n}' is not supported yet"}]],
   linkage_conflict [[=message{Severity::error, "'{0:n}' was declared with a different language linkage"}]],

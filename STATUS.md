@@ -1919,9 +1919,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
 - **Scopes:** a namespace is named by its path (`a::b`; `(anonymous)` for an unnamed one);
-  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, that
-  namespace with inline and unnamed components dropped, so their members are found in the
-  enclosing one ([namespace.def]/7, [namespace.unnamed]). Namespace entities (`EntityKind::
+  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, every
+  namespace that encloses that one through inline and unnamed namespaces only, so their members
+  are found in the enclosing ones ([namespace.def.general]/7, [namespace.unnamed]). A namespace
+  inside an inline one keeps its own inline set (`std::__y1::ranges::__cpo::begin` is
+  `std::ranges::begin`), an extension without `inline` of an inline namespace is still inline, and
+  making a namespace inline when it is reopened is an error. [#153](https://github.com/yrashk/ycxx/issues/153)
+  Namespace entities (`EntityKind::
   namespace_`) are the scope of their members' entities, so `geo::value` and `::value` are two;
   members of an unnamed namespace have internal linkage.
 - **Lookup:** unqualified lookup ([basic.lookup.unqual]) walks the enclosing namespaces from the

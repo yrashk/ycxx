@@ -702,7 +702,8 @@ written default member initializer are value-initialized.
   own overload set with a using-declaration, including from a dependent base
   (`template<class Fn> struct D : Fn { using Fn::operator(); };`). Its own functions with the same
   parameters hide the base's. [#1150](https://github.com/yrashk/ycxx/issues/1150)
-- namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
+- namespaces, nested (`namespace a::b`) and inline ones, including namespaces inside inline
+  namespaces with inline namespaces of their own, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
   [#953](https://github.com/yrashk/ycxx/issues/953)
