@@ -1,4 +1,4 @@
-name: "Verify and preview the #1611 artifact"
+name: "Recapture the #1611 partial Graph"
 
 on:
   push:
@@ -6,41 +6,54 @@ on:
 
 permissions:
   actions: read
+  contents: read
 
 jobs:
   view:
     if: github.repository == 'yrashk/ycxx'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    container: gcc:16
+    timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: ycxx-1611-graph-d19c1b27
           run-id: 45979970530
           github-token: ${{ github.token }}
           path: evidence
-      - name: Verify the capture and export display previews
+      - name: Install capture tools
         shell: bash
         run: |
+          apt-get update -qq
+          apt-get install -y -qq chromium fonts-dejavu-core python3-venv >/dev/null
+          python3 -m venv "$RUNNER_TEMP/view"
+          "$RUNNER_TEMP/view/bin/pip" install playwright==1.56.0
+      - name: Capture visible nodes before following manifest links
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/view/bin/python" -B .github/evidence/graph-target-identity/capture.py \
+            --reports evidence/reports --out recapture --chromium "$(command -v chromium)"
+          cp evidence/git.txt recapture/git.txt
           python3 -B - <<'PY'
-          import base64
-          import json
+          import base64, json
           from pathlib import Path
-
-          root = Path("evidence")
-          capture = root / "capture"
-          expected_git = "preview d19c1b27791941e8a3554e0d07f3c009760a0bf3\ntree b9d929e0ba3aaac6eee66a25faaee1f856700b54\n"
-          assert (root / "git.txt").read_text() == expected_git
-          status = json.loads((capture / "verification.json").read_text())
-          assert set(status) == {"identity", "partial", "partial_static"}
-          assert all(v["network_requests"] == 0 and not v["browser_errors"] for v in status.values())
-          for name in ("identity", "partial"):
-              assert (capture / (name + ".html")).read_bytes() == (root / "reports" / (name + ".html")).read_bytes()
-          print("YCXX_VERIFICATION " + json.dumps(status, separators=(",", ":")))
-          for name in ("identity-raw", "identity-literal", "partial-component"):
-              png = (capture / (name + ".png")).read_bytes()
-              assert png.startswith(b"\x89PNG\r\n\x1a\n")
-              encoded = base64.b64encode(png).decode()
-              for i in range(0, len(encoded), 2048):
-                  print(f"YCXX_IMAGE {name} {i // 2048} {encoded[i:i + 2048]}")
+          out = Path("recapture")
+          assert (out / "git.txt").read_text() == "preview d19c1b27791941e8a3554e0d07f3c009760a0bf3\ntree b9d929e0ba3aaac6eee66a25faaee1f856700b54\n"
+          proof = json.loads((out / "verification.json").read_text())
+          assert all(v["network_requests"] == 0 and not v["browser_errors"] for v in proof.values())
+          print("YCXX_VERIFICATION " + json.dumps(proof, separators=(",", ":")))
+          png = (out / "partial-component.png").read_bytes()
+          assert png.startswith(b"\x89PNG\r\n\x1a\n")
+          encoded = base64.b64encode(png).decode()
+          for i in range(0, len(encoded), 2048):
+              print(f"YCXX_IMAGE partial-component {i // 2048} {encoded[i:i + 2048]}")
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-1611-graph-d19c1b27-screens
+          path: recapture/
+          if-no-files-found: error
+          retention-days: 7

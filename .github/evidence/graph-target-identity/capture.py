@@ -185,9 +185,23 @@ def partial(page, plan, out):
     tabs = key_select(page, retained)
     row, where = relation_in(page, page.locator("#graph-details li.graph-relation"), edge)
     expect(row.locator('a[href^="#plan-target-"]')).to_have_attribute("href", "#" + resolved)
+    viewport = page.locator("#graph-viewport")
+    viewport.evaluate("(view) => { view.scrollTop = 0; view.scrollLeft = 0; }")
+    page.wait_for_function("""() => {
+        const within = document.querySelector('#graph-viewport').getBoundingClientRect();
+        const visible = [...document.querySelectorAll('.graph-node:not([hidden])')];
+        return visible.length === 3 && visible.every((node) => {
+            const bounds = node.getBoundingClientRect();
+            const x = bounds.left + bounds.width / 2;
+            const y = bounds.top + bounds.height / 2;
+            return x > within.left && x < within.right && y > within.top && y < within.bottom &&
+                   document.elementFromPoint(x, y)?.closest('button') === node;
+        });
+    }""")
+    page.evaluate("document.fonts.ready")
+    page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    page.locator("#target-graph").screenshot(path=out / "partial-component.png", animations="disabled")
     click_location(page, where)
-    page.locator("#target-graph").scroll_into_view_if_needed()
-    page.screenshot(path=out / "partial-component.png")
 
     key_select(page, resolved)
     page.locator("#graph-reset").click()
