@@ -110,7 +110,9 @@ def main():
             # A whitespace edit moves the cast in the same watched namespace initializer.
             namespace_cast = scope / 'namespace-cast.cpp'
             namespace_target = [*target, '-fno-exceptions']
-            for variant, location in (('original', '4:13'), ('moved', '6:5')):
+            rejections = (('original', '4:13'), ('moved', '6:5'),
+                          ('later-original', '4:31'), ('later-moved', '6:5'))
+            for variant, location in rejections:
                 namespace_cast.write_bytes((fixture / f'namespace-cast-{variant}.cpp').read_bytes())
                 for env in (cold, resident):
                     run([*namespace_target, '-fsyntax-only', namespace_cast.name], scope, env)
