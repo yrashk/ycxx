@@ -3566,6 +3566,14 @@ starts at the selected target (#1499). Artifact and value uses link to the
 producer's card and to their sites in `build.ycxx`. Shared producers have
 one card, and incomplete plans show the links resolved so far.
 
+The explorable **Graph** in standalone HTML plans and comparisons opens
+at the selected target and its immediate inputs (#1604). Its buttons expand
+dependencies and dependents, with one node per target. The sidebar links
+the selected target's facts and authored edges to `build.ycxx`. Targets
+with identical visible labels keep distinct details (#1611). Incomplete
+plans also show an entry point and its resolved inputs in each component
+disconnected from the selected target.
+
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
 with their declared rule kinds and source locations. JSON includes the same
