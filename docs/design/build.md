@@ -316,6 +316,23 @@ target's generated include paths and compile identity. Inspection shows
 both resolved include views and links them to the authored header binding.
 [Generated host library header example](../../examples/project-build/host-library-generated-headers/README.md)
 
+### Generated sources in native host library dependencies (#1600)
+
+A host-linked library can put an artifact reference in `sources`
+alongside disk paths and globs. The library's generated main sees the
+output siblings of its producer at their host logical paths. The main's
+directory participates in quoted include lookup through the includer's
+path. Adding the source leaves the library's public include search
+unchanged. Other units can see that producer's directory when a
+generated header binding makes it visible to them.
+
+Both the selected target and the host tool can compile the shared
+library. The planner stages the ordinary source producers before the
+native host compile and reports the two logical source paths against
+one authored binding. Watch and early planning continue to observe the
+real includes used by each generated main.
+[Generated host library source example](../../examples/project-build/host-library-generated-sources/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
