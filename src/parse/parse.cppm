@@ -12005,7 +12005,11 @@ public:
       const auto first_member = p_->member_initializers_.size();
       for (const auto& demand : s_.demands) {
         if (demand.variable_type) continue;
-        if (const auto* instance = p_->instance(demand.spec, q_.at_point.value_or(k_)); instance && instance->failed) {
+        const auto* instance = p_->instance(demand.spec, q_.at_point.value_or(k_));
+        if (!instance) continue;
+        // A cached pattern probe has no native root, but this fold demands its callees be checked.
+        if (p_->pattern_probe_instances_.contains(demand.spec)) p_->type_only_instances_.insert(demand.spec);
+        if (instance->failed) {
           hard.append_range(instance->body.diags);
           failed = true;
         }
