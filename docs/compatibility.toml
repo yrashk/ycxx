@@ -1205,18 +1205,19 @@ evidence = ["tests/daemon/compatibility.py", "GCC 16.2 and Clang 23.1.6 readonly
 
 [[divergence]]
 id = "empty-union-new-list"
-status = "selectable"
-mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
-reference = "[dcl.init.aggr], [expr.new]"
+status = "partial"
+mode_status = { spec = "partial", gcc = "partial", clang = "partial" }
+reference = "[dcl.init.aggr], [expr.new], [class.default.ctor], #1483"
 prior = "Use the ordinary aggregate list initializer for the allocation."
 spec = "Initialize the first variant in the tested named union with a written destructor and a nontrivial first variant."
-gcc = "Diagnose the deleted union default constructor in the tested allocations with a nontrivial variant anywhere in the union and no default member initializer. A written default member initializer keeps the allocation valid."
+gcc = "Diagnose the deleted union default constructor in the tested direct empty allocations with a nontrivial variant and no default member initializer. An ordinary member or base with a proven usable trivial defaulted constructor does not make its enclosing variant nontrivial. A first scalar default member initializer keeps the tested allocation valid."
 clang = "Same as spec."
 spec_observed = "Empty list-initialization through new copy-list-initializes the first variant under the same rules as for an automatic object."
 gcc_observed = "Rejects new U{} because the union default constructor is deleted, even though U u{} is accepted and skips the variant constructor. A default member initializer on either variant makes both forms valid in the probes."
 clang_observed = "Both targets accept new U{} and apply the same variant initialization checks as for an automatic object. The native executable runs the first variant's default constructor."
 probe = 'struct A { A() noexcept {} ~A() noexcept {} }; union U { A first; char other; ~U() {} }; U* create() { return new U{}; }'
-evidence = ["tests/daemon/compatibility.py", "Black-box GCC 16.2 and Clang 23.1.6 -std=c++2c -fsyntax-only probes, plus native Clang and ycxx executable checks"]
+limits = "Nested union variants that fail earlier member declaration checks and initializers on later variants remain in #203. Omitting a union member of another allocated aggregate remains in #1481."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/empty_union/union-written-holder-dtor-member-defaulted.accept.cpp", "tests/daemon/empty_union/union-written-holder-dtor-base-defaulted.accept.cpp"]
 
 [[divergence]]
 id = "class-head-alignment"
@@ -1664,3 +1665,32 @@ clang = "Same as spec."
 gcc_observed = "GCC 16.2 rejects the built-in template spelling and its feature query yields zero."
 clang_observed = "Upstream Clang 23.1.6 exposes the built-in template and accepts the tested alias chain and sequence values on both targets."
 evidence = ["tests/own/templates/t8-make-integer-seq.run.cpp", "tests/own/templates/t8-mangling.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]
+
+[[divergence]]
+id = "gnu-atomic-lock-free-zero-size"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "pending" }
+reference = "GNU __atomic_always_lock_free, #1293, #328"
+prior = "GNU lock-free queries were unsupported."
+spec = "Diagnose size zero in the limited null alignment query."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 returns false for `__atomic_always_lock_free(0, nullptr)` on Linux x86-64."
+clang_observed = "Clang 23.1.6 returns true for `__atomic_always_lock_free(0, nullptr)` on Linux x86-64."
+limits = "Native parity for size zero is outside the first 32-bit slice."
+probe = 'constexpr bool zero_is_lock_free = __atomic_always_lock_free(0, nullptr);'
+evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]
+
+[[divergence]]
+id = "gnu-atomic-compare-exchange-expected-signedness"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "GNU __atomic_compare_exchange_n, #1293, #328"
+prior = "GNU compare-exchange was unsupported."
+spec = "Require the expected pointer to point to the same unqualified integer type as the atomic object's pointer."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 accepts an unsigned int expected pointer for a signed int atomic object's pointer."
+clang_observed = "Clang 23.1.6 rejects the unsigned int expected pointer when the atomic object's pointer is int*."
+probe = 'bool f(int* p, unsigned* expected) { return __atomic_compare_exchange_n(p, expected, 1, false, 0, 0); }'
+evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]

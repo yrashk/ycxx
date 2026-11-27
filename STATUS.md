@@ -826,6 +826,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Naturally aligned 32-bit GNU atomics on Linux x86-64 use stateful L1 and L2 nodes
+  for loads, stores, exchange, compare-exchange, additive and bitwise updates, and
+  thread fences. The target defines the six GNU order macros and supports the null
+  alignment lock-free query for sizes 3 and 4. See [Extensions](docs/EXTENSIONS.md#gnu-atomics-on-linux-x86-64).
+  [#1293](https://github.com/yrashk/ycxx/issues/1293) · [#328](https://github.com/yrashk/ycxx/issues/328)
 - Fixed-prototype definitions and direct calls also transport `float` and `double` constants,
   loads, stores and results. INTEGER registers and XMM registers are assigned independently.
   `unit.linux_scalar_sse` exchanges objects with a native peer, checks exact bits, mixed spills
@@ -2162,6 +2167,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   observe the union and member destructor effects independently.
 - An omitted aggregate member of union type is initialized from an empty braced list,
   so its first variant can run a constructor.
+- In GCC mode, a direct empty union allocation walks ordinary variant members and bases.
+  A proven public trivial defaulted constructor leaves the enclosing variant eligible,
+  while a user-provided default constructor still triggers the deleted-default diagnostic
+  without a default member initializer. Nested union declarations and initializers on
+  later variants remain in #203. [#1483](https://github.com/yrashk/ycxx/issues/1483)
 - A union constructor that selects a nontrivially destructible member can use the hosted
   Linux cleanup subset above or a nonthrowing exception specification. A potentially
   throwing delegating constructor with a nontrivial variant receives a diagnostic.
@@ -3750,6 +3760,38 @@ available for quoted includes. The library's public search directories
 continue to come from its headers and dependencies. Inspection shows
 the host and selected-target source paths with one authored source edge.
 [Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
+
+A `cpp.host_executable` can declare direct `link_inputs` from ordinary
+host-independent action chains (#1616). The native link preserves operand order
+and repeated archives under foreign target selection. Archive-only edits leave
+translation unit inputs unchanged. Equal staged images reuse consuming actions,
+including those for early planning and witnesses. Read-only plans show each
+authored archive reference and its host path.
+[Native host archive example](examples/project-build/host-static-archive-inputs/README.md)
+
+A host-linked `cpp.library` can export ordinary generated archives through
+`public_link_inputs` (#1622). The host link orders direct archives first
+and emits a shared library's operands once in a diamond, retaining explicit
+repeats. Host and selected links use the same bytes for a shared reference
+and report their own effective paths. Archive-only edits reuse the host's
+translation unit inputs.
+[Inherited host archive example](examples/project-build/host-library-static-archive-inputs/README.md)
+
+A `cpp.library.public_link_inputs` position can choose explicit `host`
+and `target` artifact references (#1629). The host tool and selected app
+resolve their own role, including when both links use the host triple.
+They can inherit one library while using distinct archive formats, or
+select two named outputs of one ordinary producer. Plans report each
+active role, resolved path, and authored site.
+[Archive roles example](examples/project-build/archive-consumer-bindings/README.md)
+
+A `cpp.library.generated_headers` position can select explicit `host`
+and `target` artifact references (#1637). A host tool and selected app
+can share a library while seeing different versions of an include.
+Each traversal keeps its own first-use include order and generated file
+paths. Plan facts preserve both role-specific sequences and the authored
+sites, including inherited directories whose positions differ.
+[Generated header roles example](examples/project-build/role-bound-library-headers/README.md)
 
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated

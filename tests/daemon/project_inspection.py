@@ -319,7 +319,7 @@ def check_target_graph_html(document, plan):
     manifest = parsed.section('manifest', 'build.ycxx')
     anchors = {node.attrs.get('id'): node for node in manifest.descendants}
     lines = plan['definition'].splitlines()
-    kinds = {'source', 'include', 'rule', 'output', 'host-target', 'native-target'}
+    kinds = {'source', 'include', 'rule', 'output', 'host-target', 'native-target', 'link-input'}
     wanted = Counter((row['target'], row['kind'], row['value'], row['line'], row['column'])
                      for row in plan['facts'] if row['kind'] in kinds)
     found = Counter()

@@ -119,6 +119,10 @@ the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
+Native host tools can link ordered generated archives through `link_inputs`
+and inherit `public_link_inputs` from libraries, including when the selected
+app targets another platform. A shared library can choose explicit
+`host` and `target` archives or generated headers at the same position.
 Generators and witnesses can track helper executables by path and run
 generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
@@ -669,6 +673,8 @@ written default member initializer are value-initialized.
   initializes its selected member. A nonthrowing constructor works on both targets, and the
   hosted Linux subset above can unwind the construction. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
+  GCC mode accepts empty union allocation when the tested variant's nested member or base
+  has a usable trivial defaulted constructor. [#1483](https://github.com/yrashk/ycxx/issues/1483)
 - namespace-scope union templates support the same rules for concrete nontrivially destructible
   variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
 - classes and unions: data and static members, named data members of unnamed union type,
