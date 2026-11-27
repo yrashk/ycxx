@@ -21,7 +21,7 @@ executable passes its self-check.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-24). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-26). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -40,6 +40,10 @@ select the implemented GCC 16 and upstream Clang 23 behaviors. Use consistent mo
 when exchanging objects that depend on these ABI differences. The
 [compatibility table](docs/compatibility.toml) tracks support for each divergence by mode.
 
+**Embed the query engine or compiler.** Build the components as static or shared libraries
+with CMake. Choose libycxx or GCC's system libstdc++ for the host build. See the component
+APIs and examples in the [embedder guide](docs/EMBEDDING.md).
+
 **Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
 Use `ycxx show --targets` to list the workspace's declared target names and rule
 kinds before a build. Add `--format=html` for a catalog with links to their
@@ -55,8 +59,29 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 `--target=x86_64-pc-linux-gnu` for a separate native output under
 `.ycxx/targets/<triple>/out/app`. Pass the same option to `ycxx show app` to
 inspect that variant.
-Use `target_triple()` in a declared action's `args` to pass the selected triple
-to a host tool that generates a target-specific input.
+Generators and witnesses can use `target_triple()` and `host_triple()` in
+`args` or `environment` to pass canonical triples to the tool.
+A generator can take the executable output of a `cpp.host_executable` rule
+as an input. ycxx builds the tool for the host even when the app targets
+another platform. [Native host tool example](examples/project-build/native-host-tool/README.md)
+Host tools and target apps can share disk-backed C++ libraries through `deps`.
+[Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
+Host executables can declare `generated_headers` from ordinary generators
+that run before the host compile. They can also put an artifact from such a
+generator in `sources`, alongside disk paths and globs.
+[Generated host header example](examples/project-build/host-generated-headers/README.md) ·
+[Generated host source example](examples/project-build/host-generated-sources/README.md)
+Libraries linked into a host tool can also declare generated headers. A
+shared library can use the same declaration in a native scanner and a
+foreign app. [Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
+Host-linked libraries can also mix disk sources and generated C++ artifacts.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
+A typed witness can select the native artifact directly with
+`tool = input("name")` or use an executable generated from it.
+[Native host witness](examples/project-build/native-host-witness/README.md) ·
+[Host producer chain](examples/project-build/host-producer-witness/README.md)
+Rule packages can read generated inventories from the same host tool chains
+through `plan_inputs`. [Host planning input example](examples/project-build/host-planning-inputs/README.md)
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
 Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
@@ -71,6 +96,10 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
 can be compared with the checkout and rendered as a standalone HTML report.
+In the HTML report, **Target dependencies** lets you follow producers and
+open their use sites in `build.ycxx`.
+The **Graph** view lets you expand a target's dependencies and dependents
+and inspect each connection's declaration in the same standalone report.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
@@ -78,17 +107,23 @@ C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
 state or a structured fact to a consumer using `value("target", "field")`.
 The plan's **Value bindings** section links each resolved binding to its
-use in `build.ycxx`.
+use in `build.ycxx`. In a saved plan comparison, **Value binding changes**
+shows which bindings were added or removed.
 The shader examples publish bundles through `runtime_assets`. Each successful
 build switches the target's runtime asset set together and removes obsolete
 owned names. The shader bundle plans its modules from a generated inventory
 using a named `plan_inputs` binding. The reflection
-example also uses a compiled shader's descriptor layout to generate `constexpr`
-C++ bindings. Shader edits with the same layout reuse the native executable.
+example uses a compiled shader's uniform buffers and fixed-size sampler arrays
+to generate `constexpr` C++ bindings. Shader edits with the same layout reuse
+the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
-Generated actions can track the executable bytes of declared helper tools.
+Native host tools can link ordered generated archives through `link_inputs`
+and inherit `public_link_inputs` from libraries, including when the selected
+app targets another platform.
+Generators and witnesses can track helper executables by path and run
+generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
@@ -104,6 +139,10 @@ move operations.
 [#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828) [#218](https://github.com/yrashk/ycxx/issues/218)
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
+Constructors and constructor templates, in classes and class templates, can be `explicit` or
+`explicit(condition)`. A condition that depends on a constructor template's own parameters is
+evaluated after deduction. Constructor templates check their `requires` constraints.
+[#715](https://github.com/yrashk/ycxx/issues/715) [#1398](https://github.com/yrashk/ycxx/issues/1398)
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
@@ -116,6 +155,11 @@ produce the structural argument, as in `Box<detail::make<T, U>()>`.
 An explicitly specialized class can name a flat structural argument directly, as in
 `template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
 selects the same specialization. [#1248](https://github.com/yrashk/ycxx/issues/1248)
+
+Templates can declare `auto`, `decltype(auto)` and `auto...` non-type parameters. Each argument
+keeps its own type, so `v<1>` and `v<sizeof(char)>` are different specializations.
+Constrained `C auto` and `auto*` or `auto&` parameters are not supported yet.
+[#1244](https://github.com/yrashk/ycxx/issues/1244) [#1401](https://github.com/yrashk/ycxx/issues/1401)
 
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
@@ -169,6 +213,11 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+A template argument is a type-id only when it parses as one. Functional casts such as `B<U(3)>`
+(with a typedef-name `U`), `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>` and `B<int((n))>`
+are constant expressions, while `F<int(int)>`, `F<U (&)[3]>` and `F<typename T::type(T)>` stay
+types. [#1190](https://github.com/yrashk/ycxx/issues/1190) · [#810](https://github.com/yrashk/ycxx/issues/810)
+
 Fixed reference and single-pointer arguments can deduce through a unique most-derived
 base that matches a named class-template parameter.
 [#1144](https://github.com/yrashk/ycxx/issues/1144)
@@ -179,6 +228,11 @@ parentheses or braces, including through namespace aliases. [#697](https://githu
 Class templates at namespace scope can delete their copy assignment on its first in-class
 declaration, including with an lvalue or rvalue ref-qualifier. Specializations retain the deleted
 overload. [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+
+Member functions and member templates of class templates can carry `&` and `&&` ref-qualifiers,
+as in `T base() &&` next to `const T& base() const&`. Calls choose the overload by the object's
+value category, and members defined outside the class keep their qualifier.
+[#311](https://github.com/yrashk/ycxx/issues/311)
 
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
@@ -424,10 +478,10 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
 definitions for runtime construction. Ordinary in-class constructor declarations support
 bare `explicit`. Eligible inline constructors link across separate objects on both targets.
-An ordinary class can explicitly default its copy constructor as its first
-declaration and use it for trivial member copies. A non-template empty tag class at namespace
-scope with no bases and an implicit trivial destructor can first declare `T() = default`
-in class and use it to initialize an `inline constexpr` tag object.
+A class or class template can explicitly default its default, copy and move constructors, its
+copy and move assignment operators and its nonvirtual destructor as their first declarations in
+the class. Nontrivial ones run each base's and member's own operation, and work in constant
+evaluation. Local classes and defaulting outside the class are not done.
 [#157](https://github.com/yrashk/ycxx/issues/157) · [#1096](https://github.com/yrashk/ycxx/issues/1096)
 
 An explicit class return can select a written move constructor for an eligible named local
@@ -443,7 +497,9 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 Both targets construct a class prvalue selected by the built-in conditional or comma operator
 directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
 The supported nonthrowing initializers keep temporaries alive through later initializer clauses
-and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
+and destroy them in reverse order. A native by-value return can construct the result directly
+from a nonthrowing built-in conditional, including a checked copy from a same-class lvalue.
+[#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -501,6 +557,11 @@ declaration order and can call a function or read an earlier field through `this
 initializer takes precedence. The same rules apply to ordinary non-inline namespace objects,
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
+An array member of scalars with a constant default member initializer, such as `T w[N] = {};`
+in a class template or an ordinary class, is initialized by `S s;`, `S{}`, `new S` and aggregate
+initialization that omits it, with omitted elements zero. Constant evaluation of an object with
+an array member is not supported yet.
+[#1418](https://github.com/yrashk/ycxx/issues/1418) · [#1140](https://github.com/yrashk/ycxx/issues/1140)
 
 An out-of-line constructor evaluates a default member initializer with the namespace names
 visible where the initializer was written and lookup in the complete enclosing class.
@@ -591,7 +652,7 @@ written default member initializer are value-initialized.
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - implicit lvalue copy assignment for ordinary classes without bases, including class members
   with their own assignment operators. [#360](https://github.com/yrashk/ycxx/issues/360)
-- first-declaration in-class defaulted copy assignment for ordinary classes without bases.
+- copy and move assignment defaulted in the class, for ordinary classes and class templates.
   The written operator keeps its access and assigns supported members in declaration order.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - first-declaration in-class deleted move assignment for unconstrained, nonvirtual members of
@@ -644,6 +705,10 @@ written default member initializer are value-initialized.
   lookup through bases, derived-to-base conversions and base initializers. Unqualified
   injected class names respect base access in ordinary member bodies. Those bodies and ordinary
   in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
+  A class, class template or partial specialization can bring a base's member functions into its
+  own overload set with a using-declaration, including from a dependent base
+  (`template<class Fn> struct D : Fn { using Fn::operator(); };`). Its own functions with the same
+  parameters hide the base's. [#1150](https://github.com/yrashk/ycxx/issues/1150)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
@@ -722,8 +787,8 @@ written default member initializer are value-initialized.
   operands, including dependent operands in supported class-template bases and variable-template
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
-  cv `void` and object pointers (derived-to-base, `void*`, added qualifiers, `bool`), including
-  dependent operands in the same template contexts.
+  cv `void`, object and multi-level pointers (derived-to-base, `void*`, qualification conversions,
+  `bool`) and references to pointers, including dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
@@ -772,6 +837,8 @@ written default member initializer are value-initialized.
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Named `const_cast` changes cv-qualification on matching ordinary pointer types and scalar
+  glvalues while retaining the original address.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
   [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
@@ -836,6 +903,8 @@ written default member initializer are value-initialized.
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
   Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant
   expressions and native code. [#1381](https://github.com/yrashk/ycxx/issues/1381)
+  `__builtin_ctz`, used by libycxx's `<charconv>`, converts its argument to `unsigned int`
+  and counts trailing zero bits as an `int`. [#1479](https://github.com/yrashk/ycxx/issues/1479)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
@@ -981,6 +1050,15 @@ can have virtual functions. Class templates and their specializations support in
 of non-template member classes. An implicit instantiation checks the member definition when a use
 requires the member class to be complete.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
+
+**Local classes.** A class can be defined in a function body, a lambda, or a member function of
+a class template: named or unnamed, with declarators after it, constructors, a destructor that runs
+when the block exits, member functions and default member initializers. Its members use the
+block's types and constants, and the function's access. Each specialization of a templated
+function has its own local class. Block-scope enumerations and local classes with virtual
+functions are not supported yet.
+[#117](https://github.com/yrashk/ycxx/issues/117) · [#1442](https://github.com/yrashk/ycxx/issues/1442) ·
+[#1155](https://github.com/yrashk/ycxx/issues/1155)
 
 **Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
 class templates with external linkage and single public nonvirtual inheritance can declare virtual

@@ -40,8 +40,8 @@ using i64 = std::int64_t;
 enum class Mode : u8 { constant, runtime };
 
 struct EnumRange {
-  i64 minimum;
-  u64 maximum;
+  ast::Bits128 minimum;
+  ast::Bits128 maximum;
 };
 
 struct EnumLayout {
@@ -85,6 +85,7 @@ struct Config {
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
   std::function<std::optional<VirtualTarget>(EntityId, EntityId, EntityId, bool)> virtual_target{};
+  EntityId constant_destructor = EntityId::none;
 };
 
 // An interpreter-only observation of a generated call in the constant-evaluation entry.
@@ -96,20 +97,25 @@ struct ByteCapture {
 // An integer or enumeration is held normalized to its representation type: sign-extended from
 // its width when signed, zero-extended otherwise, to 64 bits; a 128-bit integer has its high half
 // in `hi`, which is 0 for every narrower type. A floating value is its encoding in its type's
-// format, binary32 in the low 32 bits.
+// format, binary32 in the low 32 bits and x87's sign and exponent in the low 16 bits of `hi`.
 enum class VKind : u8 { none, integer, null, object, function, floating };
 struct Value {
   VKind kind = VKind::none;
   bool past = false;  // object: one past the end of a non-array object
+  bool gcc_nested_end = false;  // an erased pointer cast at the end of a complete nested array
   u32 ref = 0;        // object: the object's index; function: the EntityId
   u64 bits = 0;       // integer: the value; object: the access path's id
-  u64 hi = 0;         // integer of 128 bits: the high half
+  u64 hi = 0;         // integer: high bits; object: signed byte displacement beyond the access path
 
+  constexpr Value() = default;
+  constexpr Value(VKind kind, bool past = false, u32 ref = 0, u64 bits = 0, u64 hi = 0)
+      : kind(kind), past(past), ref(ref), bits(bits), hi(hi) {}
   static constexpr Value integer(u64 bits) { return {VKind::integer, false, 0, bits}; }
   static constexpr Value wide(ast::Bits128 v) { return {VKind::integer, false, 0, v.lo, v.hi}; }
-  static constexpr Value floating(u64 bits) { return {VKind::floating, false, 0, bits}; }
+  static constexpr Value floating(u64 bits, u64 hi = 0) { return {VKind::floating, false, 0, bits, hi}; }
   static constexpr Value null() { return {VKind::null}; }
   static constexpr Value function(EntityId e) { return {VKind::function, false, std::to_underlying(e), 0}; }
+  constexpr i64 displacement() const { return i64(hi); }
   constexpr bool operator==(const Value&) const = default;
 };
 
@@ -128,6 +134,7 @@ struct Callee {
   bool is_constexpr = false;           // a constexpr or consteval function ([dcl.constexpr])
   bool unsupported = false;            // defined, but its body has no L1 yet
   EntityId default_constructs = EntityId::none;  // owner of a supported implicit default constructor
+  EntityId lifetime_class = EntityId::none;      // owner of a constructor or destructor
 };
 
 // Where an evaluation was: the function and the node, innermost first. The caller maps each to a
@@ -160,6 +167,7 @@ struct Result {
   bool past = false;
   i64 offset = 0;            // address: in bytes from the start of the object
   std::vector<Result> elements;  // aggregate: record fields or array elements in order
+  bool gcc_nested_end = false;
   bool operator==(const Result&) const = default;
 };
 
@@ -187,6 +195,9 @@ public:
 
   const Failure& failure() const { return failure_; }
   u64 steps() const { return steps_; }
+  // Whether an `if consteval` took its consteval edge: the value holds only where the evaluation
+  // is manifestly constant-evaluated ([expr.const]).
+  bool observed_constant_context() const { return observed_constant_context_; }
   // After `done`: the entry's results, described.
   std::vector<Result> results() const;
 
@@ -198,7 +209,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, callee_read, write, callee_write, lifetime };
+  enum class Use : u8 { read, callee_read, write, callee_write, lifetime, gcc_member_receiver };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -211,6 +222,7 @@ private:
       ConstantRecordField layout;
       u32 cell;
       u32 ncells;
+      const RecordStorage* nested = nullptr;  // record type, or the leaf record of an array
     };
     QualType type;
     u64 size;
@@ -224,6 +236,8 @@ private:
     Origin origin = Origin::automatic;
     bool storage = true;    // false once deallocated
     bool outside = false;   // its lifetime began outside the evaluation
+    bool switch_bypassed = false;  // the switch dispatch bypassed this local's vacuous declaration
+    bool mutable_lifetimes_outside = false;  // [expr.const.init] constant destruction
     bool usable = true;     // readable in constant mode
     bool read_only = false; // a string literal object
     EntityId entity{};
@@ -246,7 +260,7 @@ private:
   };
   struct Shape {
     Kind kind = Kind::other;
-    u32 width = 0;  // integer; floating: 32 (binary32) or 64 (binary64)
+    u32 width = 0;  // integer width or floating representation width
     bool is_signed = false;
     std::optional<ast::Builtin> integer_type;
     std::optional<EnumRange> enum_range;
@@ -256,6 +270,7 @@ private:
     u64 leaves = 0;    // cells of an object of this type
     u64 size = 0;      // bytes ([basic.types.general]); 0 for a function type
     bool is_const = false;
+    bool is_volatile = false;
   };
   struct Frame {
     const ir::Function* fn = nullptr;
@@ -263,6 +278,7 @@ private:
     std::vector<Value> regs;
     u32 node = 0;
     std::optional<Value> initializing_dynamic_subobject{};
+    std::optional<u32> cv_inactive_object{};  // complete receiver under construction or destruction
   };
   // A designated subobject: its object, its cells and its type.
   struct Place {
@@ -271,6 +287,7 @@ private:
     QualType type{};
     bool mutable_field = false;
     bool primary_base = false;
+    const RecordStorage* record = nullptr;
   };
   // An unsequenced group ([intro.execution]): the accesses its operands made so far.
   struct Access {
@@ -303,7 +320,7 @@ private:
   u32 make_object(QualType t, Origin o, const RecordStorage* record = nullptr,
                   const RecordStorage* array_record = nullptr);
   void fill_zero(const Object& object);
-  void fill_zero(QualType t, u32 cell);
+  void fill_zero(QualType t, u32 cell, const RecordStorage* record);
   bool fill_constant(QualType t, u32 cell, ConstId value, const RecordStorage* array_record = nullptr);
   bool fill_record_constant(const RecordStorage& record, u32 cell, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
@@ -321,7 +338,7 @@ private:
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
   Result describe(const Value& v, QualType t);
-  Flow capture_element(QualType t, u32 cell, Result& result);
+  Flow capture_element(QualType t, u32 cell, Result& result, const RecordStorage* record);
   Flow capture_result(u32 object);
   Flow capture_bytes(const Value& length, const Value& data, QualType pointer_type);
 
@@ -332,11 +349,17 @@ private:
     u64 index = 0;  // of the first element
     u64 bound = 0;  // the array's elements; 1 when `single`
     bool single = false;
-    u8 width = 1;
-    u64 remaining() const { return (bound - index) * width; }
+    u64 width = 1;
+    u64 start = 0;   // first byte within the element
+    std::vector<u64> strides{};  // leaf elements per element of each nested array
+    const RecordStorage* record = nullptr;
+    u64 remaining() const { return (bound - index) * width - start; }
   };
-  Flow bytes_at(const Value& p, Bytes& out, bool allow_integer = false);
+  Flow bytes_at(const Value& p, Bytes& out, bool allow_representation);
+  static std::vector<u64> byte_element_path(const Bytes& view, u64 index);
   Flow read_byte(const Bytes& b, u64 i, u8& out);
+  Flow read_scalar_byte(const Place& place, u64 offset, u8& out);
+  Flow read_record_byte(const Value& base, std::vector<u64> path, const RecordStorage& record, u64 offset, u8& out);
   Value byte_pointer(const Bytes& b, u64 i);
   Flow find_byte(const Value& s, const Value& c, u64 n, Value& out);
   Flow compare_bytes(const Value& a, const Value& b, u64 n, Value& out);
@@ -354,12 +377,18 @@ private:
     return Flow::next;
   }
   Flow jump(Frame& f, NodeId n, u32 succ);
+  Flow bind_parameter(Frame& f, ir::ValueId parameter, const Value& value);
   Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args,
-             std::optional<Value> adjusted_receiver = {});
+             std::optional<Value> adjusted_receiver, EntityId lifetime_class);
 
   // Integer helpers: `x` normalized to an integer type of `width` bits.
   static u64 norm(u64 x, u32 width, bool is_signed);
   static bool fits(i64 x, u32 width) { return width >= 64 || (x >= -(i64{1} << (width - 1)) && x < (i64{1} << (width - 1))); }
+  static std::optional<i64> signed_offset(ast::Bits128 bits) {
+    const i64 offset = i64(bits.lo);
+    if (ast::bits_of(offset) != bits) return std::nullopt;
+    return offset;
+  }
   static bool fits_unsigned(u64 x, u32 width) { return width >= 64 || x < (u64{1} << width); }
   // An integer of shape `s` as 128 bits, sign- or zero-extended, and back, reduced modulo 2^width.
   static ast::Bits128 wide_of(const Value& v, const Shape& s) {
@@ -404,6 +433,7 @@ private:
   EntityId wanted_{};
   Event pending_ = Event::done;
   bool failed_ = false;
+  bool observed_constant_context_ = false;
   Failure failure_;
   u64 steps_ = 0;
   u32 since_poll_ = 0;
@@ -426,7 +456,9 @@ const Machine::Shape& Machine::shape(QualType q) {
   u32 key = std::to_underlying(c);
   if (auto it = shapes_.find(key); it != shapes_.end()) return it->second;
   Shape s;
-  s.is_const = (std::to_underlying(ast::cv_of(c)) & 1) != 0;
+  const auto cv = std::to_underlying(ast::cv_of(c));
+  s.is_const = (cv & std::to_underlying(ast::Cv::const_)) != 0;
+  s.is_volatile = (cv & std::to_underlying(ast::Cv::volatile_)) != 0;
   auto b = ast::builtin_of(*in_, c);
   if (config_.enum_layout && in_->types.is<ast::TEnum>(c)) {
     if (auto layout = config_.enum_layout(in_->types.get<ast::TEnum>(c).entity)) {
@@ -442,9 +474,11 @@ const Machine::Shape& Machine::shape(QualType q) {
       s.is_signed = ast::is_signed(*target_, *b);
       s.leaves = 1;
       s.size = (*target_)[*b].size;
-    } else if (ast::is_floating(*b) && ast::computes((*target_)[*b].format)) {
+    } else if (ast::is_floating(*b) && (ast::computes((*target_)[*b].format) ||
+                                      (*target_)[*b].format == ast::FloatFormat::x87_extended)) {
       s.kind = Kind::floating;
-      s.width = (*target_)[*b].format == ast::FloatFormat::binary32 ? 32 : 64;
+      const auto format = (*target_)[*b].format;
+      s.width = format == ast::FloatFormat::binary32 ? 32 : format == ast::FloatFormat::binary64 ? 64 : 80;
       s.leaves = 1;
       s.size = (*target_)[*b].size;
     } else if (*b == ast::Builtin::nullptr_t) {
@@ -466,6 +500,7 @@ const Machine::Shape& Machine::shape(QualType q) {
     // An array's elements carry its cv ([basic.type.qualifier]); `canonical` pushed it there.
     Shape e = shape(a.elem);
     s.is_const = e.is_const;
+    s.is_volatile = e.is_volatile;
     s.leaves = e.leaves * s.bound;
     s.size = e.size * s.bound;
   } else if (in_->types.is<ast::TFunction>(c)) {
@@ -541,9 +576,12 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
   RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base};
   record.fields.reserve(known->fields.size());
   for (const auto& field : known->fields) {
-    const u64 leaves = shape(field.type).leaves;
-    if (leaves == 0 || leaves > std::numeric_limits<u32>::max() - record.ncells) return nullptr;
-    record.fields.push_back({field, record.ncells, u32(leaves)});
+    QualType leaf = field.type;
+    while (shape(leaf).kind == Kind::array) leaf = shape(leaf).inner;
+    const auto* nested = in_->types.is<ast::TClass>(in_->canonical(leaf)) ? record_storage(leaf) : nullptr;
+    const u64 leaves = storage_extent(field.type, nested).cells;
+    if ((leaves == 0 && !nested) || leaves > std::numeric_limits<u32>::max() - record.ncells) return nullptr;
+    record.fields.push_back({field, record.ncells, u32(leaves), nested});
     record.ncells += u32(leaves);
   }
   storage = std::move(record);
@@ -555,7 +593,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
 Machine::StorageExtent Machine::storage_extent(QualType t, const RecordStorage* array_record) {
   const Shape& s = shape(t);
   if (!array_record) return {s.leaves, s.size};
-  if (t == array_record->type) return {array_record->ncells, array_record->size};
+  if (similar(t, array_record->type)) return {array_record->ncells, array_record->size};
   if (s.kind != Kind::array) return {s.leaves, s.size};
   const auto e = storage_extent(s.inner, array_record);
   if (e.bytes == 0 || s.bound > std::numeric_limits<u32>::max() ||
@@ -584,18 +622,18 @@ u32 Machine::make_object(QualType t, Origin o, const RecordStorage* record, cons
 }
 
 void Machine::fill_zero(const Object& object) {
-  if (!object.record) {
-    fill_zero(object.type, object.cell0);
-    return;
-  }
-  for (const auto& field : object.record->fields) fill_zero(field.layout.type, object.cell0 + field.cell);
+  fill_zero(object.type, object.cell0, object.record ? object.record : object.array_record);
 }
 
-void Machine::fill_zero(QualType t, u32 cell) {
+void Machine::fill_zero(QualType t, u32 cell, const RecordStorage* record) {
   const Shape s = shape(t);
   if (s.kind == Kind::array) {
-    u64 n = shape(s.inner).leaves;
-    for (u64 i = 0; i < s.bound; ++i) fill_zero(s.inner, u32(cell + i * n));
+    const u64 n = storage_extent(s.inner, record).cells;
+    for (u64 i = 0; i < s.bound; ++i) fill_zero(s.inner, u32(cell + i * n), record);
+    return;
+  }
+  if (record && similar(t, record->type)) {
+    for (const auto& field : record->fields) fill_zero(field.layout.type, cell + field.cell, field.nested);
     return;
   }
   cells_[cell].fill = Fill::value;
@@ -631,7 +669,7 @@ bool Machine::fill_constant(QualType t, u32 cell, ConstId value, const RecordSto
     if (!vs.is<ast::VNullptr>(value) && (s.is_nullptr || !vs.is<ast::VLvalue>(value))) return false;
     break;
   default:
-    return array_record && t == array_record->type && fill_record_constant(*array_record, cell, value);
+    return array_record && similar(t, array_record->type) && fill_record_constant(*array_record, cell, value);
   }
   cells_[cell] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(value)}};
   return true;
@@ -645,7 +683,7 @@ bool Machine::fill_record_constant(const RecordStorage& record, u32 cell, ConstI
   const auto& fields = record.fields;
   if (!similar(record.type, aggregate.type) || elements.size() != fields.size()) return false;
   for (std::size_t i = 0; i < fields.size(); ++i)
-    if (!fill_constant(fields[i].layout.type, cell + fields[i].cell, elements[i])) return false;
+    if (!fill_constant(fields[i].layout.type, cell + fields[i].cell, elements[i], fields[i].nested)) return false;
   return true;
 }
 
@@ -653,8 +691,10 @@ bool Machine::fill_record_constant(const RecordStorage& record, u32 cell, ConstI
 // of an object; then the place is the object it is past. None when the path does not fit the
 // object's type.
 std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u64> extra, bool& past) {
+  if (p.displacement() != 0) return std::nullopt;
   const Object& ob = objects_[p.ref];
   Place pl{p.ref, ob.cell0, ob.ncells, ob.type};
+  pl.record = ob.record ? ob.record : ob.array_record;
   past = p.past;
   std::vector<PathStep> path = steps_of(u32(p.bits));
   for (u64 w : extra) path.push_back(ir::decode_step(w));
@@ -666,23 +706,26 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
       pl.type = base.type;
       pl.ncells = 0;  // the supported primary base is fieldless
       pl.primary_base = true;
+      pl.record = nullptr;
       continue;
     }
-    const auto* record = i == 0 ? ob.record : ob.array_record;
-    if (path[i].step == ir::Step::field && record && pl.type == record->type) {
+    const auto* record = pl.record;
+    // The layout describes the class independently of cv.
+    if (path[i].step == ir::Step::field && record && similar(pl.type, record->type)) {
       const auto index = path[i].index;
       if (index >= record->fields.size()) return std::nullopt;
       const auto& field = record->fields[index];
       pl.type = field.layout.type;
       pl.cell0 += field.cell;
       pl.ncells = field.ncells;
-      pl.mutable_field = field.layout.mutable_;
+      pl.mutable_field = pl.mutable_field || field.layout.mutable_;
+      pl.record = field.nested;
       continue;
     }
     const Shape& s = shape(pl.type);
     if (path[i].step != ir::Step::elem || s.kind != Kind::array) return std::nullopt;
     if (path[i].index > s.bound) return std::nullopt;
-    const u64 n = storage_extent(s.inner, ob.array_record).cells;
+    const u64 n = storage_extent(s.inner, pl.record).cells;
     pl.type = s.inner;
     if (path[i].index == s.bound) {
       past = true;
@@ -702,16 +745,15 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
                               Place& out) {
   if (p.kind == VKind::null) return fail(Reason::null_access);
   if (p.kind != VKind::object) return fail(p.kind == VKind::function ? Reason::access_type : Reason::ill_formed);
-  if (volatile_ && config_.mode == Mode::constant) return fail(Reason::volatile_access);
   const Object& ob = objects_[p.ref];
-  if (!ob.storage) return fail(Reason::storage_ended);
+  if (!ob.storage && use != Use::gcc_member_receiver) return fail(Reason::storage_ended);
   bool past = false;
   auto pl = resolve(p, extra, past);
   if (!pl) return fail(Reason::past_end_access);
   if (past) return fail(Reason::past_end_access);
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
-  if (use == Use::lifetime) return Flow::next;
+  if (use == Use::lifetime || use == Use::gcc_member_receiver) return Flow::next;
   // Only an ordinary store can initialize storage before the lifetime begins.
   const bool requires_live = use != Use::write;
   const Life record_life = pl->primary_base ? ob.primary_base_life : ob.record_life;
@@ -721,22 +763,33 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     Life life = cells_[c].life;
     if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
   }
+  const Life life = pl->ncells == 0 ? record_life : cells_[pl->cell0].life;
   const bool writing = use == Use::write || use == Use::callee_write;
+  if (ob.mutable_lifetimes_outside && pl->mutable_field)
+    return fail(writing ? Reason::modify_outside : Reason::not_usable);
+  // An ordinary initializing store precedes the lifetime's start.
+  const bool initializing = use == Use::write && life == Life::before;
+  const bool constant = config_.mode == Mode::constant;
+  if (constant && volatile_ && !initializing) return fail(Reason::volatile_access);
+  const auto& object_type = shape(ob.type);
+  // The complete object's cv applies between construction and destruction ([class.ctor], [class.dtor]).
+  const bool cv_inactive = ob.record && (object_type.is_const || object_type.is_volatile) &&
+      std::ranges::any_of(frames_, [object = pl->obj](const Frame& frame) { return frame.cv_inactive_object == object; });
+  const bool subobject = p.bits != 0 || !extra.empty();
+  const auto& place_type = shape(pl->type);
+  const bool actual_volatile = (subobject && place_type.is_volatile) || (object_type.is_volatile && !cv_inactive);
+  if (constant && !initializing && use != Use::callee_write && actual_volatile)
+    return fail(Reason::volatile_object_access);
   if (writing) {
     if (ob.read_only) return fail(Reason::modify_const);
-    // The initializing store comes before `obj.begin`; a const object is not modified after it.
-    const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
-    if (shape(pl->type).is_const && life == Life::alive)
+    const bool actual_const = (subobject && place_type.is_const) ||
+                              (object_type.is_const && !cv_inactive && !pl->mutable_field);
+    if (life == Life::alive && actual_const)
       return fail(Reason::modify_const);
-    if (use == Use::callee_write) {
-      // A cast can remove the destination's volatile qualification but does not change the
-      // object it designates, including a subobject of a volatile object ([dcl.type.cv]).
-      const auto cv = [&](QualType type) { return std::to_underlying(ast::cv_of(in_->canonical(type))); };
-      if ((cv(pl->type) | cv(ob.type)) & std::to_underlying(ast::Cv::volatile_))
-        return fail(Reason::volatile_object_access);
-    }
-    if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
-  } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
+    if (use == Use::callee_write && actual_volatile) return fail(Reason::volatile_object_access);
+    if (constant && (ob.outside || (ob.switch_bypassed && config_.compatibility == ast::Compatibility::gcc)))
+      return fail(Reason::modify_outside);
+  } else if (constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
     return fail(Reason::not_usable, 0, global);
   }
@@ -778,8 +831,13 @@ Machine::Flow Machine::read_cell(QualType type, u32 cell, Value& out) {
 
 Machine::Flow Machine::copy_record(const Place& dst, const Place& src) {
   const Object& source = objects_[src.obj];
-  if (config_.mode == Mode::constant && source.outside &&
-      std::ranges::any_of(source.record->fields, [](const auto& field) { return field.layout.mutable_; }))
+  auto contains_mutable = [&](this auto&& visit, const RecordStorage& record) -> bool {
+    return std::ranges::any_of(record.fields, [&](const auto& field) {
+      return field.layout.mutable_ || (field.nested && visit(*field.nested));
+    });
+  };
+  if (config_.mode == Mode::constant && (source.outside || source.mutable_lifetimes_outside) &&
+      src.record && contains_mutable(*src.record))
     return fail(Reason::not_usable);
   // The source and destination identify complete records. Copy the scalar values and their
   // pointer provenance. The destination's lifetime is controlled by its caller's obj.begin.
@@ -846,7 +904,8 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   }
   if (vs.is<ast::VFloat>(c)) {
     if (s.kind != Kind::floating) return fail(Reason::ill_formed);
-    out = Value::floating(vs.get<ast::VFloat>(c).bits.lo);
+    const auto bits = vs.get<ast::VFloat>(c).bits;
+    out = Value::floating(bits.lo, bits.hi);
     return Flow::next;
   }
   if (vs.is<ast::VNullptr>(c)) {
@@ -872,8 +931,11 @@ Machine::Flow Machine::constant(ConstId c, QualType type, Value& out) {
   } else {
     return fail(Reason::unsupported_constant);
   }
-  if (!indices.empty() || ast::is_void(*in_, s.inner))
-    return address_from_path(o, s.inner, indices, l.offset, out);
+  if (!indices.empty() || ast::is_void(*in_, s.inner)) {
+    const Flow flow = address_from_path(o, s.inner, indices, l.offset, out);
+    if (flow == Flow::next) out.gcc_nested_end = l.gcc_nested_end;
+    return flow;
+  }
   return address(o, s.inner, l.offset, out);
 }
 
@@ -885,15 +947,21 @@ Machine::Flow Machine::address_from_path(u32 obj, QualType pointee, std::span<co
   for (u32 index : indices) pointer.bits = child(u32(pointer.bits), {ir::Step::elem, index});
   bool past = false;
   auto place = resolve(pointer, {}, past);
-  if (!place || offset < 0 || (!ast::is_void(*in_, pointee) && !similar(place->type, pointee)))
+  if (!place || (!ast::is_void(*in_, pointee) && !similar(place->type, pointee)))
     return fail(Reason::unsupported_constant);
-  i64 start = offset_of(pointer);
+  const i64 start = offset_of(pointer);
   if (offset != start) {
     const Object& object = objects_[obj];
     const u64 size = indices.empty() ? complete_size(object) : storage_extent(place->type, object.array_record).bytes;
-    if (past || offset < start || u64(offset - start) != size)
+    const auto relative = signed_offset(ast::wide::sub(ast::bits_of(offset), ast::bits_of(start)));
+    if (!relative) return fail(Reason::unsupported_constant);
+    if (!past && *relative >= 0 && u64(*relative) == size) {
+      pointer.past = true;
+    } else if (config_.compatibility == ast::Compatibility::gcc) {
+      pointer.hi = u64(*relative);
+    } else {
       return fail(Reason::unsupported_constant);
-    pointer.past = true;
+    }
   }
   out = pointer;
   return Flow::next;
@@ -904,6 +972,8 @@ Machine::Flow Machine::address_from_path(u32 obj, QualType pointee, std::span<co
 Machine::Flow Machine::address(u32 obj, QualType pointee, i64 offset, Value& out) {
   const Object& object = objects_[obj];
   QualType cur = object.type;
+  if (config_.compatibility == ast::Compatibility::gcc && similar(cur, pointee))
+    return address_from_path(obj, pointee, {}, offset, out);
   u32 path = 0;
   if (offset < 0) return fail(Reason::unsupported_constant);
   u64 off = u64(offset);
@@ -1258,6 +1328,11 @@ Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
   if (Flow fl = float_shape(result_type(f, n), s); fl != Flow::next) return fl;
   Value a = operand(f, n, 0), b = nd.op == Op::fneg || nd.op == Op::fabs ? a : operand(f, n, 1);
   if (a.kind != VKind::floating || b.kind != VKind::floating) return fail(Reason::ill_formed);
+  if (s->width == 80) {
+    if (nd.op == Op::fneg) return set(f, n, Value::floating(a.bits, a.hi ^ 0x8000));
+    if (nd.op == Op::fabs) return set(f, n, Value::floating(a.bits, a.hi & 0x7FFF));
+    return unsupported(n);
+  }
   auto compute = [&](auto x, auto y) -> Flow {
     using T = decltype(x);
     T r{};
@@ -1288,6 +1363,7 @@ Machine::Flow Machine::float_arith(Frame& f, NodeId n) {
 Machine::Flow Machine::float_compare(Frame& f, NodeId n) {
   const Shape* s;
   if (Flow fl = float_shape(type_of(f, f.fn->operands_of(n)[0]), s); fl != Flow::next) return fl;
+  if (s->width > 64) return unsupported(n);
   Value a = operand(f, n, 0), b = operand(f, n, 1);
   if (a.kind != VKind::floating || b.kind != VKind::floating) return fail(Reason::ill_formed);
   auto compare = [&](auto x, auto y) -> Flow {
@@ -1315,6 +1391,8 @@ Machine::Flow Machine::float_convert(Frame& f, NodeId n) {
   const ir::Node& nd = f.fn->node(n);
   const Shape& to = shape(result_type(f, n));
   const Shape& from = shape(type_of(f, f.fn->operands_of(n)[0]));
+  if ((to.kind == Kind::floating && to.width > 64) || (from.kind == Kind::floating && from.width > 64))
+    return unsupported(n);
   Value a = operand(f, n, 0);
   switch (nd.op) {
   case Op::fconv: {
@@ -1359,6 +1437,12 @@ Machine::Flow Machine::float_convert(Frame& f, NodeId n) {
 Machine::Flow Machine::pointer_index(const Value& p, QualType elem, u32& base_path, i64& index, u64& bound,
                                      bool& single) {
   if (p.kind != VKind::object) return fail(p.kind == VKind::null ? Reason::pointer_bounds : Reason::ill_formed);
+  i64 delta = 0;
+  if (const i64 bytes = p.displacement()) {
+    const auto size = storage_extent(elem, objects_[p.ref].array_record).bytes;
+    if (size == 0 || !std::in_range<i64>(size) || bytes % i64(size) != 0) return fail(Reason::pointer_type);
+    delta = bytes / i64(size);
+  }
   u32 path = u32(p.bits);
   if (path != 0 && paths_[path].step.step == ir::Step::elem && !p.past) {
     u32 parent = paths_[path].parent;
@@ -1369,7 +1453,9 @@ Machine::Flow Machine::pointer_index(const Value& p, QualType elem, u32& base_pa
     const Shape& s = shape(pl->type);
     if (!similar(s.inner, elem)) return fail(Reason::pointer_type);
     base_path = parent;
-    index = i64(paths_[path].step.index);
+    const auto displaced = signed_offset(ast::wide::add(ast::bits_of(delta), ast::bits_of(u64(paths_[path].step.index))));
+    if (!displaced) return fail(Reason::pointer_bounds);
+    index = *displaced;
     bound = s.bound;
     single = false;
     return Flow::next;
@@ -1377,11 +1463,12 @@ Machine::Flow Machine::pointer_index(const Value& p, QualType elem, u32& base_pa
   bool past = false;
   Value whole = p;
   whole.past = false;
+  whole.hi = 0;
   auto pl = resolve(whole, {}, past);
   if (!pl || past) return fail(Reason::ill_formed);
   if (!similar(pl->type, elem)) return fail(Reason::pointer_type);
   base_path = path;
-  index = p.past ? 1 : 0;
+  index = p.past ? 1 : delta;
   bound = 1;
   single = true;
   return Flow::next;
@@ -1427,32 +1514,81 @@ Machine::Flow Machine::capture_bytes(const Value& length, const Value& data, Qua
 }
 
 // [basic.fundamental]: the narrow character types, whose objects' values are their bytes.
-Machine::Flow Machine::bytes_at(const Value& p, Bytes& out, bool allow_integer) {
+Machine::Flow Machine::bytes_at(const Value& p, Bytes& out, bool allow_representation) {
   if (p.kind == VKind::null) return fail(Reason::null_access);
   if (p.kind != VKind::object) return fail(Reason::ill_formed);
   const u32 path = u32(p.bits);
+  const Object& object = objects_[p.ref];
   bool past = false;
-  if (path != 0 && paths_[path].step.step == ir::Step::elem && !p.past) {
+  const RecordStorage* record = nullptr;
+  const auto whole_array = allow_representation ? resolve(p, {}, past) : std::nullopt;
+  if (whole_array && !past && shape(whole_array->type).kind == Kind::array) {
+    out = {p, whole_array->type, 0, 1, false};
+    record = whole_array->record;
+    while (shape(out.type).kind == Kind::array) {
+      const u64 bound = shape(out.type).bound;
+      if (!bound || out.bound > std::numeric_limits<u64>::max() / bound) return fail(Reason::byte_type);
+      out.bound *= bound;
+      out.type = shape(out.type).inner;
+      out.strides.push_back(bound);
+    }
+    u64 stride = 1;
+    for (u64& bound : out.strides | std::views::reverse) {
+      const u64 next = stride * bound;
+      bound = stride;
+      stride = next;
+    }
+  } else if (path != 0 && paths_[path].step.step == ir::Step::elem && !p.past) {
     const Value array{VKind::object, false, p.ref, paths_[path].parent};
     const auto place = resolve(array, {}, past);
     if (!place || past || shape(place->type).kind != Kind::array) return fail(Reason::ill_formed);
     out = {array, shape(place->type).inner, paths_[path].step.index, shape(place->type).bound, false};
+    record = place->record;
   } else {
     Value whole = p;
     whole.past = false;
+    whole.hi = 0;
     const auto place = resolve(whole, {}, past);
     if (!place || past) return fail(Reason::ill_formed);
     out = {whole, place->type, p.past ? 1u : 0u, 1, true};
+    record = place->record;
   }
   using enum ast::Builtin;
   const auto element = ast::builtin_of(*in_, out.type);
-  if (element && (*element == char_ || *element == signed_char || *element == unsigned_char || *element == char8_t_))
-    return Flow::next;
-  if (allow_integer && element && ast::is_integral(*element) && target_->little_endian_unsigned_integers) {
-    out.width = (*target_)[*element].size;
-    if (out.width && out.width <= 16) return Flow::next;
+  const bool character = element && (*element == char_ || *element == signed_char || *element == unsigned_char ||
+                                     *element == char8_t_);
+  if (!character) {
+    if (!allow_representation || !target_->little_endian_unsigned_integers) return fail(Reason::byte_type);
+    const auto& scalar = shape(out.type);
+    if (record && similar(record->type, out.type) && object.origin == Origin::global) {
+      out.record = record;
+      out.width = record->size;
+    } else if (scalar.kind == Kind::integer || scalar.kind == Kind::floating ||
+               (scalar.kind == Kind::pointer && object.origin == Origin::global)) {
+      out.width = scalar.size;
+    } else {
+      return fail(Reason::byte_type);
+    }
   }
-  return fail(Reason::byte_type);
+  if (!out.width || out.bound > std::numeric_limits<u64>::max() / out.width) return fail(Reason::byte_type);
+  const i64 displacement = p.displacement();
+  if (displacement < 0 || u64(displacement) >= out.width || (displacement != 0 && out.index == out.bound))
+    return fail(Reason::past_end_access);
+  // GCC retains the enclosing record's address and an interior offset from memchr, but
+  // a subsequent byte builtin cannot use that offset as the start of a new record read.
+  if (out.record && displacement) return fail(Reason::byte_type);
+  out.start = u64(displacement);
+  return Flow::next;
+}
+
+std::vector<u64> Machine::byte_element_path(const Bytes& view, u64 index) {
+  std::vector<u64> steps;
+  steps.reserve(view.strides.size());
+  for (u64 stride : view.strides) {
+    steps.push_back(ir::encode({ir::Step::elem, u32(index / stride)}));
+    index %= stride;
+  }
+  return steps;
 }
 
 // Byte `i` of `b`, as unsigned char, read under [expr.const]'s rules. A builtin's reads are
@@ -1462,23 +1598,68 @@ Machine::Flow Machine::read_byte(const Bytes& b, u64 i, u8& out) {
   if (steps_ >= config_.step_limit) return fail(Reason::step_limit, config_.step_limit);
   ++steps_;
   if (since_poll_ < std::numeric_limits<u32>::max()) ++since_poll_;
-  const u64 step = ir::encode({ir::Step::elem, u32(b.index + i / b.width)});
+  const u64 byte = b.start + i;
+  const u64 index = b.index + byte / b.width;
+  const u64 step = ir::encode({ir::Step::elem, u32(index)});
+  const auto nested = byte_element_path(b, index);
+  const auto path = nested.empty() ? std::span(&step, b.single ? 0 : 1) : std::span<const u64>(nested);
+  const u64 offset = byte % b.width;
+  if (b.record) return read_record_byte(b.base, std::vector<u64>(path.begin(), path.end()), *b.record, offset, out);
   Place place;
-  if (Flow f = locate(b.base, std::span(&step, b.single ? 0 : 1), b.type, Use::callee_read, false, place);
+  if (Flow f = locate(b.base, path, b.type, Use::callee_read, false, place);
       f != Flow::next)
     return f;
-  if (place.ncells != 1) return fail(Reason::ill_formed);
+  return read_scalar_byte(place, offset, out);
+}
+
+Machine::Flow Machine::read_scalar_byte(const Place& place, u64 offset, u8& out) {
+  if (place.ncells != 1 || offset >= 16) return fail(Reason::ill_formed);
   Value value;
-  if (Flow f = read_cell(b.type, place.cell0, value); f != Flow::next) return f;
-  if (value.kind != VKind::integer) return fail(Reason::ill_formed);
-  const u64 offset = i % b.width;
+  if (Flow f = read_cell(place.type, place.cell0, value); f != Flow::next) return f;
+  if (value.kind == VKind::null) {
+    out = 0;  // Both targets represent a null ordinary pointer with all zero bits.
+    return Flow::next;
+  }
+  if (value.kind != VKind::integer && value.kind != VKind::floating) return fail(Reason::byte_type);
   out = u8((offset < 8 ? value.bits : value.hi) >> (8 * (offset % 8)));
   return Flow::next;
 }
 
+Machine::Flow Machine::read_record_byte(const Value& base, std::vector<u64> path, const RecordStorage& record,
+                                       u64 offset, u8& out) {
+  for (u32 i = 0; i < record.fields.size(); ++i) {
+    const auto& entry = record.fields[i];
+    const auto& field = entry.layout;
+    if (offset < field.offset || offset - field.offset >= storage_extent(field.type, entry.nested).bytes) continue;
+    offset -= field.offset;
+    path.push_back(ir::encode({ir::Step::field, i}));
+    QualType type = field.type;
+    while (shape(type).kind == Kind::array) {
+      type = shape(type).inner;
+      const u64 stride = storage_extent(type, entry.nested).bytes;
+      if (!stride) return fail(Reason::byte_type);
+      path.push_back(ir::encode({ir::Step::elem, u32(offset / stride)}));
+      offset %= stride;
+    }
+    if (entry.nested) return read_record_byte(base, std::move(path), *entry.nested, offset, out);
+    Place place;
+    if (Flow f = locate(base, path, type, Use::callee_read, false, place); f != Flow::next) return f;
+    return read_scalar_byte(place, offset, out);
+  }
+  Place place;
+  if (Flow f = locate(base, path, record.type, Use::callee_read, false, place); f != Flow::next) return f;
+  out = 0;  // GCC's constant representation of the supported global aggregates zeros padding.
+  return Flow::next;
+}
+
 Value Machine::byte_pointer(const Bytes& b, u64 i) {
-  if (b.single) return Value{VKind::object, b.index + i == 1, b.base.ref, b.base.bits};
-  return Value{VKind::object, false, b.base.ref, child(u32(b.base.bits), {ir::Step::elem, u32(b.index + i)})};
+  const u64 byte = b.start + i;
+  const u64 index = b.index + byte / b.width;
+  const u32 base = u32(b.base.bits);
+  u32 path = base;
+  if (!b.strides.empty()) path = extend(base, byte_element_path(b, index));
+  else if (!b.single) path = child(base, {ir::Step::elem, u32(index)});
+  return Value{VKind::object, false, b.base.ref, path, byte % b.width};
 }
 
 // C's memchr: the bytes are read in order, and the search stops at the first match.
@@ -1487,40 +1668,14 @@ Machine::Flow Machine::find_byte(const Value& s, const Value& c, u64 n, Value& o
   out = Value::null();
   if (n == 0) return Flow::next;
   Bytes bytes;
-  if (Flow f = bytes_at(s, bytes); f != Flow::next) return f;
   const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
+  if (Flow f = bytes_at(s, bytes, read_full_range); f != Flow::next) return f;
   if (read_full_range && n > bytes.remaining()) return fail(Reason::past_end_access);
   for (u64 i = 0; i < n; ++i) {
     u8 byte = 0;
     if (Flow f = read_byte(bytes, i, byte); f != Flow::next) return f;
     if (out.kind == VKind::null && byte == u8(c.bits)) {
       out = byte_pointer(bytes, i);
-      if (!read_full_range) return Flow::next;
-    }
-  }
-  return Flow::next;
-}
-
-// C's memcmp: both objects must hold the n bytes, which C's memcmp may read in any order. The
-// result is the sign of the first difference.
-Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Value& out) {
-  out = Value::integer(0);
-  const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
-  // GCC folds identical addresses before requiring either range to be readable.
-  if (n == 0 || (read_full_range && (a.kind == VKind::object || a.kind == VKind::null) && a == b))
-    return Flow::next;
-  Bytes left, right;
-  if (Flow f = bytes_at(a, left, read_full_range); f != Flow::next) return f;
-  if (Flow f = bytes_at(b, right, read_full_range); f != Flow::next) return f;
-  if (config_.compatibility != ast::Compatibility::clang &&
-      (n > left.remaining() || n > right.remaining()))
-    return fail(Reason::past_end_access);
-  for (u64 i = 0; i < n; ++i) {
-    u8 x = 0, y = 0;
-    if (Flow f = read_byte(left, i, x); f != Flow::next) return f;
-    if (Flow f = read_byte(right, i, y); f != Flow::next) return f;
-    if (out.bits == 0 && x != y) {
-      out = Value::integer(x < y ? u64(-1) : 1);
       if (!read_full_range) return Flow::next;
     }
   }
@@ -1535,26 +1690,27 @@ u64 Machine::complete_size(const Object& object) {
 // relative to the object.
 i64 Machine::offset_of(const Value& p) {
   const Object& object = objects_[p.ref];
+  const RecordStorage* record = object.record ? object.record : object.array_record;
   QualType cur = object.type;
   i64 off = 0;
   for (PathStep st : steps_of(u32(p.bits))) {
     if (st.step == ir::Step::base) {
       const auto& base = *object.record->primary_base;
-      return i64(base.offset + (p.past ? base.size : 0));
+      return i64(base.offset + (p.past ? base.size : 0)) + p.displacement();
     }
     if (st.step == ir::Step::field) {
-      const auto* record = object.array_record ? object.array_record : object.record;
       const auto& field = record->fields[st.index];
       off += i64(field.layout.offset);
       cur = field.layout.type;
+      record = field.nested;
       continue;
     }
     const Shape& s = shape(cur);
-    off += i64(st.index * storage_extent(s.inner, object.array_record).bytes);
+    off += i64(st.index * storage_extent(s.inner, record).bytes);
     cur = s.inner;
   }
-  if (p.past) off += i64(p.bits == 0 ? complete_size(object) : storage_extent(cur, object.array_record).bytes);
-  return off;
+  if (p.past) off += i64(p.bits == 0 ? complete_size(object) : storage_extent(cur, record).bytes);
+  return off + p.displacement();
 }
 
 // Whether two pointers into string literal objects could point to the same offset of one object
@@ -1563,12 +1719,16 @@ i64 Machine::offset_of(const Value& p) {
 bool Machine::may_overlap(const Value& a, const Value& b) {
   const Object& oa = objects_[a.ref];
   const Object& ob = objects_[b.ref];
-  u64 es = shape(shape(oa.type).inner).size;
+  const u64 es = shape(shape(oa.type).inner).size;
   if (es == 0 || shape(shape(ob.type).inner).size != es) return false;
-  i64 ia = offset_of(a) / i64(es), ib = offset_of(b) / i64(es);
-  i64 na = oa.ncells, nb = ob.ncells;
-  for (i64 d = -std::min(ia, ib); ia + d < na && ib + d < nb; ++d)
-    if (cells_[oa.cell0 + u32(ia + d)].v.bits != cells_[ob.cell0 + u32(ib + d)].v.bits) return false;
+  const i64 ia = offset_of(a) / i64(es), ib = offset_of(b) / i64(es);
+  // Align the pointer positions. The nonnegative difference can span all 64 unsigned bits.
+  const u64 start_a = ia > ib ? u64(ia) - u64(ib) : 0;
+  const u64 start_b = ib > ia ? u64(ib) - u64(ia) : 0;
+  if (start_a >= oa.ncells || start_b >= ob.ncells) return true;  // no shared code units
+  const u64 count = std::min(oa.ncells - start_a, ob.ncells - start_b);
+  for (u64 i = 0; i < count; ++i)
+    if (cells_[oa.cell0 + start_a + i].v.bits != cells_[ob.cell0 + start_b + i].v.bits) return false;
   return true;
 }
 
@@ -1643,15 +1803,61 @@ Machine::Flow Machine::jump(Frame& f, NodeId n, u32 succ) {
   return Flow::jumped;
 }
 
+Machine::Flow Machine::bind_parameter(Frame& f, ir::ValueId parameter, const Value& value) {
+  const ir::Value& slot = f.fn->value(parameter);
+  if (slot.index > 0 && slot.index <= 32 && (f.fn->byval_params & (u32{1} << (slot.index - 1)))) {
+    if (slot.index == f.fn->result_param || slot.type.kind != ir::TyKind::cxx ||
+        value.kind != VKind::object || value.past || value.bits != 0 || value.displacement() != 0 ||
+        value.ref >= objects_.size())
+      return fail(Reason::ill_formed);
+    const Shape& address = shape(slot.type.type);
+    if (address.kind != Kind::pointer || address.is_nullptr) return fail(Reason::ill_formed);
+    const QualType type = in_->canonical(address.inner);
+    Object& object = objects_[value.ref];
+    if (object.origin != Origin::automatic || object.outside || !object.record)
+      return fail(Reason::ill_formed);
+    if (!object.storage) return fail(Reason::storage_ended);
+    if (object.record_life != Life::alive) return fail(Reason::outside_lifetime);
+    if (!in_->types.is<ast::TClass>(type) || ast::without_cv(type) != ast::without_cv(object.type))
+      return fail(Reason::access_type);
+    // The caller initialized the parameter object using the function type. Its cv-qualification
+    // comes from the declared parameter of the selected definition ([dcl.fct], [expr.call]).
+    object.type = type;
+  }
+  reg(f, parameter) = value;
+  return Flow::next;
+}
+
 // Pushes the callee's frame; its entry block takes the state, then the arguments.
 Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityId callee,
-                             std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver) {
+                             std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver,
+                             EntityId lifetime_class) {
   if (frames_.size() >= config_.depth_limit) return fail(Reason::depth_limit, config_.depth_limit);
   if (body->blocks.empty() || body->block(ir::BlockId(0)).nparams != args.size() + 1) return fail(Reason::ill_formed);
   Frame callee_frame{body, callee, std::vector<Value>(body->values.size()), body->block(ir::BlockId(0)).node0};
   const auto parameters = body->params_of(ir::BlockId(0));
-  for (std::size_t i = 0; i < args.size(); ++i)
-    callee_frame.regs[ir::raw(parameters[i + 1])] = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const Value& value = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
+    if (Flow fl = bind_parameter(callee_frame, parameters[i + 1], value); fl != Flow::next) return fl;
+  }
+  if (lifetime_class != EntityId::none && !args.empty()) {
+    const Value& receiver = reg(callee_frame, parameters[1]);
+    if (receiver.kind == VKind::object && !receiver.past && receiver.bits == 0 &&
+        receiver.displacement() == 0 && receiver.ref < objects_.size()) {
+      const Object& object = objects_[receiver.ref];
+      if (object.origin == Origin::automatic && !object.outside && object.storage && object.record &&
+          object.record_life != Life::after && in_->types.get<ast::TClass>(object.record->type).entity == lifetime_class)
+        callee_frame.cv_inactive_object = receiver.ref;
+    }
+  }
+  // The destruction thunk materializes a folded value, then calls the destructor.
+  // The non-mutable lifetimes belong to this evaluation, while mutable ones do not.
+  if (config_.compatibility != ast::Compatibility::gcc && callee != EntityId::none &&
+      config_.constant_destructor == callee && frames_.size() == 1 && !args.empty()) {
+    const Value receiver = callee_frame.regs[ir::raw(parameters[1])];
+    if (receiver.kind == VKind::object && receiver.ref < objects_.size())
+      objects_[receiver.ref].mutable_lifetimes_outside = true;
+  }
   frames_.push_back(std::move(callee_frame));  // `f` dangles from here
   return Flow::called;
 }
@@ -1684,8 +1890,9 @@ void Machine::start(const ir::Function& entry, EntityId name, std::span<const Va
     entry_result_ = make_object(result_address.inner, Origin::automatic, record);
   }
   for (u32 i = 1, arg = 0; i < params.size(); ++i) {
-    if (capture && i == entry.result_param) fr.regs[ir::raw(params[i])] = {VKind::object, false, *entry_result_, 0};
-    else fr.regs[ir::raw(params[i])] = args[arg++];
+    const Value value = capture && i == entry.result_param ? Value{VKind::object, false, *entry_result_, 0}
+                                                          : args[arg++];
+    if (bind_parameter(fr, params[i], value) != Flow::next) return;
   }
 }
 
@@ -1695,7 +1902,7 @@ Result Machine::describe(const Value& v, QualType t) {
   switch (v.kind) {
   case VKind::none:
   case VKind::integer: r.kind = Result::Kind::integer; r.bits = v.bits; r.hi = v.hi; break;
-  case VKind::floating: r.kind = Result::Kind::floating; r.bits = v.bits; break;
+  case VKind::floating: r.kind = Result::Kind::floating; r.bits = v.bits; r.hi = v.hi; break;
   case VKind::null: r.kind = Result::Kind::null; break;
   case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
   case VKind::object: {
@@ -1707,6 +1914,7 @@ Result Machine::describe(const Value& v, QualType t) {
     r.path = steps_of(u32(v.bits));
     r.past = v.past;
     r.offset = offset_of(v);
+    r.gcc_nested_end = v.gcc_nested_end;
     bool past = false;
     if (!r.path.empty() && resolve(v, {}, past)) r.past = past;
     break;
@@ -1715,8 +1923,20 @@ Result Machine::describe(const Value& v, QualType t) {
   return r;
 }
 
-Machine::Flow Machine::capture_element(QualType t, u32 cell, Result& result) {
+Machine::Flow Machine::capture_element(QualType t, u32 cell, Result& result, const RecordStorage* record) {
   const Shape& s = shape(t);
+  if (record && similar(t, record->type)) {
+    result.kind = Result::Kind::aggregate;
+    result.type = t;
+    result.elements.resize(record->fields.size());
+    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+      const auto& field = record->fields[i];
+      if (Flow fl = capture_element(field.layout.type, cell + field.cell, result.elements[i], field.nested);
+          fl != Flow::next)
+        return fl;
+    }
+    return Flow::next;
+  }
   if (s.kind != Kind::array) {
     Value value;
     if (Flow fl = read_cell(t, cell, value); fl != Flow::next) return fl;
@@ -1726,9 +1946,9 @@ Machine::Flow Machine::capture_element(QualType t, u32 cell, Result& result) {
   result.kind = Result::Kind::aggregate;
   result.type = t;
   result.elements.resize(s.bound);
-  const u32 stride = u32(shape(s.inner).leaves);
+  const u32 stride = u32(storage_extent(s.inner, record).cells);
   for (Result& element : result.elements) {
-    if (Flow fl = capture_element(s.inner, cell, element); fl != Flow::next) return fl;
+    if (Flow fl = capture_element(s.inner, cell, element, record); fl != Flow::next) return fl;
     cell += stride;
   }
   return Flow::next;
@@ -1740,16 +1960,10 @@ Machine::Flow Machine::capture_result(u32 object) {
   if (ob.record_life == Life::after) return fail(Reason::outside_lifetime);
   if (ob.record->dynamic) return fail(Reason::unsupported_constant);
   Result result;
-  result.kind = Result::Kind::aggregate;
-  result.type = ob.type;
   const u32 cell = ob.cell0;
-  const auto& fields = ob.record->fields;
-  result.elements.resize(fields.size());
   // The implicit caller's result lifetime begins after the entry initializes its storage.
   set_lifetime({object, cell, ob.ncells, ob.type}, /*complete=*/true, Life::alive);
-  for (std::size_t i = 0; i < fields.size(); ++i)
-    if (Flow fl = capture_element(fields[i].layout.type, cell + fields[i].cell, result.elements[i]); fl != Flow::next)
-      return fl;
+  if (Flow fl = capture_element(ob.type, cell, result, ob.record); fl != Flow::next) return fl;
   record_result_ = std::move(result);
   return Flow::next;
 }

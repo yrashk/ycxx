@@ -7,6 +7,7 @@
 //   unit_trace <golden> --update   rewrites the golden file
 import std;
 import ycxx.engine;
+import ycxx.execution;
 import ycxx.pipeline;
 import ycxx.pp;
 import ycxx.trace;
@@ -151,7 +152,7 @@ struct CancellationProbe {
 };
 
 struct CancelAtStart : engine::Tracer {
-  std::inplace_stop_source stop;
+  ycxx::exec::inplace_stop_source stop;
   trace::Live live;
   bool cancel = true;
 
@@ -165,13 +166,13 @@ struct CancelAtStart : engine::Tracer {
 };
 
 void cancellation() {
-  namespace ex = std::execution;
+  namespace ex = ycxx::exec;
   engine::Pool pool(1);
   engine::Db db(pool);
   auto cancel_query = [&](CancelAtStart& capture) {
-    return std::this_thread::sync_wait(ex::write_env(
+    return ex::sync_wait(ex::write_env(
         db.request<CancellationProbe>(0, engine::Priority::interactive, nullptr, &capture),
-        ex::prop(std::get_stop_token, capture.stop.get_token())));
+        ex::prop(ex::get_stop_token, capture.stop.get_token())));
   };
   db.set<CancellationInput>(0, 7);
   CancelAtStart cold;
@@ -198,7 +199,7 @@ void cancellation() {
 
   capture.cancel = false;
   try {
-    (void)std::this_thread::sync_wait(db.request<CancellationProbe>(1, engine::Priority::interactive, nullptr, &capture));
+    (void)ex::sync_wait(db.request<CancellationProbe>(1, engine::Priority::interactive, nullptr, &capture));
     check(false, "the failing query must throw");
   } catch (const std::runtime_error&) {
     check(std::ranges::any_of(capture.live.take(), [](const Event& e) { return !e.running && e.outcome == Outcome::failed; }),
@@ -760,7 +761,7 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   const std::string text = got;
   if (update) {
     std::ofstream(golden_path, std::ios::binary) << text;
-    std::println("updated {}", golden_path.display_string());
+    std::println("updated {}", golden_path.native());
     return;
   }
   std::ifstream in(golden_path, std::ios::binary);
@@ -1023,7 +1024,7 @@ void spans() {
   pl::Session hs;
   constexpr pl::TuId htu{1};
   got.clear();
-  hs.set_source(htu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
+  hs.set_source(htu, "m.cpp", main_text, "m.o", dir.native());
   (void)hs.get<pl::Tu>(pl::Tu::Key{htu}, &c);
   c.finish();
   const SourceSpan cube = at("FunctionIr(cube)");
@@ -1032,9 +1033,9 @@ void spans() {
   const pl::TuId editor{1u << 31};
   ycxx::pp::Config editor_config;
   editor_config.view = ycxx::pp::View::editor;
-  hs.db().set<ycxx::pp::Buffer>(ycxx::pp::path_id((dir / "h.h").lexically_normal().generic_native_encoded_string()), "// a\n// b\n" + header);
+  hs.db().set<ycxx::pp::Buffer>(ycxx::pp::path_id((dir / "h.h").lexically_normal().generic_string<char>()), "// a\n// b\n" + header);
   got.clear();
-  hs.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
+  hs.set_source(editor, "m.cpp", "", "m.o", dir.native(), editor_config);
   (void)hs.get<pl::Tu>(pl::Tu::Key{editor}, &c);
   c.finish();
   const SourceSpan open = at("FunctionIr(cube)");
@@ -1309,7 +1310,7 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
 
   if (update) {
     std::ofstream(golden_path, std::ios::binary) << got;
-    std::println("updated {}", golden_path.display_string());
+    std::println("updated {}", golden_path.native());
     return;
   }
   std::ifstream in(golden_path, std::ios::binary);

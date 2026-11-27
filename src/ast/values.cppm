@@ -187,6 +187,7 @@ struct VLvalue {
   ConstId base;
   SeqId<u32> path;
   std::int64_t offset;
+  bool gcc_nested_end = false;
 };
 
 // An object of array or class type ([dcl.init.aggr]): its canonical type and the value of each
@@ -209,6 +210,7 @@ struct [[=dependent]] VDepParam {
 struct [[=dependent]] VDepFnParam {
   u16 depth;
   u16 index;
+  u8 cv = 0;
 };
 
 // A namespace variable template found at the point of definition, with dependent arguments.
@@ -218,6 +220,7 @@ struct [[=dependent]] VDepVariable {
   SeqId<TemplateArg> written_args;
   u8 qualified;
   u8 global;
+  SeqId<NameId> qualifier{};
 };
 
 // A call to a named immediate function. The arguments are explicit types for a function
@@ -234,6 +237,14 @@ struct [[=dependent]] VDepConcept {
   SeqId<TemplateArg> args;
   bool qualified = false;
   bool global = false;
+};
+
+// The written concept-id of a concept template parameter and its parameter mapping
+// ([temp.constr.concept]). The written name also participates in symbol formation.
+struct [[=dependent]] VConceptParameter {
+  TemplateArg parameter;
+  SeqId<TemplateArg> arguments;
+  NameId name;
 };
 
 // A value named through a dependent nested-name-specifier.
@@ -331,14 +342,71 @@ struct VType {
 
 // The operands of an operator as written, for ABI encoding before conversions and folding.
 // `token` is a lex::Tk. A named cast stores its type as a VType before the operand.
+struct VWrittenTrait {
+  NameId name;
+  SeqId<QualType> arguments;
+  bool gcc_predicate;
+};
+
+struct VWrittenNew {
+  QualType allocated;
+  ConstId bound;
+  ConstId placement;
+  SeqId<ConstId> initializer;
+  u8 init_kind;  // 0 for none, 1 for parentheses, 2 for braces
+  bool global;
+};
+
+struct VWrittenDelete {
+  ConstId operand;
+  bool array;
+  bool global;
+};
+
 struct VWrittenOperator {
   u8 token;
   SeqId<ConstId> operands;
 };
 
+// A fold-expression as written, whose operands are recorded in source order.
+struct VWrittenFold {
+  u8 token;
+  bool left;
+  ConstId first;
+  ConstId second;
+};
+
+// A lambda expression in a written constraint names its closure type.
+struct VWrittenLambda {
+  EntityId closure;
+};
+
+struct VWrittenThis {};
+
+struct VWrittenCallee {
+  NameId name;
+  EntityId resolved;
+  SeqId<NameId> qualifier;
+  SeqId<TemplateArg> arguments;
+  bool global;
+  bool template_id;
+};
+
+struct VWrittenMember {
+  ConstId object;
+  NameId name;
+  SeqId<TemplateArg> arguments;
+  bool arrow;
+  bool template_id;
+};
+
 // A pack occupies one parameter slot in an atomic constraint's mapping.
 struct VConstraintPack {
   SeqId<ConstId> elements;
+};
+
+struct VConstraintTemplate {
+  TemplateArg argument;
 };
 
 // A mapped enum argument retains its nominal type alongside the underlying integer value.
@@ -359,11 +427,12 @@ struct VAtom {
   ItemId item;
   u32 begin;
   u32 end;
-  u16 depth;
   SeqId<ConstId> mapping;
   SeqId<u32> calls;
-  bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
   EntityId lookup_class;  // class scope visible at the atom's spelling
+  SeqId<AtomLambdaScope> lambda_scope{};
+  u16 depth;
+  bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
 };
 
 // A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
@@ -373,15 +442,41 @@ struct VConstraint {
   SeqId<ConstId> operands;
 };
 
-// The written form of requires { typename ...; ... } for constraint linkage.
-struct [[=dependent]] VRequiresTypes {
-  SeqId<TemplateArg> types;
+// [temp.constr.fold]: the normalized operand and the unexpanded template packs it
+// names. Bind each pack element when checking satisfaction, in increasing order.
+struct VFoldConstraint {
+  ConstId operand;
+  ConstId expression;  // token replay for a pack pattern with a nontrivial argument mapping
+  SeqId<u32> packs;
+  u8 op;
+  SeqId<FoldPackBinding> bound;
+  bool legacy = false;  // atomic ordering for the corresponding compiler's fold
+  bool expand_concepts = false;  // spec normalization expands bound concept packs
+};
+
+// The written form of a requires-expression in a constraint symbol.
+struct [[=dependent]] VRequiresExpression {
+  SeqId<QualType> parameters;
+  SeqId<WrittenRequirement> requirements;
+  bool parameter_list;
+};
+
+struct [[=dependent]] VRequiresParameter {
+  u32 scope;
+  u32 index;
+  Cv cv;
+};
+
+// A builtin expression without an interoperable constraint encoding in either peer.
+struct VWrittenBuiltin {
+  NameId name;
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional, VRequiresTypes,
-                               VWrittenOperator>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack, VConstraintTemplate,
+                               VDepCall, VDepMember, VDepConcept, VConceptParameter, VConstraintEnum, VDepField, VDepConditional,
+                               VRequiresExpression, VRequiresParameter, VWrittenTrait, VWrittenNew, VWrittenDelete, VWrittenOperator, VWrittenCallee, VWrittenMember,
+                               VWrittenFold, VWrittenLambda, VWrittenThis, VFoldConstraint, VWrittenBuiltin>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

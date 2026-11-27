@@ -13,6 +13,59 @@ using ir::Op;
 using M = Machine;
 using N = NodeId;
 
+// BOOTSTRAP: modules: GCC 16.2 cannot read the machine partition built against stock
+// libstdc++ if this definition is in the interface.
+// C's memcmp: both objects must hold the n bytes, which C's memcmp may read in any order. The
+// result is the sign of the first difference.
+Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Value& out) {
+  out = Value::integer(0);
+  const bool read_full_range = config_.compatibility == ast::Compatibility::gcc;
+  // GCC folds identical addresses before requiring either range to be readable.
+  if (n == 0 || (read_full_range && (a.kind == VKind::object || a.kind == VKind::null) && a == b))
+    return Flow::next;
+  Bytes left, right;
+  if (Flow f = bytes_at(a, left, read_full_range); f != Flow::next) return f;
+  if (Flow f = bytes_at(b, right, read_full_range); f != Flow::next) return f;
+  if (read_full_range && a.ref == b.ref) {
+    // A scalar array and its first element have the same GCC fold as two equal pointers.
+    const auto array_and_first = [](const Bytes& array, const Bytes& first) {
+      return array.strides.size() == 1 && first.strides.empty() && array.base == first.base &&
+             first.index == 0 && first.start == 0;
+    };
+    if (array_and_first(left, right) || array_and_first(right, left)) return Flow::next;
+
+    // A row's one-past position and the following row's first element compare through
+    // the latter's readable range. A preceding element reached by going back from a row
+    // start retains its out-of-bounds path and cannot use this rule.
+    const auto next_row = [&](const Bytes& end, const Bytes& first) {
+      if (end.single || first.single || !end.strides.empty() || !first.strides.empty() ||
+          end.index != end.bound || first.index != 0 || first.start != 0 || !similar(end.type, first.type))
+        return false;
+      const u32 last = u32(end.base.bits), next = u32(first.base.bits);
+      if (last == 0 || next == 0) return false;
+      const auto& l = paths_[last];
+      const auto& r = paths_[next];
+      return l.parent == r.parent && l.step.step == ir::Step::elem && r.step.step == ir::Step::elem &&
+             u64(l.step.index) + 1 == r.step.index;
+    };
+    if (next_row(left, right)) left = right;
+    else if (next_row(right, left)) right = left;
+  }
+  if (config_.compatibility != ast::Compatibility::clang &&
+      (n > left.remaining() || n > right.remaining()))
+    return fail(Reason::past_end_access);
+  for (u64 i = 0; i < n; ++i) {
+    u8 x = 0, y = 0;
+    if (Flow f = read_byte(left, i, x); f != Flow::next) return f;
+    if (Flow f = read_byte(right, i, y); f != Flow::next) return f;
+    if (out.bits == 0 && x != y) {
+      out = Value::integer(x < y ? u64(-1) : 1);
+      if (!read_full_range) return Flow::next;
+    }
+  }
+  return Flow::next;
+}
+
 struct Ops {
   using Flow = M::Flow;
   using Frame = M::Frame;
@@ -70,7 +123,13 @@ struct Ops {
     const Value arg = m.operand(f, n, 0);
     if (arg.kind != VKind::integer) return m.fail(Reason::ill_formed);
     const ast::Bits128 bits{arg.bits, arg.hi};
-    if (ast::wide::is_zero(bits)) return m.fail(Reason::ctz_zero);
+    if (ast::wide::is_zero(bits)) {
+      if (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc || !has(f, n, ir::Flag::ctz_gcc_zero))
+        return m.fail(Reason::ctz_zero);
+      const M::Shape* type;
+      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), type); fl != Flow::next) return fl;
+      return m.set(f, n, Value::integer(type->width));
+    }
     return m.set(f, n, Value::integer(ast::wide::countr_zero(bits)));
   }
 
@@ -149,8 +208,8 @@ struct Ops {
     if (s->enum_range && constant(m)) {
       if (from.kind != M::Kind::integer) return m.fail(Reason::ill_formed);
       auto [minimum, maximum] = *s->enum_range;
-      bool outside = from.is_signed && ast::is_negative(x) ? x.hi != ~u64{0} || i64(x.lo) >= 0 || i64(x.lo) < minimum
-                                                            : x.hi != 0 || x.lo > maximum;
+      const bool negative = from.is_signed && ast::is_negative(x);
+      const bool outside = negative ? ast::wide::slt(x, minimum) : ast::wide::ult(maximum, x);
       if (outside) return m.fail(Reason::enum_range);
     }
     // To bool it is the boolean conversion ([conv.integral]/1 defers to [conv.bool]).
@@ -204,15 +263,33 @@ struct Ops {
     u64 bound = 0;
     bool single = false;
     if (Flow fl = m.pointer_index(p, imm_type(f, n), base, index, bound, single); fl != Flow::next) return fl;
-    // `index` is in [0, bound], so negating it cannot overflow, while negating `by` could.
-    if ((by > 0 && index > i64(bound) - by) || (by < 0 && by < -index)) return m.fail(Reason::pointer_bounds);
-    i64 at = index + by;
+    using ast::bits_of;
+    const auto at = M::signed_offset(ast::wide::add(bits_of(index), bits_of(by)));
+    if (!at || !std::in_range<i64>(bound)) return m.fail(Reason::pointer_bounds);
+    const i64 limit = i64(bound);
+    if (p.gcc_nested_end && *at < limit) return m.fail(Reason::pointer_bounds);
+    const bool displaced = *at < 0 || *at > limit;
+    if (displaced && (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc))
+      return m.fail(Reason::pointer_bounds);
+    // In GCC mode an out-of-bounds address retains its array. Access still requires a
+    // valid element, so store the displacement separately from the path to that array.
+    const i64 anchor = single && displaced ? 0 : std::clamp(*at, i64{0}, limit);
     Value r{VKind::object, false, p.ref, 0};
+    r.gcc_nested_end = p.gcc_nested_end;
     if (single) {
       r.bits = base;
-      r.past = at == 1;
+      r.past = anchor == 1;
     } else {
-      r.bits = m.child(base, {ir::Step::elem, u32(at)});
+      r.bits = m.child(base, {ir::Step::elem, u32(anchor)});
+    }
+    if (displaced) {
+      const u64 size = m.storage_extent(imm_type(f, n), m.objects_[p.ref].array_record).bytes;
+      if (size == 0 || !std::in_range<i64>(size)) return m.fail(Reason::pointer_bounds);
+      const auto relative = ast::wide::mul(bits_of(*at - anchor), bits_of(size));
+      const auto delta = M::signed_offset(relative);
+      if (!delta || !M::signed_offset(ast::wide::add(bits_of(m.offset_of(r)), relative)))
+        return m.fail(Reason::pointer_bounds);
+      r.hi = u64(*delta);
     }
     return m.set(f, n, r);
   }
@@ -231,9 +308,9 @@ struct Ops {
     if (Flow fl = m.pointer_index(a, imm_type(f, n), ba, ia, na, sa); fl != Flow::next) return fl;
     if (Flow fl = m.pointer_index(b, imm_type(f, n), bb, ib, nb, sb); fl != Flow::next) return fl;
     if (ba != bb || sa != sb) return m.fail(Reason::pointer_difference);
-    i64 d = ia - ib;
-    if (!M::fits(d, s->width)) return m.fail(Reason::signed_overflow);
-    return m.set(f, n, Value::integer(u64(d)));
+    const auto d = M::signed_offset(ast::wide::sub(ast::bits_of(ia), ast::bits_of(ib)));
+    if (!d || !M::fits(*d, s->width)) return m.fail(Reason::signed_overflow);
+    return m.set(f, n, Value::integer(u64(*d)));
   }
 
   static Flow ptr_cmp(M& m, Frame& f, N n) {
@@ -284,6 +361,11 @@ struct Ops {
               const i64 offset = m.offset_of(p);
               if (offset >= 0 && u64(offset) < m.complete_size(object)) {
                 if (Flow fl = m.address(p.ref, to, offset, p); fl != Flow::next) return fl;
+              } else if (offset >= 0 && u64(offset) == m.complete_size(object) &&
+                         p.bits != 0 && m.paths_[u32(p.bits)].parent != 0) {
+                // The terminal position has no following row. Preserve the equal byte address
+                // and row distance, but reject going back into the preceding row.
+                p.gcc_nested_end = true;
               }
             }
           }
@@ -304,7 +386,8 @@ struct Ops {
     auto storage = ir::Storage(imms(f, n)[1]);
     auto init = ir::Init(imms(f, n)[2]);
     if (storage != ir::Storage::automatic && storage != ir::Storage::temporary) return m.unsupported(n);
-    const auto* record = constant(m) ? m.record_storage(t) : nullptr;
+    // Lay out the record independently of cv. The object below retains it for access checks.
+    const auto* record = constant(m) ? m.record_storage(ast::without_cv(t)) : nullptr;
     const u64 leaves = record ? record->ncells : m.shape(t).leaves;
     if (!m.can_allocate(leaves) || (leaves == 0 && !record)) return m.unsupported(n);
     u32 o = m.make_object(t, M::Origin::automatic, record);
@@ -353,6 +436,7 @@ struct Ops {
       object.usable = !unknown;
       object.unknown_reference = unknown && has(f, n, ir::Flag::unknown_reference);
     }
+    if (has(f, n, ir::Flag::switch_bypassed_lifetime)) m.objects_[pl.obj].switch_bypassed = true;
     m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }
@@ -378,11 +462,14 @@ struct Ops {
         !m.in_->types.is<ast::TClass>(m.in_->canonical(pointer.inner)))
       return m.fail(Reason::ill_formed);
     const Value receiver = m.operand(f, n, 1);
-    if (Flow fl = m.locate(receiver, {}, pointer.inner, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+    const bool gcc = m.config_.compatibility == ast::Compatibility::gcc;
+    const auto use = gcc ? M::Use::gcc_member_receiver : M::Use::lifetime;
+    if (Flow fl = m.locate(receiver, {}, pointer.inner, use, false, place); fl != Flow::next) return fl;
     // [class.cdtor] permits calls during construction and destruction. Check a completed
     // lifetime independently of the fields, which the call need not read.
     const auto& object = m.objects_[place.obj];
-    if (object.record_life == M::Life::after || (place.primary_base && object.primary_base_life == M::Life::after))
+    if (!gcc && (object.record_life == M::Life::after ||
+                 (place.primary_base && object.primary_base_life == M::Life::after)))
       return m.fail(Reason::outside_lifetime);
     return Flow::next;
   }
@@ -494,7 +581,7 @@ struct Ops {
         return m.unsupported(n);
       initializing = receiver;
     }
-    const Flow flow = m.enter(f, n, it->second.body, e, args, adjusted_receiver);
+    const Flow flow = m.enter(f, n, it->second.body, e, args, adjusted_receiver, it->second.lifetime_class);
     if (flow == Flow::called) m.frames_.back().initializing_dynamic_subobject = initializing;
     return flow;
   }
@@ -635,7 +722,11 @@ struct Ops {
     }
     return m.jump(f, n, 0);
   }
-  static Flow consteval_br(M& m, Frame& f, N n) { return m.jump(f, n, constant(m) ? 0 : 1); }
+  static Flow consteval_br(M& m, Frame& f, N n) {
+    // `if consteval` lets the program see that it is constant-evaluated ([stmt.if]/5).
+    if (constant(m) && has(f, n, ir::Flag::observes_context)) m.observed_constant_context_ = true;
+    return m.jump(f, n, constant(m) ? 0 : 1);
+  }
 
   // Returns to the caller, whose call node receives the state, then the values.
   static Flow ret(M& m, Frame& f, N n) {

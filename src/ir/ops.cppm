@@ -70,6 +70,22 @@ export enum class VirtualCallKind : std::uint8_t { ordinary, immediate, qualifie
 export enum class MemOrder : std::uint8_t { relaxed, consume, acquire, release, acq_rel, seq_cst };
 export enum class Rmw : std::uint8_t { xchg, add, sub, and_, or_, xor_, max, min };
 
+export constexpr bool atomic_load_order(MemOrder order) {
+  return order == MemOrder::relaxed || order == MemOrder::consume ||
+         order == MemOrder::acquire || order == MemOrder::seq_cst;
+}
+
+export constexpr bool atomic_store_order(MemOrder order) {
+  return order == MemOrder::relaxed || order == MemOrder::release || order == MemOrder::seq_cst;
+}
+
+// A compare-exchange failure is a load. It cannot be stronger than the read side of success.
+export constexpr bool atomic_failure_order(MemOrder success, MemOrder failure) {
+  if (success == MemOrder::release) success = MemOrder::relaxed;
+  if (success == MemOrder::acq_rel) success = MemOrder::acquire;
+  return atomic_load_order(failure) && failure <= success;
+}
+
 // One step of a typed access path ([basic.lval], [class.mem]): the i-th non-static data member,
 // direct base, virtual base, or array element with a constant index. Union members are fields.
 export enum class Step : std::uint8_t { field, base, vbase, elem };
@@ -89,6 +105,9 @@ export enum class Flag : std::uint8_t {
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
+  ctz_gcc_zero,      // GCC mode accepts a zero operand for this spelling in constant evaluation
+  switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
+  observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -184,7 +203,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V}).with({commutative})]],
   or_ [[=pure({V, V}, {V}).with({commutative})]],
   xor_ [[=pure({V, V}, {V}).with({commutative})]],
-  ctz [[=pure({V}, {V})]],  // trailing zero bits of an integer; undefined for zero
+  ctz [[=pure({V}, {V}).accepts({ctz_gcc_zero})]],  // trailing zero bits of an integer
   icmp [[=pure({V, V}, {V}).imms({pred})]],
   select [[=pure({V, V, V}, {V})]],
 
@@ -219,7 +238,9 @@ export enum class Op : std::uint16_t {
   // Memory and object lifetime ([basic.life], [basic.stc], [class.union]).
   alloc [[=state({S}, {S, V}).imms({type, storage, init})]],
   dealloc [[=state({S, V}, {S}).imms({storage})]],
-  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({outside_lifetime, outside_unknown, unknown_reference})]],
+  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({
+    outside_lifetime, outside_unknown, unknown_reference, switch_bypassed_lifetime
+  })]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
@@ -227,11 +248,12 @@ export enum class Op : std::uint16_t {
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src
-  atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_})]],
-  atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_})]],
-  atomic__rmw [[=state({S, V, V}, {S, V}).imms({type, rmw, order}).accepts({volatile_})]],
-  atomic__cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({type, order, order}).accepts({volatile_})]],
-  fence [[=state({S}, {S}).imms({order})]],
+  atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_}).with({nonconstant})]],
+  atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_}).with({nonconstant})]],
+  atomic__rmw [[=state({S, V, V}, {S, V}).imms({type, rmw, order}).accepts({volatile_}).with({nonconstant})]],
+  // Address, expected value, desired value. The data results are the prior value and success.
+  atomic__cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({type, order, order}).accepts({volatile_}).with({nonconstant})]],
+  fence [[=state({S}, {S}).imms({order}).with({nonconstant})]],
 
   // Dynamic dispatch and RTTI. The vptr is a typed field holding `vtable_addr(C)`.
   vfunc [[=state({S, V}, {V}).imms({entity, u32})]],  // the function in a class's vtable slot
@@ -289,7 +311,7 @@ export enum class Op : std::uint16_t {
   // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
   // ([expr.const]) from falling off the end.
   unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
-  consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
+  consteval_br [[=control({}, {}, 2).accepts({observes_context})]],  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
   invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).imms({u32}).accepts({not_constexpr})]],

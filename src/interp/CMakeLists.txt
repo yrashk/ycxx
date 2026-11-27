@@ -1,5 +1,5 @@
 # The L1 interpreter (#25): constant evaluation and whole programs.
-add_library(ycxxc_interp STATIC)
+add_library(ycxxc_interp ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_interp PUBLIC FILE_SET CXX_MODULES FILES
   reason.cppm
   machine.cppm
