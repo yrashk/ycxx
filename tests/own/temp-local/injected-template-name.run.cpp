@@ -45,6 +45,13 @@ template <class T> struct P<T*> {
   template <class U> P(const P<U*>& o) : p(o.p) {}
 };
 
+// A non-static data member named as its class, which declares no constructor, hides the
+// injected-class-name ([class.mem.general]): `D < 2` compares the member.
+template <class T> struct D {
+  int D;
+  bool small() const { return D < 2; }
+};
+
 int main() {
   A<int> a(3);
   A<long> b(a);
@@ -68,5 +75,8 @@ int main() {
   p.p = &i;
   P<const int*> q(p);
   if (q.p != &i) return 12;
+  ::D<int> d;
+  d.D = 1;
+  if (!d.small()) return 13;
   return 0;
 }

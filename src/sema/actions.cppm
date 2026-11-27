@@ -1167,12 +1167,17 @@ public:
   // The template whose name `name` is in the current class, or none. In a class template, or a
   // specialization of one, its injected-class-name followed by `<` is the template's name
   // ([temp.local]/1): `A<U>` in `A` names the specialization `A<U>`. The class's constructors
-  // share the name but are not found by lookup ([class.ctor]/1), so they do not hide it; nor can
-  // another member be named as the class ([class.mem.general]).
+  // share the name but are not found by lookup ([class.ctor]/1), so they do not hide it. The only
+  // member that can, a non-static data member of a class without a user-declared constructor
+  // ([class.mem.general]), makes `A < 2` a comparison.
   EntityId injected_class_template(NameId name) {
     if (current_class == EntityId::none) return EntityId::none;
     const EntityRec& c = w_->entities.rec(current_class);
-    return c.name == name ? c.templ : EntityId::none;
+    if (c.templ == EntityId::none || c.name != name) return EntityId::none;
+    if (const ClassRec* r = class_rec(current_class))
+      return std::ranges::contains(r->fields, name, &FieldRec::name) ? EntityId::none : c.templ;
+    if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::data_member) return EntityId::none;
+    return c.templ;
   }
 
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
