@@ -3084,6 +3084,8 @@ public:
 private:
   std::optional<NodeId> replay_member_default(sema::Sema& caller, const ast::DefaultArg& value, EntityId function,
                                               QualType parameter);
+  std::optional<std::size_t> member_default_index(EntityId cls, EntityId member, const ast::DefaultArg& value) const;
+  std::vector<u32> definition_default_calls(u32 item, const ast::DefaultArg& value) const;
   static bool inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
                                        const Program::Dmi& dmi, EntityId base);
   static bool inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
@@ -3579,19 +3581,26 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   if (specialization.templ == EntityId::none && specialization.scope != EntityId::none &&
       p_->class_args_.contains(std::to_underlying(specialization.scope)))
     return replay_member_default(caller, value, function, parameter);
-  if (specialization.templ == EntityId::none || !p_->is_namespace(specialization.scope) ||
-      !caller.types().is_scalar(parameter)) return std::nullopt;
+  if (specialization.templ == EntityId::none) return std::nullopt;
+  // A function template, or a member template of a class (of a class template specialization,
+  // whose arguments bind the enclosing levels, [temp.mem]).
+  const bool member = !p_->is_namespace(specialization.scope);
+  const auto outer = member ? p_->class_args_.find(std::to_underlying(specialization.scope)) : p_->class_args_.end();
   const u32 item = p_->index(value.source);
   const auto& written = p_->items().items[item];
   auto& seqs = p_->world().ins.seqs;
-  const auto declarations = seqs.elements(p_->item_sema(item).value.decls);
+  const auto declarations = seqs.elements(outer != p_->class_args_.end()
+                                              ? p_->class_member_sema(item, specialization.scope).decls
+                                              : p_->item_sema(item).value.decls);
   const auto decl = std::ranges::find(declarations, specialization.templ, &ast::DeclSema::entity);
   if (decl == declarations.end()) return std::nullopt;
 
   AtItem source(*p_, item, false);
-  source.from = p_->namespace_path(specialization.scope);
+  if (!member) source.from = p_->namespace_path(specialization.scope);
+  else source.completing_class = specialization.scope;
   source.at_point = default_instantiation_point.value_or(point());
   source.instantiation_calls = seqs.elements(value.dependent_calls);
+  if (member && source.instantiation_calls.empty()) source.instantiation_calls = definition_default_calls(item, value);
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), value.source, 0);
   replay.unevaluated = caller.unevaluated;
   replay.immediate_context = caller.immediate_context || caller.is_consteval(function);
@@ -3599,15 +3608,30 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   replay.trial_initializer = caller.trial_initializer;
   const auto params = seqs.elements(decl->template_params);
   if (params.empty()) return std::nullopt;
+  if (member) {
+    replay.current_class = specialization.scope;
+    replay.template_scopes = p_->enclosing_heads(item);
+  }
   replay.template_scopes.push_back(params);
   replay.template_args = sema::Bindings::of(params.front().depth, specialization.args);
+  if (outer != p_->class_args_.end()) {
+    sema::Bindings all = outer->second;
+    all.levels.resize(params.front().depth + 1);
+    all.levels[params.front().depth] = replay.template_args.levels[params.front().depth];
+    replay.template_args = std::move(all);
+  }
   replay.push_scope();
   const auto written_params = seqs.elements(decl->params);
-  const auto default_param = std::ranges::find_if(written_params, [&](const ast::ParamSema& param) {
+  auto default_param = std::ranges::find_if(written_params, [&](const ast::ParamSema& param) {
     if (param.default_arg == NodeId::none) return false;
     const auto arg = p_->world().ins.ast.get<ast::DefaultArg>(param.default_arg);
     return arg.source == value.source && arg.source_begin == value.source_begin && arg.source_end == value.source_end;
   });
+  // A member's default waits for its complete class: the class's record keeps it.
+  if (default_param == written_params.end() && member)
+    if (const auto index = member_default_index(specialization.scope, specialization.templ, value);
+        index && *index < written_params.size())
+      default_param = written_params.begin() + std::ptrdiff_t(*index);
   if (default_param == written_params.end()) return std::nullopt;
   for (const auto& param : std::ranges::subrange(written_params.begin(), default_param + 1)) {
     if (param.name == replay.no_name()) continue;
@@ -3656,6 +3680,37 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   return result;
 }
 
+// Which parameter of `member` of class `cls` has the default written at `value`'s tokens.
+std::optional<std::size_t> AtItem::member_default_index(EntityId cls, EntityId member, const ast::DefaultArg& value) const {
+  const sema::ClassRec* record = p_->classes_.find(cls);
+  if (!record) return std::nullopt;
+  const auto m = std::ranges::find(record->members, member, &sema::MemberDeclRec::entity);
+  if (m == record->members.end()) return std::nullopt;
+  const auto slot = std::ranges::find_if(m->defaults, [&](NodeId d) {
+    if (d == NodeId::none) return false;
+    const auto written = p_->world().ins.ast.get<ast::DefaultArg>(d);
+    return written.source == value.source && written.source_begin == value.source_begin;
+  });
+  if (slot == m->defaults.end()) return std::nullopt;
+  return std::size_t(slot - m->defaults.begin());
+}
+
+// The calls that were dependent where the template defines the default at `value`'s tokens, in
+// member item `item`, which argument-dependent lookup completes at the point of instantiation
+// ([temp.dep.candidate]): the current instantiation's default at the same place records them.
+std::vector<u32> AtItem::definition_default_calls(u32 item, const ast::DefaultArg& value) const {
+  const auto& ins = p_->world().ins;
+  if (const sema::ClassRec* pattern = p_->classes_.find(p_->class_entity(p_->items().items[item].parent)))
+    for (const sema::MemberDeclRec& m : pattern->members)
+      for (NodeId d : m.defaults)
+        if (d != NodeId::none) {
+          const auto arg = ins.ast.get<ast::DefaultArg>(d);
+          if (arg.source == value.source && arg.source_begin == value.source_begin)
+            return ins.seqs.elements(arg.dependent_calls);
+        }
+  return {};
+}
+
 // A default argument of a member function of class template specialization `function`'s class,
 // instantiated for the call that uses it ([temp.inst]/12): its tokens analysed again in its
 // member's item, with the class's arguments bound and every member declared
@@ -3663,18 +3718,9 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
 std::optional<NodeId> AtItem::replay_member_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                      EntityId function, QualType parameter) {
   const EntityId cls = p_->world().entities.rec(function).scope;
-  const sema::ClassRec* record = p_->classes_.find(cls);
-  if (!record) return std::nullopt;
-  const auto member = std::ranges::find(record->members, function, &sema::MemberDeclRec::entity);
-  if (member == record->members.end()) return std::nullopt;
-  const auto& ins = p_->world().ins;
-  const auto slot = std::ranges::find_if(member->defaults, [&](NodeId d) {
-    if (d == NodeId::none) return false;
-    const auto written = ins.ast.get<ast::DefaultArg>(d);
-    return written.source == value.source && written.source_begin == value.source_begin;
-  });
-  if (slot == member->defaults.end()) return std::nullopt;
-  const std::size_t index = std::size_t(slot - member->defaults.begin());
+  const auto found = member_default_index(cls, function, value);
+  if (!found) return std::nullopt;
+  const std::size_t index = *found;
   const u32 item = p_->index(value.source);
   const auto& written = p_->items().items[item];
   auto& seqs = p_->world().ins.seqs;
@@ -3687,17 +3733,7 @@ std::optional<NodeId> AtItem::replay_member_default(sema::Sema& caller, const as
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
   source.completing_class = cls;
-  // The calls that were dependent in the template's definition, which argument-dependent lookup
-  // completes at the point of instantiation ([temp.dep.candidate]): the current instantiation's
-  // default at the same place records them.
-  if (const sema::ClassRec* pattern = p_->classes_.find(p_->class_entity(written.parent)))
-    for (const sema::MemberDeclRec& m : pattern->members)
-      for (NodeId d : m.defaults)
-        if (d != NodeId::none) {
-          const auto arg = ins.ast.get<ast::DefaultArg>(d);
-          if (arg.source == value.source && arg.source_begin == value.source_begin)
-            source.instantiation_calls = seqs.elements(arg.dependent_calls);
-        }
+  source.instantiation_calls = definition_default_calls(item, value);
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), value.source, 0);
   replay.unevaluated = caller.unevaluated;
   replay.immediate_context = caller.immediate_context || caller.is_consteval(function);
@@ -6594,8 +6630,9 @@ private:
       return member_class_declaration(ce);
     // Defaults wait for the complete class ([class.mem.general]): an ordinary class's, and a class
     // template's, in its definition and in each specialization, which instantiates them when a
-    // call uses them ([temp.inst]/12). A local class's in a templated function bind at once.
-    if (!member_template_ && (s_.template_scopes.empty() ? !inst_ : p_->local_class_item(k_) == items::none))
+    // call uses them ([temp.inst]/12); member templates' too. A local class's in a templated
+    // function bind at once.
+    if (s_.template_scopes.empty() ? !inst_ : p_->local_class_item(k_) == items::none)
       ps_.member_template_name = [this](NameId name) -> std::optional<bool> {
         std::string_view spelling = p_->world().ins.names.spelling(name);
         bool found = false;
@@ -11964,7 +12001,8 @@ NodeId Program::bind_member_default(EntityId cls, EntityId function, std::size_t
   const u32 item = index(decl.item);
   const auto& it = items_->items[item];
   const auto& cell = item_cells_[item]->value;
-  const auto params = w_->ins.seqs.elements(w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord)).params);
+  const auto declaration = w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord));
+  const auto params = w_->ins.seqs.elements(declaration.params);
   const auto [begin, end] = tokens;
   AtItem q(*this, item, false);
   q.completing_class = cls;
@@ -11975,6 +12013,7 @@ NodeId Program::bind_member_default(EntityId cls, EntityId function, std::size_t
   // A class template's definition checks the default unbound ([temp.res]); what depends on
   // its parameters waits for the call that uses it.
   s.template_scopes = enclosing_heads(item);
+  if (const auto head = w_->ins.seqs.elements(declaration.template_params); !head.empty()) s.template_scopes.push_back(head);
   s.push_scope();
   for (const auto& param : std::span(params).first(parameter + 1))
     s.declare_local(param.name, param.type, sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
