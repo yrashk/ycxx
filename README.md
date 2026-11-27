@@ -203,6 +203,10 @@ builds a signed freestanding dylib with strong function exports. It can be
 loaded by a platform executable or the ycxx rule worker. Set its install name
 with `-Wl,-install_name,<name>`. [Leaf dylib support](docs/design/darwin-shared-output.md)
 
+Link a native arm64 executable against a leaf dylib with
+`ycxx cxx main.cpp staging/libprovider.dylib -o app`. The loader uses the
+provider's recorded install name. [Explicit dylib inputs](docs/design/darwin-dylib-input.md)
+
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
