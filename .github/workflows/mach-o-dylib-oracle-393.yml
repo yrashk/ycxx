@@ -1,0 +1,40 @@
+name: ARM64 Mach-O dylib platform oracle
+
+on:
+  push:
+    branches: [codex/ycxx-mach-o-dylib-oracle-393]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      BASELINE: ed695123db269735a34978f2becd5c7089aab181
+      BASELINE_TREE: f3c1e1ebe74b877f3bd87dcf1e9936d549e7f246
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact main and run black-box linker probes
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD^)" = "$BASELINE"
+          test "$(git rev-parse "$BASELINE^{tree}")" = "$BASELINE_TREE"
+          output="$RUNNER_TEMP/ycxx-mach-o-dylib-oracle-393"
+          mkdir -p "$output"
+          git rev-parse HEAD HEAD^ 'HEAD^{tree}' "$BASELINE^{tree}" > "$output/git.txt"
+          bash .github/evidence/mach-o-dylib-oracle-393/probe.sh "$output" | tee "$output/probes.log"
+      - name: Upload linker and loader evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-mach-o-dylib-oracle-393
+          path: ${{ runner.temp }}/ycxx-mach-o-dylib-oracle-393/
+          if-no-files-found: error
+          retention-days: 14
