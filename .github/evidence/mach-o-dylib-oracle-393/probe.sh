@@ -2,6 +2,7 @@
 # Compare platform dylib output and loader behavior for an import-free ARM64 ABI leaf.
 set -euo pipefail
 output=$1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 mkdir -p "$output/source" "$output/clients"
 source_dir="$output/source"
 clients="$output/clients"
@@ -113,16 +114,35 @@ case_build() {
 "$cxx" "$source_dir/dlopen.cc" -o "$clients/dlopen"
 case_build shared -shared
 case_build dynamiclib -dynamiclib
-case_build reduced-metadata -dynamiclib -Wl,-no_uuid,-no_function_starts,-no_data_in_code
-case_build unsigned -dynamiclib -Wl,-no_adhoc_codesign
+case_build classic-shared -shared -Wl,-ld_classic
+case_build classic-dynamiclib -dynamiclib -Wl,-ld_classic
+case_build libsystem -dynamiclib -lSystem
+case_build reduced-metadata -dynamiclib -Wl,-no_uuid,-no_function_starts -lSystem
+case_build unsigned -dynamiclib -Wl,-no_adhoc_codesign -lSystem
 if [[ $(cat "$output/unsigned/dylib-build.txt.exit") == 0 ]]; then
   folder="$output/manually-signed"
   library="$output/unsigned/leaf.dylib"
   mkdir -p "$folder"
+  cp "$library" "$output/unsigned/leaf-before-signing.dylib"
   run "$folder/sign.txt" codesign --force --sign - --timestamp=none "$library"
   if [[ $(cat "$folder/sign.txt.exit") == 0 ]]; then
     metadata "$folder" "$library"
     clients_test "$folder" "$library" manually-signed
+  fi
+fi
+
+if [[ $(cat "$output/libsystem/dylib-build.txt.exit") == 0 ]]; then
+  folder="$output/no-load-command"
+  library="$output/libsystem/leaf.dylib"
+  mkdir -p "$folder"
+  cp "$library" "$output/libsystem/reference-before-removal.dylib"
+  run "$folder/remove-dependency.txt" python3 "$script_dir/strip-test-dependency.py" "$library"
+  if [[ $(cat "$folder/remove-dependency.txt.exit") == 0 ]]; then
+    run "$folder/sign.txt" codesign --force --sign - --timestamp=none "$library"
+    if [[ $(cat "$folder/sign.txt.exit") == 0 ]]; then
+      metadata "$folder" "$library"
+      clients_test "$folder" "$library" no-load-command
+    fi
   fi
 fi
 
@@ -133,7 +153,8 @@ from pathlib import Path
 
 output = Path(sys.argv[1])
 scenarios = {}
-for name in ('shared', 'dynamiclib', 'reduced-metadata', 'unsigned', 'manually-signed'):
+for name in ('shared', 'dynamiclib', 'classic-shared', 'classic-dynamiclib',
+             'libsystem', 'reduced-metadata', 'unsigned', 'manually-signed', 'no-load-command'):
     folder = output / name
     if not folder.exists():
         continue
