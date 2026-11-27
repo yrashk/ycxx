@@ -11,8 +11,8 @@ consteval int read_dangling(bool inspect) {
     if (!inspect)
       return alias->value;
   }
-  return alias->value;  // READ
+  return alias->value;  //! error[gcc]
 }
 
 static_assert(read_dangling(false) == 17);
-static_assert(read_dangling(true) == 0);  // CALL
+static_assert(read_dangling(true) == 0);  //! error

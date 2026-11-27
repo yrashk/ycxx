@@ -4452,7 +4452,7 @@ def skipped_quote_diagnostics(world):
 def flat_record_array_lifetime(world):
     scope = world.scope
     fixtures = Path(__file__).with_name('flat_record_array')
-    for source in sorted(fixtures.glob('*.reject.cpp')):
+    for source in sorted(fixtures.glob('*.cpp')):
         name = source.name
         contents = source.read_bytes()
         (scope / name).write_bytes(contents)

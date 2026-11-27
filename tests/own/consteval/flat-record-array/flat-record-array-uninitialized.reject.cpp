@@ -6,9 +6,9 @@ struct Entry {
 consteval int read_uninitialized(bool inspect) {
   Entry table[2];
   if (inspect)
-    return table[1].value;  // READ
+    return table[1].value;  //! error[gcc]
   return 17;
 }
 
 static_assert(read_uninitialized(false) == 17);
-static_assert(read_uninitialized(true) == 0);  // CALL
+static_assert(read_uninitialized(true) == 0);  //! error
