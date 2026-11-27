@@ -258,8 +258,6 @@ def check_rejections(ycxx, workspace, env, other):
         ('cycle', f'{sources}\n    deps = ["left"]', "dependency cycle at 'left'"),
         ('generated-source', 'sources = [artifact("blocked", "source")]',
          'host executable sources require disk paths or globs'),
-        ('generated-header', f'{sources}\n    generated_headers = [artifact("blocked", "header")]',
-         'generated_headers is not supported in host executable dependencies'),
         ('generated-archive', f'{sources}\n    public_link_inputs = [artifact("blocked", "archive")]',
          'public_link_inputs is not supported in host executable dependencies'),
     ):

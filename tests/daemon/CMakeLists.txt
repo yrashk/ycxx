@@ -112,6 +112,9 @@ add_test(NAME daemon.project_native_host_tool
 add_test(NAME daemon.project_host_cxx_libraries
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_cxx_libraries.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_host_library_generated_headers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_headers.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_host_generated_headers
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_headers.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.project_host_generated_sources
