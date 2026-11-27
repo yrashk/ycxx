@@ -108,7 +108,7 @@ export enum class Flag : std::uint8_t {
   count_zero_gcc,    // GCC mode returns the operand width for zero in constant evaluation
   switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
   observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
-  initializing_store,  // a compiler-generated scalar initializer for a local record array
+  ordered_subobjects,  // alloc selects a named scalar-array aggregate; store initializes a tracked leaf
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -237,7 +237,7 @@ export enum class Op : std::uint16_t {
   int_to_ptr [[=pure({V}, {V}).with({nonconstant})]],
 
   // Memory and object lifetime ([basic.life], [basic.stc], [class.union]).
-  alloc [[=state({S}, {S, V}).imms({type, storage, init})]],
+  alloc [[=state({S}, {S, V}).imms({type, storage, init}).accepts({ordered_subobjects})]],
   dealloc [[=state({S, V}, {S}).imms({storage})]],
   obj__begin [[=state({S, V}, {S}).imms({type}).accepts({
     outside_lifetime, outside_unknown, unknown_reference, switch_bypassed_lifetime
@@ -245,7 +245,7 @@ export enum class Op : std::uint16_t {
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
-  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body, initializing_store})]],
+  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body, ordered_subobjects})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src

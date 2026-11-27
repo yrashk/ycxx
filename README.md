@@ -924,6 +924,8 @@ written default member initializer are value-initialized.
   Constant expressions can iterate over a named local array of flat aggregate records
   initialized with braced lists for their integral or enumeration fields.
   [#1642](https://github.com/yrashk/ycxx/issues/1642)
+  Constant expressions can also initialize, read and write fixed one-dimensional scalar
+  arrays in supported named automatic aggregates. [#1140](https://github.com/yrashk/ycxx/issues/1140)
   A constant expression can return a named empty or flat aggregate and use the result,
   including an initialized fixed-size `char` member array.
   [#975](https://github.com/yrashk/ycxx/issues/975)

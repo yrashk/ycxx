@@ -25,6 +25,7 @@ struct IntRep {
 template <class F>
 concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e, std::int64_t v, double d) {
   typename std::bool_constant<F::evaluating_constants>;
+  requires (!F::evaluating_constants || requires { { f.uses_local_scalar_array_layout(q) } -> std::same_as<bool>; });
   { f.canonical(q) } -> std::same_as<ast::QualType>;  // cv-unqualified
   { f.classify(q) } -> std::same_as<TypeClass>;
   { f.integer(q) } -> std::same_as<IntRep>;        // pre: bool or integer

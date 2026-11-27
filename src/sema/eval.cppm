@@ -17,6 +17,52 @@ import :types;
 import :diag;
 import :actions;
 
+namespace ycxx::sema {
+
+// Only named automatic aggregates use this layout. Stored records and temporaries
+// have separate admission rules. Keep the profile to direct, independently laid out
+// scalar fields and fixed one-dimensional scalar array fields.
+const ClassRec* local_scalar_array_record(World& world, Questions& questions, QualType type) {
+  Types& types = world.types;
+  type = types.canonical(type);
+  if (!types.is_class(type) || Types::is_volatile(type)) return nullptr;
+  const EntityId entity = types.class_of(type);
+  if (!questions.is_complete(entity)) return nullptr;
+  const ClassRec* record = questions.classes().find(entity);
+  if (!record || !Sema::is_aggregate_class(*record) || record->union_ || record->dynamic ||
+      !record->bases.empty() || record->unapplied_layout || questions.class_layout_uncertain(entity) ||
+      !record->destructor_usable || record->destructor != EntityId::none)
+    return nullptr;
+  bool has_array = false;
+  for (const FieldRec& field : record->fields) {
+    if (record->access_of(field.entity) != ast::Access::public_ || field.bit_width || field.no_unique_address)
+      return nullptr;
+    QualType leaf = types.canonical(field.type);
+    if (types.is_array(leaf)) {
+      const auto array = types.rec(leaf);
+      if (array.bound == 0 || array.bound > std::numeric_limits<u32>::max()) return nullptr;
+      leaf = types.canonical(array.inner);
+      has_array = true;
+    }
+    if (Types::is_volatile(leaf)) return nullptr;
+    if (types.is_pointer(leaf)) continue;
+    if (types.is_enum(leaf)) {
+      const auto* enumeration = questions.classes().find_enum(types.enum_of(leaf));
+      if (!enumeration || !enumeration->underlying) return nullptr;
+      leaf = *enumeration->underlying;
+    }
+    const auto builtin = types.builtin_of(leaf);
+    if (!builtin) return nullptr;
+    const auto& target = world.target;
+    if (ast::is_integral(*builtin) && ast::width_of(target, *builtin) <= 128) continue;
+    if (ast::is_floating(*builtin) && ast::computes(target[*builtin].format)) continue;
+    return nullptr;
+  }
+  return has_array ? record : nullptr;
+}
+
+}  // namespace ycxx::sema
+
 export namespace ycxx::sema {
 
 // The facts `function_ir` needs (ycxx.irgen:facts), over sema's world and questions.
@@ -47,6 +93,7 @@ public:
     };
   }
   static constexpr bool evaluating_constants = true;
+  bool uses_local_scalar_array_layout(QualType type) { return local_scalar_array_record(*w_, *q_, type) != nullptr; }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
@@ -309,6 +356,7 @@ private:
         .compatibility = q_->compatibility(),
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
         .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
+        .local_scalar_array_layout = [this](QualType t) { return local_scalar_array_layout(t); },
         .virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic, bool immediate) {
           return virtual_target(selected, receiver, dynamic, immediate);
         },
@@ -559,6 +607,20 @@ private:
           !constant_record_field(field.type))
         return std::nullopt;
       // Preserve the enum type in the field path. The interpreter decodes its underlying value.
+      result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
+    }
+    return result;
+  }
+
+  std::optional<interp::ConstantRecordLayout> local_scalar_array_layout(QualType type) {
+    const auto* record = local_scalar_array_record(s_->world(), *q_, type);
+    if (!record) return std::nullopt;
+    const auto layout = s_->class_layout(s_->types().class_of(type));
+    if (!layout) return std::nullopt;
+    interp::ConstantRecordLayout result{layout->size, {}};
+    result.fields.reserve(record->fields.size());
+    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+      const FieldRec& field = record->fields[i];
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
     }
     return result;

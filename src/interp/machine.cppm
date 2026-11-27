@@ -85,6 +85,7 @@ struct Config {
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
+  std::function<std::optional<ConstantRecordLayout>(QualType)> local_scalar_array_layout{};
   std::function<std::optional<VirtualTarget>(EntityId, EntityId, EntityId, bool)> virtual_target{};
   EntityId constant_destructor = EntityId::none;
 };
@@ -210,7 +211,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, callee_read, write, callee_write, lifetime, gcc_member_receiver };
+  enum class Use : u8 { read, callee_read, write, callee_write, initialize, lifetime, gcc_member_receiver };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -245,15 +246,17 @@ private:
     EntityId entity{};
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
-    const RecordStorage* record = nullptr;  // owned by records_
+    const RecordStorage* record = nullptr;  // owned by a layout cache
     const RecordStorage* array_record = nullptr;
-    u32 initialized_array_fields = 0;  // direct fields completed in element and declaration order
+    bool local_scalar_array_record = false;
+    u32 initialized_subobjects = 0;  // scalar leaves completed in element and declaration order
     Life record_life = Life::before;        // distinct from the lifetimes of its subobjects
     Life primary_base_life = Life::before;
     bool dynamic_initialized = false;     // set only by a completed constructor
     bool unknown_reference = false;       // an opaque referent can alias another outside object
 
     bool local_record_array() const { return origin == Origin::automatic && array_record; }
+    bool orders_subobject_initialization() const { return local_record_array() || local_scalar_array_record; }
   };
   struct StorageExtent {
     u64 cells;
@@ -320,6 +323,8 @@ private:
   // ------------------------------------------------------------ objects
 
   const RecordStorage* record_storage(QualType t, const ConstantRecordLayout* known = nullptr);
+  const RecordStorage* local_scalar_array_storage(QualType type);
+  std::optional<RecordStorage> build_record_storage(QualType type, const ConstantRecordLayout& layout);
   StorageExtent storage_extent(QualType t, const RecordStorage* array_record);
   bool can_allocate(u64 ncells) const;
   u32 make_object(QualType t, Origin o, const RecordStorage* record = nullptr,
@@ -330,7 +335,7 @@ private:
   bool fill_record_constant(const RecordStorage& record, u32 cell, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
-  bool pending_array_field(const Place& p) const;
+  bool pending_subobject(const Place& p) const;
   void set_lifetime(const Place& p, bool complete, Life life);
   Flow read_cell(QualType type, u32 cell, Value& out);
   Flow copy_record(const Place& dst, const Place& src);
@@ -435,6 +440,7 @@ private:
   std::map<u32, u32> globals_;
   std::map<u32, std::optional<RecordStorage>> records_;
   std::vector<Group> groups_;
+  std::map<u32, std::optional<RecordStorage>> local_scalar_array_records_;
 
   EntityId wanted_{};
   Event pending_ = Event::done;
@@ -579,19 +585,34 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
     if (layout) known = &*layout;
   }
   if (!known) return nullptr;
-  RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base, known->flat_array_element};
-  record.fields.reserve(known->fields.size());
-  for (const auto& field : known->fields) {
+  storage = build_record_storage(type, *known);
+  return storage ? &*storage : nullptr;
+}
+
+const Machine::RecordStorage* Machine::local_scalar_array_storage(QualType t) {
+  const QualType type = in_->canonical(t);
+  auto [it, inserted] = local_scalar_array_records_.try_emplace(std::to_underlying(type));
+  auto& storage = it->second;
+  if (inserted && config_.local_scalar_array_layout)
+    if (const auto layout = config_.local_scalar_array_layout(type))
+      storage = build_record_storage(type, *layout);
+  return storage ? &*storage : nullptr;
+}
+
+std::optional<Machine::RecordStorage> Machine::build_record_storage(QualType type,
+                                                                   const ConstantRecordLayout& layout) {
+  RecordStorage record{type, layout.size, 0, {}, layout.dynamic, layout.primary_base, layout.flat_array_element};
+  record.fields.reserve(layout.fields.size());
+  for (const auto& field : layout.fields) {
     QualType leaf = field.type;
     while (shape(leaf).kind == Kind::array) leaf = shape(leaf).inner;
     const auto* nested = in_->types.is<ast::TClass>(in_->canonical(leaf)) ? record_storage(leaf) : nullptr;
     const u64 leaves = storage_extent(field.type, nested).cells;
-    if ((leaves == 0 && !nested) || leaves > std::numeric_limits<u32>::max() - record.ncells) return nullptr;
+    if ((leaves == 0 && !nested) || leaves > std::numeric_limits<u32>::max() - record.ncells) return std::nullopt;
     record.fields.push_back({field, record.ncells, u32(leaves), nested});
     record.ncells += u32(leaves);
   }
-  storage = std::move(record);
-  return &*storage;
+  return record;
 }
 
 // A stored record array needs its leaf layout only for this object. Its cell stride follows
@@ -760,21 +781,21 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
   if (use == Use::lifetime || use == Use::gcc_member_receiver) return Flow::next;
-  // Only an ordinary store can initialize storage before the lifetime begins.
-  const bool requires_live = use != Use::write;
+  // For ordered subobjects, only a store emitted by the initializer can
+  // write before the leaf's lifetime begins. Other writes require a live object.
+  const bool may_initialize = use == Use::initialize || (use == Use::write && !ob.orders_subobject_initialization());
   const Life record_life = pl->primary_base ? ob.primary_base_life : ob.record_life;
-  if (pl->ncells == 0 && (record_life == Life::after || (requires_live && record_life == Life::before)))
+  if (pl->ncells == 0 && (record_life == Life::after || (!may_initialize && record_life == Life::before)))
     return fail(Reason::outside_lifetime);
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
-    if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
+    if (life == Life::after || (!may_initialize && life == Life::before)) return fail(Reason::outside_lifetime);
   }
   const Life life = pl->ncells == 0 ? record_life : cells_[pl->cell0].life;
-  const bool writing = use == Use::write || use == Use::callee_write;
+  const bool writing = use == Use::write || use == Use::callee_write || use == Use::initialize;
   if (ob.mutable_lifetimes_outside && pl->mutable_field)
     return fail(writing ? Reason::modify_outside : Reason::not_usable);
-  // An ordinary initializing store precedes the lifetime's start.
-  const bool initializing = use == Use::write && life == Life::before;
+  const bool initializing = may_initialize && life == Life::before;
   const bool constant = config_.mode == Mode::constant;
   if (constant && volatile_ && !initializing) return fail(Reason::volatile_access);
   const auto& object_type = shape(ob.type);
@@ -802,10 +823,10 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   return use == Use::callee_read || use == Use::callee_write ? Flow::next : note_access(*pl, writing);
 }
 
-bool Machine::pending_array_field(const Place& p) const {
+bool Machine::pending_subobject(const Place& p) const {
   const Object& object = objects_[p.obj];
   return object.record_life == Life::before && p.ncells == 1 && !p.record &&
-         p.cell0 - object.cell0 == object.initialized_array_fields && cells_[p.cell0].life == Life::before;
+         p.cell0 - object.cell0 == object.initialized_subobjects && cells_[p.cell0].life == Life::before;
 }
 
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {

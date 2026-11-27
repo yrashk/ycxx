@@ -1406,6 +1406,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   whole-element copies, member calls on elements, and separate element lifetime operations
   ([dcl.init.aggr], [basic.life], [expr.const]).
   [#1642](https://github.com/yrashk/ycxx/issues/1642) · [#1140](https://github.com/yrashk/ycxx/issues/1140)
+- Constant evaluation can initialize and access fixed one-dimensional arrays of supported
+  integral, enumeration, pointer and floating-point types in a named automatic aggregate.
+  Element initializers run in order. Each element becomes readable after its initialization,
+  including omitted elements that are zero-initialized before the next member. Accesses
+  retain the array's bounds and storage lifetime ([dcl.init.aggr], [basic.life], [expr.const]).
+  [#1140](https://github.com/yrashk/ycxx/issues/1140)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
   initializer's object, including through a conditional glvalue. Reading a later field on
