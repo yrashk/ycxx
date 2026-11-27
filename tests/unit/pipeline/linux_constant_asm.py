@@ -9,6 +9,9 @@ import tempfile
 
 from linux_compile import run
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 ACCESSOR_SOURCE = '''\
 #include "symbol.hpp"
@@ -165,7 +168,7 @@ def main():
     options = (ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26')
     source = Path(__file__).resolve().with_suffix('.cpp')
     with tempfile.TemporaryDirectory(prefix='ycxx-constant-asm-') as temp, \
-            tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+            tempfile.TemporaryDirectory(prefix='yd-', dir=runtime_root('yd-')) as runtime:
         scope = Path(temp).resolve()
         (scope / '.ycxx').touch()
         (scope / 'directive.cpp').write_bytes(source.read_bytes())

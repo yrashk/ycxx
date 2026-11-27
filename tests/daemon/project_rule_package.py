@@ -1,12 +1,14 @@
 """Run bundled and project-owned C++ rule packages through the resident engine (#1257, #1281)."""
 
 import json
+import os
 from pathlib import Path
 import shlex
 import sys
 import tempfile
 
 from project_build import check_program, env_for, run_client, traced_build, tu_outcomes
+from project_build_watch import Watch
 from runtime_dir import runtime_root
 
 
@@ -344,15 +346,54 @@ def check_package(ycxx, scope, env, compiler):
     check_private_primitives(ycxx, scope, env)
 
 
-def compiler_wrapper(path, log, compiler=None):
+def compiler_wrapper(path, log, compiler=None, *, label=None):
     command = (f'exec {shlex.quote(str(compiler))} "$@"' if compiler is not None
                else f"printf '%s\\n' {shlex.quote(f'{path.name}: deliberate failure')} >&2\nexit 31")
     path.write_text(f'''\
 #!/bin/sh
-printf '%s\\n' {shlex.quote(path.name)} >> {shlex.quote(str(log))}
+printf '%s\\n' {shlex.quote(label or path.name)} >> {shlex.quote(str(log))}
 {command}
 ''', encoding='utf-8')
     path.chmod(0o755)
+
+
+def check_fallback_watch(ycxx, scope, env, compiler, tools, early, log):
+    package = f'{PACKAGE}/rules'
+    executable = scope / '.ycxx' / 'out' / 'app'
+    selected, candidate = tools / 'clang++', early / 'clang++'
+    pending = scope / '.ycxx' / 'watch-test-compiler'
+    journal = ['c++', 'clang++']
+    watch = Watch(ycxx, scope, env)
+    try:
+        summary, events, watched = watch.build('watch the warm fallback compiler selection')
+        check_actions(summary, events)
+        assert not candidate.exists() and {str(selected), str(candidate)} <= set(watched), watched
+
+        original = selected.stat()
+        compiler_wrapper(pending, log, compiler, label='clang-B')
+        os.utime(pending, ns=(original.st_atime_ns, original.st_mtime_ns))
+        pending.replace(selected)
+        updated = selected.stat()
+        assert (updated.st_size, updated.st_mtime_ns) == (original.st_size, original.st_mtime_ns)
+        assert updated.st_ino != original.st_ino
+        _, events, _ = watch.build('same-size and same-mtime fallback compiler replacement')
+        check_compiler_attempts(events, package, (ycxx, 'failed'), (tools / 'c++', 'failed'),
+                                (selected, 'executed'))
+        journal.extend(('c++', 'clang-B'))
+        assert log.read_text(encoding='utf-8').splitlines() == journal
+        check_program(executable, 41)
+
+        compiler_wrapper(pending, log, compiler, label='earlier')
+        pending.replace(candidate)
+        _, events, watched = watch.build('earlier clang++ appears on the same PATH')
+        check_compiler_attempts(events, package, (ycxx, 'failed'), (tools / 'c++', 'failed'),
+                                (candidate, 'executed'))
+        journal.extend(('c++', 'earlier'))
+        assert log.read_text(encoding='utf-8').splitlines() == journal
+        assert str(candidate) in watched, watched
+        check_program(executable, 41)
+    finally:
+        watch.close()
 
 
 def check_fallback(ycxx, scope, env, compiler):
@@ -364,13 +405,15 @@ def check_fallback(ycxx, scope, env, compiler):
     executable = scope / '.ycxx' / 'out' / 'app'
     log = scope / 'compiler-attempts'
     tools = scope / 'host-compilers'
+    early = scope / 'earlier-host-compilers'
     tools.mkdir()
+    early.mkdir()
     compiler_wrapper(tools / 'c++', log)
     compiler_wrapper(tools / 'clang++', log, compiler)
     compiler_wrapper(tools / 'g++', log, compiler)
 
     # This daemon is already running. Only the invoking client has this relative PATH.
-    build_env = dict(env, PATH=tools.name)
+    build_env = dict(env, PATH=f'{early.name}:{tools.name}')
     summary, events = traced_build(ycxx, scope, build_env, 'fallback to the first successful PATH compiler')
     check_actions(summary, events, 'RulePackage', 'RuleWorker', failed=2)
     check_compiler_attempts(events, package_ref, (ycxx, 'failed'), (tools / 'c++', 'failed'),
@@ -383,6 +426,7 @@ def check_fallback(ycxx, scope, env, compiler):
     check_actions(summary, events)
     assert log.read_text(encoding='utf-8').splitlines() == ['c++', 'clang++'], 'warm build launched a compiler'
     assert executable.read_bytes() == previous, 'warm fallback build changed the output'
+    check_fallback_watch(ycxx, scope, build_env, compiler, tools, early, log)
 
     failing_tools = scope / 'failing-compilers'
     failing_tools.mkdir()
@@ -443,6 +487,33 @@ exec {real_compiler} "$@"
     check_actions(summary, events, 'RulePackage', 'RulePackage', 'RuleWorker')
     check_compiler_attempts(events, f'{PACKAGE}/rules', (wrapper, 'executed'), (wrapper, 'executed'))
     assert log.read_text(encoding='utf-8').splitlines() == ['superseded', 'current']
+    check_program(scope / '.ycxx' / 'out' / 'app', 41)
+
+    # Change only the selected compiler after it produces a package that would
+    # reject app if the coordinator admitted the superseded result.
+    guard = 'if (generation == "reject-executable")\n            return 26;'
+    fixture = plugin_source('replacement-compiler')
+    assert fixture.count(guard) == 1
+    source.write_text(fixture.replace(guard, '''\
+#ifdef YCXX_TEST_OBSOLETE_COMPILER
+        return 26;
+#endif
+'''), encoding='utf-8')
+    next_compiler = wrapper.with_name('next-compiler')
+    compiler_wrapper(next_compiler, log, compiler, label='current compiler')
+    wrapper.write_text(f'''\
+#!/bin/sh
+printf '%s\\n' 'superseded compiler' >> {attempts}
+{real_compiler} -DYCXX_TEST_OBSOLETE_COMPILER "$@" || exit $?
+/bin/mv {shlex.quote(str(next_compiler))} {shlex.quote(str(wrapper))}
+''', encoding='utf-8')
+    wrapper.chmod(0o755)
+    write_package(package, f'cxx({json.dumps(str(wrapper))})')
+    log.write_text('', encoding='utf-8')
+    summary, events = traced_build(ycxx, scope, env, 'compiler replaced before package admission')
+    check_actions(summary, events, 'RulePackage', 'RulePackage', 'RuleWorker')
+    check_compiler_attempts(events, f'{PACKAGE}/rules', (wrapper, 'executed'), (wrapper, 'executed'))
+    assert log.read_text(encoding='utf-8').splitlines() == ['superseded compiler', 'current compiler']
     check_program(scope / '.ycxx' / 'out' / 'app', 41)
 
 

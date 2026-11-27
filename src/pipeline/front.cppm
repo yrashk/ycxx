@@ -190,7 +190,7 @@ namespace ycxx::pipeline {
 struct Dynamic {
   EntityId variable;
   QualType type;
-  ast::NodeId init;
+  ast::Child init;  // initializer root and its token offset in the item
   EntityId destructor;
   ast::ItemId item;
 };
@@ -208,6 +208,8 @@ void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidd
                              const std::map<EntityId, FunctionVisibility>& function_visibility, bool target_is_linux) {
   if (!inline_declarations.empty())
     for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
+  if (!inline_declarations.empty())
+    for (Entity& e : tu.entities) e.inline_function = e.is_function && inline_declarations.contains(e.id);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
@@ -226,11 +228,51 @@ void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidd
   }
 }
 
+struct DynamicClassEmission {
+  EntityId cls;
+  EntityId primary_base;
+  EntityId key;
+  bool defined;
+  bool key_defined;
+  std::optional<ast::Loc> key_location;
+  std::vector<sema::VirtualSlot> slots;
+};
+
+struct PeerVirtualClass {
+  EntityId cls = EntityId::none;
+  std::optional<ast::ItemId> definition;
+  std::optional<ast::Loc> declaration;
+  EntityId automatic_base = EntityId::none;
+  std::optional<EntityId> automatic_key;
+  std::optional<parse::Program::DerivedVirtualDestructor> destructor;
+  bool unsupported = false;
+  bool producer_or_pure = false;
+  bool consumer = false;
+  EntityId defined_nonkey = EntityId::none;
+  std::optional<OwnedVirtualTable> root_table;
+  std::optional<ast::Loc> table_location;
+  std::vector<EntityId> slots;
+};
+
+struct TypedVirtualCast {
+  ast::Loc at;
+  EntityId source;
+  EntityId target;
+  parse::Program::TypedCastRtti rtti;
+};
+
 // What a group's `unit_of` leaves to its unit (#947): the decisions that need every group's
 // declarations, made by `finish_unit` when the groups' parts are put together.
 struct UnitPart {
   TranslationUnit tu;
   std::vector<Dynamic> dynamic;  // in definition order
+  std::vector<DynamicClassEmission> dynamic_classes;
+  std::set<EntityId> peer_primary_bases;
+  std::set<EntityId> implicit_dynamic_constructors;
+  std::vector<PeerVirtualClass> peer_classes;
+  std::vector<TypedVirtualCast> typed_casts;
+  std::vector<std::pair<EntityId, std::optional<ast::Loc>>> peer_table_uses;
+  std::set<EntityId> peer_attributes;
   std::set<EntityId> inline_declarations, noexcept_declarations, hidden_declarations;
   std::set<EntityId> defined;  // functions a declaration here defines
   std::set<EntityId> weak_declarations;  // explicitly weak
@@ -406,7 +448,7 @@ void init_function(sema::World& world, TranslationUnit& tu, std::span<const Dyna
     ast::Builder b(ins);
     std::vector<ast::Child> stmts;
     for (const Dynamic& x : dynamic.subspan(first, last - first)) {
-      ast::Child init{x.init == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init), 0};
+      ast::Child init{x.init.id == ast::NodeId::none ? ast::NodeId::none : b.adopt(x.init.id), 0};
       stmts.push_back({b.add(ast::StaticInit{x.variable, x.type, init, x.destructor, atexit, dso}, 0), 0});
     }
     ast::Child root = b.commit(ast::Child{b.add(ast::Compound{b.list(stmts)}, 0), 0});
@@ -439,11 +481,28 @@ void init_function_def(sema::World& world, TranslationUnit& tu, EntityId fn, Qua
   tu.functions.push_back({fn, d, body, item, 0, std::nullopt});
 }
 
-void block_virtual_emission(TranslationUnit& unit, parse::Program& program, const sema::ClassRec& record) {
-  unit.virtual_emission_blocked = true;
+std::optional<ast::Loc> virtual_declaration(parse::Program& program, const sema::ClassRec& record) {
   const auto member = std::ranges::find_if(record.members, &sema::MemberDeclRec::is_virtual);
   if (member != record.members.end())
-    if (auto d = program.member_decl(member->entity)) unit.virtual_declaration = ast::Loc{d->item, 0};
+    if (auto d = program.member_decl(member->entity)) return ast::Loc{d->item, 0};
+  return std::nullopt;
+}
+
+void block_virtual_emission(TranslationUnit& unit, parse::Program& program, const sema::ClassRec& record) {
+  unit.virtual_emission_blocked = true;
+  if (const auto at = virtual_declaration(program, record)) unit.virtual_declaration = at;
+}
+
+// Ownership arbitration needs the table and the source location of its claim, independently
+// of the Program that established the claim.
+bool claim_virtual_table(TranslationUnit& unit, OwnedVirtualTable table, std::optional<ast::Loc> at) {
+  if (unit.owned_virtual_table) {
+    unit.virtual_emission_blocked = true;
+    if (at) unit.virtual_declaration = at;
+    return false;
+  }
+  unit.owned_virtual_table = std::move(table);
+  return true;
 }
 
 bool root_destructor_body_supported(parse::Program& program, EntityId cls, const ast::BodySema& body) {
@@ -460,7 +519,9 @@ bool root_destructor_body_supported(parse::Program& program, EntityId cls, const
   const auto call = tree.get<ast::Call>(expr);
   if (call.function == EntityId::none || !tree.is<ast::DeclRef>(call.callee.id)) return false;
   const auto callee = tree.get<ast::DeclRef>(call.callee.id);
-  if (callee.entity != call.function || !program.peer_root_destructor_observer(call.function, cls)) return false;
+  if (callee.entity != call.function) return false;
+  program.ensure_declared(call.function, program.end());
+  if (!program.peer_root_destructor_observer(call.function, cls)) return false;
   const auto arguments = tree.children(call.args);
   return arguments.size() == 1 && tree.is<ast::This>(arguments.front().id);
 }
@@ -969,6 +1030,10 @@ bool names_tu_local(parse::Program& program, EntityId entity, bool include_value
     // A variable is the scope of its initializer's closures (#338).
     const bool variable = r.kind == sema::EntityKind::variable;
     if (variable && r.linkage == ast::Linkage::internal) return true;
+    // A TU-local closure type (docs/design/closures.md, decision 4), as of a lambda in an
+    // unevaluated operand of a declaration (#1549).
+    if (r.kind == sema::EntityKind::class_ && r.lambda_signature != sema::Fp128{} && r.linkage == ast::Linkage::internal)
+      return true;
     if (!variable && r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
         r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
       return false;
@@ -1031,88 +1096,123 @@ bool names_constraint_closure(parse::Program& program, EntityId entity) {
   return false;
 }
 
-// Native compilation may consume peer-owned objects, including one non-key definition.
-bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::World& world,
-                            const std::set<EntityId>& uncertain_layouts) {
+// Each group resolves the declarations its peer ABI checks read. Ownership and
+// exemptions granted by another class are applied after all groups have contributed.
+std::vector<PeerVirtualClass> peer_virtual_classes(parse::Program& program, sema::World& world) {
   const auto& classes = program.classes();
-  std::set<EntityId> automatic_primary_bases;
-  std::set<EntityId> derived_destructor_classes;
-  if (classes.has_virtual_layouts()) {
-    for (EntityId c : classes.classes()) {
-      const auto& record = classes.rec(c);
-      if (const EntityId base = record.peer_automatic_primary_base; base != EntityId::none) {
-        // Check both classes after the last declaration, even when nothing constructs the derived class.
-        const auto key = program.automatic_derived_vtable_key(c);
-        if (uncertain_layouts.contains(c) || uncertain_layouts.contains(base) || !key ||
-            (*key != EntityId::none && tu.owned_virtual_table)) {
-          block_virtual_emission(tu, program, record);
-          return false;
-        }
-        if (*key != EntityId::none)
-          tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {*key}, base};
-        automatic_primary_bases.insert(base);
+  if (!classes.has_virtual_layouts()) return {};
+  std::vector<PeerVirtualClass> result;
+  for (EntityId c : std::vector<EntityId>(classes.classes().begin(), classes.classes().end())) {
+    const auto& record = classes.rec(c);
+    if (!record.virtual_layout_unsupported && record.peer_automatic_primary_base == EntityId::none) continue;
+    program.ensure_virtual_abi_declarations(c);
+    PeerVirtualClass& fact = result.emplace_back();
+    fact.cls = c;
+    fact.definition = program.class_definition_item(c);
+    fact.declaration = virtual_declaration(program, record);
+    fact.automatic_base = record.peer_automatic_primary_base;
+    fact.unsupported = record.virtual_layout_unsupported;
+    for (const auto& member : record.members)
+      if (member.is_virtual) fact.slots.push_back(member.entity);
+    if (fact.automatic_base != EntityId::none) {
+      fact.automatic_key = program.automatic_derived_vtable_key(c);
+      if (fact.automatic_key && *fact.automatic_key != EntityId::none)
+        if (const auto key = program.member_decl(*fact.automatic_key)) fact.table_location = ast::Loc{key->item, 0};
+    }
+    fact.destructor = program.derived_virtual_destructor_ownership(c);
+    if (fact.destructor && fact.destructor->owns_derived_key)
+      if (const auto key = program.member_decl(fact.destructor->destructor)) fact.table_location = ast::Loc{key->item, 0};
+    if (!fact.unsupported || fact.automatic_base != EntityId::none || fact.destructor) continue;
+
+    fact.producer_or_pure = program.peer_root_destructor_producer(c) || program.peer_pure_dispatch(c);
+    if (const auto slots = sema::native_virtual_table_slots(record);
+        slots && program.function_defined_before(slots->front(), program.end())) {
+      if (!program.function_defined_before(slots->back(), program.end()) &&
+          !program.has_unapplied_declaration_attributes(c) &&
+          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
+        fact.root_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {slots->begin(), slots->end()}};
+        if (const auto key = program.member_decl(slots->front())) fact.table_location = ast::Loc{key->item, 0};
       }
-      if (const auto destructor = program.derived_virtual_destructor_ownership(c)) {
-        if ((destructor->owns_derived_key && tu.owned_virtual_table) ||
-            uncertain_layouts.contains(c) || uncertain_layouts.contains(destructor->base) ||
-            uncertain_layouts.contains(destructor->destructor) || uncertain_layouts.contains(destructor->base_destructor)) {
-          block_virtual_emission(tu, program, record);
-          return false;
-        }
-        derived_destructor_classes.insert(c);
-        derived_destructor_classes.insert(destructor->base);
-        if (destructor->owns_derived_key) {
-          const auto deleting = destructor_variant(world, destructor->destructor, sema::EntityKind::deleting_destructor);
-          tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c),
-                                                     {destructor->destructor, deleting}, destructor->base, true};
-        }
+      continue;
+    }
+    auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
+      if (program.function_defined_before(f, program.end())) {
+        const auto def = program.declaration(f, program.end());
+        const auto* owner = classes.find(world.entities.rec(f).scope);
+        if (!def || !def->is_virtual || !(def->flags & sema::decl_flag::definition) ||
+            (def->flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted)) ||
+            !owner || !sema::native_virtual_nonkey_member(*owner, f) ||
+            (fact.defined_nonkey != EntityId::none && fact.defined_nonkey != f)) return std::nullopt;
+        fact.defined_nonkey = f;
+      }
+      const auto d = program.member_decl(f);
+      return d ? program.decl_sema(*d) : std::nullopt;
+    };
+    fact.consumer = sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration);
+  }
+  return result;
+}
+
+std::optional<ast::Loc> merge_peer_virtual_classes(TranslationUnit& tu, sema::World& world,
+                                                   std::span<const PeerVirtualClass> classes,
+                                                   const std::set<EntityId>& uncertain_layouts,
+                                                   auto&& attributed) {
+  std::optional<ast::Loc> table_location;
+  std::set<EntityId> primary_bases, destructor_classes;
+  auto block = [&](const PeerVirtualClass& fact) {
+    tu.virtual_emission_blocked = true;
+    tu.virtual_declaration = fact.declaration;
+  };
+  for (const auto& fact : classes) {
+    if (fact.automatic_base != EntityId::none) {
+      if (uncertain_layouts.contains(fact.cls) || uncertain_layouts.contains(fact.automatic_base) || attributed(fact.cls) ||
+          attributed(fact.automatic_base) || !fact.automatic_key) {
+        block(fact);
+        return {};
+      }
+      if (*fact.automatic_key != EntityId::none) {
+        if (!claim_virtual_table(tu, {sema::virtual_table_entity(world, fact.cls), {*fact.automatic_key}, fact.automatic_base},
+                                 fact.declaration)) return {};
+        table_location = fact.table_location;
+      }
+      primary_bases.insert(fact.automatic_base);
+    }
+    if (const auto& destructor = fact.destructor) {
+      if (uncertain_layouts.contains(fact.cls) || uncertain_layouts.contains(destructor->base) ||
+          uncertain_layouts.contains(destructor->destructor) || uncertain_layouts.contains(destructor->base_destructor) ||
+          attributed(fact.cls) || attributed(destructor->base)) {
+        block(fact);
+        return {};
+      }
+      destructor_classes.insert(fact.cls);
+      destructor_classes.insert(destructor->base);
+      if (destructor->owns_derived_key) {
+        const auto deleting = destructor_variant(world, destructor->destructor, sema::EntityKind::deleting_destructor);
+        if (!claim_virtual_table(tu, {sema::virtual_table_entity(world, fact.cls), {destructor->destructor, deleting},
+                                      destructor->base, true}, fact.declaration)) return {};
+        table_location = fact.table_location;
       }
     }
   }
   EntityId defined_nonkey = EntityId::none;
-  auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
-    // Inspect all definitions at the end of the unit, including a key written after the
-    // supported definition. A derived consumer may ask about the same root again.
-    if (program.function_defined_before(f, program.end())) {
-      const auto def = program.declaration(f, program.end());
-      const auto* owner = classes.find(world.entities.rec(f).scope);
-      if (!def || !def->is_virtual || !(def->flags & sema::decl_flag::definition) ||
-          (def->flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted)) ||
-          !owner || !sema::native_virtual_nonkey_member(*owner, f) ||
-          (defined_nonkey != EntityId::none && defined_nonkey != f)) return std::nullopt;
-      defined_nonkey = f;
-    }
-    const auto d = program.member_decl(f);
-    return d ? program.decl_sema(*d) : std::nullopt;
-  };
-  for (EntityId c : classes.classes()) {
-    const auto& record = classes.rec(c);
-    if (!record.virtual_layout_unsupported) continue;
-    if (record.peer_automatic_primary_base != EntityId::none || automatic_primary_bases.contains(c)) continue;
-    if (derived_destructor_classes.contains(c)) continue;
-    if (!uncertain_layouts.contains(c) && program.peer_root_destructor_producer(c)) continue;
-    // Check the full unit even if a pure call was admitted before a later redeclaration.
-    if (!uncertain_layouts.contains(c) && program.peer_pure_dispatch(c)) continue;
-    // The first slot is the key function of the admitted root. Classify its ownership using
-    // the complete unit, even when no function uses the class or constructs an object here.
-    if (const auto slots = sema::native_virtual_table_slots(record);
-        slots && program.function_defined_before(slots->front(), program.end())) {
-      // An elaborated declaration may introduce the class with namespace attributes. A friend
-      // may also redeclare either slot with its own attributes, including after the key.
-      if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
-          !program.has_unapplied_declaration_attributes(c) &&
-          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
-        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c),
-                                                  {slots->begin(), slots->end()}};
-        continue;
-      }
-    } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {
+  for (const auto& fact : classes) {
+    if (!fact.unsupported || fact.automatic_base != EntityId::none || primary_bases.contains(fact.cls) ||
+        destructor_classes.contains(fact.cls)) continue;
+    if (!uncertain_layouts.contains(fact.cls) && !attributed(fact.cls) && fact.producer_or_pure) continue;
+    if (fact.root_table && !attributed(fact.cls)) {
+      if (!claim_virtual_table(tu, *fact.root_table, fact.declaration)) return {};
+      table_location = fact.table_location;
       continue;
     }
-    block_virtual_emission(tu, program, record);
-    return false;
+    if (fact.consumer && (fact.defined_nonkey == EntityId::none || defined_nonkey == EntityId::none ||
+                          fact.defined_nonkey == defined_nonkey)) {
+      if (fact.defined_nonkey != EntityId::none) defined_nonkey = fact.defined_nonkey;
+      continue;
+    }
+    block(fact);
+    return {};
   }
-  return true;
+  return table_location;
 }
 
 // The definitions and declarations of the global namespace, in item order.
@@ -1161,13 +1261,82 @@ void unwind_through_constructors(TranslationUnit& tu, Definition& unwind_definit
   }
 }
 
-// The unit's definitions from its Program, or, with `part`, one group's: the items [first, end)
-// and the instances their Program made, leaving to `finish_unit` what needs every group (#947).
-// A part is made only for a unit without virtual functions: the virtual-table decisions read the
-// whole unit's Program.
+Special symbol_special(sema::EntityKind kind) {
+  switch (kind) {
+    case sema::EntityKind::virtual_table: return Special::virtual_table;
+    case sema::EntityKind::type_info: return Special::type_info;
+    case sema::EntityKind::constructor: return Special::constructor;
+    case sema::EntityKind::destructor: return Special::destructor;
+    case sema::EntityKind::deleting_destructor: return Special::deleting_destructor;
+    case sema::EntityKind::base_object_destructor: return Special::base_object_destructor;
+    default: return Special::none;
+  }
+}
+
+// The table owner is decided from all key definitions, inline declarations and table
+// installations, in the order in which the unit contributes its class records.
+template <class Declare>
+void emit_dynamic_tables(TranslationUnit& tu, sema::World& world, const std::vector<DynamicClassEmission>& classes,
+                         std::set<EntityId> peer_primary_bases, const std::set<EntityId>& inline_declarations,
+                         Declare& declare) {
+  if (classes.empty()) return;
+  std::map<EntityId, const DynamicClassEmission*> by_class;
+  for (const auto& record : classes) {
+    by_class.emplace(record.cls, &record);
+    peer_primary_bases.erase(record.primary_base);
+  }
+  std::set<EntityId> installed;
+  for (const FunctionDef& f : tu.functions) {
+    installed.insert(f.constructor_table);
+    installed.insert(f.destructor_table);
+  }
+  std::map<EntityId, bool> tables;
+  std::set<EntityId> descriptors_only;
+  for (const auto& record : classes) {
+    if (!record.defined || peer_primary_bases.contains(record.cls)) continue;
+    if (record.key == EntityId::none ? !installed.contains(sema::virtual_table_entity(world, record.cls)) : !record.key_defined)
+      continue;
+    tables.emplace(record.cls, record.key == EntityId::none || inline_declarations.contains(record.key));
+    for (EntityId base = record.primary_base; base != EntityId::none;) {
+      const auto& primary = *by_class.at(base);
+      if (tables.contains(base) || (primary.key != EntityId::none && !inline_declarations.contains(primary.key))) break;
+      descriptors_only.insert(base);
+      base = primary.primary_base;
+    }
+  }
+  for (const auto& record : classes) {
+    const auto owned = tables.find(record.cls);
+    const bool table_here = owned != tables.end();
+    if (!table_here && !descriptors_only.contains(record.cls)) continue;
+    const EntityId entity = table_here ? sema::virtual_table_entity(world, record.cls) : sema::type_info_entity(world, record.cls);
+    DynamicTable table{entity, record.cls, {}, record.primary_base, !table_here || owned->second, !table_here};
+    if (table_here) {
+      for (const sema::VirtualSlot& slot : record.slots) {
+        EntityId e = slot.function;
+        if (slot.pure) e = sema::pure_virtual_handler(world);
+        else if (slot.kind == sema::VirtualSlotKind::deleting_destructor)
+          e = destructor_variant(world, slot.function, sema::EntityKind::deleting_destructor);
+        ast::DeclSema d{};
+        d.kind = ast::DeclKind::function;
+        d.entity = e;
+        d.type = world.entities.rec(e).type;
+        declare(d, std::nullopt);
+        table.slots.push_back(e);
+      }
+    }
+    ast::DeclSema d{};
+    d.kind = ast::DeclKind::variable;
+    d.entity = entity;
+    d.type = world.entities.rec(entity).type;
+    declare(d, record.key_location);
+    tu.dynamic_tables.push_back(std::move(table));
+  }
+}
+
+// Collect one group's definitions and the facts that finish_unit needs from its Program.
 TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse::ItemsView& items, std::string name,
-                        const std::set<EntityId>& uncertain_layouts, std::uint32_t first = 0,
-                        std::uint32_t end = std::numeric_limits<std::uint32_t>::max(), UnitPart* part = nullptr) {
+                        const std::set<EntityId>& uncertain_layouts, std::uint32_t first,
+                        std::uint32_t end, UnitPart& part) {
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
@@ -1175,7 +1344,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   tu.has_raw_linkage_names = region.has_clang_attribute_pragma;
   const auto& classes = program.classes();
   const bool has_typed_cast = program.has_typed_dynamic_cast();
-  if (!has_typed_cast && !native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
+  part.peer_classes = peer_virtual_classes(program, world);
+  part.peer_attributes = program.unapplied_declaration_attributes();
   const bool target_is_linux = world.target.triple == ast::x86_64_linux.triple;
   const bool exceptions_enabled = program.exceptions_enabled();
   std::set<std::uint32_t> seen;
@@ -1300,7 +1470,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
     // A constructor, destructor or ordinary class-template member binds locally when its
     // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
-    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+    // So does an implicit or defaulted assignment operator, which any unit can emit.
+    const bool synthesized_assignment = r.kind == sema::EntityKind::function && program.synthesized_assignment(e);
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || synthesized_assignment ||
+         ordinary_class_template_member(r)) &&
         linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     return linkage;
@@ -1308,7 +1481,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none) return;
-    if (part && d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::definition)) part->defined.insert(e);
+    if (d.kind == ast::DeclKind::function && (d.flags & sema::decl_flag::definition)) part.defined.insert(e);
     // Any reachable declaration can mark the entity inline ([dcl.inline]).
     if ((d.flags & sema::decl_flag::inline_) && (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
@@ -1336,23 +1509,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template ||
         r.kind == sema::EntityKind::alias_template || r.kind == sema::EntityKind::concept_)
       return;  // no symbol: a template's specializations have them
-    const bool table = r.kind == sema::EntityKind::virtual_table;
-    const bool rtti = r.kind == sema::EntityKind::type_info;
-    bool fn = r.kind != sema::EntityKind::variable && !table && !rtti;
+    const Special special = symbol_special(r.kind);
+    const bool fn = r.kind != sema::EntityKind::variable && special != Special::virtual_table && special != Special::type_info;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     const ast::Linkage linkage = symbol_linkage(d);
-    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
-                           table ? Special::virtual_table
-                           : rtti ? Special::type_info
-                           : r.kind == sema::EntityKind::constructor  ? Special::constructor
-                           : r.kind == sema::EntityKind::destructor ? Special::destructor
-                           : r.kind == sema::EntityKind::deleting_destructor ? Special::deleting_destructor
-                           : r.kind == sema::EntityKind::base_object_destructor ? Special::base_object_destructor
-                                                                    : Special::none});
+    tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope, special});
     Entity& emitted = tu.entities.back();
     if (fn) {
       const auto* owner = r.scope == EntityId::none ? nullptr : world.entities.find(r.scope);
+      emitted.namespace_static = program.is_namespace(r.scope) &&
+          (d.storage == ast::Storage::static_ ||
+           (r.linkage == ast::Linkage::internal && !parse::Program::unnamed(program.namespace_path(r.scope))));
       if (has_class_argument(r) || (owner && has_class_argument(*owner)))
         emitted.unsupported_class_parameter_signature = !default_visible_type(d.type) ||
             !std::ranges::all_of(r.args, default_visible_argument) ||
@@ -1377,14 +1545,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       emitted.local_parameter_binding =
           std::ranges::any_of(type.params, [&](QualType param) { return names_tu_local(program, param); });
     }
+    // A non-template member's trailing requires-clause is part of its name (#1417).
+    if (fn && r.templ == EntityId::none && d.constraints != ConstId::none) tu.entities.back().trailing_constraint = d.trailing_constraint;
     if (r.templ != EntityId::none) {
-      tu.entities.back().template_type = world.entities.rec(r.templ).type;
+      const auto& pattern = world.entities.rec(r.templ);
+      emitted.template_type = pattern.type;
+      emitted.generic_invoker_head = pattern.generic_invoker_head;
+      emitted.template_trailing_constraint = pattern.lambda_trailing_constraint;
+      const bool invoker = ins.seqs.size(pattern.generic_invoker_head) != 0;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
-      if (sema::Sema::closure_member(world, r.templ))
-        tu.entities.back().template_type = world.entities.rec(world.entities.rec(r.templ).scope).type;
-      tu.entities.back().template_args = r.args;
+      if (!invoker && sema::Sema::closure_member(world, r.templ))
+        emitted.template_type = world.entities.rec(pattern.scope).type;
+      emitted.template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
-      if (world.entities.rec(r.templ).kind == sema::EntityKind::function_template)
+      if (!invoker && pattern.kind == sema::EntityKind::function_template)
         if (auto td = program.declaration(r.templ, program.end())) {
           std::vector<ast::TemplateParamSema> ps = ins.seqs.elements(td->template_params);
           sema::Templates t = program.templates();
@@ -1420,12 +1594,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       // Its typed return is available to lookup, but calls and address formation require the ABI.
       if (c.flags & sema::closure_flag::polymorphic_result) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
-      for (EntityId f : {c.call, c.invoker}) {
+      for (EntityId f : {c.call, c.invoker, c.conversion}) {
         if (f == EntityId::none) continue;
-        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
+        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, sema::Sema::closure_member_body(c, f), locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
-        if (in_declaration) declaration_closure_member(tu.functions.back());
+        if (in_declaration || (c.flags & (sema::closure_flag::generic_invoker | sema::closure_flag::generated_conversion)))
+          declaration_closure_member(tu.functions.back());
       }
     }
   };
@@ -1452,7 +1627,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     } else if (entity.kind != sema::EntityKind::function) {
       return;
     }
-    if (part) part->coalesce_if_inline.insert(f.entity);
+    part.coalesce_if_inline.insert(f.entity);
     f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity;
   };
   // Whether a variable's definition is weak once a declaration says `inline`.
@@ -1470,7 +1645,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         }));
   };
   auto weak_inline_variable = [&](const ast::DeclSema& d) {
-    if (part && weak_if_inline(d)) part->weak_if_inline.insert(d.entity);
+    if (weak_if_inline(d)) part.weak_if_inline.insert(d.entity);
     return inline_declarations.contains(d.entity) && weak_if_inline(d);
   };
   // Native statics and closure members are collected separately from the enclosing body.
@@ -1580,24 +1755,37 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
       classes_with_unapplied_rtti_abi.insert(d.entity);
   };
+  auto record_class_template_spellings = [&](ast::SeqId<ast::TemplateTypeSpelling> spellings, std::uint32_t k) {
+    for (const auto& spelling : ins.seqs.elements(spellings)) {
+      const auto located = std::pair{ast::Loc{program.id(k), spelling.at}, spelling.arguments};
+      auto [it, added] = tu.class_template_spellings.try_emplace(spelling.specialization, located);
+      if (!added && it->second.first.item == located.first.item && located.first.offset < it->second.first.offset)
+        it->second = located;
+    }
+  };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   (program.in_global_scope(it.parent) || program.named_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
+    if (const auto* body = program.analysed_body(k)) record_class_template_spellings(body->template_type_spellings, k);
     // A class template member is not emitted from its pattern. A friend class declaration
     // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
     if (member && !program.enclosing_heads(k).empty()) {
-      if (const auto* pattern = target_is_linux ? program.analysed_item(k) : nullptr)
-        for (const auto& declaration : ins.seqs.elements(pattern->decls))
-          if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      if (const auto* pattern = target_is_linux || program.compatibility() == ast::Compatibility::clang ? program.analysed_item(k) : nullptr) {
+        record_class_template_spellings(pattern->template_type_spellings, k);
+        if (target_is_linux)
+          for (const auto& declaration : ins.seqs.elements(pattern->decls))
+            if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      }
       continue;
     }
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
+    record_class_template_spellings(is.template_type_spellings, k);
     if (!ast::is_none(is.asm_hidden_symbol))
       tu.asm_hidden_symbols.push_back({std::string(ins.names.spelling(is.asm_hidden_symbol)),
                                        {program.id(k), is.asm_directive_at}});
@@ -1631,6 +1819,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const auto& d = decls[i];
       declare(d, at[i]);
+      if (d.kind == ast::DeclKind::function) {
+        collect_constraint_lambdas(ins, d.head_constraint.expression, tu.written_constraint_lambdas);
+        collect_constraint_lambdas(ins, d.trailing_constraint.expression, tu.written_constraint_lambdas);
+      }
       record_class_rtti_abi(d, k);
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
           (attributed || ins.seqs.size(d.annotations) != 0) &&
@@ -1660,6 +1852,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if ((d.flags & sema::decl_flag::consteval_) && (immediate_free || immediate_constructor) && !it.template_depth &&
           !it.specialization && entity.templ == EntityId::none && can_defer_body(body))
         continue;
+      // GCC defers repeated C-linkage definitions across namespaces until code generation.
+      if (!tu.duplicate_c_definition && program.compatibility() == ast::Compatibility::gcc &&
+          (d.flags & sema::decl_flag::lang_c) && program.function_defined_before(d.entity, k))
+        tu.duplicate_c_definition = at.front().value_or(ast::Loc{program.id(k), 0});
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       tu.functions.back().emit_if_referenced = immediate_if_referenced(d, entity, body);
       namespace flag = sema::decl_flag;
@@ -1720,10 +1916,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       }
       if (!member) {
         std::vector<EntityId> layout_inputs;
-        if (program.supports_base_object_variant(d.entity, uncertain_layouts, part ? &layout_inputs : nullptr)) {
-          if (part) part->base_object_variant_layouts.emplace_back(d.entity, std::move(layout_inputs));
-          else tu.base_object_variants.insert(d.entity);
-        }
+        if (program.supports_base_object_variant(d.entity, uncertain_layouts, &layout_inputs))
+          part.base_object_variant_layouts.emplace_back(d.entity, std::move(layout_inputs));
       }
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
@@ -1753,23 +1947,24 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const ast::DeclSema& d = decls[i];
       if (!declarators[i] || d.kind != ast::DeclKind::variable || d.entity == EntityId::none ||
-          !(d.flags & sema::decl_flag::definition))
+          !(d.flags & sema::decl_flag::definition) || (d.flags & sema::decl_flag::template_))
         continue;
-      tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
+      const ast::Declarator& declarator = *declarators[i];
+      tu.variables.push_back({d.entity, d.type, declarator.value, at[i]});
       tu.variables.back().coalesced = weak_inline_variable(d);
       // Not constant-initialized: initialized dynamically, in order ([basic.start.dynamic]); a
       // destructor runs at exit ([basic.start.term]).
-      ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
+      ast::Child init = declarator.value == ast::ConstId::none ? declarator.init : ast::Child{};
+      if (init.id != ast::NodeId::none) init.at += at[i]->offset;
       EntityId dtor = world.types.is_reference(d.type) ? EntityId::none : program.classes().destructor_of(d.type);
       if (dtor != EntityId::none && !tu.namespace_destruction) tu.namespace_destruction = at[i];
-      if (init != ast::NodeId::none || dtor != EntityId::none) {
+      if (init.id != ast::NodeId::none || dtor != EntityId::none) {
         dynamic.push_back({d.entity, d.type, init, dtor, program.id(k)});
         tu.variables.back().dynamic = true;  // written at run time: by its initialization or its destructor
       }
     }
   }
-  if (part) part->dynamic = dynamic;
-  else init_function(world, tu, dynamic, declare, runtime, program.region().files.at(0));
+
   // The function template specializations instantiated at the end of the unit ([temp.inst]), in
   // order of instantiation. A specialization that is only declared here is an external reference.
   for (const parse::Program::Instance* in : program.instances()) {
@@ -1860,6 +2055,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   for (const auto& initializer : program.member_initializers())
     if (initializer.emits_closures())
       closures_of(initializer.closures, program.id(initializer.item), 0, true);
+  // Alias template specializations' closures (#1549), emitted where referred to.
+  for (const auto& alias : program.alias_closures()) closures_of(alias.closures, program.id(alias.item), 0, true);
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
@@ -1869,7 +2066,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       auto dr = ins.ast.get<ast::Declarator>(c.id);
       if (dr.decl >= ins.seqs.size(is.decls)) continue;
       ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
-      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
+      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition) ||
+          (d.flags & sema::decl_flag::template_))  // a static data member template's specializations are instantiated
+        continue;
       // The checked declaration can survive even when its replayed initializer has no native use.
       const bool lazy = program.is_lazy_member(d.entity);
       if (lazy && !program.used_member(d.entity)) continue;
@@ -1887,17 +2086,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     d.type = world.entities.rec(spec).type;
     declare(d, std::nullopt);
   }
-  // A dynamic class that serves only as the abstract primary base of a peer profile class (its
-  // `peer_automatic_primary_base`) keeps the profile's output: the profile installs the derived
-  // table directly, so the base needs neither its table nor its implicit constructors here (#1156).
-  std::set<EntityId> profile_only_bases;
-  for (EntityId c : classes.classes())
-    if (const EntityId base = classes.rec(c).peer_automatic_primary_base;
-        base != EntityId::none && classes.find(base) && classes.rec(base).dynamic)
-      profile_only_bases.insert(base);
-  for (EntityId c : classes.classes())
-    if (const auto& record = classes.rec(c); record.dynamic && record.dynamic->primary_base)
-      profile_only_bases.erase(record.bases.front().cls);
   // The implicitly defined special members needed by this unit ([special]). The implicit
   // constructors of dynamic classes and of classes containing one are emitted where something
   // calls them, as a keyless table is emitted where something installs it (#309).
@@ -1908,21 +2096,21 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
+    if ((s.kind == default_constructor || s.kind == copy_constructor) && classes.rec(cls).dynamic)
+      part.implicit_dynamic_constructors.insert(s.decl.entity);
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
-                                          s.kind == default_constructor ||
-                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
-                                         !internal_class(cls);
-    return dynamic_member(tu.functions.size() - 1);
+    // Implicit and defaulted special members are inline ([class.copy.ctor], [dcl.fct.def.default]).
+    else tu.functions.back().coalesced = !internal_class(cls) && !names_tu_local(program, cls, /*include_value_types=*/true);
+    const std::size_t function = tu.functions.size() - 1;
+    // The lambdas of default member initializers that a constructor runs.
+    closures_of(tu.functions.back().body.closures, program.id(s.item), 0);
+    return dynamic_member(function);
   };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
     const EntityId cls = world.entities.rec(s.decl.entity).scope;
     // A class template's current instantiation is not code ([temp.dep.type]).
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
-    if (profile_only_bases.contains(cls) && (s.kind == parse::Program::SpecialMember::default_constructor ||
-                                             s.kind == parse::Program::SpecialMember::copy_constructor))
-      continue;
     // A deleted implicit constructor of a dynamic class has no body (`validate_dynamic_constructors`).
     if (program.synthesized_body(i).tree == ast::NodeId::none) continue;
     if (program.emitted_on_use(s.decl.entity)) {
@@ -1934,6 +2122,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   // The special members the emitted code uses, to a fixed point over the bodies emitted for them
   // and the tables they install.
   std::set<EntityId> used;
+  {
+    // The startup function is built at the merge, but its special members must be
+    // selected by the Program that holds their instantiated definitions.
+    std::vector<EntityId> refs;
+    for (const auto& initializer : dynamic) {
+      if (initializer.init.id != ast::NodeId::none) program.references(initializer.init.id, refs);
+      if (initializer.destructor != EntityId::none) refs.push_back(initializer.destructor);
+    }
+    used.insert(refs.begin(), refs.end());
+  }
+  part.dynamic = std::move(dynamic);
   const auto use_table = [&](EntityId cls) {
     const auto* record = classes.find(cls);
     if (!record || !record->dynamic) return;
@@ -1969,78 +2168,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   // defined here and not inline; weak where it has none (or an inline one) and a constructor or
   // destructor emitted here installs it (Itanium C++ ABI §5.2.3). A derived descriptor names
   // its base's; a keyless base whose table is not used here gets its descriptor alone.
-  std::set<EntityId> installed;
-  for (const FunctionDef& f : tu.functions) {
-    installed.insert(f.constructor_table);
-    installed.insert(f.destructor_table);
-  }
-  const auto owned_here = [&](EntityId c) -> std::optional<bool> {  // weak, if emitted here
-    const auto& record = classes.rec(c);
-    const auto& dynamic = *record.dynamic;
-    if (dynamic.key_function != EntityId::none && !inline_declarations.contains(dynamic.key_function))
-      return program.function_defined_before(dynamic.key_function, program.end()) ? std::optional(false) : std::nullopt;
-    // Itanium C++ ABI §5.2.3: a key function made inline later puts the table in every object
-    // that defines it.
-    if (dynamic.key_function != EntityId::none)
-      return program.function_defined_before(dynamic.key_function, program.end()) ? std::optional(true) : std::nullopt;
-    return installed.contains(sema::virtual_table_entity(world, c)) ? std::optional(true) : std::nullopt;
-  };
-  std::set<EntityId> tables, descriptors_only;
+  std::vector<DynamicClassEmission> dynamic_classes;
+  std::set<EntityId> peer_primary_bases;
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.dynamic || !record.defined || profile_only_bases.contains(c) || !owned_here(c)) continue;
-    tables.insert(c);
-    // The bases' descriptors: owned by the key function's unit, or emitted here.
-    for (EntityId base = record.dynamic->primary_base ? record.bases.front().cls : EntityId::none;
-         base != EntityId::none;) {
-      const auto& base_record = classes.rec(base);
-      const auto key = base_record.dynamic->key_function;
-      if (tables.contains(base) || (key != EntityId::none && !inline_declarations.contains(key))) break;
-      descriptors_only.insert(base);
-      base = base_record.dynamic->primary_base ? base_record.bases.front().cls : EntityId::none;
-    }
-  }
-  for (EntityId c : classes.classes()) {
-    const bool table_here = tables.contains(c);
-    if (!table_here && (!descriptors_only.contains(c) || tables.contains(c))) continue;
-    const auto& record = classes.rec(c);
+    if (record.peer_automatic_primary_base != EntityId::none)
+      peer_primary_bases.insert(record.peer_automatic_primary_base);
+    if (!record.dynamic) continue;
     const auto& dynamic = *record.dynamic;
-    const EntityId base = dynamic.primary_base ? record.bases.front().cls : EntityId::none;
-    const EntityId entity = table_here ? sema::virtual_table_entity(world, c) : sema::type_info_entity(world, c);
-    DynamicTable table{entity, c, {}, base, table_here ? *owned_here(c) : true, !table_here};
-    const auto reference = [&](EntityId e) {
-      if (seen.contains(std::to_underlying(e))) return;
-      ast::DeclSema d{};
-      d.kind = ast::DeclKind::function;
-      d.entity = e;
-      d.type = world.entities.rec(e).type;
-      declare(d, std::nullopt);
-    };
-    for (const sema::VirtualSlot& slot : table_here ? dynamic.slots : std::vector<sema::VirtualSlot>{}) {
-      EntityId e = slot.function;
-      if (slot.pure) e = sema::pure_virtual_handler(world);
-      else if (slot.kind == sema::VirtualSlotKind::deleting_destructor)
-        e = destructor_variant(world, slot.function, sema::EntityKind::deleting_destructor);
-      reference(e);
-      table.slots.push_back(e);
-    }
-    const auto at = program.member_decl(dynamic.key_function);
-    ast::DeclSema d{};
-    d.kind = ast::DeclKind::variable;
-    d.entity = table.entity;
-    d.type = world.entities.rec(table.entity).type;
-    declare(d, at ? std::optional(ast::Loc{at->item, 0}) : std::nullopt);
-    tu.dynamic_tables.push_back(std::move(table));
+    const auto key = program.member_decl(dynamic.key_function);
+    dynamic_classes.push_back({c, dynamic.primary_base ? record.bases.front().cls : EntityId::none,
+                               dynamic.key_function, record.defined,
+                               dynamic.key_function != EntityId::none &&
+                                 program.function_defined_before(dynamic.key_function, program.end()),
+                               key ? std::optional(ast::Loc{key->item, 0}) : std::nullopt, dynamic.slots});
   }
-  auto unwind_provider = [&](EntityId callee) {
-    return !program.function_defined_before(callee, program.end()) && !noexcept_declarations.contains(callee) &&
-           program.asm_label(callee).empty();
-  };
-  auto unwind_definition = [&](const FunctionDef& f) {
-    return !noexcept_declarations.contains(f.entity) && !f.coalesced && f.guards.empty() &&
-           program.asm_label(f.entity).empty() &&
-           (!inline_declarations.contains(f.entity) || f.constructor_cleanup != EntityId::none);
-  };
+  part.dynamic_classes = std::move(dynamic_classes);
+  part.peer_primary_bases = std::move(peer_primary_bases);
   auto declare_virtual_table = [&](EntityId entity, std::optional<ast::Loc> at) {
     ast::DeclSema table{};
     table.kind = ast::DeclKind::variable;
@@ -2050,7 +2194,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   };
   for (FunctionDef& f : tu.functions) {
     f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
-    if (!part && attributed_members.contains(f.entity)) f.private_constexpr = false;
     if (f.destructor_table != EntityId::none)
       declare_virtual_table(f.destructor_table, ast::Loc{f.item, f.body_offset});
     if (f.constructor_table != EntityId::none)
@@ -2062,8 +2205,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         const auto init = ins.ast.get<ast::LocalVar>(local.decl).init.id;
         if (init == ast::NodeId::none || !ins.ast.is<ast::PeerRootInit>(init)) continue;
         const EntityId table = ins.ast.get<ast::PeerRootInit>(init).vtable;
-        if (seen.contains(std::to_underlying(table))) continue;
         const EntityId cls = world.entities.rec(table).scope;
+        part.peer_table_uses.emplace_back(cls, virtual_declaration(program, classes.rec(cls)));
+        if (seen.contains(std::to_underlying(table))) continue;
+        program.ensure_virtual_abi_declarations(cls);
         if (!program.peer_root_vtable_visible(cls)) {
           block_virtual_emission(tu, program, classes.rec(cls));
           return tu;
@@ -2073,34 +2218,29 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     }
     static_locals(world, tu, f, locals, runtime);
     // A function with statics does not coalesce (`static_locals`), whatever declares it inline.
-    if (part && std::ranges::any_of(locals, [&](const ast::LocalRec& l) {
+    if (std::ranges::any_of(locals, [&](const ast::LocalRec& l) {
           return l.entity != EntityId::none && l.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(l.decl);
         }))
-      part->coalesce_if_inline.erase(f.entity);
-    // Check the complete unit by entity, including later redeclarations and qualified friends.
-    if (!part) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition, uncertain_layouts,
-                               classes_with_unapplied_rtti_abi);
+      part.coalesce_if_inline.erase(f.entity);
   }
   if (has_typed_cast) {
     // Any definition that can reach native emission needs its RTTI checked here. The object
     // stage can omit an unreferenced immediate definition after these checks.
-    std::set<std::pair<EntityId, EntityId>> checked;
-    for (const FunctionDef& f : tu.functions) {
-      if (f.body.tree == ast::NodeId::none) continue;
+    std::map<std::pair<EntityId, EntityId>, parse::Program::TypedCastRtti> checked;
+    auto scan_casts = [&](ast::ItemId item, ast::NodeId tree, std::uint32_t offset) {
+      if (tree == ast::NodeId::none) return;
       auto collect = [&](this auto&& visit, const ast::Red& node) -> void {
         if (node.is<ast::DynamicCastPointer>()) {
           const auto cast = node.get<ast::DynamicCastPointer>();
           const EntityId source = world.entities.rec(cast.source_rtti).scope;
           const EntityId target = world.entities.rec(cast.target_rtti).scope;
-          if (checked.emplace(source, target).second) {
-            const ast::Loc at{f.item, node.offset()};
-            const auto rtti = program.peer_typed_dynamic_cast(source, target);
-            if (uncertain_layouts.contains(source) || uncertain_layouts.contains(target) ||
-                rtti == parse::Program::TypedCastRtti::unsupported) {
-              tu.unsupported_typed_dynamic_cast = at;
-              return;
-            }
-            if (rtti == parse::Program::TypedCastRtti::keyless_base)
+          const ast::Loc at{item, node.offset()};
+          auto [check, first_use] = checked.try_emplace({source, target}, parse::Program::TypedCastRtti::unsupported);
+          if (first_use) {
+            program.ensure_virtual_abi_declarations(source);
+            program.ensure_virtual_abi_declarations(target);
+            check->second = program.peer_typed_dynamic_cast(source, target);
+            if (check->second == parse::Program::TypedCastRtti::keyless_base)
               tu.keyless_type_info.insert(cast.source_rtti);
             for (EntityId id : {cast.source_rtti, cast.target_rtti, cast.runtime}) {
               ast::DeclSema d{};
@@ -2110,23 +2250,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
               declare(d, at);
             }
           }
+          part.typed_casts.push_back({at, source, target, check->second});
         }
-        node.for_each_child([&](const ast::Red& child) {
-          if (!tu.unsupported_typed_dynamic_cast) visit(child);
-        });
+        node.for_each_child(visit);
       };
-      collect(ast::Red(ins.ast, f.body.tree, f.body_offset));
-      if (tu.unsupported_typed_dynamic_cast) return tu;
-    }
-    if (!native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
+      collect(ast::Red(ins.ast, tree, offset));
+    };
+    for (const auto& initializer : part.dynamic)
+      scan_casts(initializer.item, initializer.init.id, initializer.init.at);
+    for (const FunctionDef& f : tu.functions) scan_casts(f.item, f.body.tree, f.body_offset);
   }
-  // Register the owner after checking the makers. An owned declaration cannot stand in for
-  // the visibility check required when a maker requests the address point.
-  if (const auto& owned = tu.owned_virtual_table) {
-    const auto key = program.member_decl(owned->slots.front());
-    declare_virtual_table(owned->entity, key ? std::optional(ast::Loc{key->item, 0}) : std::nullopt);
-  }
-  if (!part) unwind_through_constructors(tu, unwind_definition);
   // Written declarations have already supplied their locations and definitions. For the
   // remaining implicit declarations, a code reference alone emits an undefined symbol.
   for (EntityId e : program.implicit_allocation_functions()) {
@@ -2153,15 +2286,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.variables.push_back({.entity = e, .type = object.type, .init = object.args.front().value, .at = {}, .coalesced = true});
   }
   apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, target_is_linux);
-  if (part) {
-    part->attributed_members = std::move(attributed_members);
-    part->classes_with_unapplied_rtti_abi = std::move(classes_with_unapplied_rtti_abi);
-    part->inline_declarations = std::move(inline_declarations);
-    part->noexcept_declarations = std::move(noexcept_declarations);
-    part->hidden_declarations = std::move(hidden_declarations);
-    part->weak_declarations = std::move(weak_declarations);
-    part->function_visibility = std::move(function_visibility);
-  }
+  part.attributed_members = std::move(attributed_members);
+  part.classes_with_unapplied_rtti_abi = std::move(classes_with_unapplied_rtti_abi);
+  part.inline_declarations = std::move(inline_declarations);
+  part.noexcept_declarations = std::move(noexcept_declarations);
+  part.hidden_declarations = std::move(hidden_declarations);
+  part.weak_declarations = std::move(weak_declarations);
+  part.function_visibility = std::move(function_visibility);
+  part.peer_attributes = program.unapplied_declaration_attributes();
   return tu;
 }
 
@@ -2178,19 +2310,33 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   std::set<EntityId> classes_with_unapplied_rtti_abi;
   std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
+  std::vector<DynamicClassEmission> dynamic_classes;
+  std::map<EntityId, std::size_t> dynamic_class_index;
+  std::set<EntityId> peer_primary_bases, implicit_dynamic_constructors;
+  std::vector<PeerVirtualClass> peer_classes;
+  std::map<EntityId, std::size_t> peer_class_index;
+  std::vector<TypedVirtualCast> typed_casts;
+  std::vector<std::pair<EntityId, std::optional<ast::Loc>>> peer_table_uses;
+  std::set<EntityId> peer_attributes;
   auto label_order = [&](ast::Loc at) {
     return std::pair{index.index.at(std::to_underlying(at.item)), at.offset};
   };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
+    tu.written_constraint_lambdas.append_range(p.tu.written_constraint_lambdas);
+    for (const auto& [specialization, spelling] : p.tu.class_template_spellings) {
+      auto [it, added] = tu.class_template_spellings.try_emplace(specialization, spelling);
+      if (!added && label_order(spelling.first) < label_order(it->second.first)) it->second = spelling;
+    }
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));
-      } else if (!e.asm_label.empty()) {
+      } else if (e.namespace_static || !e.asm_label.empty()) {
         // A group may read another declaration out of order. Compare written positions.
         auto& kept = *std::ranges::find(tu.entities, e.id, &Entity::id);
-        if (kept.asm_label.empty() ||
-            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at))) {
+        kept.namespace_static |= e.namespace_static;
+        if (!e.asm_label.empty() && (kept.asm_label.empty() ||
+            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at)))) {
           kept.asm_label = std::move(e.asm_label);
           kept.asm_label_at = e.asm_label_at;
         }
@@ -2202,6 +2348,11 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       if (variables.insert(v.entity).second) tu.variables.push_back(std::move(v));
     if (tu.main == EntityId::none) tu.main = p.tu.main;
     if (!tu.namespace_destruction) tu.namespace_destruction = p.tu.namespace_destruction;
+    if (!tu.duplicate_c_definition) tu.duplicate_c_definition = p.tu.duplicate_c_definition;
+    if (!tu.virtual_emission_blocked && p.tu.virtual_emission_blocked) {
+      tu.virtual_emission_blocked = true;
+      tu.virtual_declaration = p.tu.virtual_declaration;
+    }
     tu.base_object_variants.insert(p.tu.base_object_variants.begin(), p.tu.base_object_variants.end());
     for (const auto& [function, layouts] : p.base_object_variant_layouts)
       if (uncertain_layouts.empty() || std::ranges::none_of(layouts, [&](EntityId e) { return uncertain_layouts.contains(e); }))
@@ -2210,6 +2361,24 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
     for (AsmHiddenSymbol& directive : p.tu.asm_hidden_symbols) tu.asm_hidden_symbols.push_back(std::move(directive));
     tu.has_raw_linkage_names |= p.tu.has_raw_linkage_names;
     classes_with_unapplied_rtti_abi.merge(p.classes_with_unapplied_rtti_abi);
+    for (auto& record : p.dynamic_classes) {
+      auto [it, added] = dynamic_class_index.emplace(record.cls, dynamic_classes.size());
+      if (added) dynamic_classes.push_back(std::move(record));
+      else {
+        auto& existing = dynamic_classes[it->second];
+        const bool key_defined = existing.key_defined || record.key_defined;
+        if (!existing.defined && record.defined) existing = std::move(record);
+        existing.key_defined = key_defined;
+      }
+    }
+    for (auto& cls : p.peer_classes)
+      if (peer_class_index.emplace(cls.cls, peer_classes.size()).second) peer_classes.push_back(std::move(cls));
+    typed_casts.append_range(p.typed_casts);
+    peer_table_uses.append_range(p.peer_table_uses);
+    peer_attributes.merge(p.peer_attributes);
+    tu.keyless_type_info.merge(p.tu.keyless_type_info);
+    peer_primary_bases.merge(p.peer_primary_bases);
+    implicit_dynamic_constructors.merge(p.implicit_dynamic_constructors);
     dynamic.insert(dynamic.end(), p.dynamic.begin(), p.dynamic.end());
     for (auto [into, from] : {std::pair{&inline_declarations, &p.inline_declarations}, {&noexcept_declarations, &p.noexcept_declarations},
                              {&hidden_declarations, &p.hidden_declarations}, {&defined, &p.defined},
@@ -2223,6 +2392,14 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       into.namespace_hidden |= v.namespace_hidden;
       into.namespace_default |= v.namespace_default;
     }
+  }
+  // Only the ordinary dynamic hierarchy needs its implicit base constructors.
+  // A peer profile installs its own table without them.
+  if (!peer_primary_bases.empty()) {
+    for (const auto& cls : dynamic_classes) peer_primary_bases.erase(cls.primary_base);
+    std::erase_if(tu.functions, [&](const FunctionDef& f) {
+      return implicit_dynamic_constructors.contains(f.entity) && peer_primary_bases.contains(world.entities.rec(f.entity).scope);
+    });
   }
   for (FunctionDef& f : tu.functions) {
     f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
@@ -2239,18 +2416,60 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity && asm_label(f.entity).empty();
   for (Variable& v : tu.variables)
     if (weak_if_inline.contains(v.entity)) v.coalesced = inline_declarations.contains(v.entity) && asm_label(v.entity).empty();
-  // What is declared here has no template or label: the runtime's entry points, exception
-  // descriptors and the initialization functions.
+  // Declare symbols introduced by the merge itself, including tables with no constructor
+  // or destructor that installs them in this translation unit.
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     if (d.entity == EntityId::none || !entities.insert(d.entity).second) return;
     const sema::EntityRec& r = world.entities.rec(d.entity);
-    const bool rtti = r.kind == sema::EntityKind::type_info;
-    const bool fn = r.kind != sema::EntityKind::variable && !rtti;
+    const Special special = symbol_special(r.kind);
+    const bool fn = r.kind != sema::EntityKind::variable && special != Special::virtual_table && special != Special::type_info;
     tu.entities.push_back({d.entity, std::string(ins.names.spelling(r.name)), d.type, fn, r.lang, r.linkage, false, at, r.scope,
-                           rtti ? Special::type_info : Special::none});
+                           special});
     if (fn) tu.entities.back().nonthrowing = world.types.rec(d.type).fn_noexcept;
   };
+  std::ranges::stable_sort(peer_classes, {}, [&](const PeerVirtualClass& cls) {
+    return cls.definition ? index.index.at(std::to_underlying(*cls.definition)) : std::numeric_limits<std::uint32_t>::max();
+  });
+  if (!peer_attributes.empty())
+    for (std::size_t i = 0; i < peer_classes.size(); ++i) peer_class_index.at(peer_classes[i].cls) = i;
+  auto attributed = [&](EntityId cls) {
+    if (peer_attributes.empty()) return false;
+    if (peer_attributes.contains(cls)) return true;
+    if (const auto peer = peer_class_index.find(cls); peer != peer_class_index.end())
+      return std::ranges::any_of(peer_classes[peer->second].slots, [&](EntityId slot) { return peer_attributes.contains(slot); });
+    const auto dynamic = dynamic_class_index.find(cls);
+    return dynamic != dynamic_class_index.end() &&
+           std::ranges::any_of(dynamic_classes[dynamic->second].slots, [&](const sema::VirtualSlot& slot) {
+             return peer_attributes.contains(slot.function);
+           });
+  };
+  std::ranges::stable_sort(typed_casts, {}, [&](const TypedVirtualCast& cast) { return label_order(cast.at); });
+  for (const auto& cast : typed_casts)
+    if (cast.rtti == parse::Program::TypedCastRtti::unsupported ||
+        uncertain_layouts.contains(cast.source) || uncertain_layouts.contains(cast.target) ||
+        attributed(cast.source) || attributed(cast.target)) {
+      tu.unsupported_typed_dynamic_cast = cast.at;
+      return tu;
+    }
+  if (!tu.virtual_emission_blocked) {
+    const auto location = merge_peer_virtual_classes(tu, world, peer_classes, uncertain_layouts, attributed);
+    if (tu.virtual_emission_blocked) return tu;
+    for (const auto& [owner, declaration] : peer_table_uses)
+      if (attributed(owner)) {
+        tu.virtual_emission_blocked = true;
+        tu.virtual_declaration = declaration;
+        return tu;
+      }
+    if (const auto& table = tu.owned_virtual_table) {
+      ast::DeclSema d{};
+      d.kind = ast::DeclKind::variable;
+      d.entity = table->entity;
+      d.type = world.entities.rec(d.entity).type;
+      declare(d, location);
+    }
+  }
   Runtime<decltype(declare)> runtime{world, declare};
+  emit_dynamic_tables(tu, world, dynamic_classes, std::move(peer_primary_bases), inline_declarations, declare);
   init_function(world, tu, dynamic, declare, runtime, source);
   auto unwind_provider = [&](EntityId callee) {
     return !defined.contains(callee) && !noexcept_declarations.contains(callee) && asm_label(callee).empty();

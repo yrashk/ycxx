@@ -1,4 +1,4 @@
-"""Inspect source, resolved provenance, build diffs, and workspace targets (#1256, #1392, #1441, #1453)."""
+"""Inspect source, resolved provenance, build diffs, and target navigation including the graph (#1604)."""
 
 from collections import Counter, defaultdict
 import html
@@ -211,6 +211,15 @@ def check_value_bindings_html(document, plan):
     assert not any(node.attrs.get('data-value-probe') == '1' for node in parsed.elements)
 
 
+def graph_target_ids(plan):
+    graph = plan['dependency_graph']
+    names = {plan['target']}
+    for edge in graph['edges'] + graph['value_edges']:
+        names.update((edge['consumer'], edge['producer']))
+    ordered = sorted(names, key=lambda name: name.encode('utf-8'))
+    return {name: f'plan-target-{index}' for index, name in enumerate(ordered)}
+
+
 def check_target_dependencies_html(document, plan):
     from project_module_graph import PlanHTML
 
@@ -223,14 +232,11 @@ def check_target_dependencies_html(document, plan):
     assert (incomplete in navigation.visible()) == (not graph['complete']), navigation.visible()
 
     outgoing = defaultdict(list)
-    names = {plan['target']}
     for edge in graph['edges'] + graph['value_edges']:
         outgoing[edge['consumer']].append(edge)
-        names.update((edge['consumer'], edge['producer']))
-    ordered = sorted(names, key=lambda name: name.encode('utf-8'))
-    ids = {name: f'plan-target-{index}' for index, name in enumerate(ordered)}
+    ids = graph_target_ids(plan)
     selected = plan['target']
-    order = [selected, *(name for name in ordered if name != selected)]
+    order = [selected, *(name for name in ids if name != selected)]
     cards = [node for node in navigation.descendants if node.tag == 'article']
     assert [card.attrs.get('id') for card in cards] == [ids[name] for name in order]
     document_ids = (node.attrs.get('id', '') for node in parsed.elements)
@@ -273,6 +279,84 @@ def check_target_dependencies_html(document, plan):
         assert found == expected, (name, found, expected)
     for attribute in ('data-dependency-probe', 'data-value-probe', 'data-value-binding-probe'):
         assert not any(attribute in node.attrs for node in navigation.descendants), attribute
+
+
+def check_target_graph_html(document, plan):
+    from project_module_graph import PlanHTML
+
+    parsed = PlanHTML(document)
+    graph = parsed.section('target-graph-heading', 'Graph')
+    assert graph.attrs.get('id') == 'target-graph' and 'hidden' in graph.attrs, graph.attrs
+    assert ('Incomplete plan' in graph.visible()) == (not plan['dependency_graph']['complete']), graph.visible()
+
+    def by_id(identifier, elements):
+        matches = [node for node in elements if node.attrs.get('id') == identifier]
+        assert len(matches) == 1, (identifier, len(matches))
+        return matches[0]
+
+    for name in ('reset', 'expand-inputs', 'expand-consumers'):
+        button = by_id(f'graph-{name}', graph.descendants)
+        assert button.tag == 'button' and button.visible().strip(), button.attrs
+    heading = by_id('graph-target', graph.descendants)
+    assert heading.tag.startswith('h'), heading.tag
+    viewport = by_id('graph-viewport', graph.descendants)
+    assert viewport.attrs.get('role') == 'region' and viewport.attrs.get('tabindex') == '0', viewport.attrs
+    stage = by_id('graph-stage', viewport.descendants)
+    edges = by_id('graph-edges', stage.descendants)
+    assert edges.tag == 'canvas' and edges.attrs.get('aria-hidden') == 'true', edges.attrs
+    nodes = by_id('graph-nodes', stage.descendants)
+    assert not nodes.descendants and not nodes.visible().strip(), 'graph emitted a second target tree'
+    assert by_id('graph-count', graph.descendants).attrs.get('role') == 'status'
+    by_id('graph-details', graph.descendants)
+
+    navigation = parsed.section('target-dependencies', 'Target dependencies')
+    fallback = navigation
+    while fallback is not None:
+        assert 'hidden' not in fallback.attrs, 'target cards are unavailable before the graph initializes'
+        fallback = fallback.parent
+    # The existing card links carry each resolved artifact and value occurrence.
+    references = [node for node in parsed.elements if node.tag == 'a'
+                  and node.attrs.get('href', '').startswith('#plan-target-')]
+    dependencies = plan['dependency_graph']
+    assert len(references) == len(dependencies['edges']) + len(dependencies['value_edges']), references
+    assert all(node in navigation.descendants for node in references)
+
+    facts = parsed.section('facts', 'Plan facts')
+    manifest = parsed.section('manifest', 'build.ycxx')
+    anchors = {node.attrs.get('id'): node for node in manifest.descendants}
+    lines = plan['definition'].splitlines()
+    kinds = {'source', 'include', 'rule', 'output', 'host-target', 'native-target', 'link-input'}
+    ids = graph_target_ids(plan)
+    wanted = Counter((ids[row['target']], row['kind'], row['value'].replace('\x7f', r'\x7F'),
+                      row['line'], row['column']) for row in plan['facts']
+                     if row['kind'] in kinds and row['target'] in ids)
+    found = Counter()
+    for row in parsed.elements:
+        if not {'data-graph-target', 'data-graph-kind'} & row.attrs.keys():
+            continue
+        assert row.tag == 'tr' and row in facts.descendants, row.attrs
+        target, kind = row.attrs['data-graph-target'], row.attrs['data-graph-kind']
+        value, = (node for node in row.descendants if node.attrs.get('class') == 'fact-value')
+        links = [node for node in row.descendants if node.tag == 'a']
+        if links:
+            link, = links
+            _, line, column = link.visible().split(':')
+            line, column = int(line), int(column)
+            assert link.attrs['href'] == f'#manifest-line-{line}', link.attrs
+            line_text = lines[line - 1].replace('\x7f', r'\x7F')
+            assert anchors[f'manifest-line-{line}'].visible() == line_text
+        else:
+            line = column = 0
+        found[target, kind, value.visible(), line, column] += 1
+    assert found == wanted, (found, wanted)
+
+    scripts = [node for node in parsed.elements if node.tag == 'script']
+    assert len(scripts) == 1 and 'src' not in scripts[0].attrs and scripts[0].visible().strip(), (
+        'expected one inline graph script')
+    assert all(attribute not in node.attrs for node in parsed.elements
+               for attribute in ('data-dependency-probe', 'data-catalog-probe', 'data-saved-dependency-probe'))
+    assert all(value not in scripts[0].visible() for value in (CORE, MARKUP, UNSAFE_SOURCE, UNSAFE_TARGET))
+    return scripts[0].visible()
 
 
 def check_dependency_changes_html(document, definition, changes, *, value_bindings=False):
@@ -362,6 +446,7 @@ def compare_dependencies(ycxx, scope, snapshot, current, expected):
     check_dependency_changes_html(document, current['definition'], expected)
     check_dependency_html(document, current)
     check_target_dependencies_html(document, current)
+    check_target_graph_html(document, current)
     assert scope_state(scope) == before, 'dependency comparison changed the workspace'
     return diff
 
@@ -387,6 +472,7 @@ def compare_value_bindings(ycxx, scope, env, snapshot, current, expected):
     check_dependency_changes_html(document, current['definition'], expected, value_bindings=True)
     check_value_bindings_html(document, current)
     check_target_dependencies_html(document, current)
+    check_target_graph_html(document, current)
     assert scope_state(scope) == before, 'value binding comparison changed the workspace'
     return diff
 
@@ -590,11 +676,13 @@ def check_unresolved(ycxx, scope, definition):
     check_dependency_html(document, plan)
     check_value_bindings_html(document, plan)
     check_target_dependencies_html(document, plan)
+    script = check_target_graph_html(document, plan)
     assert not (scope / '.ycxx').exists(), 'cold inspection created build state'
     assert not (scope / 'generator-ran').exists(), 'cold inspection ran the generator'
+    return script
 
 
-def check_views(ycxx, scope, definition):
+def check_views(ycxx, scope, definition, graph_script):
     before = scope_state(scope)
     assert show(ycxx, scope, '--format=source') == definition.encode('utf-8')
     snapshot = show_json(ycxx, scope)
@@ -638,6 +726,7 @@ def check_views(ycxx, scope, definition):
     check_dependency_html(document, snapshot)
     check_value_bindings_html(document, snapshot)
     check_target_dependencies_html(document, snapshot)
+    assert check_target_graph_html(document, snapshot) == graph_script, 'graph script depends on author data'
     assert scope_state(scope) == before, 'inspection changed files or build state'
 
     assert not (scope / 'generator-ran').exists(), 'inspection ran the generator'
@@ -718,7 +807,7 @@ def main():
         check_catalog_scopes(ycxx, scope / 'catalog-nesting', env)
         check_catalog_manifest_paths(ycxx, scope / 'catalog-paths', env)
         check_catalog_manifest_encoding(ycxx, scope / 'catalog-encoding', env)
-        check_unresolved(ycxx, scope, definition)
+        graph_script = check_unresolved(ycxx, scope, definition)
         (scope / '.ycxx').mkdir()
         try:
             traced_build(ycxx, scope, env, 'admit the inspection plan')
@@ -733,7 +822,7 @@ def main():
             # Keep the admitted rule plans while making an accidental execution observable.
             generator = scope / 'generator.sh'
             generator.write_text('#!/bin/sh\nprintf ran > "$1"\nexit 7\n', encoding='utf-8')
-            snapshot = check_views(ycxx, scope, definition)
+            snapshot = check_views(ycxx, scope, definition, graph_script)
 
             # Plan inspection still works with unavailable execution inputs.
             generator.unlink()

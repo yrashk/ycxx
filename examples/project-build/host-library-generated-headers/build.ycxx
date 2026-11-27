@@ -1,0 +1,30 @@
+generate "wire_schema" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("header")]
+    inputs = { script = "generate-schema.sh" score = "score.txt" }
+    outputs = { header = "wire_schema.hh" }
+}
+
+cpp.library "schema" {
+    sources = ["schema.cc"]
+    public_include_dirs = ["include"]
+    generated_headers = [artifact("wire_schema", "header")]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["schema"]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["schema"]
+    generated_headers = [artifact("config", "header")]
+}

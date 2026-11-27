@@ -122,6 +122,7 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
+  bool darwin_passes_empty_argument = false;
   // A 128-bit integer passes and returns as two 64-bit integer words, low first: in registers
   // when two are left, else whole in 16-byte-aligned stack (AMD64 psABI §3.2.3; AAPCS64 C.9,
   // without C.8's even-numbered register, as Apple's convention has it). Unset for a calling
@@ -395,31 +396,40 @@ class Lowering {
   // a separate ordinary member, which is a distinct memory location ([intro.memory]).
   ValueId load_field(ValueId state, ValueId base, const SubObject& field) {
     const ast::BitField bits = field.bit_field;
-    ValueId packed = constant(T::i32, 0);
+    const auto field_type = layout(field.type);
+    const T storage = field_type.size == 8 ? T::i64 : T::i32;
+    ValueId packed = constant(storage, 0);
     for (std::uint32_t i = 0; i < bits.bytes(); ++i) {
       ValueId p = add_offset(base, field.offset + i);
       ValueId byte = emit1(Op2::load, T::i8, {state, p}, {0});
-      ValueId v = resize(byte, T::i32, false);
-      if (i != 0) v = emit1(Op2::shl, T::i32, {v, constant(T::i32, 8 * i)});
-      packed = emit1(Op2::or_, T::i32, {packed, v});
+      ValueId v = resize(byte, storage, false);
+      if (i != 0) v = emit1(Op2::shl, storage, {v, constant(storage, 8 * i)});
+      packed = emit1(Op2::or_, storage, {packed, v});
     }
-    if (bits.shift != 0) packed = emit1(Op2::lshr, T::i32, {packed, constant(T::i32, bits.shift)});
-    if (bits.width == 32) return packed;
-    if (layout(field.type).is_signed) {
-      ValueId shift = constant(T::i32, 32 - bits.width);
-      ValueId high = emit1(Op2::shl, T::i32, {packed, shift});
-      return emit1(Op2::ashr, T::i32, {high, shift});
+    if (bits.shift != 0) packed = emit1(Op2::lshr, storage, {packed, constant(storage, bits.shift)});
+    const auto storage_width = storage == T::i64 ? 64u : 32u;
+    if (bits.width < storage_width) {
+      if (field_type.is_signed) {
+        const ValueId shift = constant(storage, storage_width - bits.width);
+        const ValueId high = emit1(Op2::shl, storage, {packed, shift});
+        packed = emit1(Op2::ashr, storage, {high, shift});
+      } else {
+        packed = emit1(Op2::and_, storage, {packed, constant(storage, std::int64_t(bits.mask() >> bits.shift))});
+      }
     }
-    return emit1(Op2::and_, T::i32, {packed, constant(T::i32, bits.mask() >> bits.shift)});
+    const T result = field_type.size == 1 ? T::i8 : field_type.size == 2 ? T::i16 : storage;
+    return resize(packed, result, false);
   }
 
   ValueId store_field(ValueId state, ValueId base, const SubObject& field, ValueId value) {
     const ast::BitField bits = field.bit_field;
-    if (bits.shift != 0) value = emit1(Op2::shl, T::i32, {value, constant(T::i32, bits.shift)});
+    const T storage = layout(field.type).size == 8 ? T::i64 : T::i32;
+    value = resize(value, storage, false);
+    if (bits.shift != 0) value = emit1(Op2::shl, storage, {value, constant(storage, bits.shift)});
     for (std::uint32_t i = 0; i < bits.bytes(); ++i) {
       std::uint8_t mask = std::uint8_t(bits.mask() >> (8 * i));
       ValueId p = add_offset(base, field.offset + i);
-      ValueId v = i == 0 ? value : emit1(Op2::lshr, T::i32, {value, constant(T::i32, 8 * i)});
+      ValueId v = i == 0 ? value : emit1(Op2::lshr, storage, {value, constant(storage, 8 * i)});
       ValueId byte = resize(v, T::i8, false);
       if (mask != 0xff) {
         ValueId previous = emit1(Op2::load, T::i8, {state, p}, {0});
@@ -498,7 +508,7 @@ class Lowering {
         if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
         if (!config_.sysv_amd64 && object.contains_explicit_alignment)
           return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
-        if (omits_class_transport(object)) {  // the parameter or result still has an object in this frame
+        if (omits_class_transport(object, result)) {  // the parameter or result still has an object in this frame
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
           continue;
@@ -692,10 +702,15 @@ class Lowering {
         out(n, 0, emit1(Op2::neg, *t, {in(n, 0)}, {}, nd.flags));
         return {};
       }
-      case Op::ctz: {
+      case Op::ctz:
+      case Op::clz: {
         auto t = result_type();
         if (!t) return fail(t.error());
-        out(n, 0, emit1(Op2::ctz, *t, {in(n, 0)}));
+        // GCC's zero result is a constant-evaluation extension. Runtime zero is undefined.
+        const auto operand = in(n, 0);
+        const auto op = nd.op == Op::clz ? Op2::clz : Op2::ctz;
+        const auto count = emit1(op, b_.peek().type(operand), {operand});
+        out(n, 0, resize(count, *t, false));
         return {};
       }
       case Op::icmp: out(n, 0, emit1(Op2::icmp, T::i1, {in(n, 0), in(n, 1)}, {imms[0]})); return {};
@@ -920,7 +935,42 @@ class Lowering {
         T st[] = {T::state};
         ValueId ops[] = {in(n, 0), p, v};
         std::uint64_t im[] = {imms[0]};
-        out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags, {}, o)));
+        out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, nd.flags & bit(Flag::volatile_), {}, o)));
+        return {};
+      }
+      case Op::atomic__load:
+      case Op::atomic__store:
+      case Op::atomic__rmw:
+      case Op::atomic__cmpxchg:
+      case Op::fence: {
+        if (!config_.sysv_amd64) return fail("native atomics require System V AMD64");
+        Op2 op = Op2::fence;
+        switch (nd.op) {
+          case Op::atomic__load: op = Op2::atomic_load; break;
+          case Op::atomic__store: op = Op2::atomic_store; break;
+          case Op::atomic__rmw: op = Op2::atomic_rmw; break;
+          case Op::atomic__cmpxchg: op = Op2::atomic_cmpxchg; break;
+          default: break;
+        }
+        if (op != Op2::fence) {
+          const QualType access{std::uint32_t(imms[0])};
+          auto value_type = type_of(access);
+          if (!value_type || *value_type != T::i32 || layout(access).align < 4)
+            return fail("native atomics require a naturally aligned 32-bit integer access");
+        }
+        if (op == Op2::atomic_rmw && imms[1] > std::to_underlying(Rmw::xor_))
+          return fail("unsupported atomic read-modify-write operation");
+        const T result_types[]{T::state, T::i32, T::i1};
+        for (std::uint32_t i = 1; i < nd.nres; ++i) {
+          auto actual = type_of(cxx(f_.results_of(n)[i]));
+          if (!actual || *actual != result_types[i]) return fail("atomic result has the wrong type");
+        }
+        std::array<ValueId, 4> args;
+        for (std::uint32_t i = 0; i < nd.nopnd; ++i) args[i] = in(n, i);
+        auto lowered = b_.emit(op, std::span(result_types).first(nd.nres),
+                              std::span(args).first(nd.nopnd),
+                              op == Op2::fence ? imms : imms.subspan(1), nd.flags, {}, origin());
+        for (std::uint32_t i = 0; i < nd.nres; ++i) out(n, i, b_.peek().result(lowered, i));
         return {};
       }
       case Op::va_start:
@@ -1027,7 +1077,7 @@ class Lowering {
             if (!config_.sysv_amd64 && object.contains_explicit_alignment)
               return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
             // L1 already has an object for the argument or result. Omit only its transport.
-            if (omits_class_transport(object, fixed_direct)) continue;
+            if (omits_class_transport(object, class_result, fixed_direct)) continue;
           }
           if (class_result) {
             result_pieces = class_pieces(c);
@@ -1370,6 +1420,8 @@ class Lowering {
       std::uint32_t passed_words = in_registers ? registers : words;
       return {passed_words, T::i64, l.size, chunks};
     }
+    if (config_.darwin_passes_empty_argument && l.empty && l.size == 1)
+      return {1, T::i8, 1};
     if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64, l.size};
     if (l.size > config_.composite_in_registers) return {};
     return {words, T::i64, l.size};
@@ -1382,11 +1434,12 @@ class Lowering {
     return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
            (l.sysv_stack_record || (!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
-  // Darwin omits empty call-trivial arguments and results (#116). System V transports no
-  // value for a NO_CLASS record in a fixed direct call or its definition (#641).
-  bool omits_class_transport(const TypeLayout& l, bool fixed_direct = true) const {
+  // Apple's Darwin convention omits empty call-trivial arguments (#116). GCC transports the
+  // one-byte empty argument. System V omits a NO_CLASS record in fixed direct calls (#641).
+  bool omits_class_transport(const TypeLayout& l, bool result, bool fixed_direct = true) const {
     if (config_.sysv_amd64) return fixed_direct && l.sysv_empty_record;
-    return l.kind == TypeKind::record && l.trivial_calls && l.empty;
+    return l.kind == TypeKind::record && l.trivial_calls && l.empty &&
+           (result || !config_.darwin_passes_empty_argument || l.size != 1);
   }
   // An ABI-local class object. AAPCS64 rounds it up to permit full-word accesses.
   ValueId frame_object(const TypeLayout& l) {

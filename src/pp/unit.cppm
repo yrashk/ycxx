@@ -1353,9 +1353,27 @@ private:
   }
 
   // Skips the lines of groups not included, up to the group to include or the #if's `#endif`.
-  // Only conditional directives are looked at. Skipped lines are still lexed, and what phase 3
-  // reports there stands ([lex.pptoken]/2: an unmatched ' is ill-formed, skipped or not).
+  // Only conditional directives are looked at. Skipped lines are still lexed ([lex.phases]).
+  // For an unmatched quote in skipped source, GCC warns and Clang suppresses the diagnostic.
   void skip_groups(Frame& f) {
+    const auto mode = s_->config.compatibility;
+    auto skip_line_text = [&](const PTok& first, bool header_probes = false) {
+      rest_of_line(f, header_probes);
+      if (mode == ast::Compatibility::spec || f.lex_diags.empty()) return;
+      const u32 next = f.pending.front().loc.offset;
+      const auto unmatched = [&](const lex::LexDiagnostic& d) {
+        return d.offset >= first.loc.offset && d.offset < next &&
+               (d.kind == lex::LexDiag::unterminated_char || d.kind == lex::LexDiag::unterminated_string);
+      };
+      if (mode == ast::Compatibility::clang) {
+        std::erase_if(f.lex_diags, unmatched);
+      } else {
+        for (auto& d : f.lex_diags)
+          if (unmatched(d))
+            d.kind = d.kind == lex::LexDiag::unterminated_char ? lex::LexDiag::skipped_unterminated_char
+                                                            : lex::LexDiag::skipped_unterminated_string;
+      }
+    };
     std::size_t depth = 0;
     for (;;) {
       if (fatal_) return;
@@ -1365,7 +1383,7 @@ private:
         return;
       }
       if (t.tok.kind != Tk::hash || !t.tok.has(tok_flag::line_start)) {
-        rest_of_line(f);
+        skip_line_text(t);
         continue;
       }
       PTok d = lex_next(f);
@@ -1383,7 +1401,7 @@ private:
             return;
           }
         }
-        rest_of_line(f, word == "if" || word == "elif" || word == "embed");
+        skip_line_text(t, word == "if" || word == "elif" || word == "embed");
       };
       if (word == "if" || word == "ifdef" || word == "ifndef") {
         ++depth;
@@ -1514,7 +1532,9 @@ private:
       const bool ordinary = function && function->advertised && (function->type != 'l' ||
           ast::computes((*s_->config.target)[ast::Builtin::long_double].format)) &&
           (function->function != lex::BuiltinFunction::source_location ||
-           s_->config.target->triple == ast::x86_64_linux.triple);
+           s_->config.target->triple == ast::x86_64_linux.triple) &&
+          (function->function != lex::BuiltinFunction::atomic ||
+           s_->config.target->supports(ast::NativeOperation::gnu_atomic32));
       const auto* trait = lex::type_trait(name);
       const bool supported = (trait && trait->advertised) || lex::builtin_template(name) || ordinary || variadic;
       return number_token(t, supported ? 1 : 0);
