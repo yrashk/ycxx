@@ -114,10 +114,10 @@ generate "{producer}" {{
     private_path = json.dumps(str(scope / HOST_VIRTUAL / roles[0][0] / 'detail.hh'))
     guard = f'''\
 #if __has_include("detail.hh")
-#error the generated source's private directory leaked into include search
+#error a private generated directory leaked into include search
 #endif
 #if defined({macro}) && __has_include({private_path})
-#error a host peer could open the generated source's private sibling
+#error a host peer could open a private generated sibling
 #endif
 '''
     (scope / COMMON).write_text(guard + '''\
