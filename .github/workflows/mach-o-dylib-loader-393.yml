@@ -1,0 +1,42 @@
+name: Load the Linux-cross-produced arm64 Mach-O dylib
+
+on:
+  push:
+    branches: [codex/ycxx-mach-o-dylib-loader-393]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      BASE: 6a01fcc39afcdca9bfbbeb60fbfc85fcf814d5b7
+      BASE_TREE: b81722e11e902cdf7f0efef0f84c5e1f02f09401
+      DYLIB_SHA: b46ff5d2a1f43865ef504aca368ecb38190f762b8fd049930666e6b8f3032df9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the binary and exercise native signing and loading
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-parse "$BASE^{tree}")" = "$BASE_TREE"
+          output="$RUNNER_TEMP/ycxx-cross-produced-dylib-393"
+          evidence=.github/evidence/mach-o-dylib-loader-393
+          mkdir -p "$output"
+          git show --no-patch --format='%H %T %P' HEAD > "$output/git.txt"
+          bash "$evidence/probe.sh" "$output" "$evidence/provider-cold.dylib" "$DYLIB_SHA" | tee "$output/probe.log"
+      - name: Upload loader and platform linker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-393-cross-produced-dylib-native-load
+          path: ${{ runner.temp }}/ycxx-cross-produced-dylib-393/
+          if-no-files-found: error
+          retention-days: 14
