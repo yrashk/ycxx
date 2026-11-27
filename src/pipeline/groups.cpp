@@ -462,7 +462,11 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         }
       }
     }
-    for (EntityId e : classes.enums()) r.enums.push_back({e, classes.underlying(e)});
+    for (EntityId e : classes.enums()) {
+      // Preserve the existing scalar layout fallback, but do not use it for the record ABI.
+      const bool known = classes.find_enum(e)->underlying.has_value();
+      r.enums.push_back({e, classes.underlying(e), !known});
+    }
     return r;
   };
   // Puts a group's result into the unit's, in group order: each entity and shape once, and each
@@ -607,6 +611,8 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   }
   std::optional<PeerLayout> blocked_peer;
   if (!uncertain_layouts.empty()) {
+    for (EnumShape& shape : out.shapes.enums)
+      shape.layout_uncertain |= uncertain_layouts.contains(shape.entity);
     std::set<EntityId> blocked_classes;
     for (const auto& result : results)
       for (const auto& peer : result.peer_layouts)

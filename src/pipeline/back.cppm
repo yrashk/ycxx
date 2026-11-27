@@ -222,6 +222,7 @@ struct ClassShape {
 struct EnumShape {
   EntityId entity = EntityId::none;
   QualType underlying{};
+  bool layout_uncertain = false;
 };
 struct Shapes {
   std::vector<ClassShape> classes;  // in order of definition
@@ -1040,7 +1041,8 @@ bool QueryLayout::contains_mutable_field(QualType type) const {
   return contains(type);
 }
 
-// System V AMD64 psABI §3.2.3. Flat records of integral, object-pointer or object lvalue-reference members.
+// System V AMD64 psABI §3.2.3. Flat records of integral or enum values, object pointers or object
+// lvalue references. Enums use their known underlying integer type ([dcl.enum]/8).
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   // Only a 128-bit integer member raises the alignment above 8: an alignment-specifier is refused.
@@ -1050,9 +1052,15 @@ std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const
   std::uint64_t end = 0;
   std::uint8_t mask = 0;
   for (const ir::SubObject& f : l.fields) {
+    auto builtin = ast::builtin_of(in, f.type);
+    if (in.types.is<ast::TEnum>(f.type)) {
+      const EnumShape* enumeration = enum_of(in.types.get<ast::TEnum>(f.type).entity);
+      if (!enumeration || enumeration->layout_uncertain) return 0;
+      builtin = ast::builtin_of(in, enumeration->underlying);
+    }
     ast::BuiltinLayout field;
-    if (auto b = ast::builtin_of(in, f.type); b && ast::is_integral(*b))
-      field = (*target_)[*b];
+    if (builtin && ast::is_integral(*builtin))
+      field = (*target_)[*builtin];
     else if ((ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type))) ||
              (in.types.is<ast::TLRef>(f.type) && !ast::is_function(in, in.types.get<ast::TLRef>(f.type).referee)))
       field = {target_->pointer_size, target_->pointer_align};
