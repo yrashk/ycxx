@@ -71,6 +71,11 @@ that run before the host compile. They can also put an artifact from such a
 generator in `sources`, alongside disk paths and globs.
 [Generated host header example](examples/project-build/host-generated-headers/README.md) ·
 [Generated host source example](examples/project-build/host-generated-sources/README.md)
+Libraries linked into a host tool can also declare generated headers. A
+shared library can use the same declaration in a native scanner and a
+foreign app. [Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
+Host-linked libraries can also mix disk sources and generated C++ artifacts.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
 A typed witness can select the native artifact directly with
 `tool = input("name")` or use an executable generated from it.
 [Native host witness](examples/project-build/native-host-witness/README.md) ·
