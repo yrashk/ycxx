@@ -10284,7 +10284,10 @@ public:
     return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});
   }
   bool constraints_satisfied(const ast::DeclSema& d, std::span<const TemplateArg> args = {}) {
-    if (!(d.flags & decl_flag::template_)) return trailing_constraints_satisfied(trailing_constraints(d));
+    // A non-template function: its trailing requires-clause. A pattern with a template head (a
+    // generic lambda's call operator, unflagged) substitutes `args` below.
+    if (!(d.flags & decl_flag::template_) && args.empty() && ins().seqs.size(d.template_params) == 0)
+      return trailing_constraints_satisfied(trailing_constraints(d));
     if (d.constraints == ConstId::none) return true;
     std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(d.template_params);
     auto nf = templates().substitute_constraint(d.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, args));
