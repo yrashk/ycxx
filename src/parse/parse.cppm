@@ -3469,7 +3469,7 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   const auto before = caller.diag_count();
   sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
   s.replaying_type_default = caller.replaying_type_default;
-  s.replaying_alias_type_arguments = pattern.call.qualified_type_arguments;
+  s.replaying_alias_type_arguments = pattern.call.argument_checks();
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
   // Its lambdas' closure types are this specialization's ([temp.alias]/5), and its generic
@@ -3483,8 +3483,9 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   ps.set_questions(q);
   ps.seek(item.begin + pattern.begin);
   ps.namespace_alias_type = pattern.call.class_result;
+  ps.namespace_alias_sizeof = pattern.call.layout_arguments;
   // Substitution stops at an invalid argument before a later argument can instantiate a class.
-  ps.substituting_partial_arguments = pattern.call.qualified_type_arguments;
+  ps.substituting_partial_arguments = pattern.call.argument_checks();
   try {
     auto type = ps.type_id();
     if (type && ps.at_end() && !s.has_error_since(before)) {
@@ -4479,18 +4480,22 @@ private:
         const auto checks = ps_.deferred_argument_checks();
         const auto ranks = ps_.deferred_rank_checks();
         const auto type_arguments = ps_.deferred_alias_type_arguments();
+        const auto layout_arguments = ps_.deferred_alias_layout_arguments();
         const std::size_t closures = s_.closures.size();
         const u32 closure_aliases = s_.closure_alias_uses;
         ps_.namespace_alias_type = true;
+        ps_.namespace_alias_sizeof = true;
         auto t = [&] {
           const Parser::GccSignatureScope spelling{ps_};
           return ps_.type_id();
         }();
+        ps_.namespace_alias_sizeof = false;
         ps_.namespace_alias_type = false;
         if (!t || !alias_template(name, name_at, *t)) return bad();
         sema::AliasCallPattern pattern;
         pattern.rank_checks = ps_.deferred_rank_checks() != ranks;
         pattern.qualified_type_arguments = ps_.deferred_alias_type_arguments() != type_arguments;
+        pattern.layout_arguments = ps_.deferred_alias_layout_arguments() != layout_arguments;
         using Kind = sema::AliasCallPattern::Kind;
         if (ps_.deferred_immediate_calls() != calls) {
           pattern.kind = ps_.deferred_argument_checks() == checks ? Kind::retained : Kind::may_erase;
@@ -4502,7 +4507,7 @@ private:
         // where it is another alias template's.
         pattern.closures = s_.closures.size() != closures || s_.closure_alias_uses != closure_aliases;
         if (pattern.closures && pattern.kind == Kind::none) pattern.kind = Kind::unrepresented;
-        if (pattern.kind != Kind::none || pattern.rank_checks || pattern.qualified_type_arguments)
+        if (pattern.kind != Kind::none || pattern.rank_checks || pattern.argument_checks())
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), pattern});
         if (!ps_.expect(Tk::semi)) bad();
         return;

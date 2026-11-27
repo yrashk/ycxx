@@ -150,6 +150,7 @@ public:
   u32 deferred_class_immediate_calls() const { return deferred_class_immediate_calls_; }
   u32 deferred_rank_checks() const { return deferred_rank_checks_; }
   u32 deferred_alias_type_arguments() const { return deferred_alias_type_arguments_; }
+  u32 deferred_alias_layout_arguments() const { return deferred_alias_layout_arguments_; }
   void bump() {
     half_ = false;
     if (i_ < end_) ++i_;
@@ -662,9 +663,12 @@ public:
         if (pattern.kind == Kind::retained || pattern.kind == Kind::may_erase) ++deferred_immediate_calls_;
         if (pattern.class_result) ++deferred_class_immediate_calls_;
         rank_check = rank_check || pattern.rank_checks;
-        if (pattern.qualified_type_arguments && !in_template_id_lookahead_) ++deferred_alias_type_arguments_;
+        if (!in_template_id_lookahead_) {
+          if (pattern.qualified_type_arguments) ++deferred_alias_type_arguments_;
+          if (pattern.layout_arguments) ++deferred_alias_layout_arguments_;
+        }
         defer_alias = type_alias_checks_ &&
-                      (pattern.qualified_type_arguments || (type_alias_checks_->type_default && (rank_check || written_rank_check)));
+                      (pattern.argument_checks() || (type_alias_checks_->type_default && (rank_check || written_rank_check)));
       }
       if (rank_check) ++deferred_rank_checks_;
     }
@@ -2062,8 +2066,10 @@ public:
     if (!tmpl && !tt && !builtin && !dependent_member) return std::nullopt;
     const bool namespace_template = tmpl && (!in || in->ns) && s_->namespace_scoped(tmpl->entity);
     const bool ordinary = alias_constraints_enabled_ && !s_->templated();
+    const bool classify_layout_alias = classify_only && in && in->ns && namespace_template &&
+        tmpl->kind == ast::DeclKind::type_alias && s_->questions().alias_call_pattern(tmpl->entity).layout_arguments;
     TemplateArgumentEnd extent{};
-    if (ordinary && namespace_template && (scope || classify_only)) {
+    if ((ordinary && namespace_template && (scope || classify_only)) || classify_layout_alias) {
       extent = template_argument_end(k + 1, /*verify_openers=*/true);
       if (extent.closed && (extent.half || kind(extent.next) != Tk::coloncolon)) {
         if (scope) return std::nullopt;
@@ -2086,7 +2092,11 @@ public:
     const u32 qualified_types = deferred_qualified_type_arguments_;
     auto args = [&] {
       const TemplateIdLookahead lookahead{*this, !selected};
-      return template_argument_list(nullptr, &took_closer);
+      const auto layout_parameters =
+          namespace_alias_sizeof && selected && scope && namespace_template && tmpl->kind == ast::DeclKind::class_
+              ? std::optional{tmpl->template_params} : std::nullopt;
+      return template_argument_list(nullptr, &took_closer, /*expand_empty=*/false, nullptr,
+                                    /*retain_decltype=*/false, layout_parameters);
     }();
     u32 after = i_ - saved;
     bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
@@ -2096,7 +2106,8 @@ public:
     if (args && closed) {
       // A terminal namespace alias already names a type in lookahead. Its expansion may
       // instantiate another template, so leave substitution to the committed parse.
-      if (classify_only && in && in->ns && constrained_alias && (half_ || kind() != Tk::coloncolon))
+      if (classify_only && in && in->ns && (half_ || kind() != Tk::coloncolon) &&
+          (classify_layout_alias || (ordinary && constrained_alias)))
         t = s_->builtin(Builtin::dependent);
       else
         t = tt ? s_->template_param_id(*tt, *args, 0)
@@ -2148,7 +2159,7 @@ public:
                                                        bool* terminal_template_id = nullptr,
                                                        bool template_argument = false,
                                                        bool conversion = false) {
-    const bool classify_only = !checked && alias_constraints_enabled_ && !s_->templated();
+    const bool classify_only = !checked;
     const TemplateIdLookahead lookahead{*this, in_template_id_lookahead_ || !checked};
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
@@ -3428,15 +3439,29 @@ public:
     return *v.value;
   }
 
+  // A complete, optionally parenthesized `sizeof(type-id)` argument. The operand is
+  // checked as a type-id by the unary expression parser.
+  bool whole_sizeof_argument(u32 offset) {
+    if (kind(offset + 1) != Tk::l_paren) return false;
+    u32 after = past_parentheses(offset + 1);
+    for (u32 n = 0; n < offset; ++n)
+      if (kind(after++) != Tk::r_paren) return false;
+    const Tk end = kind(after);
+    return end == Tk::comma || end == Tk::greater || end == Tk::greatergreater;
+  }
+
   // Read a value argument outside the destination context of any enclosing default argument.
-  Ex template_argument_expression(bool replay_layout) {
+  Ex template_argument_expression(bool replay_layout, bool alias_sizeof = false) {
     const bool saved_default = std::exchange(in_integral_template_default_, false);
     const auto saved_value_argument = std::exchange(in_template_value_argument_, s_->unevaluated);
     const auto saved_layout = std::exchange(layout_argument_at_, std::nullopt);
-    if (replay_layout) {
+    if (replay_layout || alias_sizeof) {
       u32 offset = 0;
       while (kind(offset) == Tk::l_paren) ++offset;
-      if (kind(offset) == Tk::kw_alignof || kind(offset) == Tk::kw_sizeof) layout_argument_at_ = pos() + offset;
+      const Tk op = kind(offset);
+      if ((replay_layout && op == Tk::kw_alignof) ||
+          (op == Tk::kw_sizeof && (replay_layout || whole_sizeof_argument(offset))))
+        layout_argument_at_ = pos() + offset;
     }
     Ex e = conditional_expression();
     layout_argument_at_ = saved_layout;
@@ -3463,7 +3488,9 @@ public:
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
                                                                      bool* took_closer = nullptr, bool expand_empty = false,
                                                                      VariableArgumentReplay* replay = nullptr,
-                                                                     bool retain_decltype = false) {
+                                                                     bool retain_decltype = false,
+                                                                     std::optional<ast::SeqId<ast::TemplateParamSema>>
+                                                                         layout_parameters = std::nullopt) {
     // Any nested template-id must supply canonical arguments to its enclosing argument.
     const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     if (took_closer) *took_closer = false;
@@ -3537,13 +3564,20 @@ public:
           }
         } else {
           const std::size_t expression_diags = s_->diag_count();
-          Ex e = template_argument_expression(replay != nullptr);
+          bool alias_sizeof = false;
+          if (layout_parameters && args.size() < s_->ins().seqs.size(*layout_parameters)) {
+            const auto param = s_->ins().seqs.at(*layout_parameters, args.size());
+            alias_sizeof = !param.pack && param.kind == ast::TemplateArgKind::value &&
+                           s_->types().is(param.type, s_->types().target().size_type);
+          }
+          Ex e = template_argument_expression(replay != nullptr, alias_sizeof);
           // Neither reading works: report the one the grammar prefers ([temp.arg.general]/2).
           if (!e.ok() && !trial_diags.empty()) {
             s_->truncate_diags(expression_diags);
             std::ranges::move(trial_diags, std::back_inserter(s_->diagnostics()));
           }
           if (e.ok()) {
+            if (alias_sizeof && dependent_layout_argument(e)) ++deferred_alias_layout_arguments_;
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
             QualType t = v ? s_->builtin(Builtin::bool_) : sema::Types::unqualified(s_->rvalue(e).type());
@@ -3568,6 +3602,7 @@ public:
         }
         // `pattern...`: a pack expansion ([temp.variadic]/5), expanded where its packs are bound.
         if (ok && is(Tk::ellipsis)) {
+          layout_parameters.reset();  // the following argument no longer has a known position
           u32 at = pos();
           bump();
           if (!s_->names_pack(args.back())) {
@@ -3714,6 +3749,7 @@ public:
     const bool saved_half = half_, saved_qualified_half = qualified_half_;
     const std::array counters{&deferred_argument_checks_, &deferred_immediate_calls_, &deferred_class_immediate_calls_,
                               &deferred_rank_checks_, &deferred_qualified_type_arguments_,
+                              &deferred_alias_layout_arguments_,
                               &deferred_alias_type_arguments_, &alias_constraint_failures_, &dependent_layout_arguments_};
     std::array<u32, counters.size()> counts;
     std::ranges::transform(counters, counts.begin(), [](const u32* c) { return *c; });
@@ -8304,6 +8340,7 @@ private:
   u32 deferred_rank_checks_ = 0;
   u32 deferred_qualified_type_arguments_ = 0;  // dependent qualified types read as template arguments
   u32 deferred_alias_type_arguments_ = 0;
+  u32 deferred_alias_layout_arguments_ = 0;
   struct TypeAliasCheckScope;
   TypeAliasCheckScope* type_alias_checks_ = nullptr;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
@@ -8320,6 +8357,7 @@ public:
   bool substituting_partial_arguments = false;
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool namespace_alias_type = false;  // the namespace alias instantiation reparses this type-id
+  bool namespace_alias_sizeof = false;  // a namespace alias RHS or its sizeof argument replay
   bool member_alias_type = false;  // the class instantiation reparses this type-id
   bool replayed_member_alias_type = false;  // an ordinary member alias in a class template
 private:

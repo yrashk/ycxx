@@ -100,14 +100,17 @@ struct ConstantCallEvaluation {
   bool diagnosed = false;
 };
 // What naming an alias template's specialization reads again: immediate calls its type retains or
-// may erase, checks of a dependent array's rank, or a type with a dependent operand that has no
-// representation (`decltype(f<T>())` of a deduced return type), known only once the arguments are.
+// may erase, checks of dependent template arguments, or a type with a dependent operand that
+// has no representation (`decltype(f<T>())` of a deduced return type), known only once the
+// arguments are.
 struct AliasCallPattern {
   enum class Kind { none, retained, may_erase, unrepresented } kind = Kind::none;
   bool class_result = false;
   bool rank_checks = false;
   bool qualified_type_arguments = false;
   bool closures = false;  // its type-id makes closure types, each specialization its own (#1549)
+  bool layout_arguments = false;
+  bool argument_checks() const { return qualified_type_arguments || layout_arguments; }
 };
 
 struct PresumedSource {
@@ -1408,13 +1411,13 @@ public:
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
     if (pattern.closures) ++closure_alias_uses;
-    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks || pattern.qualified_type_arguments) {
+    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks || pattern.argument_checks()) {
       // Replay checks obligations that become concrete now. The enclosing alias, member or
       // signature retains checks whose arguments still depend on its own parameters.
-      const bool partial_type_arguments = pattern.qualified_type_arguments &&
+      const bool partial_argument_checks = pattern.argument_checks() &&
           (replay_partial_alias || use == AliasSubstitution::signature) &&
           std::ranges::any_of(args, [&](const TemplateArg& a) { return !dependent(a); });
-      if ((pattern.class_result && replay_partial_alias) || partial_type_arguments ||
+      if ((pattern.class_result && replay_partial_alias) || partial_argument_checks ||
           std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
         const auto before = diag_count();
         const bool saved = std::exchange(replaying_type_default, substituting_default);
