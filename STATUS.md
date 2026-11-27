@@ -3000,13 +3000,15 @@ Calls to user functions and values from the active constexpr frame remain outsid
 proof domain. `__has_builtin` answers 0 while support is partial.
 [Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
 
-## Checked signed integer builtins (#1077)
+## Checked integer builtins (#1077, #1636)
 
 The direct GNU `__builtin_add_overflow` and `__builtin_mul_overflow` calls accept matching
-signed target-`intmax_t` operands with a writable destination of the same type. Constant
-evaluation writes the width-converted result on both outcomes and returns whether the
-mathematical result exceeds the signed range. The destination uses the usual object and
-lifetime rules. `__has_builtin` answers 0 for the partial domain.
+signed target-`intmax_t` operands with a writable destination of the same type during
+constant evaluation. Constant evaluation and native code also accept differing standard
+unsigned integer operand and destination types up to 64 bits. The call evaluates each argument
+once, stores the converted result once and returns whether it differs from the exact arithmetic
+result. The destination uses the usual object and lifetime rules. `__has_builtin` answers 0 for
+the partial domain. [#1636](https://github.com/yrashk/ycxx/issues/1636)
 
 Native emission can omit an unreferenced immediate function template specialization. A named
 namespace-scope specialization with checked arithmetic that is retained by the reference

@@ -1655,6 +1655,19 @@ clang_observed = "Upstream Clang 23.1.6 exposes the built-in template and accept
 evidence = ["tests/own/templates/t8-make-integer-seq.run.cpp", "tests/own/templates/t8-mangling.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]
 
 [[divergence]]
+id = "gnu-checked-overflow-result-type"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "GNU Integer Overflow Builtins (https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html), #1636, #1640"
+prior = "Require matching signed target-intmax_t operands and result."
+spec = "Reject boolean and enumerated result pointers for these builtins, following the documented GNU operand rules."
+gcc = "Same as spec."
+clang = "Accept bool* and pointers to an enum with an unsigned char underlying type in the tested add and multiply calls."
+limits = "ycxx rejects the two tested result pointer types in every mode. The unsigned slice accepts standard unsigned integer operands and a writable standard unsigned integer result up to 64 bits."
+probe = 'enum E : unsigned char { zero = 0 }; bool f(bool* b, E* e) { return __builtin_add_overflow(1u, 2u, b) || __builtin_add_overflow(1u, 2u, e) || __builtin_mul_overflow(1u, 2u, b) || __builtin_mul_overflow(1u, 2u, e); }'
+evidence = ["GCC 16.2.0 Linux x86-64 and upstream Clang 23.1.6 Linux x86-64 and arm64 Darwin strict C++26 syntax probes for both operations and both result types", "docs/EXTENSIONS.md"]
+
+[[divergence]]
 id = "gnu-atomic-lock-free-zero-size"
 status = "recorded"
 mode_status = { spec = "unverified", gcc = "pending", clang = "pending" }
