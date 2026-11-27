@@ -90,6 +90,9 @@ struct ClassName {
   bool local_class = false;
   std::optional<std::uint32_t> private_closure_number{};
   bool static_closure = false;
+  // A TU-local closure in a class or namespace (`scope`), owned by no function or variable
+  // (#1549): `$_N` (`private_closure_number`) in its scope's <nested-name>.
+  bool closure_in_scope = false;
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -457,8 +460,19 @@ class Mangler {
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
     if (n.closure) {
-      if (n.closure_variable != ast::EntityId::none)
+      // In a local class: `Z <encoding> E N <prefix> E [<discriminator>]` (§5.1.6).
+      if (auto root = n.closure_in_scope ? local_root(e) : std::nullopt) {
+        auto l = local_encoding(*root->second.local);
+        if (!l) return l;
+        return prefix(e).transform([&](std::string p) { return "Z" + *l + "EN" + p + "E" + discriminator(root->second); });
+      }
+      if (n.closure_variable != ast::EntityId::none || (n.closure_in_scope && n.scope != ast::EntityId::none))
         return prefix(e).transform([](std::string p) { return "N" + p + "E"; });
+      if (n.closure_in_scope) {  // in the global namespace: an <unscoped-name>
+        auto component = closure_component(n);
+        if (component) candidates_.push_back(key);
+        return component;
+      }
       // A closure type as a type: the <local-name> `Z <encoding> E <closure-type-name>` (§5.1.6).
       if (!n.local) return std::unexpected("a closure type whose function is unknown");
       auto l = local_encoding(*n.local);
@@ -513,7 +527,11 @@ class Mangler {
       // n-th closure of one signature in its context is numbered n − 2 (§5.1.8). Its context is
       // the <local-name> before the nested-name it begins.
       std::string r;
-      if (n.closure_variable != ast::EntityId::none) {
+      if (n.closure_in_scope && n.scope != ast::EntityId::none) {
+        auto owner = prefix(n.scope);
+        if (!owner) return owner;
+        r = *owner;
+      } else if (n.closure_variable != ast::EntityId::none) {
         auto owner = prefix(n.closure_variable);
         if (!owner) return owner;
         r = *owner;
@@ -565,7 +583,7 @@ class Mangler {
   std::optional<std::pair<ast::EntityId, ClassName>> local_root(ast::EntityId e) const {
     for (int depth = 0; e != ast::EntityId::none && classes_ && depth < 64; ++depth) {
       ClassName n = classes_(e);
-      if (!n.is_class || n.closure) return std::nullopt;
+      if (!n.is_class || (n.closure && !n.closure_in_scope)) return std::nullopt;
       if (n.local_class) {
         if (!n.local) return std::nullopt;
         return std::pair{e, std::move(n)};
@@ -644,7 +662,7 @@ class Mangler {
     if (scope != ast::EntityId::none) {
       std::string local;
       std::string disc;  // a local class's discriminator, after the whole nested-name (§5.1.6)
-      if (sc.closure && sc.closure_variable == ast::EntityId::none) {
+      if (sc.closure && sc.closure_variable == ast::EntityId::none && !sc.closure_in_scope) {
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;
@@ -699,7 +717,7 @@ class Mangler {
       const bool gcc_generated = compatibility_ == ast::Compatibility::gcc && in_.seqs.size(spec.generic_invoker_head) != 0;
       if (gcc_generated && !conversion) name = "_FUN";
       std::string local;
-      if (sc.closure_variable == ast::EntityId::none) {  // else the variable is its <closure-prefix>
+      if (sc.closure_variable == ast::EntityId::none && !sc.closure_in_scope) {  // else its <closure-prefix> or scope
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;

@@ -1030,6 +1030,10 @@ bool names_tu_local(parse::Program& program, EntityId entity, bool include_value
     // A variable is the scope of its initializer's closures (#338).
     const bool variable = r.kind == sema::EntityKind::variable;
     if (variable && r.linkage == ast::Linkage::internal) return true;
+    // A TU-local closure type (docs/design/closures.md, decision 4), as of a lambda in an
+    // unevaluated operand of a declaration (#1549).
+    if (r.kind == sema::EntityKind::class_ && r.lambda_signature != sema::Fp128{} && r.linkage == ast::Linkage::internal)
+      return true;
     if (!variable && r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
         r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
       return false;
@@ -2051,6 +2055,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   for (const auto& initializer : program.member_initializers())
     if (initializer.emits_closures())
       closures_of(initializer.closures, program.id(initializer.item), 0, true);
+  // Alias template specializations' closures (#1549), emitted where referred to.
+  for (const auto& alias : program.alias_closures()) closures_of(alias.closures, program.id(alias.item), 0, true);
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
