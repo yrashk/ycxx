@@ -12530,6 +12530,9 @@ private:
   struct ConstructorInitializers {
     std::map<u32, Ex> subobjects;
     std::optional<Ex> delegation;  // engaged even when a delegating initializer failed
+    // A definition's mem-initializer named a dependent type: which bases it initializes is known
+    // only in an instantiation, so none is default-initialized here.
+    bool dependent_bases = false;
   };
 
   // Skip an initializer after an error, leaving the next comma or body brace.
@@ -12555,6 +12558,7 @@ private:
     bool seen_initializer = false;
     bool reported_mixed = false;
     bool names_base_pack = false;  // whether the last mem-initializer-id is a pack of base classes
+    bool skipped = false;          // whether the last mem-initializer was skipped after an error
     // One mem-initializer: false when the list cannot be read further.
     const auto one = [&]() -> bool {
       if (!ps_.is(Tk::identifier)) {
@@ -12566,10 +12570,12 @@ private:
       u32 at = ps_.pos();
       NameId n = ps_.name_of(ps_.tok());
       names_base_pack = false;
+      skipped = false;
       ps_.bump();
       u32 field = 0;
       while (field < rec.fields.size() && rec.fields[field].name != n) ++field;
       std::optional<QualType> type;
+      std::optional<QualType> named;
       auto destination = sema::ConstructorDestination::object;
       // A dependent mem-initializer-id, such as a base that is a template parameter or a pack's
       // element ([temp.dep.type]), names its base only in an instantiation, which checks it.
@@ -12578,7 +12584,7 @@ private:
         type = rec.fields[field].type;
       } else {
         // [class.base.init]/2: a direct base or the constructor's class, ignoring parameters.
-        auto named = s_.class_name(n, false, true, std::nullopt, /*search_locals=*/false);
+        named = s_.class_name(n, false, true, std::nullopt, /*search_locals=*/false);
         if (named && s_.types().is_class(*named)) {
           EntityId cls = s_.types().class_of(*named);
           auto base = std::ranges::find(rec.bases, cls, &sema::BaseRec::cls);
@@ -12602,11 +12608,15 @@ private:
         if (!std::exchange(reported_mixed, true)) s_.diag(at, Diag::delegating_initializer_not_alone);
         r.delegation.emplace();
         skip_mem_initializer();
+        skipped = true;
         return true;
       }
       if (!type) {
-        s_.diag(at, Diag::no_member, n, ct);
+        // A class that is no direct base, such as a pack's element, is named by its type.
+        if (named && s_.types().is_class(*named)) s_.diag(at, Diag::not_direct_base, *named, ct);
+        else s_.diag(at, Diag::no_member, n, ct);
         skip_mem_initializer();
+        skipped = true;
         return true;
       }
       if (delegates) {
@@ -12614,6 +12624,7 @@ private:
         if (!s_.template_scopes.empty() || inst_) {
           s_.diag(at, Diag::not_supported, Tk::colon);
           skip_mem_initializer();
+          skipped = true;
           return true;
         }
       }
@@ -12655,7 +12666,10 @@ private:
           init = s_.convert(args[0], ft, open);  // a reference binds ([dcl.init.ref])
         }
       }
-      if (dependent_target) return true;
+      if (dependent_target) {
+        r.dependent_bases = true;
+        return true;
+      }
       if (delegates) r.delegation = init;
       else {
         if (r.subobjects.contains(field)) s_.diag(at, Diag::redeclared_member, n);  // [class.base.init]/3
@@ -12673,7 +12687,14 @@ private:
       const u32 start = ps_.index();
       if (const sema::Expansion* x = s_.expansion_at(begin)) {
         const sema::Expansion e = *x;
-        if (auto n = s_.expansion_length(e, begin)) {
+        const std::size_t before = s_.diag_count();
+        auto n = s_.expansion_length(e, begin);
+        if (!n && s_.diag_count() != before) {  // packs of different lengths, diagnosed
+          ps_.seek(start + (e.end - begin));
+          if (!ps_.expect(Tk::ellipsis)) return r;
+          continue;
+        }
+        if (n) {
           for (std::size_t i = 0; i < *n; ++i) {
             ps_.seek(start);
             s_.begin_pattern();
@@ -12691,9 +12712,10 @@ private:
       s_.begin_pattern();
       const bool ok = one();
       const u32 ellipsis = ps_.pos();
-      const bool expanded = ok && ps_.is(Tk::ellipsis);
+      const bool expanded = ok && !skipped && ps_.is(Tk::ellipsis);
       const auto packs = s_.end_pattern(expanded, begin, ellipsis);
       if (!ok) return r;
+      if (skipped) ps_.accept(Tk::ellipsis);  // its error is reported
       if (expanded) {
         ps_.bump();
         // [class.base.init]: the expansion initializes the bases a pack expansion in the
@@ -12736,6 +12758,8 @@ private:
       Ex init;
       if (auto it = inits.subobjects.find(u32(rec.fields.size() + i)); it != inits.subobjects.end()) {
         init = it->second;
+      } else if (inits.dependent_bases) {
+        continue;
       } else if (const auto* record = p_->classes_.find(base); record && record->polymorphic) {
         if (!record->dynamic) {
           s_.check_polymorphic_base_default_init(bt, 0);

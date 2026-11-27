@@ -4537,7 +4537,8 @@ public:
         std::size_t n = s_->diag_count();
         s_->begin_pattern();
         cast_expression();
-        a_is_pattern = !s_->end_pattern(false, first, 0).empty();
+        // A probe: its packs are neither an expansion nor the enclosing operand's.
+        a_is_pattern = !s_->end_pattern(true, first, 0, /*record=*/false).empty();
         s_->truncate_diags(n);
         i_ = begin_ + first;
       }
@@ -4618,9 +4619,11 @@ public:
       if (n)
         for (std::size_t i = 0; i < *n; ++i) {
           i_ = begin_ + begin;
+          s_->begin_pattern();
           s_->push_frame(e.packs, u32(i));
           const Ex element = cast_expression();
           s_->pop_frame();
+          s_->end_element(e.packs);
           out.push_back(element);
           if (!constraint) continue;
           if (!element.ok()) break;
