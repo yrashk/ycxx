@@ -162,6 +162,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_sysv_reference_fields
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_sysv_reference_fields.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} "${YCXXC_LIBYCXX_SOURCE_DIR}")
+  # PARITY: by design: exchanges System V AMD64 records with native Linux peers.
+  add_test(NAME unit.linux_sysv_enum_fields
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_sysv_enum_fields.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   # PARITY: by design: own/int128 on x86-64 ELF, with native peers; the driver runs it on macOS.
   add_test(NAME unit.linux_int128
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_int128.py
