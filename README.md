@@ -196,6 +196,11 @@ The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF 
 It resolves PC-relative GOT words at nonzero offsets in independently assembled objects.
 [#782](https://github.com/yrashk/ycxx/issues/782)
 
+On arm64 macOS, `ycxx cxx -shared -fPIC -nostdlib leaf.cpp -o libleaf.dylib`
+builds a signed freestanding dylib with strong function exports. It can be
+loaded by a platform executable or the ycxx rule worker. Set its install name
+with `-Wl,-install_name,<name>`. [Leaf dylib support](docs/design/darwin-shared-output.md)
+
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello

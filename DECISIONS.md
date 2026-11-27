@@ -23,6 +23,10 @@ reasoning; do not leave decisions only in issue threads.
      direct function imports use eager GOT relocations. Provider discovery uses GNU hash when
      available and otherwise uses SysV hash. Target CRT, versioned imports, provider dependencies
      and normal hosted process startup follow under #390.
+   - arm64 macOS [leaf shared output](docs/design/darwin-shared-output.md) builds a signed
+     dylib from freestanding position-independent objects. Its install name enters the
+     link query. It exports strong functions and resolves direct local references (#393).
+     Native dylib inputs are tracked in #392.
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
