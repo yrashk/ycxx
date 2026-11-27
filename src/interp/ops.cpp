@@ -388,9 +388,18 @@ struct Ops {
     if (storage != ir::Storage::automatic && storage != ir::Storage::temporary) return m.unsupported(n);
     // Lay out the record independently of cv. The object below retains it for access checks.
     const auto* record = constant(m) ? m.record_storage(ast::without_cv(t)) : nullptr;
-    const u64 leaves = record ? record->ncells : m.shape(t).leaves;
-    if (!m.can_allocate(leaves) || (leaves == 0 && !record)) return m.unsupported(n);
-    u32 o = m.make_object(t, M::Origin::automatic, record);
+    const auto& shape = m.shape(t);
+    const M::RecordStorage* array_record = nullptr;
+    if (constant(m) && storage == ir::Storage::automatic && shape.kind == M::Kind::array &&
+        m.in_->types.is<ast::TClass>(shape.inner)) {
+      array_record = m.record_storage(ast::without_cv(shape.inner));
+      if (!array_record || !array_record->flat_array_element) return m.unsupported(n);
+    }
+    const auto extent = m.storage_extent(t, array_record);
+    const u64 leaves = record ? record->ncells : extent.cells;
+    if (!m.can_allocate(leaves) || (leaves == 0 && !record) || (array_record && extent.bytes == 0))
+      return m.unsupported(n);
+    u32 o = m.make_object(t, M::Origin::automatic, record, array_record);
     const M::Object& ob = m.objects_[o];
     if (init == ir::Init::zero) {
       m.fill_zero(ob);
@@ -427,16 +436,29 @@ struct Ops {
     M::Place pl;
     if (Flow fl = m.locate(p, {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
     if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
+    auto& object = m.objects_[pl.obj];
     const bool unknown = has(f, n, ir::Flag::outside_unknown);
+    if (object.local_record_array()) {
+      if (unknown || has(f, n, ir::Flag::outside_lifetime)) return m.unsupported(n);
+      if (p.bits == 0) {
+        // The local's final marker completes either all direct initializers or a bulk
+        // zero/vacuous initialization with no element expressions.
+        if (object.record_life != M::Life::before ||
+            (object.initialized_array_fields != 0 && object.initialized_array_fields != object.ncells))
+          return m.unsupported(n);
+      } else {
+        if (!m.pending_array_field(pl)) return m.unsupported(n);
+        ++object.initialized_array_fields;
+      }
+    }
     if (unknown || has(f, n, ir::Flag::outside_lifetime)) {
-      auto& object = m.objects_[pl.obj];
       if (p.bits != 0 || object.origin != M::Origin::automatic || (unknown && !object.record))
         return m.fail(Reason::ill_formed);
       object.outside = true;
       object.usable = !unknown;
       object.unknown_reference = unknown && has(f, n, ir::Flag::unknown_reference);
     }
-    if (has(f, n, ir::Flag::switch_bypassed_lifetime)) m.objects_[pl.obj].switch_bypassed = true;
+    if (has(f, n, ir::Flag::switch_bypassed_lifetime)) object.switch_bypassed = true;
     m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }
@@ -449,6 +471,9 @@ struct Ops {
     auto pl = m.resolve(p, {}, past);
     if (!pl || past) return m.fail(Reason::past_end_access);
     if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
+    const auto& object = m.objects_[pl->obj];
+    if (object.local_record_array() && (p.bits != 0 || object.record_life != M::Life::alive))
+      return m.unsupported(n);
     m.set_lifetime(*pl, p.bits == 0, M::Life::after);
     return Flow::next;
   }
@@ -468,6 +493,7 @@ struct Ops {
     // [class.cdtor] permits calls during construction and destruction. Check a completed
     // lifetime independently of the fields, which the call need not read.
     const auto& object = m.objects_[place.obj];
+    if (object.local_record_array()) return m.unsupported(n);
     if (!gcc && (object.record_life == M::Life::after ||
                  (place.primary_base && object.primary_base_life == M::Life::after)))
       return m.fail(Reason::outside_lifetime);
@@ -516,6 +542,13 @@ struct Ops {
     const auto kind = m.shape(t).kind;
     if (pl.ncells != 1 || kind == M::Kind::array || kind == M::Kind::other) return m.unsupported(n);
     M::Cell& c = m.cells_[pl.cell0];
+    if (m.objects_[pl.obj].local_record_array()) {
+      if (has(f, n, ir::Flag::initializing_store)) {
+        if (!m.pending_array_field(pl)) return m.unsupported(n);
+      } else if (c.life != M::Life::alive) {
+        return m.fail(Reason::outside_lifetime);
+      }
+    }
     c.fill = M::Fill::value;
     c.v = v;
     return Flow::next;
