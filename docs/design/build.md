@@ -409,6 +409,33 @@ keep their existing meanings. The plan links each active role to its
 resolved archive path, operand position, and authored reference.
 [Archive roles example](../../examples/project-build/archive-consumer-bindings/README.md)
 
+### Explicit generated headers by link role (#1637)
+
+```text
+cpp.library "bridge" {
+    generated_headers = [{
+        host = artifact("host_config", "header")
+        target = artifact("target_config", "header")
+    }]
+}
+```
+
+Each position requires both artifact references. A host-tool traversal
+resolves `host` and the selected app traversal resolves `target`, even
+when the triples match. A plain artifact reference retains its shared
+behavior. The generators still receive the existing triple selectors,
+and the host choice uses the ordinary host-independent producer path.
+Separate producers can supply a different version of `config.hh` for
+each role. Declared siblings of one producer remain in the same directory.
+
+Both traversals keep the first occurrence of a directory and inherit
+their dependency's search order. A role choice can make one traversal
+deduplicate a directory that the other keeps. For libraries with owned
+or inherited choices, the plan records each role's full include sequence,
+including disk directories, and links generated entries to their
+authored artifact sites.
+[Generated header roles example](../../examples/project-build/role-bound-library-headers/README.md)
+
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
 argv word. `target_triple()` resolves to the selected compiler target and
