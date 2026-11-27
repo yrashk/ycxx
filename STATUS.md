@@ -4574,8 +4574,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), static data member templates (trailing requires-clauses on member templates
-  came with #1417),
+  templates (#339), static data member templates (done since: see "Static data member templates";
+  trailing requires-clauses on member templates came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
 
@@ -4652,6 +4652,33 @@ static argument tracked in #1301 and #209.
   still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
+
+## Static data member templates (#340, 2026-11-27)
+
+- **Declared** in a class or class template as `template<…> static T v = …;` ([temp.mem],
+  [class.static.data]): a `variable_template` entity scoped in the class, its head one level inside
+  the class's, kept among the class's static members with `is_template`. Its in-class initializer is
+  a pattern; a class template specialization declares its own member template and skips the
+  initializer ([temp.inst]/3). A non-static one is diagnosed ([temp.pre]/2).
+- **Instantiated** per specialization used (`Program::variable_instance`, [temp.inst]/7): the member
+  item is analysed again with the class's arguments and the member template's bound, through the
+  static data member path, so `inline` non-constexpr ones have storage and `constexpr` ones are
+  usable in constant expressions. `static constexpr auto` deduces per specialization; lambdas in
+  initializers are owned by the specialization.
+- **Named** unqualified in the class and in derived classes (initializers, member function bodies,
+  default arguments, requires-clauses, `if constexpr`), as `C::v<args>`, `T::template v<args>`,
+  `object.v<args>` and `p->v<args>`. One of the current instantiation is value-dependent. Access and
+  constraints are checked.
+- **Defined outside** a non-template class: `template<class T> const int N::w = …;`.
+- **Emitted** with Clang's names (`_ZN1SIiE7counterIcEE`), strong, as other variable template
+  specializations are until #124.
+- Tests: `tests/own/templates/member-variable-template-*` (24; 17 by the spec-only author, a PEER
+  test links Clang's uses, two XFAIL for the gaps below).
+  `<iostream>` on macOS arm64: errors 2,468 → 2,423 at `07e6d567`; `basic_string.hpp` 156 → 111.
+  Its remaining `__sv_like` errors are `__is_convertible` gaps (#1399, #218).
+- Not yet: partial and explicit specializations (#1594); defining one of a class template outside
+  the class (#256). Found on the way: #1595 (an undefined specialization's constant use reports an
+  internal error).
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 

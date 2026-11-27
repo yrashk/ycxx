@@ -5376,6 +5376,13 @@ public:
         // or where the member found is a template ([temp.names]/3).
         std::optional<std::vector<ast::TemplateArg>> targs;
         if (is(Tk::less) && (keyword || s_->names_member_template(e, arrow, n))) {
+          // `object.v<args>`: a static data member template's specialization ([expr.ref]).
+          if (auto v = s_->object_variable_template(e, arrow, n)) {
+            auto args = template_argument_list();
+            if (!args) return {NodeId::none, e.begin, pos()};
+            e = s_->object_variable_template_id(e, arrow, *v, *args, name_at, pos());
+            break;
+          }
           targs = template_argument_list();
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
@@ -5726,6 +5733,7 @@ public:
         if (!replay.deferred.empty()) {
           auto v = s_->variable_template(n, begin, /*initializer=*/true);
           if (!v) return {NodeId::none, begin, pos()};
+          s_->unqualified_variable_template_access(*v, n, begin);
           if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
             return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->replayed_variable_template_id(*v, *args, replay.deferred, begin, pos());
@@ -6205,6 +6213,23 @@ public:
             return s_->dependent_variable_template_id(*v, *args, begin, pos(), true,
                                                        r_->tokens[begin_ + begin].kind == Tk::coloncolon, qualifier);
           }
+          return s_->variable_template_id(*v, *args, begin, pos());
+        }
+      // `C::v<args>`: a static data member template of class C ([temp.mem], [temp.names]/3).
+      if (s->type)
+        if (auto v = s_->scope_variable_template(*s, n)) {
+          s_->member_template_access(*s->type, v->entity, n, name_at);
+          VariableArgumentReplay replay{{}, template_argument_replay_ == TemplateArgumentReplay::variable_initializer};
+          const bool replay_values = template_argument_replay_ != TemplateArgumentReplay::none && !s_->unevaluated;
+          auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &replay : nullptr);
+          if (!args) return {NodeId::none, begin, pos()};
+          if (!replay.deferred.empty()) {
+            if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
+              return s_->dependent_variable_template_id(*v, *args, begin, pos());
+            return s_->replayed_variable_template_id(*v, *args, replay.deferred, begin, pos());
+          }
+          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+            return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->variable_template_id(*v, *args, begin, pos());
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with

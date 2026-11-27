@@ -4159,6 +4159,16 @@ public:
     q_.type_trait_demand = var_->point;
     s_.template_args = var_->args;
   }
+  // `var` instantiates a specialization of a static data member template of class template
+  // specialization `inst` ([temp.mem], [temp.inst]/7): the class's arguments and the member
+  // template's are bound.
+  ItemAnalysis(Program& p, u32 item, Program::ClassInstantiation inst, Program::VarInstantiation var)
+      : ItemAnalysis(p, item, std::move(inst)) {
+    var_ = std::move(var);
+    q_.at_point = var_->point;
+    q_.type_trait_demand = var_->point;
+    s_.template_args = var_->args;
+  }
   bool has_member_initial_value() const { return member_initial_value_; }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
   bool class_assertion_failure() const { return q_.observed_class_assertion_failure; }
@@ -7127,6 +7137,12 @@ private:
         s_.diag(spec.begin, Diag::not_supported, Tk::kw_constexpr);
         return bad();
       }
+      // [temp.pre]/2: a variable template in a class is a static data member template. (An
+      // operator's name here is a function declarator that did not parse as one.)
+      if (member_template_ && !s_.ins().names.spelling(d.name).starts_with("operator")) {
+        s_.diag(d.name_at, Diag::data_member_template, d.name);
+        return bad();
+      }
       // [dcl.spec.auto.general]: a non-static data member's type has no placeholder.
       if (types.has_placeholder(d.type)) {
         s_.diag(d.name_at, Diag::auto_not_allowed);
@@ -9067,6 +9083,10 @@ private:
     bool fn = types.is_function(d.type);
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
     if (!defaults_allowed(d.params, fn, d.name)) return false;
+    if (!fn && member_template_ && (d.template_args || ps_.is(Tk::less))) {
+      s_.diag(d.name_at, Diag::not_supported, Tk::less);  // a partial specialization (#1594)
+      return false;
+    }
     if (fn) {
       const auto cv = types.rec(d.type).fn_cv;
       const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, cv)));
@@ -9194,9 +9214,8 @@ private:
         p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, d.noexcept_tokens});
       if (overridden) p_->overridden_virtuals_.emplace(sem.entity, overridden->entity);
       remember_member_defaults(sem.entity, d.params);
-    } else if (member_template_) {
-      s_.diag(d.name_at, Diag::not_supported, Tk::kw_template);  // a static data member template
-      return false;
+    } else if (member_template_ && !var_) {
+      return static_member_template(spec, d, c, sem, flags);
     } else {
       // A static data member: a declaration, unless inline or constexpr ([class.static.data]).
       // One that is const integral or constexpr may give its value in the class, and is then
@@ -9211,10 +9230,12 @@ private:
       const sema::Sema::StaticConstexprInitializerScope constexpr_initializer(s_, spec.is_constexpr);
       // The member owns the closure types of its initializer's lambdas; its identity needs no type.
       const sema::EntityRec member{sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+      // A static data member template's specialization owns its own ([temp.inst]/7).
       const sema::Sema::ClosureOwnerScope closures(
-          s_, sema::Sema::ClosureOwner{s_.world().entities.reserve(member),
-                                       owner.linkage == ast::Linkage::internal || Program::unnamed(p_->ns_of(k_))
-                                           ? ast::Linkage::internal : ast::Linkage::external});
+          s_, var_ ? variable_closures(var_->spec, true)
+                   : sema::Sema::ClosureOwner{s_.world().entities.reserve(member),
+                                              owner.linkage == ast::Linkage::internal || Program::unnamed(p_->ns_of(k_))
+                                                  ? ast::Linkage::internal : ast::Linkage::external});
       // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
       // read here, before the member is declared.
       std::optional<Ex> early;
@@ -9235,8 +9256,11 @@ private:
             !s_.check_destructor_access(d.type, d.name_at)) return false;
         flags |= sema::decl_flag::definition;
       }
-      sem.entity = s_.world().entities.entity(
-          {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      // A static data member template's specialization: the entity its use named, whose template
+      // the class declared ([temp.inst]/7, `Program::variable_instance`).
+      sem.entity = var_ ? var_->spec
+                        : s_.world().entities.entity(
+                              {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       sem.flags = flags;
       // The written list forms here apply to base-free namespace-scope owners.
       const bool braced = ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace);
@@ -9267,7 +9291,7 @@ private:
       // [temp.inst]/3: a class template specialization declares its static data members; the
       // initializer of one defined in the class (inline or constexpr) is instantiated when the
       // member is used (`Program::member_value`), from the extent the template's analysis recorded.
-      if (inst_ && !early && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
+      if (inst_ && !var_ && !early && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
         if (auto initializer = p_->static_initializer(k_, ordinal)) {
           ps_.seek(initializer->end);
           p_->lazy_member(sem.entity, k_, ordinal, *inst_, initializer->dependent_layout);
@@ -9355,6 +9379,90 @@ private:
     declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
     return true;
+  }
+
+  // `template<…> static T v = initializer;`: a static data member template ([temp.mem],
+  // [class.static.data]), a variable template of class `c` ([temp.pre]/2). Its initializer is a
+  // pattern ([temp.res]); each specialization's is instantiated from it when used
+  // (`Program::variable_instance`, [temp.inst]/7).
+  bool static_member_template(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, ast::DeclSema& sem, u16 flags) {
+    sema::Types& types = s_.types();
+    if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);  // [dcl.constexpr]
+    const bool has_init = ps_.is(Tk::equal) || ps_.is(Tk::l_brace);
+    if (spec.is_constexpr && !has_init) {
+      s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
+      return false;
+    }
+    sema::EntityRec e{sema::EntityKind::variable_template, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity};
+    e.head = head_fp(s_.template_scopes.back());
+    // A class template specialization declares the member template; its initializer is
+    // instantiated only for the specializations that are used ([temp.inst]/3, /7).
+    const bool skip_initializer = inst_.has_value();
+    // A placeholder type stays while the initializer is dependent; each specialization deduces
+    // its own ([dcl.type.auto.deduct], `Program::specialization_type`). Its lambdas' closure
+    // types are the member template's (docs/design/closures.md).
+    std::optional<Ex> early;
+    if (types.has_placeholder(d.type) && !skip_initializer) {
+      std::unique_ptr<sema::Braced> list;
+      using Replay = Parser::TemplateArgumentReplay;
+      const Parser::TemplateArgumentReplayScope replay(ps_, Replay::variable_initializer);
+      const auto& owner = s_.world().entities.rec(c.entity);
+      const sema::Sema::ClosureOwnerScope closures(
+          s_, sema::Sema::ClosureOwner{s_.world().entities.reserve(e),
+                                       owner.linkage == ast::Linkage::internal || Program::unnamed(p_->ns_of(k_))
+                                           ? ast::Linkage::internal : ast::Linkage::external});
+      if (ps_.is(Tk::l_brace) || !deduce_variable(d, list, early, /*pattern=*/true) || list) {
+        if (ps_.is(Tk::l_brace)) s_.diag(ps_.pos(), Diag::not_supported, Tk::l_brace);
+        return false;
+      }
+    }
+    sem.kind = ast::DeclKind::variable;
+    sem.storage = ast::Storage::static_;
+    sem.type = d.type;
+    flags |= sema::decl_flag::template_;
+    // An initializer in the class is what each specialization is instantiated from.
+    if (has_init) flags |= sema::decl_flag::definition;
+    sem.flags = flags;
+    sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+    sem.constraints = associated_constraints();
+    sem.head_constraint = head_constraint_;
+    e.type = d.type;
+    e.constraints = constraints_fp_;
+    sem.entity = s_.world().entities.entity(e);
+    s_.own.push_back({d.name, sem});
+    p_->declared(sem, k_);
+    Ex init;
+    const u32 ordinal = u32(decls_.size());
+    if (skip_initializer) {
+      // Where the template's analysis found the initializer's end; without one, it was diagnosed.
+      if (auto extent = p_->static_initializer(k_, ordinal)) ps_.seek(extent->end);
+      else if (has_init) ps_.skip_to_semi();
+      declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), ConstId::none},
+                                     d.begin, ps_.pos()));
+      decls_.push_back(sem);
+      return true;
+    }
+    if (early) {
+      init = types.has_placeholder(d.type) ? *early : s_.convert(*early, d.type, early->begin);
+    } else if (has_init) {
+      using Replay = Parser::TemplateArgumentReplay;
+      const Parser::TemplateArgumentReplayScope replay(ps_, Replay::variable_initializer);
+      const sema::Sema::ClosureOwnerScope closures(s_, variable_closures(sem.entity, true));
+      if (ps_.is(Tk::l_brace) || ps_.kind(1) == Tk::l_brace) {
+        const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
+        auto list = ps_.braced_init_list();
+        init = s_.list_init(d.type, *list, form, /*extend_reference=*/true);
+      } else {
+        ps_.bump();
+        Ex x = ps_.assignment_expression();
+        init = s_.convert(x, d.type, x.begin);
+      }
+    }
+    if (has_init) p_->set_static_initializer(k_, ordinal, {ps_.index(), false});
+    declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(init, d.begin), ConstId::none},
+                                   d.begin, ps_.pos()));
+    decls_.push_back(sem);
+    return !has_init || init.ok();
   }
 
   // Whether the class already has a member named `n`: in this item, or an earlier member item
@@ -9795,20 +9903,18 @@ private:
       // the current instantiation: X's own parameters, in order, as its arguments ([temp.dep.type]).
       bool class_member = false;
       // [temp.mem]/1: two heads only before a member template of a class template.
-      if (two_heads_ && !(fn && d.qualified && d.scope.type && s_.types().is_class(*d.scope.type) &&
-                          s_.world().entities.rec(s_.types().class_of(*d.scope.type)).templ != EntityId::none)) {
+      // A static data member template's definition (#256) is one such member template too.
+      if (two_heads_ && !(d.qualified && d.scope.type && s_.types().is_class(*d.scope.type) &&
+                          s_.world().entities.rec(s_.types().class_of(*d.scope.type)).templ != EntityId::none &&
+                          (fn || s_.member_variable_template(s_.types().class_of(*d.scope.type), d.name)))) {
         s_.diag(d.name_at, Diag::extraneous_template_head);
         return false;
       }
       if (template_ && d.qualified && d.scope.type && s_.types().is_class(*d.scope.type)) {
         const sema::EntityRec& c = s_.world().entities.rec(s_.types().class_of(*d.scope.type));
         if (c.templ == EntityId::none) {
-          // `template<class T> R S::f(T)`: a member template of a class defined outside it
-          // ([temp.mem]); a static data member template is not supported.
-          if (!fn) {
-            s_.diag(d.qualifier_at, Diag::not_a_template, c.name);
-            return false;
-          }
+          // `template<class T> R S::f(T)` or `template<class T> T S::v = …`: a member template of
+          // a class defined outside it ([temp.mem]).
           member_template_ = true;
         } else {
           const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.front();
@@ -14997,9 +15103,26 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
   ast::DeclSema tmpl = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   if (!qualifies(tmpl)) return nullptr;
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
-  sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
+  const sema::u16 depth = head.empty() ? 0 : head[0].depth;
+  sema::Bindings args = partial ? partial->args : sema::Bindings::of(depth, rec.args);
+  // A static data member template of a class template specialization ([temp.mem]): the class's
+  // arguments bind the enclosing levels, and its member item is analysed as the class's.
+  const EntityId owner = w_->entities.rec(rec.templ).scope;
+  std::optional<ClassInstantiation> of_class;
+  if (auto outer = class_args_.find(std::to_underlying(owner)); outer != class_args_.end() && !partial) {
+    sema::Bindings all = outer->second;
+    all.levels.resize(depth + 1);
+    all.levels[depth] = args.levels[depth];
+    args = std::move(all);
+    if (items_->items[k].parent != items::none && items_->items[items_->items[k].parent].kind == ItemKind::class_def)
+      of_class = ClassInstantiation{owner, outer->second, point};
+  }
   var_instantiating_.insert(key);
-  ItemAnalysis analysis(*this, k, VarInstantiation{v, std::move(args), point, partial ? std::nullopt : std::optional(tmpl)});
+  VarInstantiation var{v, std::move(args), point, partial ? std::nullopt : std::optional(tmpl)};
+  std::optional<ItemAnalysis> analysing;
+  if (of_class) analysing.emplace(*this, k, *of_class, std::move(var));
+  else analysing.emplace(*this, k, std::move(var));
+  ItemAnalysis& analysis = *analysing;
   Result<ast::ItemSema> cell = analysis.run();
   var_instantiating_.erase(key);
   // What the definition diagnosed it says once, there.
