@@ -5031,6 +5031,15 @@ public:
     for (const PackRef& r : packs) note_pack(r);
     return packs;
   }
+  // After one element of an expansion is read in an instantiation (begun with `begin_pattern`):
+  // the packs the expansion names are bound to that element, so only the others are the enclosing
+  // operand's. Without this, `h(g(xs...))` reported `xs` as unexpanded in `h`'s argument.
+  void end_element(const std::vector<PackRef>& expanded) {
+    std::vector<PackRef> packs = std::move(pattern_packs_.back());
+    pattern_packs_.pop_back();
+    for (const PackRef& r : packs)
+      if (!std::ranges::contains(expanded, r)) note_pack(r);
+  }
   NameId pack_name(const PackRef& r) {
     if (r.fn != NameId{}) return r.fn;
     for (const auto& scope : template_scopes)

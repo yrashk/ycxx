@@ -3757,8 +3757,15 @@ public:
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
+      const std::size_t before = s_->diag_count();
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
+      if (!n && s_->diag_count() != before) {  // packs of different lengths, diagnosed: no operand
+        i_ = begin_ + e.end;
+        expect(Tk::ellipsis);
+        out.push_back({NodeId::none, begin, pos()});
+        return out;
+      }
       if (!n) {
         // A pack not bound yet (an enclosing template's): the expansion stays dependent.
         if (unexpanded) *unexpanded = true;
@@ -3771,9 +3778,11 @@ public:
       }
       for (std::size_t i = 0; i < *n; ++i) {
         i_ = begin_ + begin;
+        s_->begin_pattern();
         s_->push_frame(e.packs, u32(i));
         out.push_back(read());
         s_->pop_frame();
+        s_->end_element(e.packs);
       }
       i_ = begin_ + e.end;
       expect(Tk::ellipsis);
@@ -4559,7 +4568,8 @@ public:
         std::size_t n = s_->diag_count();
         s_->begin_pattern();
         cast_expression();
-        a_is_pattern = !s_->end_pattern(false, first, 0).empty();
+        // A probe: its packs are neither an expansion nor the enclosing operand's.
+        a_is_pattern = !s_->end_pattern(true, first, 0, /*record=*/false).empty();
         s_->truncate_diags(n);
         i_ = begin_ + first;
       }
@@ -4640,9 +4650,11 @@ public:
       if (n)
         for (std::size_t i = 0; i < *n; ++i) {
           i_ = begin_ + begin;
+          s_->begin_pattern();
           s_->push_frame(e.packs, u32(i));
           const Ex element = cast_expression();
           s_->pop_frame();
+          s_->end_element(e.packs);
           out.push_back(element);
           if (!constraint) continue;
           if (!element.ok()) break;
