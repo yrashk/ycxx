@@ -69,7 +69,7 @@ constexpr std::string_view styles = R"HTML(
   .plan-target .empty { padding: 0; }
   #target-graph { margin-bottom: 1.25rem; --graph-edge: #547485; }
   .graph-explorer { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 29%); }
-  .graph-main { min-width: 0; padding: .85rem 1.1rem 1.1rem; }
+  .graph-main { display: flex; flex-direction: column; min-width: 0; padding: .85rem 1.1rem 1.1rem; }
   .graph-toolbar, .graph-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .7rem; }
   #graph-count { color: var(--muted); font-size: .85rem; }
   #graph-reset, .graph-controls button, .graph-node {
@@ -79,7 +79,7 @@ constexpr std::string_view styles = R"HTML(
   .graph-controls button:disabled { opacity: .6; cursor: default; }
   #graph-reset:focus-visible, .graph-controls button:focus-visible, .graph-node:focus-visible,
   #graph-viewport:focus-visible { outline: 2px solid #188496; outline-offset: 2px; }
-  #graph-viewport { margin-top: .75rem; min-height: 13rem; max-height: 27rem; overflow: auto;
+  #graph-viewport { flex: 1; margin-top: .75rem; min-height: 13rem; max-height: 27rem; overflow: auto;
     border: 1px solid var(--border); border-radius: .55rem; background-color: #f8fafc;
     background-image: radial-gradient(#dce4ec 1px, transparent 1px); background-size: 16px 16px; }
   #graph-stage { position: relative; overflow: hidden; }
