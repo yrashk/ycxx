@@ -171,7 +171,7 @@ public:
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
-  // A call of a C library function a builtin lowers to (`World::string_function`).
+  // A call of a C library function a builtin lowers to (`World::library_function`).
   virtual void use_library_function(EntityId) {}
   // The static object denoted by a class-valued template parameter ([temp.param]).
   virtual void use_template_parameter_object(EntityId) {}
@@ -9439,10 +9439,10 @@ public:
   }
 
   // A builtin that is a C library function: a call of its implicit declaration, whose arguments
-  // are copy-initialized parameters as in any call ([expr.call]/7). The call carries the
-  // function's `constant`, so that constant evaluation reads the bytes itself (`ir::BuiltinFn`).
-  Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
-    const ast::DeclSema d = w_->string_function(f, compatibility());
+  // use ordinary implicit conversions ([expr.call]/7). The `constant` field selects a separate
+  // interpreter implementation for library builtins that provide one.
+  Ex builtin_library_call(const LibraryFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
+    const ast::DeclSema d = w_->library_function(f, compatibility());
     const auto& signature = types().rec(d.type);
     if (!builtin_arity(signature.params.size(), args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -9450,7 +9450,11 @@ public:
     if (std::ranges::any_of(args, [&](const Ex& a) { return dependent(a); })) return dependent_node(args, begin, end, result);
     std::vector<Child> converted;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      const Ex arg = convert(args[i], signature.params[i], args[i].begin);
+      const QualType param = signature.params[i];
+      Ex arg = args[i];
+      if (f.params[i] == CType::float_ && types().is_class(arg.type()))
+        arg = exact_conversion_call(arg, param, arg.begin, /*allow_explicit=*/false).value_or(arg);
+      arg = convert(arg, param, arg.begin);
       if (!arg.ok()) return {NodeId::none, begin, end};
       converted.push_back(at(arg, begin));
     }
@@ -9468,9 +9472,9 @@ public:
     if (entity.kind != EntityKind::function || entity.lang != LangLinkage::c || entity.scope != EntityId::none ||
         entity.linkage != ast::Linkage::external) return none;
     const NameId name = entity.name;
-    const auto* library = string_function_named(ins().names.spelling(name));
+    const auto* library = library_function_named(ins().names.spelling(name));
     if (!library || library->constant == none) return none;
-    const auto expected = types().rec(w_->string_function(*library, compatibility()).type);
+    const auto expected = types().rec(w_->library_function(*library, compatibility()).type);
     if (expected.params != signature.params ||
         (expected.inner != signature.inner && (library->constant != memchr ||
          signature.inner != types().pointer(types().add_cv(builtin(Builtin::void_), Cv::const_)))))
@@ -9954,7 +9958,7 @@ public:
       return builtin_constant_probe(args.front(), begin, end);
     }
     if (b.function == library)
-      return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
+      return builtin_library_call(*library_function_named(lex::library_function_name(b)), std::move(args), begin, end);
     if (b.function == add_overflow || b.function == mul_overflow) {
       const auto op = b.function == add_overflow ? ast::BuiltinOp::add_overflow : ast::BuiltinOp::mul_overflow;
       return builtin_overflow_call(op, args, begin, end);

@@ -2690,13 +2690,13 @@ group = 'lib'
 clauses = ['numeric.limits', 'bit', 'support.types.layout']
 std = 'C++98'
 detect = '\bnumeric_limits\b|\bstd::(?:popcount|countl_zero|countr_zero|bit_width|rotl|rotr|byteswap)\b|\boffsetof\s*\('
-issues = [248]
+issues = [248, 1615]
 probe = '''
 struct S { int a; int b; };
 int main() { return (__builtin_popcount(7u) == 3 && __builtin_offsetof(S, b) == 4) ? 0 : 1; }
 '''
 status = 'partial'
-note = '`__builtin_offsetof` and the `offsetof` macro of `<cstddef>` give the offsets of direct non-static data members of ordinary standard-layout classes. Compound member designators, the `<bit>` and `<limits>` built-ins such as `__builtin_popcount`, and the remaining numeric built-ins are tracked in #248.'
+note = '`__builtin_offsetof` and the `offsetof` macro of `<cstddef>` give the offsets of direct non-static data members of ordinary standard-layout classes. `__builtin_acosf` calls the C library float inverse cosine at run time (#1615). Compound member designators, the `<bit>` and `<limits>` built-ins such as `__builtin_popcount`, and the remaining numeric built-ins are tracked in #248.'
 
 [[feature]]
 id = 'lib-atomic'

@@ -2044,7 +2044,7 @@ public:
   // Every specialization whose definition the unit requires, in order of first demand.
   std::span<const EntityId> required() const { return required_; }
   std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
-  // The C library functions the unit's builtins call (`World::string_function`), in order of first use.
+  // The C library functions the unit's builtins call (`World::library_function`), in order of first use.
   std::span<const EntityId> library_functions() const { return library_functions_; }
   std::span<const EntityId> template_parameter_objects() const { return template_parameter_objects_; }
   // The calls of a template's body that were dependent at its definition, by the template's item

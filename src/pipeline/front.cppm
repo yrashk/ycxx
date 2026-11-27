@@ -2270,7 +2270,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
   // The C library functions builtins call, declared as the target's C library declares them
-  // (`World::string_function`).
+  // (`World::library_function`).
   for (EntityId e : program.library_functions()) {
     ast::DeclSema d{};
     d.entity = e;
