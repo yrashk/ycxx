@@ -985,6 +985,19 @@ clang_observed = "Rejects both accesses."
 evidence = ["tests/own/casts/const-cast-constexpr.accept.cpp", "tests/own/casts/const-cast-constexpr-volatile.reject.cpp"]
 
 [[divergence]]
+id = "constexpr-const-record-array-member-write"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.type.cv]/4, [expr.const.core], #1659"
+prior = "Constant evaluation did not reach these writes through automatic record-array elements."
+spec = "Reject the cast write to a non-mutable member of an actually const record array element."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts the write to the inherited-const member, and rejects the control with a declared const field."
+clang_observed = "Clang 23.1.6 rejects both writes on Linux x86-64 and Darwin arm64."
+evidence = ["tests/own/consteval/flat-record-array/constexpr-array-const-object-member.reject.cpp", "tests/own/consteval/flat-record-array/constexpr-array-declared-const-member.reject.cpp"]
+
+[[divergence]]
 id = "constexpr-by-value-class-parameter-cv"
 status = "recorded"
 mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
@@ -1696,3 +1709,29 @@ gcc_observed = "GCC 16.2.0 accepts an unsigned int expected pointer for a signed
 clang_observed = "Clang 23.1.6 rejects the unsigned int expected pointer when the atomic object's pointer is int*."
 probe = 'bool f(int* p, unsigned* expected) { return __atomic_compare_exchange_n(p, expected, 1, false, 0, 0); }'
 evidence = ["docs/compatibility.toml", "docs/EXTENSIONS.md"]
+
+[[divergence]]
+id = "constexpr-flat-record-array-future-read"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1642"
+spec = "Reject a read before initialization completes for a later scalar member of the current array element or a scalar member of a later element."
+gcc = "Preserve the draft rejection for the first flat-record-array slice. The observed GCC acceptance is pending."
+clang = "Same as spec."
+gcc_observed = "Strict GCC 16.2.0 on x86-64 Linux accepts the fixed-bound future reads and observes 7 for the later member and 11 for the later element."
+clang_observed = "Strict Clang 23.1.6 on Linux x86-64 and arm64 Darwin rejects these reads because the object's lifetime has not begun."
+limits = "The observations cover fixed-bound automatic flat non-union aggregate arrays in immediate evaluation."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-future-member.cpp", "tests/daemon/flat_record_array/flat-record-array-future-element.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "constexpr-flat-record-array-initialization-write"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1642"
+spec = "Reject ordinary assignment to a scalar field whose lifetime has not begun, including through an int reference."
+gcc = "The draft rejection is the first-slice expectation. GCC acceptance is pending."
+clang = "Same as spec."
+gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future element's field evaluates to 29 after direct and reference-parameter stores despite a later initializer of 17. The field assigned within its own initializer evaluates to 3."
+clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
+limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
+evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]

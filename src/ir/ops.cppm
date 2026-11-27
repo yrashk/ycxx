@@ -108,6 +108,7 @@ export enum class Flag : std::uint8_t {
   count_zero_gcc,    // GCC mode returns the operand width for zero in constant evaluation
   switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
   observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
+  initializing_store,  // a compiler-generated scalar initializer for a local record array
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -244,7 +245,7 @@ export enum class Op : std::uint16_t {
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
-  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body})]],
+  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body, initializing_store})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src

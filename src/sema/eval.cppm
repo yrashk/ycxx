@@ -544,6 +544,11 @@ private:
     if (!layout) return std::nullopt;
 
     interp::ConstantRecordLayout result{layout->size, {}};
+    // This profile needs only member lifetimes in complete aggregate initialization order.
+    result.flat_array_element = aggregate && !record->union_ && record->destructor == EntityId::none &&
+        !record->fields.empty() && std::ranges::all_of(record->fields, [&](const FieldRec& field) {
+          return types.is_integral(field.type) || types.is_enum(field.type);
+        });
     // The currently supported union aggregate initializer gives a value to its first
     // variant only. Its other variants share storage without supplying constant values.
     const std::size_t fields = record->union_ ? std::min<std::size_t>(record->fields.size(), 1) : record->fields.size();

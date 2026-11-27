@@ -68,6 +68,7 @@ struct ConstantRecordLayout {
   std::vector<ConstantRecordField> fields{};
   bool dynamic = false;
   std::optional<ConstantRecordBase> primary_base{};
+  bool flat_array_element = false;
 };
 
 struct VirtualTarget {
@@ -230,6 +231,7 @@ private:
     std::vector<Field> fields;
     bool dynamic;
     std::optional<ConstantRecordBase> primary_base;
+    bool flat_array_element;
   };
   struct Object {
     QualType type{};
@@ -245,10 +247,13 @@ private:
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
     const RecordStorage* array_record = nullptr;
+    u32 initialized_array_fields = 0;  // direct fields completed in element and declaration order
     Life record_life = Life::before;        // distinct from the lifetimes of its subobjects
     Life primary_base_life = Life::before;
     bool dynamic_initialized = false;     // set only by a completed constructor
     bool unknown_reference = false;       // an opaque referent can alias another outside object
+
+    bool local_record_array() const { return origin == Origin::automatic && array_record; }
   };
   struct StorageExtent {
     u64 cells;
@@ -325,6 +330,7 @@ private:
   bool fill_record_constant(const RecordStorage& record, u32 cell, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
+  bool pending_array_field(const Place& p) const;
   void set_lifetime(const Place& p, bool complete, Life life);
   Flow read_cell(QualType type, u32 cell, Value& out);
   Flow copy_record(const Place& dst, const Place& src);
@@ -573,7 +579,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
     if (layout) known = &*layout;
   }
   if (!known) return nullptr;
-  RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base};
+  RecordStorage record{type, known->size, 0, {}, known->dynamic, known->primary_base, known->flat_array_element};
   record.fields.reserve(known->fields.size());
   for (const auto& field : known->fields) {
     QualType leaf = field.type;
@@ -796,9 +802,15 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   return use == Use::callee_read || use == Use::callee_write ? Flow::next : note_access(*pl, writing);
 }
 
+bool Machine::pending_array_field(const Place& p) const {
+  const Object& object = objects_[p.obj];
+  return object.record_life == Life::before && p.ncells == 1 && !p.record &&
+         p.cell0 - object.cell0 == object.initialized_array_fields && cells_[p.cell0].life == Life::before;
+}
+
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {
   Object& ob = objects_[p.obj];
-  if (complete && ob.record) ob.record_life = life;
+  if (complete && (ob.record || ob.local_record_array())) ob.record_life = life;
   if (p.primary_base || (complete && life == Life::after)) ob.primary_base_life = life;
   if ((complete || p.primary_base) && life == Life::after) ob.dynamic_initialized = false;
   for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
@@ -1805,6 +1817,9 @@ Machine::Flow Machine::jump(Frame& f, NodeId n, u32 succ) {
 
 Machine::Flow Machine::bind_parameter(Frame& f, ir::ValueId parameter, const Value& value) {
   const ir::Value& slot = f.fn->value(parameter);
+  if (slot.index > 0 && slot.index == f.fn->result_param && value.kind == VKind::object &&
+      value.ref < objects_.size() && objects_[value.ref].local_record_array())
+    return fail(Reason::unsupported_constant);
   if (slot.index > 0 && slot.index <= 32 && (f.fn->byval_params & (u32{1} << (slot.index - 1)))) {
     if (slot.index == f.fn->result_param || slot.type.kind != ir::TyKind::cxx ||
         value.kind != VKind::object || value.past || value.bits != 0 || value.displacement() != 0 ||
@@ -1842,6 +1857,9 @@ Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityI
   }
   if (lifetime_class != EntityId::none && !args.empty()) {
     const Value& receiver = reg(callee_frame, parameters[1]);
+    if (receiver.kind == VKind::object && receiver.ref < objects_.size() &&
+        objects_[receiver.ref].local_record_array())
+      return fail(Reason::unsupported_constant);
     if (receiver.kind == VKind::object && !receiver.past && receiver.bits == 0 &&
         receiver.displacement() == 0 && receiver.ref < objects_.size()) {
       const Object& object = objects_[receiver.ref];
