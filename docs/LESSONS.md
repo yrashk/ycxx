@@ -16,6 +16,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     cannot regenerate data that needs a build, and `merge=ours` keeps it silently stale.
   - Rule: DECISIONS §6.9. Learned on #366.
 
+- **Give subagents the exact stage-named test command, and commit only after they stop.**
+  - A brief to a spec-only test author said `tools/test --cxx clang <path>`. A bare path also
+    runs `tools/build`, which started a second build in the session's `build/` and broke the
+    session's own build of modules.
+  - Separately, `git add tests` while the author was still writing swept two unfinished files
+    into a commit.
+  - Do: brief with `tools/test --cxx clang core <path>`, never a bare path. Wait for the author's
+    report before staging its directory, or stage files by name.
+  - Learned on #356.
 - **A session cannot run on a model above its parent's.** A session asked to run on Fable
   silently started on Opus.
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
