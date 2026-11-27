@@ -1918,9 +1918,11 @@ class Gen {
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
         case ast::BuiltinOp::ctz:
-        case ast::BuiltinOp::ctz_gcc_zero: {
-          const auto flags = b.op == ast::BuiltinOp::ctz_gcc_zero ? ir::bit(ir::Flag::ctz_gcc_zero) : ir::Flags{0};
-          return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))}, {}, flags);
+        case ast::BuiltinOp::ctz_gcc_zero:
+        case ast::BuiltinOp::clzll: {
+          const auto op = b.op == ast::BuiltinOp::clzll ? ir::Op::clz : ir::Op::ctz;
+          const auto flags = b.op == ast::BuiltinOp::ctz ? ir::Flags{0} : ir::bit(ir::Flag::count_zero_gcc);
+          return pure(op, t, {rvalue(child(a, args[0]))}, {}, flags);
         }
         case ast::BuiltinOp::nansl: {
           const ir::Ty result[] = {vty(t)};

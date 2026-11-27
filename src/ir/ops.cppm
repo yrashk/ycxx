@@ -105,7 +105,7 @@ export enum class Flag : std::uint8_t {
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
-  ctz_gcc_zero,      // GCC mode accepts a zero operand for this spelling in constant evaluation
+  count_zero_gcc,    // GCC mode returns the operand width for zero in constant evaluation
   switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
   observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
 };
@@ -203,7 +203,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V}).with({commutative})]],
   or_ [[=pure({V, V}, {V}).with({commutative})]],
   xor_ [[=pure({V, V}, {V}).with({commutative})]],
-  ctz [[=pure({V}, {V}).accepts({ctz_gcc_zero})]],  // trailing zero bits of an integer
+  ctz [[=pure({V}, {V}).accepts({count_zero_gcc})]],  // trailing zero bits of an integer
   icmp [[=pure({V, V}, {V}).imms({pred})]],
   select [[=pure({V, V, V}, {V})]],
 
@@ -347,6 +347,8 @@ export enum class Op : std::uint16_t {
   // A virtual member invocation for constant evaluation: receiver, converted arguments,
   // selected function, and VirtualCallKind ([expr.call], [expr.const.core]).
   call_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
+
+  clz [[=pure({V}, {V}).accepts({count_zero_gcc})]],  // leading zero bits of an integer
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

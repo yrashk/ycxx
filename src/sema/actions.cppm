@@ -9682,13 +9682,14 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
-    if (b.function == ctz) {
+    if (b.function == ctz || b.function == clzll) {
       if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return {NodeId::none, begin, end};
-      const QualType param = builtin(Builtin::unsigned_int);
+      const QualType param = builtin(b.function == ctz ? Builtin::unsigned_int : Builtin::unsigned_long_long);
+      const auto op = b.function == ctz ? ast::BuiltinOp::ctz_gcc_zero : ast::BuiltinOp::clzll;
       Ex operand = args.front();
       if (!dependent(operand) && types().is_class(operand.type()))
         operand = exact_conversion_call(operand, param, operand.begin, /*allow_explicit=*/false).value_or(operand);
-      return builtin_value_call(ast::BuiltinOp::ctz_gcc_zero, builtin(Builtin::int_), param, operand, begin, end);
+      return builtin_value_call(op, builtin(Builtin::int_), param, operand, begin, end);
     }
     if (b.function == ctzg) {
       const Ex invalid{NodeId::none, begin, end};
@@ -9753,6 +9754,7 @@ public:
       case strlen:
       case ctz:
       case ctzg:
+      case clzll:
       case library:
       case constant_p:
       case add_overflow:

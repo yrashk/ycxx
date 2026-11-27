@@ -156,7 +156,7 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // sema's (`sema::string_functions`).
 enum class BuiltinFunction : std::uint8_t {
   fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
-  source_line, source_location, ctzg, nansl, ctz, atomic,
+  source_line, source_location, ctzg, nansl, ctz, atomic, clzll,
 };
 
 enum class AtomicBuiltin : std::uint8_t {
@@ -191,6 +191,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
     BuiltinFunctionInfo{"__builtin_ctz", BuiltinFunction::ctz},
     BuiltinFunctionInfo{"__builtin_ctzg", BuiltinFunction::ctzg},
+    BuiltinFunctionInfo{"__builtin_clzll", BuiltinFunction::clzll},
     BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memcpy", BuiltinFunction::library},
