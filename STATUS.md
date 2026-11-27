@@ -4644,8 +4644,9 @@ static argument tracked in #1301 and #209.
   `template_` argument whose type is `TDepName`'s `template_name` form. Substitution applies Q's
   member alias template once Q is a class (`Templates::member_template_of`); a template template
   parameter bound to `Q::template M` gives `typename Q::template M<args>`.
-  GCC mode accepts the omitted keyword in a terminal member template-id of an explicit
-  `typename` type.
+  Spec and GCC modes allow an omitted `template` in the terminal member template-id of a
+  `typename` type ([temp.names], [temp.res.general]). Clang mode requires it in the tested
+  dependent spelling. [#1466](https://github.com/yrashk/ycxx/issues/1466)
 - **Mangling:** `N <qualifier> <name> I…E E`, the template prefix a candidate, as Clang and GCC;
   `Q::template M` as a template argument follows the selected compatibility mode (DECISIONS §1.7).
 - Access is checked where one is named; it hides a base's member of its name, and an earlier

@@ -599,6 +599,8 @@ template<class Q> using Result = typename Q::Alias<int>;
 static_assert(__is_same(Result<Owner>, int));
 #endif
 ''')
+    (world.scope / 'dependent-template-qualifier.cpp').write_text(
+        'template<class T> using R = typename T::M<int>::type;\n')
     (world.scope / 'alias-identity.cpp').write_text('''\
 template<template<class...> class> struct Identity {};
 template<class T> struct Original {};
@@ -1265,8 +1267,10 @@ int use() { return transform(7); }
         for case in ('GLOBAL_POINTER', 'GLOBAL_REFERENCE', 'LOCAL_POINTER', 'LOCAL_REFERENCE'):
             invoke(*flags, f'-D{case}', '-fsyntax-only', 'immediate-escape.cpp', status=mode != 'spec')
         invoke(*flags, '-DEXPLICIT_TEMPLATE', '-fsyntax-only', 'dependent-template.cpp')
-        invoke(*flags, '-fsyntax-only', 'dependent-template.cpp', status=mode != 'gcc')
+        invoke(*flags, '-fsyntax-only', 'dependent-template.cpp', status=mode == 'clang')
         invoke(*flags, '-DTEMPLATE_ARGUMENT', '-fsyntax-only', 'dependent-template.cpp', status=1)
+        if mode != 'gcc':
+            invoke(*flags, '-fsyntax-only', 'dependent-template-qualifier.cpp', status=1)
         invoke(*flags, '-fsyntax-only', 'alias-identity.cpp')
         invoke(*flags, '-fsyntax-only', 'memchr.cpp', status=mode == 'gcc')
         invoke(*flags, '-fsyntax-only', 'memcmp.cpp', status=mode != 'clang')
