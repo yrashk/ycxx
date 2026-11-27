@@ -16,6 +16,7 @@ import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.ast.target;
+import ycxx.hash;
 
 export namespace ycxx::compile {
 
@@ -252,7 +253,8 @@ struct Options {
   bool check_policies = false;
   pipeline::OptimizationMode optimization = pipeline::OptimizationMode::none;
   bool shared = false;
-  std::optional<std::string> output, interpreter, soname;
+  bool dynamiclib = false;
+  std::optional<std::string> output, interpreter, soname, install_name;
   bool dependencies = false;  // `-MD`
   std::optional<std::string> dependency_path;  // `-MF`
   std::vector<std::string> dependency_targets;  // `-MT`, in command-line order
@@ -261,6 +263,7 @@ struct Options {
   std::vector<std::string> archives;
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
+  std::vector<std::string> dylibs;  // explicit Mach-O dylib inputs in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
 };
 
@@ -320,6 +323,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     } else if (a == "-nostdlib") o.nostdlib = true;
     else if (a == "-nostdlib++") o.nostdlibxx = true;
     else if (a == "-shared") o.shared = true;
+    else if (a == "-dynamiclib") o.dynamiclib = true;
     else if (a == "-Wl,-soname" || a == "-Wl,--soname")
       return std::unexpected("a SONAME is required after '-Wl,-soname,'");
     else if (a.starts_with("-Wl,-soname,") || a.starts_with("-Wl,--soname,")) {
@@ -328,6 +332,14 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       const auto name = a.substr(prefix.size());
       if (name.contains(',')) return std::unexpected("the SONAME option takes one name");
       o.soname = name;
+    } else if (a == "-Wl,-install_name") {
+      return std::unexpected("an install name is required after '-Wl,-install_name,'");
+    } else if (a.starts_with("-Wl,-install_name,")) {
+      if (o.install_name) return std::unexpected("duplicate install-name option");
+      constexpr std::string_view prefix = "-Wl,-install_name,";
+      const auto name = a.substr(prefix.size());
+      if (name.contains(',')) return std::unexpected("the install-name option takes one name");
+      o.install_name = name;
     } else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
       if (a == "--dynamic-linker" && (i + 1 == args.size() || args[i + 1].starts_with('-')))
         return std::unexpected("argument to '--dynamic-linker' is missing");
@@ -388,12 +400,23 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.query != Options::Query::none) return o;
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
-  if (o.shared && !linux_link) return std::unexpected("'-shared' requires an x86-64 Linux link");
+  if (o.dynamiclib && !darwin_link) return std::unexpected("'-dynamiclib' requires an arm64 Darwin link");
+  o.shared = o.shared || o.dynamiclib;
+  if (o.shared && !linux_link && !darwin_link)
+    return std::unexpected("'-shared' requires an x86-64 Linux or arm64 Darwin link");
   if (o.soname && !o.shared) return std::unexpected("the SONAME option requires '-shared'");
+  if (o.soname && !linux_link) return std::unexpected("the SONAME option requires x86-64 Linux shared output");
+  const bool darwin_shared = darwin_link && o.shared;
+  if (o.install_name && !darwin_shared)
+    return std::unexpected("the install-name option requires arm64 Darwin shared output");
   if (o.interpreter && (!linux_link || o.shared))
     return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");
   for (std::string_view path : other_inputs) {
-    if (is_shared_object(path) || o.interpreter) o.libraries.emplace_back(path);
+    if (darwin_link && !o.shared && path.ends_with(".dylib")) o.dylibs.emplace_back(path);
+    else if (is_shared_object(path) || o.interpreter || (o.shared && path.ends_with(".dylib")))
+      o.libraries.emplace_back(path);
+    else if (path.ends_with(".dylib"))
+      return std::unexpected("Mach-O dylib inputs require an arm64 Darwin executable link");
     else return std::unexpected(std::format("'{}': unknown kind of input file", path));
   }
   if (o.shared) {
@@ -403,10 +426,10 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     if (!o.sources.empty() && o.pp.pic == 0)
       return std::unexpected("'-shared' source compilation requires '-fPIC' or '-fpic'");
     if (o.check_policies) return std::unexpected("'-shared' does not support '-fcheck-policies'");
-    if (!o.soname)
-      o.soname = std::filesystem::path(o.output.value_or("a.out")).filename().native();
-    if (o.soname->empty() || o.soname->contains('/') || o.soname->contains('\0'))
-      return std::unexpected("invalid ELF shared object SONAME");
+    auto& name = darwin_shared ? o.install_name : o.soname;
+    if (!name) name = std::filesystem::path(o.output.value_or("a.out")).filename().native();
+    if (name->empty() || name->contains('\0') || (!darwin_shared && name->contains('/')))
+      return std::unexpected(darwin_shared ? "invalid Mach-O dylib install name" : "invalid ELF shared object SONAME");
   }
   if (!o.archives.empty()) {
     if (!linux_link && !darwin_link) return std::unexpected("archive inputs require an executable link");
@@ -423,13 +446,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       return std::unexpected("Linux dynamic linking requires an absolute '--dynamic-linker' path");
     if (o.libraries.empty()) return std::unexpected("Linux dynamic linking requires an explicit shared object");
   }
-  if (o.pp.target != &ast::x86_64_linux && o.nostdlib)
+  if (o.pp.target != &ast::x86_64_linux && !darwin_shared && o.nostdlib)
     return std::unexpected("unsupported option '-nostdlib'");
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
   // An executable for arm64 macOS links libycxx's runtime after the operands (#842).
-  if (darwin_link && !o.nostdlibxx) {
+  if (darwin_link && !darwin_shared && !o.nostdlibxx) {
     for (const auto& archive : pipeline::darwin_runtime().archives)
       add_operand(Kind::darwin_runtime_archive, o.archives, archive);
     o.undefined = pipeline::darwin_runtime().undefined;
@@ -990,6 +1013,23 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         dynamic->libraries.push_back(std::move(*library));
       }
     }
+    std::vector<pipeline::DarwinDylibInput> darwin_dylibs;
+    if (!bad_input) {
+      for (const std::string& path : opts->dylibs) {
+        auto text = read_disk(in_cwd(r, path));
+        if (!text) {
+          bad_input = std::format("cannot read '{}'", path);
+          break;
+        }
+        const std::span bytes(reinterpret_cast<const std::uint8_t*>(text->data()), text->size());
+        auto library = link::read_dylib(bytes, path);
+        if (!library) {
+          bad_input = std::move(library.error());
+          break;
+        }
+        darwin_dylibs.push_back({path, std::move(*library), fingerprint128(bytes)});
+      }
+    }
     std::optional<pipeline::ArchiveLinkInputs> archive_link;
     if (!archives.empty())
       archive_link.emplace(pipeline::ArchiveLinkInputs{
@@ -998,7 +1038,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
         {key.units, std::move(objects), out.filename().native(), std::move(dynamic),
-         std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization});
+         std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization,
+         std::move(opts->install_name), std::move(darwin_dylibs)});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;

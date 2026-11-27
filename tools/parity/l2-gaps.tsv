@@ -3,3 +3,8 @@
 va_arg	aarch64	#647	by design: Apple arm64 expands va_arg into loads and a store in `lower`
 invoke	aarch64	#648	the hosted catch-all requires Darwin call-site tables and a catch personality
 int3	aarch64	#190	by design: this operation is the x86 breakpoint instruction
+atomic_load	aarch64	#328	GNU atomics first support naturally aligned 32-bit words on Linux x86-64
+atomic_store	aarch64	#328	GNU atomics first support naturally aligned 32-bit words on Linux x86-64
+atomic_rmw	aarch64	#328	GNU atomics first support naturally aligned 32-bit words on Linux x86-64
+atomic_cmpxchg	aarch64	#328	GNU atomics first support naturally aligned 32-bit words on Linux x86-64
+fence	aarch64	#328	GNU atomics first support naturally aligned 32-bit words on Linux x86-64

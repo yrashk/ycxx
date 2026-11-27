@@ -611,7 +611,7 @@ struct EntityRec {
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
   Fp128 head{};                          // a template head, scope discriminator or builtin class identity
-  Fp128 constraints{};                   // a function template's constraints (ast.md §4.3)
+  Fp128 constraints{};                   // a function template's constraints, or a function's trailing requires-clause (ast.md §4.3)
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
   // A closure type's number among its context's closures of its signature (ast.md §4.3); its
@@ -682,6 +682,11 @@ public:
         r.kind == EntityKind::namespace_)
       f = ast::mix(f, r.head);
     if (r.kind == EntityKind::function_template) f = ast::mix(f, r.constraints);
+    // A non-template function's trailing requires-clause ([basic.scope.scope]/4): its tokens'
+    // fingerprint. Zero, and not mixed, without one.
+    if ((r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor) &&
+        r.constraints != Fp128{})
+      f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.trailing-constraints")), r.constraints);
     // A closure's `head` includes its signature and ordinal in its scope (docs/design/closures.md).
     // A compiler-owned class uses `head` to distinguish it from declarations of the same name.
     if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
@@ -800,6 +805,14 @@ struct MemberDeclRec {
   bool is_final = false;
   bool is_pure = false;
   bool is_consteval = false;  // an immediate function ([dcl.constexpr])
+  // A non-template member function's trailing requires-clause in normal form, the specialization's
+  // in a class template specialization; none without one ([class.mem.general]). A candidate only
+  // while satisfied ([over.match.viable]/3).
+  ast::ConstId constraints = ast::ConstId::none;
+  // A special member that is not eligible ([special]/6): its constraints are not satisfied, or
+  // another of its kind is more constrained. Still user-declared, it is no candidate and does not
+  // count for the class's triviality ([class.prop]).
+  bool ineligible = false;
   // A trailing requires-clause or a template's constraints: it corresponds to no unconstrained
   // declaration ([basic.scope.scope]/4, [namespace.udecl]/11).
   bool constrained = false;

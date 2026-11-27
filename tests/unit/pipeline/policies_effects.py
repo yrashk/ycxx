@@ -11,6 +11,9 @@ import sys
 import tempfile
 import textwrap
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "daemon"))
+from runtime_dir import runtime_root
+
 
 compiler, include = sys.argv[1:]
 with tempfile.TemporaryDirectory() as directory:
@@ -152,7 +155,7 @@ with tempfile.TemporaryDirectory() as directory:
     syntax(write("large_missing.cpp", large.replace(", Tag<143>>;", ">;")),
            error="effect bound of 'tail' exceeds the caller's declared bound")
 
-    with tempfile.TemporaryDirectory(prefix="yef-", dir="/tmp") as sockets:
+    with tempfile.TemporaryDirectory(prefix="yef-", dir=runtime_root("yef-")) as sockets:
         env = {key: value for key, value in os.environ.items() if key not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
         env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
 
@@ -404,7 +407,7 @@ with tempfile.TemporaryDirectory() as directory:
     wrapper = write("dispatch.hpp", wrapper_source)
     local_handler = write("local_handler.cpp", checked_handler_source.replace(
         "<ycxx/effects/handler.hpp>", '"dispatch.hpp"'))
-    with tempfile.TemporaryDirectory(prefix="yef-handler-", dir="/tmp") as sockets:
+    with tempfile.TemporaryDirectory(prefix="yef-handler-", dir=runtime_root("yef-handler-")) as sockets:
         handler_env = dict(env, YCXX_RUNTIME_DIR=sockets)
         resident_handler = [*base, "--daemon=require", "-fsyntax-only", local_handler]
         try:
@@ -552,7 +555,7 @@ with tempfile.TemporaryDirectory() as directory:
         obj = root / f"edited-tag-{suffix}.o"
         command = ["-c", editable, "-o", obj]
         resident = ["--daemon=require" if option == "--no-daemon" else option for option in target]
-        with tempfile.TemporaryDirectory(prefix="yef-tag-", dir="/tmp") as sockets:
+        with tempfile.TemporaryDirectory(prefix="yef-tag-", dir=runtime_root("yef-tag-")) as sockets:
             cache_env = dict(env, YCXX_RUNTIME_DIR=sockets)
             try:
                 invoke([*resident, *command], env=cache_env)
@@ -812,7 +815,7 @@ with tempfile.TemporaryDirectory() as directory:
 
         resident_leaf = root / "resident_leaf.o"
         resident_leaf.write_bytes(payload)
-        with tempfile.TemporaryDirectory(prefix="yef-link-", dir="/tmp") as sockets:
+        with tempfile.TemporaryDirectory(prefix="yef-link-", dir=runtime_root("yef-link-")) as sockets:
             link_env = dict(env, YCXX_RUNTIME_DIR=sockets)
             resident_native = [arg if arg != "--no-daemon" else "--daemon=require" for arg in native]
             args = [*resident_native, "-o", executable, obj_entry, obj_stage, resident_leaf]

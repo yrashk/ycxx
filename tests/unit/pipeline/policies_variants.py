@@ -9,6 +9,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "daemon"))
+from runtime_dir import runtime_root
+
 
 ycxx, host, include = sys.argv[1:]
 base = pathlib.Path(__file__).with_suffix(".cpp").read_text()
@@ -96,7 +99,7 @@ using Choice = own::variant<Receipt, Permit>;
     caller_source = base.replace("own::linear<Receipt>, own::affine<Permit>,", "own::linear<Receipt>,")
     rules.write_text(rules_source)
     check("composed_registry", caller_source, other_sources=(rules,))
-    with tempfile.TemporaryDirectory(prefix="ycv-", dir="/tmp") as sockets:
+    with tempfile.TemporaryDirectory(prefix="ycv-", dir=runtime_root("ycv-")) as sockets:
         env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
         env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
         resident_flags = ["--daemon=require" if flag == "--no-daemon" else flag for flag in flags]

@@ -106,6 +106,8 @@ struct Entity {
   // BOOTSTRAP: std::vector<bool>: GCC 16 writes a module unit exporting one that importers cannot read.
   std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
   ast::WrittenConstraint template_head_constraint{}, template_trailing_constraint{};
+  // A non-template member function's trailing requires-clause, which its name encodes (#1417).
+  ast::WrittenConstraint trailing_constraint{};
   // A GNU asm label: the symbol exactly as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label{};
   std::optional<ast::Loc> asm_label_at{};
@@ -2709,6 +2711,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   };
   std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
   std::uint32_t next_constraint_closure_number = 0;
+  // The `$_N` of closures in a class or namespace that no function or variable owns (#1549).
+  std::map<EntityId, std::uint32_t> scope_closure_numbers;
   auto note_closure = [&](EntityId closure) {
     if (private_closure_numbers.contains(closure)) return;
     if (written_closure_numbers.contains(closure)) {
@@ -2949,7 +2953,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
       return std::nullopt;
     return FunctionName{
-        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
+        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt,
+         false, false, fn.trailing_constraint},
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
@@ -3002,8 +3007,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
             fname, fe.type, fe.scope, fe.special != Special::none, fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
       }
     } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
-               (r.scope != EntityId::none || written != written_closure_numbers.end())) {
-      auto f = by_id.find(ir::raw(r.scope));
+               (r.scope != EntityId::none || written != written_closure_numbers.end() || r.lambda_signature != Fp128{})) {
+      // A closure in a class or namespace, with no variable to own it: TU-local, of a lambda in an
+      // unevaluated operand of a declaration (#1549) or in a constraint.
+      const bool in_scope = written == written_closure_numbers.end() &&
+                            (r.scope == EntityId::none || w->entities.rec(r.scope).kind == sema::EntityKind::class_ ||
+                             w->entities.rec(r.scope).kind == sema::EntityKind::namespace_);
+      auto f = in_scope ? by_id.end() : by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
       n.closure_number = written == written_closure_numbers.end() ? r.ordinal : written->second;
@@ -3028,12 +3038,23 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                               (fe.lang == ast::LangLinkage::c || fe.id == tu.main);
           n.local = std::make_shared<const LocalFunction>(LocalFunction{
               fname, fe.type, fe.scope, fe.special != Special::none,
-              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt, internal_name, c_name});
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt, internal_name, c_name,
+              fe.trailing_constraint});
         } else {
           n.closure_variable = fe.id;
         }
       } else if (r.scope != EntityId::none && w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
         n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
+      } else if (in_scope) {
+        // Named `$_N` in its scope, as Clang names its TU-local closures; N is unique in the unit.
+        // A constraint's closure keeps its structural name in the signature it is written in.
+        n.closure_in_scope = true;
+        if (!n.private_closure_number) {
+          auto number = scope_closure_numbers.find(c);
+          if (number == scope_closure_numbers.end())
+            number = scope_closure_numbers.emplace(c, std::uint32_t(scope_closure_numbers.size())).first;
+          n.private_closure_number = number->second;
+        }
       }
     }
     return n;
@@ -3118,7 +3139,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility, target);
+                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility, target,
+                         e.trailing_constraint);
     };
     auto name = encode(entry);
     if (!name) {
