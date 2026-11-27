@@ -2787,9 +2787,11 @@ public:
                                               bool fallback = false) override;
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter, u32 at) override;
-  bool defaults_pending(EntityId f) override {
+  bool defaults_pending(EntityId f, std::size_t parameter) override {
     const EntityId templ = p_->world().entities.rec(f).templ;
-    return p_->member_default_tokens_.contains(f) || (templ != EntityId::none && p_->member_default_tokens_.contains(templ));
+    auto tokens = p_->member_default_tokens_.find(f);
+    if (tokens == p_->member_default_tokens_.end() && templ != EntityId::none) tokens = p_->member_default_tokens_.find(templ);
+    return tokens != p_->member_default_tokens_.end() && parameter < tokens->second.size() && tokens->second[parameter];
   }
   std::optional<bool> replay_destructor_exception(sema::Sema& caller, EntityId cls, u32 at) override;
   std::optional<QualType> replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
@@ -3578,6 +3580,8 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
     const bool templated = specialization.templ != EntityId::none;
     const EntityId owner = templated ? specialization.templ : function;
     if (auto pending = completion->defaults.find({owner, begin}); pending != completion->defaults.end()) {
+      // A member template's default that uses itself is diagnosed where a call instantiates it.
+      if (templated && pending->second.state == Program::ReplayState::active) return std::nullopt;
       if (!templated && completing_class == completion->cls && class_default_argument_start &&
           begin >= *class_default_argument_start) {
         caller.diag(at, Diag::default_arg_not_yet_defined);
@@ -3691,7 +3695,8 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   } catch (const TooDeep&) {
     return NodeId::none;
   }
-  if (replay.has_error_since(previous_diags)) return NodeId::none;
+  // The instantiation limit was reported where it was reached.
+  if (replay.has_error_since(previous_diags) || p_->instantiation_gave_up()) return NodeId::none;
   if (result == NodeId::none || !parser.at_end() || !replay.closures.empty() ||
       caller.builder().get<ast::DefaultArg>(result).source_end != 0) {
     replay.diag(value.source_begin, Diag::default_arg_dependent);
@@ -3807,7 +3812,8 @@ std::optional<NodeId> AtItem::replay_member_default(sema::Sema& caller, const as
   } catch (const TooDeep&) {
     return NodeId::none;
   }
-  if (replay.has_error_since(previous_diags)) return NodeId::none;
+  // The instantiation limit was reported where it was reached.
+  if (replay.has_error_since(previous_diags) || p_->instantiation_gave_up()) return NodeId::none;
   if (result == NodeId::none || !parser.at_end()) {
     if (parser.at_end()) replay.diag(parser.pos(), Diag::expected_expression);
     else replay.diag(parser.pos(), Diag::unexpected_token, parser.kind());
@@ -3856,7 +3862,7 @@ public:
                                                 EntityId function, QualType parameter, u32 at) override {
     return at_.replay_function_default(caller, value, function, parameter, at);
   }
-  bool defaults_pending(EntityId f) override { return at_.defaults_pending(f); }
+  bool defaults_pending(EntityId f, std::size_t parameter) override { return at_.defaults_pending(f, parameter); }
   std::optional<bool> replay_destructor_exception(sema::Sema& caller, EntityId cls, u32 at) override {
     return at_.replay_destructor_exception(caller, cls, at);
   }

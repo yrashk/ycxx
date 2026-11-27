@@ -204,9 +204,9 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
-  // Whether function `f`'s default arguments still wait for its class to be complete
-  // ([class.mem.general]), so a call before then cannot take them.
-  virtual bool defaults_pending(EntityId) { return false; }
+  // Whether the default argument of parameter `parameter` of function `f` still waits for its
+  // class to be complete ([class.mem.general]), so a call before then cannot take it.
+  virtual bool defaults_pending(EntityId, std::size_t) { return false; }
   // The effective specification of a written trivial destructor whose class is being completed.
   virtual std::optional<bool> replay_destructor_exception(Sema&, EntityId, u32) { return std::nullopt; }
   // A selected specialization's exception specification ([except.spec]/13): of a member template,
@@ -14299,7 +14299,7 @@ public:
       args.push_back(*a);
     }
     if (args.size() < params.size()) {
-      if (default_source != EntityId::none && q_->defaults_pending(default_source))
+      if (default_source != EntityId::none && q_->defaults_pending(default_source, args.size()))
         diag(paren_at, Diag::default_arg_not_yet_defined);
       else
         diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
