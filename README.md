@@ -21,7 +21,7 @@ executable passes its self-check.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-26). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-27). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -133,6 +133,9 @@ Constructors and constructor templates, in classes and class templates, can be `
 `explicit(condition)`. A condition that depends on a constructor template's own parameters is
 evaluated after deduction. Constructor templates check their `requires` constraints.
 [#715](https://github.com/yrashk/ycxx/issues/715) [#1398](https://github.com/yrashk/ycxx/issues/1398)
+Mem-initializers can expand packs, as in `value(static_cast<A&&>(args)...)` and `value{args...}`.
+Base-class pack expansions such as `Bs(x)...` wait on base-specifier packs.
+[#1400](https://github.com/yrashk/ycxx/issues/1400) [#308](https://github.com/yrashk/ycxx/issues/308)
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation

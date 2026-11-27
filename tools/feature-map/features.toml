@@ -2096,7 +2096,8 @@ std = 'C++11'
 ftm = '__cpp_variadic_templates'
 detect = '\b(?:typename|class)\s*\.\.\.|\bsizeof\s*\.\.\.'
 status = 'done'
-issues = [210]
+issues = [210, 1400]
+note = 'Pack expansions in mem-initializers and nested expansions such as `h(g(xs...))` (#1400). Base-specifier packs and their `Bs(x)...` initializers (#308) and `V v(xs...)` declarations (#1596) remain.'
 probe = '''
 template<class... T> int count(T...) { return sizeof...(T); }
 int main() { return count(1, 'a', 2L) - 3; }

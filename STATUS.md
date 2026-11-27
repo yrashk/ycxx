@@ -1703,7 +1703,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
   member subobject whose class has an implicit or defaulted nontrivial constructor, and other
-  `= default` forms (#157, #244). A pack expansion in a mem-initializer is #1400.
+  `= default` forms (#157, #244). Pack expansions in mem-initializers: "Pack expansions in
+  mem-initializers (#1400)" below.
 
 - Ordinary explicit class returns copy-initialize from an eligible named local or
   parameter as an xvalue, including parenthesized names. A written move constructor
@@ -2471,6 +2472,27 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - `T(a...)` expands its arguments as a call does ([expr.type.conv], [temp.variadic]/5). This is
   also the path a call through a still-dependent alias's member takes at the definition, as in
   libycxx's `invoke`. Test: `tests/own/templates/functional-cast-pack.run.cpp`.
+
+## Pack expansions in mem-initializers (#1400)
+
+- A mem-initializer's parenthesized expression-list reads each clause as an expandable operand,
+  as a call's arguments are: `value(static_cast<A&&>(args)...)`, `m(1, args..., 2)`. The braced
+  form `value{args...}` already did. An empty expansion value-initializes the member. In the
+  definition an unexpanded clause, or a member of dependent type, leaves the initializer
+  dependent, and the instantiation checks it ([class.base.init], [temp.variadic]).
+- A mem-initializer followed by `...` is a mem-initializer-list expansion. The definition
+  records it, and an instantiation reads it once for each element, as `expandable` does. Its
+  mem-initializer-id must name a pack of base classes ([class.base.init]); `B(t)...` and
+  `m(t)...` are diagnosed, as Clang and GCC do. A dependent base named as a template parameter,
+  `B(x)`, is checked in the instantiation instead of reported as no member.
+- Nested expansions: an instantiation's element of an expansion no longer notes its packs to the
+  enclosing operand (`Sema::end_element`), so `h(g(args...))` works in bodies and initializers.
+- Tests: `tests/own/mem-initializer-packs/` (spec-only author, plus `nested-expansion` and
+  `dependent-targets`): 8 pass. The base-pack cases are XFAIL: `struct D : Bs...` itself is
+  #308. Not yet: `V v(args...)` as a declaration's initializer (#1596), and a template-id
+  mem-initializer-id such as libycxx's `__tuple_leaf<_Ip, _Ts>(…)...` (#308).
+- `<iostream>` hello (#776): 2,468 errors at `07e6d567` → 2,435. No errors remain at
+  `optional.hpp:107`, `:201`, `:205`, `:234`, `tuple.hpp:35`–`49`, `:338`, or `pair.hpp:226`.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
