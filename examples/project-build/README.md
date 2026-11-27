@@ -28,6 +28,7 @@ out of the checkout and build it there.
 | [Module providers](module-providers/README.md) | [build.ycxx](module-providers/build.ycxx) | Resolve a shared module through two import paths and compare its provider on Linux and macOS. |
 | [Native C++](native/README.md) | [build.ycxx](native/build.ycxx) | Watch a generator input change and inspect the library dependency and source glob. |
 | [Custom rule](custom-rule/README.md) | [build.ycxx](custom-rule/build.ycxx) | Use a C++ workspace plugin to generate a retry-limit header and compare a whitespace edit with a digit edit. |
+| [Native leaf rule](native-leaf-rule/README.md) | [build.ycxx](native-leaf-rule/build.ycxx) | Pin a rule plugin to ycxx and inspect the native shared-library link and load probes. |
 | [Typed capability header](typed-capabilities/README.md) | [build.ycxx](typed-capabilities/build.ycxx) | Inspect the compiler's `<filesystem>` probe and run the app that uses its generated constant. |
 | [Package-defined probe](package-probe/README.md) | [build.ycxx](package-probe/build.ycxx) | Edit a codec profile and trace how a plugin classifies shell output as a typed support state. |
 | [Shader bundle](shader-bundle/README.md) | [build.ycxx](shader-bundle/build.ycxx) | Generate an inventory, add and remove a shader, and update managed runtime assets under watch. |
