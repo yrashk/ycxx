@@ -2929,6 +2929,14 @@ modes diagnose a reached zero operand in a required constant expression. GCC mod
 width of `unsigned int` during constant evaluation. At run time the GNU builtin's zero
 operand has undefined behavior. The other fixed-width spellings remain in #248.
 
+## Leading-zero count builtin (#1539)
+
+`__builtin_clzll` implicitly converts one argument to `unsigned long long`, evaluates it once
+and counts its leading zero bits as an `int`. Constant evaluation uses the target operand width.
+Spec and Clang modes diagnose a reached zero operand in a required constant expression. GCC
+mode returns the operand width during constant evaluation. Runtime zero has undefined behavior.
+Native lowering uses BSR on x86-64 and CLZ on AArch64. `__has_builtin` answers 1.
+
 ## C library string and memory builtins (#248, #1093, #1170)
 
 `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,

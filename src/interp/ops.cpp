@@ -119,19 +119,22 @@ struct Ops {
   static Flow lshr(M& m, Frame& f, N n) { return m.shift(f, n); }
   static Flow ashr(M& m, Frame& f, N n) { return m.shift(f, n); }
 
-  static Flow ctz(M& m, Frame& f, N n) {
+  static Flow count_zeros(M& m, Frame& f, N n, bool leading) {
     const Value arg = m.operand(f, n, 0);
     if (arg.kind != VKind::integer) return m.fail(Reason::ill_formed);
     const ast::Bits128 bits{arg.bits, arg.hi};
-    if (ast::wide::is_zero(bits)) {
-      if (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc || !has(f, n, ir::Flag::ctz_gcc_zero))
-        return m.fail(Reason::ctz_zero);
-      const M::Shape* type;
-      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), type); fl != Flow::next) return fl;
-      return m.set(f, n, Value::integer(type->width));
-    }
-    return m.set(f, n, Value::integer(ast::wide::countr_zero(bits)));
+    const bool zero = ast::wide::is_zero(bits);
+    if (zero && (!constant(m) || m.config_.compatibility != ast::Compatibility::gcc ||
+                 !has(f, n, ir::Flag::count_zero_gcc)))
+      return m.fail(leading ? Reason::clz_zero : Reason::ctz_zero);
+    if (!leading && !zero) return m.set(f, n, Value::integer(ast::wide::countr_zero(bits)));
+
+    const M::Shape* type;
+    if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), type); fl != Flow::next) return fl;
+    return m.set(f, n, Value::integer(type->width - ast::wide::bit_width(bits)));
   }
+  static Flow ctz(M& m, Frame& f, N n) { return count_zeros(m, f, n, false); }
+  static Flow clz(M& m, Frame& f, N n) { return count_zeros(m, f, n, true); }
 
   static Flow icmp(M& m, Frame& f, N n) {
     Value a = m.operand(f, n, 0), b = m.operand(f, n, 1);

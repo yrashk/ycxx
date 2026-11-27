@@ -215,6 +215,8 @@ export enum class Op : std::uint16_t {
 
   // x86 INT3 can resume at the following instruction.
   int3 [[=state({S}, {S})]],
+
+  clz [[=pure({V}, {V})]],  // leading zero bits; zero input yields poison
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
@@ -477,6 +479,7 @@ std::expected<void, std::string> verify(const Function& f) {
           if (!is_int(r) || t(0) != r) return at("operand and result must be one integer type");
           break;
         case Op::ctz:
+        case Op::clz:
           if ((r != Type::i32 && r != Type::i64) || t(0) != r) return at("operand and result must both be i32 or both i64");
           break;
         case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv:

@@ -701,6 +701,15 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[0]);
       e_.reg({0x0f, 0xbc}, rax, rax, body_.type(ops[0]) == Type::i64);  // BSF (Intel SDM vol. 2)
       break;
+    case Op::clz: {
+      const Type type = body_.type(ops[0]);
+      read(ops[0]);
+      e_.reg({0x0f, 0xbd}, rax, rax, type == Type::i64);  // BSR (Intel SDM vol. 2)
+      // For a 32- or 64-bit operand, XOR with the maximum bit index subtracts the BSR index.
+      e_.reg({0x83}, 6, rax, false);  // xor eax, imm8
+      e_.immediate(l2::bits(type) - 1, 1);
+      break;
+    }
     case Op::fadd: float_two(0x58); return {};
     case Op::fsub: float_two(0x5c); return {};
     case Op::fmul: float_two(0x59); return {};
