@@ -168,6 +168,11 @@ keeps its own type, so `v<1>` and `v<sizeof(char)>` are different specialization
 Constrained `C auto` and `auto*` or `auto&` parameters are not supported yet.
 [#1244](https://github.com/yrashk/ycxx/issues/1244) [#1401](https://github.com/yrashk/ycxx/issues/1401)
 
+A class template can declare a non-static data member of a directly named class specialization
+whose integer argument depends on a template parameter, as in `Buffer<N + 1> storage;`.
+Instantiation also evaluates arguments that read a field of a constexpr variable template or
+name an earlier static constexpr member of the same class. [#1657](https://github.com/yrashk/ycxx/issues/1657)
+
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
 [#340](https://github.com/yrashk/ycxx/issues/340)

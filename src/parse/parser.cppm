@@ -47,6 +47,7 @@ struct DeclSpec {
   u32 begin = 0;
   QualType type{};
   std::optional<u32> constrained_auto_at;  // the concept's name in a constrained placeholder
+  std::optional<u32> replayed_member_type_at;  // an argument to evaluate in the class specialization
   bool has_type = false;
   bool is_static = false;
   bool is_extern = false;
@@ -538,13 +539,23 @@ public:
     bump();
     int saved = std::exchange(angle_, 0);
     const u32 enclosing_decltype = std::exchange(s_->decltype_unevaluated, ++s_->unevaluated);
-    Ex e = expression();
+    bool used_replayed_member = false;
+    Ex e = [&] {
+      const sema::Sema::DecltypeReplayScope replay(*s_, used_replayed_member);
+      return expression();
+    }();
     s_->decltype_unevaluated = enclosing_decltype;
     --s_->unevaluated;
     angle_ = saved;
     bool closed = expect(Tk::r_paren);
     if (!e.ok() || !closed) return std::nullopt;
     const bool parenthesized = s_->as<ast::Paren>(e).has_value();
+    const auto type = s_->decltype_of(e, parenthesized);
+    if (s_->types().has_replayed_member_type(type) ||
+        (used_replayed_member && s_->types().is_dependent(type))) {
+      s_->diag(at, Diag::not_supported, Tk::kw_decltype);
+      return std::nullopt;
+    }
     if (!written_function_parameters_.empty()) {
       const auto reference = written_atom(e);
       if (s_->ins().values.is<ast::VDepFnParam>(reference)) {
@@ -555,7 +566,7 @@ public:
       }
     }
     if (s_->dependent(e)) ++deferred_argument_checks_;
-    return s_->decltype_of(e, parenthesized);
+    return type;
   }
 
   // In an argument, a nested `<` can be an operator. Type-template names reached through
@@ -622,7 +633,7 @@ public:
 
   // `X<args>` where X is a class template ([temp.names]): the specialization's type, from the
   // name; the arguments are consumed.
-  std::optional<QualType> class_template_type() {
+  std::optional<QualType> class_template_type(std::optional<u32>* replay_member_type_at = nullptr) {
     u32 at = pos();
     NameId name = name_of(tok());
     const ast::TemplateParamSema* tt = s_->template_template_param(name);
@@ -630,11 +641,17 @@ public:
     bump();
     const u32 ranks = deferred_rank_checks_;
     const u32 qualified_types = deferred_qualified_type_arguments_;
-    auto args = template_argument_list();
+    if (!tmpl || tmpl->kind != ast::DeclKind::class_) replay_member_type_at = nullptr;
+    auto args = template_argument_list(/*replay_at=*/nullptr, /*took_closer=*/nullptr, /*expand_empty=*/false,
+                                       /*replay=*/nullptr, /*retain_decltype=*/false, replay_member_type_at);
     if (!args) return std::nullopt;
     if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
     if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
     s_->unqualified_type_template_access(*tmpl, name, at);
+    if (replay_member_type_at && *replay_member_type_at) {
+      if (!s_->check_replayed_template_arguments(*tmpl, *args, at)) return std::nullopt;
+      return s_->ins().intern_type(ast::TReplayMemberType{s_->item()});
+    }
     return type_template_id(*tmpl, *args, at, deferred_rank_checks_ != ranks,
                             deferred_qualified_type_arguments_ != qualified_types);
   }
@@ -700,7 +717,7 @@ public:
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
   DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr,
                            bool allow_conversion_id = false, bool class_member = false,
-                           bool allow_constrained_auto = false) {
+                           bool allow_constrained_auto = false, bool replay_member_type = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -1027,7 +1044,8 @@ public:
             goto done;
           }
           if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
-            auto t = class_template_type();
+            auto t = class_template_type(replay_member_type && !d.is_static && !d.is_typedef
+                                             ? &d.replayed_member_type_at : nullptr);
             if (!t) {
               d.ok = false;
               goto done;
@@ -1193,7 +1211,8 @@ public:
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
                         NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false,
                         bool reject_parameter_defaults = false,
-                        MemberArrayBounds member_array_bounds = MemberArrayBounds::none) {
+                        MemberArrayBounds member_array_bounds = MemberArrayBounds::none,
+                        std::optional<u32> replayed_member_type_at = std::nullopt) {
     Declarator d;
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
@@ -1205,6 +1224,21 @@ public:
                                   (named_exception == NamedExceptionSpec::class_member ||
                                    named_exception == NamedExceptionSpec::ordinary));
     Level top = level(abstract, d.ok, conversion, defer_exception, member_array_bounds);
+    if (replayed_member_type_at) {
+      const auto ordinary_pointer = [](const Level::PtrOp& pointer) {
+        return pointer.op == Tk::star && !pointer.owner;
+      };
+      for (const Level* part = &top; part; part = part->inner.get()) {
+        // Only object fields use the replayed specifier. Check the written shape before build()
+        // could put it in a function type, including a callback after another declarator.
+        if (std::ranges::all_of(part->pointers, ordinary_pointer) &&
+            std::ranges::none_of(part->suffixes, &Suffix::function)) continue;
+        if (d.ok) s_->diag(*replayed_member_type_at, Diag::not_supported, Tk::kw_template);
+        d.ok = false;
+        if (in_body) s_->discard_local_declarations(first_local);
+        return d;
+      }
+    }
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -3352,7 +3386,7 @@ public:
   // The value of a template argument for a non-type parameter of type `t`: a converted constant
   // expression ([temp.arg.nontype]/1). One that names a template parameter is value-dependent and
   // stays a `VDep*` value ([temp.dep.constexpr]).
-  std::optional<sema::ConstId> template_value(Ex e, QualType t) {
+  std::optional<sema::ConstId> template_value(Ex e, QualType t, bool* replay_member_type = nullptr) {
     if (!e.ok()) return std::nullopt;
     const auto concrete_class = [&](QualType type) {
       return s_->types().is_class(type) && !s_->types().is_dependent(type);
@@ -3393,6 +3427,12 @@ public:
       if (replayed && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      }
+      // The direct class template-id of a data member is evaluated by class replay.
+      if (replay_member_type && !(e.info.flags & unavailable) && !s_->pattern_names_pack() && !is(Tk::ellipsis) &&
+          (s_->types().is_integral(t) || s_->types().is_dependent(t))) {
+        *replay_member_type = true;
+        return std::nullopt;
       }
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
@@ -3463,7 +3503,8 @@ public:
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
                                                                      bool* took_closer = nullptr, bool expand_empty = false,
                                                                      VariableArgumentReplay* replay = nullptr,
-                                                                     bool retain_decltype = false) {
+                                                                     bool retain_decltype = false,
+                                                                     std::optional<u32>* replay_member_type_at = nullptr) {
     // Any nested template-id must supply canonical arguments to its enclosing argument.
     const TemplateArgumentReplayScope initializer(*this, TemplateArgumentReplay::none);
     if (took_closer) *took_closer = false;
@@ -3558,9 +3599,17 @@ public:
               // Positional and type checking only. No constant is available until replay.
               args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), sema::ConstId::none});
             } else {
-              if (!v) v = template_value(e, t);
-              if (!v) ok = false;
-              else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), *v});
+              bool replay_value = false;
+              if (!v) v = template_value(e, t, replay_member_type_at ? &replay_value : nullptr);
+              if (replay_value) {
+                if (!*replay_member_type_at) *replay_member_type_at = e.begin;
+                // This slot is used only to check the written argument list and is never interned.
+                args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), ConstId::none});
+              } else if (v) {
+                args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), *v});
+              } else {
+                ok = false;
+              }
             }
           } else {
             ok = false;
@@ -3587,7 +3636,7 @@ public:
         }
       } while (accept(Tk::comma));
     }
-    if (ok)
+    if (ok && (!replay_member_type_at || !*replay_member_type_at))
       if (auto xs = s_->expand_bound(args, expand_empty)) args = *xs;
     --angle_;
     // [temp.names]/4: `>>` closes this list and the enclosing one.
