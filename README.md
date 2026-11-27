@@ -21,7 +21,7 @@ executable passes its self-check.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-26). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-27). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -104,6 +104,8 @@ In an incomplete plan, you can also explore resolved components that are
 disconnected from the selected target.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
+The native leaf example pins `cxx("ycxx")` and measures native shared-library linking
+and loading. [Native leaf rule example](examples/project-build/native-leaf-rule/README.md)
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
@@ -147,6 +149,9 @@ Constructors and constructor templates, in classes and class templates, can be `
 `explicit(condition)`. A condition that depends on a constructor template's own parameters is
 evaluated after deduction. Constructor templates check their `requires` constraints.
 [#715](https://github.com/yrashk/ycxx/issues/715) [#1398](https://github.com/yrashk/ycxx/issues/1398)
+Mem-initializers can expand packs, as in `value(static_cast<A&&>(args)...)` and `value{args...}`.
+Base-class pack expansions such as `Bs(x)...` wait on base-specifier packs.
+[#1400](https://github.com/yrashk/ycxx/issues/1400) [#308](https://github.com/yrashk/ycxx/issues/308)
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
@@ -166,8 +171,12 @@ Constrained `C auto` and `auto*` or `auto&` parameters are not supported yet.
 [#1244](https://github.com/yrashk/ycxx/issues/1244) [#1401](https://github.com/yrashk/ycxx/issues/1401)
 
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
-`typename Q::template M<args>` and as template template arguments.
-[#340](https://github.com/yrashk/ycxx/issues/340)
+`typename Q::template M<args>` and as template template arguments. They can also declare static
+data member templates (`template<class T> static constexpr bool v = …;`), used in the class, as
+`C::v<args>` and as `object.v<args>`. They cannot be partially or explicitly specialized yet, and
+a class template's cannot be defined outside the class yet.
+[#340](https://github.com/yrashk/ycxx/issues/340) [#1594](https://github.com/yrashk/ycxx/issues/1594)
+[#256](https://github.com/yrashk/ycxx/issues/256)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
@@ -188,6 +197,11 @@ The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF 
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
 It resolves PC-relative GOT words at nonzero offsets in independently assembled objects.
 [#782](https://github.com/yrashk/ycxx/issues/782)
+
+On arm64 macOS, `ycxx cxx -shared -fPIC -nostdlib leaf.cpp -o libleaf.dylib`
+builds a signed freestanding dylib with strong function exports. It can be
+loaded by a platform executable or the ycxx rule worker. Set its install name
+with `-Wl,-install_name,<name>`. [Leaf dylib support](docs/design/darwin-shared-output.md)
 
 ```sh
 tools/build
@@ -240,6 +254,10 @@ value category, and members defined outside the class keep their qualifier.
 
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
+
+Inside a class template, its own name with template arguments names that specialization, as in
+the converting constructor `template <class U> A(const A<U>&)`, in parameter and return types and
+in `A<U>::member`. [#1567](https://github.com/yrashk/ycxx/issues/1567)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
@@ -485,7 +503,9 @@ bare `explicit`. Eligible inline constructors link across separate objects on bo
 A class or class template can explicitly default its default, copy and move constructors, its
 copy and move assignment operators and its nonvirtual destructor as their first declarations in
 the class. Nontrivial ones run each base's and member's own operation, and work in constant
-evaluation. Local classes and defaulting outside the class are not done.
+evaluation. Outside the class, a non-union class with no bases, no virtual functions and only
+scalar members can default the same members. Local classes and defaulting outside the class
+for other classes are not done.
 [#157](https://github.com/yrashk/ycxx/issues/157) · [#1096](https://github.com/yrashk/ycxx/issues/1096)
 
 An explicit class return can select a written move constructor for an eligible named local
@@ -611,7 +631,9 @@ written default member initializer are value-initialized.
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
-  Free function templates can instantiate omitted dependent scalar defaults after overload selection.
+  Default arguments that depend on template parameters are instantiated only when a call uses
+  them. This holds for function templates, member function templates, and members and constructors
+  of class templates, including virtual functions.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
   nonmember candidates at instantiation. Unary operators, prefix increment and compound
@@ -622,7 +644,8 @@ written default member initializer are value-initialized.
   and ordinary aggregates with arithmetic fields. A braced argument to a known function can
   initialize a class temporary for a reference parameter, including `const std::initializer_list<int>&`
   with libycxx. A pointer or reference target type can select a free or static member overload.
-  Ordinary non-template member defaults can refer to members declared later in the class.
+  Member defaults of classes and class templates can refer to members declared later in the class,
+  except in member templates of classes that are not templates ([#1607](https://github.com/yrashk/ycxx/issues/1607)).
   Namespace function definitions can inherit C language linkage from a matching earlier
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
@@ -715,7 +738,8 @@ written default member initializer are value-initialized.
   own overload set with a using-declaration, including from a dependent base
   (`template<class Fn> struct D : Fn { using Fn::operator(); };`). Its own functions with the same
   parameters hide the base's. [#1150](https://github.com/yrashk/ycxx/issues/1150)
-- namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
+- namespaces, nested (`namespace a::b`) and inline ones, including namespaces inside inline
+  namespaces with inline namespaces of their own, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
   [#953](https://github.com/yrashk/ycxx/issues/953)
@@ -748,7 +772,11 @@ written default member initializer are value-initialized.
   non-dependent primary class specializations with explicit type or value arguments check
   constraints. [#908](https://github.com/yrashk/ycxx/issues/908)
   Class templates and class partial specializations accept parenthesized requires-clause
-  operands joined by `&&` or `||`.
+  operands joined by `&&` or `||`. Members of class templates, constructors, prospective
+  destructors and defaulted or deleted special members included, take trailing requires-clauses:
+  a member is a candidate only while satisfied, the more constrained one wins, and an ineligible
+  special member does not count for the class's triviality.
+  [#1417](https://github.com/yrashk/ycxx/issues/1417)
   A failed dependent type requirement can end substitution before later requirements
   instantiate their types. [#1283](https://github.com/yrashk/ycxx/issues/1283)
   Non-template code outside requires-expression bodies also checks constraints on directly named
@@ -773,6 +801,10 @@ written default member initializer are value-initialized.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
+- dependent concept-ids as template arguments, such as `typename conditional_t<C<I>, A, B>::type`
+  in alias templates, member aliases and function signatures, and dependent comparisons such as
+  `(sizeof(I) > 4)` in namespace alias templates and member aliases of class templates
+  [#1548](https://github.com/yrashk/ycxx/issues/1548);
 - dependent non-type template arguments from parameterless namespace `consteval` function
   templates with explicit type arguments, including fixed namespace-qualified calls. An
   unqualified call to a single ordinary external `consteval` function can also use direct
@@ -840,7 +872,10 @@ written default member initializer are value-initialized.
   function templates, with Clang's names for closure types;
 - lambdas in the initializers of namespace-scope variables, static data members (of class
   templates too) and variable templates, and in constraints; constexpr lambdas, except captures by
-  reference ([#338](https://github.com/yrashk/ycxx/issues/338));
+  reference ([#338](https://github.com/yrashk/ycxx/issues/338)); lambdas in `decltype` and other
+  unevaluated operands of alias-declarations, alias templates, member aliases of class templates
+  and function declarators, except a function template's
+  ([#1269](https://github.com/yrashk/ycxx/issues/1269));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
@@ -1128,7 +1163,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
-- Lambdas in default member initializers, default arguments and unevaluated operands
+- Lambdas in default member initializers and default arguments
   ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.

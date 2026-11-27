@@ -1030,6 +1030,10 @@ bool names_tu_local(parse::Program& program, EntityId entity, bool include_value
     // A variable is the scope of its initializer's closures (#338).
     const bool variable = r.kind == sema::EntityKind::variable;
     if (variable && r.linkage == ast::Linkage::internal) return true;
+    // A TU-local closure type (docs/design/closures.md, decision 4), as of a lambda in an
+    // unevaluated operand of a declaration (#1549).
+    if (r.kind == sema::EntityKind::class_ && r.lambda_signature != sema::Fp128{} && r.linkage == ast::Linkage::internal)
+      return true;
     if (!variable && r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
         r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
       return false;
@@ -1541,6 +1545,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       emitted.local_parameter_binding =
           std::ranges::any_of(type.params, [&](QualType param) { return names_tu_local(program, param); });
     }
+    // A non-template member's trailing requires-clause is part of its name (#1417).
+    if (fn && r.templ == EntityId::none && d.constraints != ConstId::none) tu.entities.back().trailing_constraint = d.trailing_constraint;
     if (r.templ != EntityId::none) {
       const auto& pattern = world.entities.rec(r.templ);
       emitted.template_type = pattern.type;
@@ -1941,7 +1947,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const ast::DeclSema& d = decls[i];
       if (!declarators[i] || d.kind != ast::DeclKind::variable || d.entity == EntityId::none ||
-          !(d.flags & sema::decl_flag::definition))
+          !(d.flags & sema::decl_flag::definition) || (d.flags & sema::decl_flag::template_))
         continue;
       const ast::Declarator& declarator = *declarators[i];
       tu.variables.push_back({d.entity, d.type, declarator.value, at[i]});
@@ -2049,6 +2055,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   for (const auto& initializer : program.member_initializers())
     if (initializer.emits_closures())
       closures_of(initializer.closures, program.id(initializer.item), 0, true);
+  // Alias template specializations' closures (#1549), emitted where referred to.
+  for (const auto& alias : program.alias_closures()) closures_of(alias.closures, program.id(alias.item), 0, true);
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
@@ -2058,7 +2066,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       auto dr = ins.ast.get<ast::Declarator>(c.id);
       if (dr.decl >= ins.seqs.size(is.decls)) continue;
       ast::DeclSema d = ins.seqs.at(is.decls, dr.decl);
-      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition)) continue;
+      if (d.kind != ast::DeclKind::variable || d.entity == EntityId::none || !(d.flags & sema::decl_flag::definition) ||
+          (d.flags & sema::decl_flag::template_))  // a static data member template's specializations are instantiated
+        continue;
       // The checked declaration can survive even when its replayed initializer has no native use.
       const bool lazy = program.is_lazy_member(d.entity);
       if (lazy && !program.used_member(d.entity)) continue;

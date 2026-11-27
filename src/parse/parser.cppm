@@ -3342,7 +3342,7 @@ public:
     if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
     const auto value = literal->value;
     if (s_->ins().values.is<ast::VInt>(value) ||
-        s_->ins().values.is<ast::VDepVariable>(value) ||
+        s_->ins().values.is<ast::VDepVariable>(value) || s_->ins().values.is<ast::VDepConcept>(value) ||
         (s_->ins().values.is<ast::VDepOp>(value) &&
          s_->ins().values.get<ast::VDepOp>(value).op == ast::DepOp::logical_and))
       return value;
@@ -3384,10 +3384,13 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
-      // Class bases and type requirements replay with their arguments bound. A dependent
-      // value whose expression has no representation can wait until replay, provided it
-      // contains no pack that an expansion needs to retain.
-      if ((class_template_base || in_type_requirement_) && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+      // Class bases, type requirements, namespace alias templates and the ordinary member
+      // aliases of a class template replay with their arguments bound ([temp.alias]/2). A
+      // dependent value whose expression has no representation can wait until replay,
+      // provided it contains no pack that an expansion needs to retain.
+      const bool replayed = class_template_base || in_type_requirement_ || namespace_alias_type ||
+                            replayed_member_alias_type;
+      if (replayed && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       }
@@ -3754,8 +3757,15 @@ public:
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
+      const std::size_t before = s_->diag_count();
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
+      if (!n && s_->diag_count() != before) {  // packs of different lengths, diagnosed: no operand
+        i_ = begin_ + e.end;
+        expect(Tk::ellipsis);
+        out.push_back({NodeId::none, begin, pos()});
+        return out;
+      }
       if (!n) {
         // A pack not bound yet (an enclosing template's): the expansion stays dependent.
         if (unexpanded) *unexpanded = true;
@@ -3768,9 +3778,11 @@ public:
       }
       for (std::size_t i = 0; i < *n; ++i) {
         i_ = begin_ + begin;
+        s_->begin_pattern();
         s_->push_frame(e.packs, u32(i));
         out.push_back(read());
         s_->pop_frame();
+        s_->end_element(e.packs);
       }
       i_ = begin_ + e.end;
       expect(Tk::ellipsis);
@@ -4556,7 +4568,8 @@ public:
         std::size_t n = s_->diag_count();
         s_->begin_pattern();
         cast_expression();
-        a_is_pattern = !s_->end_pattern(false, first, 0).empty();
+        // A probe: its packs are neither an expansion nor the enclosing operand's.
+        a_is_pattern = !s_->end_pattern(true, first, 0, /*record=*/false).empty();
         s_->truncate_diags(n);
         i_ = begin_ + first;
       }
@@ -4637,9 +4650,11 @@ public:
       if (n)
         for (std::size_t i = 0; i < *n; ++i) {
           i_ = begin_ + begin;
+          s_->begin_pattern();
           s_->push_frame(e.packs, u32(i));
           const Ex element = cast_expression();
           s_->pop_frame();
+          s_->end_element(e.packs);
           out.push_back(element);
           if (!constraint) continue;
           if (!element.ok()) break;
@@ -4767,6 +4782,10 @@ public:
     if (is(Tk::question)) return conditional_rest(l);
     return l;
   }
+
+  // A concept-id read as an evaluated template argument keeps a `VDepConcept` value while its
+  // arguments are dependent ([temp.arg.nontype], [temp.dep.constexpr]/2).
+  bool preserve_concept_value() const { return in_template_value_argument_ && !s_->unevaluated; }
 
   bool structural_member_argument() const {
     return member_alias_type && in_template_value_argument_ && !s_->unevaluated;
@@ -5357,6 +5376,13 @@ public:
         // or where the member found is a template ([temp.names]/3).
         std::optional<std::vector<ast::TemplateArg>> targs;
         if (is(Tk::less) && (keyword || s_->names_member_template(e, arrow, n))) {
+          // `object.v<args>`: a static data member template's specialization ([expr.ref]).
+          if (auto v = s_->object_variable_template(e, arrow, n)) {
+            auto args = template_argument_list();
+            if (!args) return {NodeId::none, e.begin, pos()};
+            e = s_->object_variable_template_id(e, arrow, *v, *args, name_at, pos());
+            break;
+          }
           targs = template_argument_list();
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
@@ -5707,6 +5733,7 @@ public:
         if (!replay.deferred.empty()) {
           auto v = s_->variable_template(n, begin, /*initializer=*/true);
           if (!v) return {NodeId::none, begin, pos()};
+          s_->unqualified_variable_template_access(*v, n, begin);
           if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
             return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->replayed_variable_template_id(*v, *args, replay.deferred, begin, pos());
@@ -5718,6 +5745,9 @@ public:
             if (auto v = s_->variable_template(n, begin))
               return s_->dependent_variable_template_id(*v, *args, begin, pos());
             if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+            // A value-dependent concept-id ([temp.dep.constexpr]/2) keeps its value as the
+            // argument, substituted when the template-id's own arguments are.
+            if (auto c = s_->concept_named(n)) return s_->concept_id_expr(*c, *args, begin, pos(), preserve_concept_value());
             if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
               Ex callee = s_->name_expr(n, begin, pos(), true);
               if (!callee.ok()) return callee;
@@ -6152,8 +6182,7 @@ public:
             const bool global = r_->tokens[begin_ + begin].kind == Tk::coloncolon;
             return written_concept_expression(*c, *args, begin, true, global);
           }
-          return s_->concept_id_expr(*c, *args, begin, pos(),
-                                     class_template_base && in_template_value_argument_ && !s_->unevaluated);
+          return s_->concept_id_expr(*c, *args, begin, pos(), preserve_concept_value());
         }
       }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
@@ -6184,6 +6213,23 @@ public:
             return s_->dependent_variable_template_id(*v, *args, begin, pos(), true,
                                                        r_->tokens[begin_ + begin].kind == Tk::coloncolon, qualifier);
           }
+          return s_->variable_template_id(*v, *args, begin, pos());
+        }
+      // `C::v<args>`: a static data member template of class C ([temp.mem], [temp.names]/3).
+      if (s->type)
+        if (auto v = s_->scope_variable_template(*s, n)) {
+          s_->member_template_access(*s->type, v->entity, n, name_at);
+          VariableArgumentReplay replay{{}, template_argument_replay_ == TemplateArgumentReplay::variable_initializer};
+          const bool replay_values = template_argument_replay_ != TemplateArgumentReplay::none && !s_->unevaluated;
+          auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &replay : nullptr);
+          if (!args) return {NodeId::none, begin, pos()};
+          if (!replay.deferred.empty()) {
+            if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
+              return s_->dependent_variable_template_id(*v, *args, begin, pos());
+            return s_->replayed_variable_template_id(*v, *args, replay.deferred, begin, pos());
+          }
+          if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+            return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->variable_template_id(*v, *args, begin, pos());
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with

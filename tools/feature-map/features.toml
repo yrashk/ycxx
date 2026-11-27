@@ -862,7 +862,7 @@ std = 'C++11'
 ftm = '__cpp_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*(?:\(|\{|<|mutable\b|->|constexpr\b|noexcept\b)'
 status = 'partial'
-note = 'not in default member initializers, default arguments, static_assert or unevaluated operands'
+note = 'not in default member initializers, default arguments or static_assert'
 issues = [338]
 probe = '''
 int main() { int k = 2; int s = 0; [&] { ++s; }(); return ([k](int x) { return x + k; }(1) == 3 && s == 1) ? 0 : 1; }
@@ -947,8 +947,9 @@ group = 'lambda'
 clauses = ['expr.prim.lambda.closure']
 std = 'C++20'
 detect = '\bdecltype\s*\(\s*\[[^\[\]]*\]'
-status = 'missing'
-issues = [338]
+status = 'partial'
+note = 'not in a function template signature (#1269) or a default template argument (#1608); a class template member closure is TU-local, not vague (#1593)'
+issues = [1269, 1593, 1608]
 probe = '''
 using L = decltype([] { return 5; });
 int main() { L l; return l() == 5 ? 0 : 1; }
@@ -1082,8 +1083,8 @@ int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }
 '''
 status = 'partial'
-issues = [356, 354]
-note = 'Ordinary non-template member defaults use complete-class lookup. Scalar defaults on free function templates replay when omitted. Other dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
+issues = [356, 354, 1602, 1607, 338]
+note = 'Member defaults of classes and class templates use complete-class lookup. Dependent defaults of function templates, member templates and class template members are instantiated when a call uses them. Lambdas in member defaults (#338), nested classes naming later members of the enclosing class (#1602), member templates of ordinary classes naming later members (#1607), out-of-class additions and defaults on qualified namespace definitions remain'
 
 [[feature]]
 id = 'dcl-variadic-fn'
@@ -1415,7 +1416,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Defaulting outside the class, in local classes and with a requires-clause remains open.'
+note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Constrained ones (a trailing requires-clause, #1417) are candidates only when satisfied, and an ineligible one does not count for triviality. Defaulting outside the class and in local classes remains open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1919,8 +1920,9 @@ name = 'Conditionally trivial special members (constrained destructors)'
 group = 'class'
 clauses = ['class.dtor', 'over.match.best']
 std = 'C++20'
-status = 'missing'
-issues = [234]
+status = 'done'
+issues = [234, 1417]
+note = 'A class template specialization selects among its prospective destructors, and its other special members are eligible only when their trailing requires-clauses are satisfied and no satisfied one of the same kind is more constrained (#1417). Type-trait queries on class template specializations are #218.'
 probe = '''
 template<class T> struct W { ~W() requires (sizeof(T) > 4) {} ~W() = default; };
 int main() { W<int> w; (void)w; return 0; }
@@ -2013,7 +2015,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'Member function templates and member alias templates, also as `Q::template M<args>` and as template template arguments, work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, static data member templates and `&S::f<int>` remain.'
+note = 'Member function templates, member alias templates (also as `Q::template M<args>` and as template template arguments) and static data member templates work. Member class templates (#306), conversion function templates (#339), specializations of static data member templates (#1594), defining one of a class template outside the class (#256) and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
@@ -2061,7 +2063,7 @@ clauses = ['temp.res', 'temp.res.general', 'temp.local', 'temp.dep', 'temp.dep.g
 std = 'C++98'
 core = true
 status = 'partial'
-issues = [263, 241, 209]
+issues = [263, 241, 209, 1590]
 probe = '''
 template<class T> struct H { using type = int; };
 template<class T> typename H<T>::type g(T) { return 0; }
@@ -2069,7 +2071,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open. In a class template or its partial specialization, its injected-class-name followed by template arguments names that specialization ([temp.local]/1, #1567); the injected-class-name of a base specialization used without arguments in a derived class remains (#1590).'
 
 [[feature]]
 id = 'temp-ttp'
@@ -2096,7 +2098,8 @@ std = 'C++11'
 ftm = '__cpp_variadic_templates'
 detect = '\b(?:typename|class)\s*\.\.\.|\bsizeof\s*\.\.\.'
 status = 'done'
-issues = [210]
+issues = [210, 1400]
+note = 'Pack expansions in mem-initializers and nested expansions such as `h(g(xs...))` (#1400). Base-specifier packs and their `Bs(x)...` initializers (#308) and `V v(xs...)` declarations (#1596) remain.'
 probe = '''
 template<class... T> int count(T...) { return sizeof...(T); }
 int main() { return count(1, 'a', 2L) - 3; }
@@ -2111,7 +2114,7 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\btemplate\s*<[^;{]*>\s*using\s+\w+\s*='
 status = 'done'
-note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630).'
+note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630). Dependent concept-ids and comparisons can select the type, as in `typename conditional_t<C<I>, A, B>::type` (#1548).'
 
 [[feature]]
 id = 'temp-var'
@@ -2226,8 +2229,8 @@ std = 'C++20'
 ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
-issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Broader template and member constraints and constraint mangling remain.'
+issues = [234, 236, 1180]
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Trailing requires-clauses on members of class templates (functions, constructors, prospective destructors, defaulted and deleted special members, out-of-class definitions) are checked when the member is a candidate, with the more constrained preferred (#1417). Broader template constraints, constrained friends (#1180) and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }

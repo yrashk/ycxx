@@ -102,6 +102,18 @@ limits = "Covers uniform private or protected access, mixed access, default memb
 evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cpp"]
 
 [[divergence]]
+id = "class-tail-padding-ineligible-assignment"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[special]/6, Itanium C++ ABI §1.1 and §2.4, #1417, #1670"
+spec = "A satisfied, more-constrained defaulted copy assignment makes the user-provided fallback ineligible. The layout reserves the tail padding of the 8-byte base and gives the derived class size 12."
+gcc = "Same as spec for the tested layout."
+clang = "Uses the spec layout for this case. Matching the Linux x86-64 Clang layout remains pending."
+gcc_observed = "GCC 16.2 on Linux x86-64 gives the 8-byte base a 12-byte derived class."
+clang_observed = "Clang 23.1.6 gives the 8-byte base an 8-byte derived class on Linux x86-64 and a 12-byte derived class on Darwin arm64. Hosted Clang 23.1.7 also fails the 12-byte assertion on Linux x86-64."
+evidence = ["tests/own/member-requires/ineligible-assignment-layout.run.cpp", "https://github.com/yrashk/ycxx/issues/1670", "https://github.com/yrashk/ycxx/actions/runs/46035259077/job/140628967381"]
+
+[[divergence]]
 id = "over-width-bit-field-allocation"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -164,6 +176,21 @@ clang_observed = "Emits the written namespace alias in an alias-only unit. When 
 limits = "Covers namespace variable template-ids in dependent class template arguments, including bare, global, nested and alias qualifiers, omitted defaults, and simple operations on the argument."
 probe = 'namespace Outer { namespace Inner { template<class T> constexpr bool value = true; } } namespace Alias = Outer::Inner; template<bool> struct Box {}; template<class T> void f(Box<Alias::value<T>>) {}'
 evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp", "Black-box GCC 16.2 and Clang 23.1.6 symbol probes with namespace aliases, earlier declarations and uninstantiated template bodies on ELF and Mach-O"]
+
+[[divergence]]
+id = "dependent-concept-symbol"
+status = "partial"
+mode_status = { spec = "pending", gcc = "supported", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.2, [temp.names]/8, [temp.dep.constexpr]/2, #1548, #1589"
+prior = "A value-dependent concept-id as a template argument of a declaration was rejected."
+spec = "Uses GCC's unqualified concept name and the written arguments (DECISIONS §1.7) until #1589 decides the spec form."
+gcc = "Use the unqualified concept name and the arguments, X <source-name> <template-args> E."
+clang = "Uses GCC's form. Clang's form is pending in #1589."
+gcc_observed = "Writes the bare concept name for every spelling: qualified, `::`-qualified, through a namespace alias, inline namespaces and unqualified inside the namespace."
+clang_observed = "Writes sr, the enclosing non-inline namespaces and E before the name for any concept outside the global namespace, whatever the spelling, with no gs for a leading `::`. A concept in the global namespace has the bare name, as in GCC."
+limits = "Covers concept-ids in dependent class template arguments of function template signatures. Concepts in the global namespace agree in every mode."
+probe = 'namespace a::b { template<class T> concept V = sizeof(T) >= 4; } template<bool> struct Box {}; template<class T> void f(Box<a::b::V<T>>) {}'
+evidence = ["tests/own/abi/dependent-concept-args.run.cpp", "Black-box GCC 16 and Clang 23.1.5 symbol probes on Mach-O (#1589)"]
 
 [[divergence]]
 id = "dependent-variable-template-redeclaration"
@@ -1376,6 +1403,32 @@ int call() { return var<int>(0) + enu<int>(0); }
 evidence = ["STATUS.md", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "trivially-copyable-no-eligible-copy"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[class.prop]/1.1, [special]/6, #1417"
+prior = "Special members with unsatisfied trailing requires-clauses were not supported."
+spec = "A class whose copy and move constructors and assignment operators are all ineligible (unsatisfied constraints) is not trivially copyable. Type-trait built-ins do not classify class template specializations yet (#218)."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Reports such a class as trivially copyable."
+clang_observed = "Reports such a class as not trivially copyable, as the draft says."
+evidence = ["tests/own/member-requires/no-eligible-copy.accept.cpp"]
+
+[[divergence]]
+id = "member-declarator-requires-clause"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[class.mem.general], #1417"
+prior = "A member-declarator's trailing requires-clause was not supported."
+spec = "Each member-declarator has its own requires-clause: in `int f() requires C, g();` only `f` is constrained."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "Same as spec."
+clang_observed = "Gives `g` the requires-clause written for `f`."
+evidence = ["tests/own/member-requires/separate-declarators.run.cpp"]
+
+[[divergence]]
 id = "pack-index-written-operator-symbol"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1557,6 +1610,31 @@ clang = "Accept the tested default on a named or abstract function pointer in an
 evidence = ["tests/own/block-try-catch/named-function-pointer-default.reject.cpp", "tests/own/block-try-catch/abstract-function-pointer-default.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 exception-declaration probes"]
 
 [[divergence]]
+id = "class-template-default-uses-later-default"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "supported" }
+reference = "[class.mem.general], [dcl.fct.default], [temp.inst]/12, #356"
+prior = "Reject the class template's default argument with \"default arguments of templates are not supported yet\" or an undeclared later member."
+spec = "Reject a member default that calls a later member of the same class template and takes that member's default, with \"the selected default argument has not yet been defined\". A later member template's default is instantiated per call and is accepted. The draft does not settle when a later default becomes usable."
+gcc = "Accept the tested static member function and member template defaults that take a later member's default. ycxx rejects them, as in spec mode."
+clang = "Reject them, as spec mode does. Accept a later member template's default."
+probe = 'template<class U> struct S { static constexpr int f(int x = g()) { return x; } static constexpr int g(int y = sizeof(U)) { return y; } }; static_assert(S<long>::f() == 8);'
+limits = "Ordinary classes reject the same uses in every mode. An ordinary class's member template default cannot name a later member yet (#1607)."
+evidence = ["GCC 16.2 and upstream Clang 23.1.5 later-default probes from the #356 review"]
+
+[[divergence]]
+id = "default-argument-substitution-in-requires"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "supported", clang = "pending" }
+reference = "[temp.inst]/12, [temp.deduct.general], [expr.prim.req], #356"
+prior = "Reject every call that takes a dependent member default with \"default arguments of templates are not supported yet\"."
+spec = "Treat an ill-formed default argument instantiated by a call in a requires-expression as an unsatisfied requirement."
+gcc = "Same as spec for the tested `requires { S<T>::f(); }` whose member default `T::v` is ill-formed for `int`."
+clang = "Diagnose the ill-formed default argument as a hard error outside the immediate context. ycxx still yields false here."
+probe = 'template<class T> struct S { static int f(int x = T::v) { return x; } }; template<class T> concept C = requires { S<T>::f(); }; static_assert(!C<int>);'
+evidence = ["GCC 16.2 and upstream Clang 23.1.5 requires-expression probes from the #356 review"]
+
+[[divergence]]
 id = "equivalent-inherited-type-aliases"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1682,6 +1760,34 @@ clang = "Same as spec."
 gcc_observed = "GCC 16.2 rejects the built-in template spelling and its feature query yields zero."
 clang_observed = "Upstream Clang 23.1.6 exposes the built-in template and accepts the tested alias chain and sequence values on both targets."
 evidence = ["tests/own/templates/t8-make-integer-seq.run.cpp", "tests/own/templates/t8-mangling.run.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 syntax probes"]
+
+[[divergence]]
+id = "unevaluated-lambda-closure-symbol"
+status = "recorded"
+mode_status = { spec = "partial", gcc = "pending", clang = "partial" }
+reference = "[expr.prim.lambda.closure], [basic.def.odr], Itanium C++ ABI §5.1.8, #1549, #1593"
+prior = "Reject a lambda in an unevaluated operand outside a function body or a variable's initializer."
+spec = "A lambda in an unevaluated operand of an alias-declaration, alias template or function declarator has a translation-unit-local closure type in the class or namespace around it, named $_N in that scope with N unique in the unit."
+gcc = "Same as spec."
+clang = "Same as spec."
+gcc_observed = "A class's closures, of a class template's specialization or not, are external and named Ul<sig>E[n]_ per class; a namespace's are internal Ul names."
+clang_observed = "A class template specialization's closures are external and named Ul<sig>E[n]_ per class. A non-template class's and a namespace's are internal $_N."
+limits = "The closure of a class template's member alias should be one entity in every unit ([basic.def.odr]) with vague linkage, as both compilers give it (#1593). Internal names match Clang's shape for non-template classes and namespaces, not its numbers."
+probe = 'template <class C> int g() { return sizeof(C); } template <class I> struct T { using a = decltype([] {}); }; int use() { return g<T<int>::a>(); }'
+evidence = ["tests/own/lambda-unevaluated/member-alias.run.cpp", "tests/own/lambda-unevaluated/alias-template.run.cpp", "GCC 16.2 and Clang 23.1.5 Mach-O symbols of g<C> for closures of class template, class and namespace aliases"]
+
+[[divergence]]
+id = "alias-template-closure-identity"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[temp.alias]/5, #1549, #1593"
+prior = "Reject a lambda in an alias template's defining-type-id."
+spec = "Each argument list gives its own closure type. Naming the same specialization twice names one closure type: [temp.alias]/5 makes the type differ between instantiations, and the specialization is one."
+gcc = "Same as spec."
+clang = "Each use of the specialization names a different closure type: same<L<int>, L<int>> is false."
+limits = "Clang mode does not give each use its own closure type yet (#1593)."
+probe = 'template <class T> using L = decltype([] {}); template <class A, class B> constexpr bool same = false; template <class A> constexpr bool same<A, A> = true; static_assert(same<L<int>, L<int>>);'
+evidence = ["tests/own/lambda-unevaluated/alias-template.run.cpp", "GCC 16.2 accepts the probe, Clang 23.1.5 rejects it"]
 
 [[divergence]]
 id = "gnu-checked-overflow-result-type"
