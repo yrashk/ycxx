@@ -861,7 +861,10 @@ written default member initializer are value-initialized.
   function templates, with Clang's names for closure types;
 - lambdas in the initializers of namespace-scope variables, static data members (of class
   templates too) and variable templates, and in constraints; constexpr lambdas, except captures by
-  reference ([#338](https://github.com/yrashk/ycxx/issues/338));
+  reference ([#338](https://github.com/yrashk/ycxx/issues/338)); lambdas in `decltype` and other
+  unevaluated operands of alias-declarations, alias templates, member aliases of class templates
+  and function declarators, except a function template's
+  ([#1269](https://github.com/yrashk/ycxx/issues/1269));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
@@ -1147,7 +1150,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
-- Lambdas in default member initializers, default arguments and unevaluated operands
+- Lambdas in default member initializers and default arguments
   ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.

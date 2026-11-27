@@ -1611,6 +1611,24 @@ public:
       for (EntityId f : {c.call, c.invoker, c.conversion})
         if (f != EntityId::none) declaration_closures_.insert_or_assign(std::to_underlying(f), DeclarationClosure{c, item, begin});
   }
+  // The closures of alias template specializations, read again in a type-id of `item` (#1549):
+  // each once, for constant evaluation and emission where something refers to them.
+  struct AliasClosures {
+    u32 item;
+    ast::SeqId<ast::ClosureDef> closures;
+  };
+  std::deque<AliasClosures> alias_closures_;
+  std::set<EntityId> alias_closure_types_;
+  const std::deque<AliasClosures>& alias_closures() const { return alias_closures_; }
+  void alias_closures(ast::SeqId<ast::ClosureDef> closures, u32 item) {
+    std::vector<ast::ClosureDef> fresh;
+    for (const ast::ClosureDef& c : w_->ins.seqs.elements(closures))
+      if (alias_closure_types_.insert(c.closure).second) fresh.push_back(c);
+    if (fresh.empty()) return;
+    const auto seq = w_->ins.intern_seq(std::span<const ast::ClosureDef>(fresh));
+    declaration_closures(seq, item, 0);
+    alias_closures_.push_back({item, seq});
+  }
   void generated_closure_members(ast::SeqId<ast::ClosureDef> closures, u32 item, u32 begin) {
     for (const auto& c : w_->ins.seqs.elements(closures)) {
       const EntityId generated = c.flags & sema::closure_flag::generic_invoker ? c.invoker : c.conversion;
@@ -2675,6 +2693,7 @@ public:
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
     return p_->publish_class(c, std::move(r), item_, context);
   }
+  EntityId enclosing_namespace() override { return p_->namespace_entity(p_->ns_of(item_)); }
   const sema::EnumRec* defining_enum(EntityId e) override { return p_->defining_enum(e); }
   bool require_enum_definition(EntityId e) override {
     const bool ready = p_->require_enum_definition(e, point());
@@ -3453,6 +3472,13 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   s.replaying_alias_type_arguments = pattern.call.qualified_type_arguments;
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
+  // Its lambdas' closure types are this specialization's ([temp.alias]/5), and its generic
+  // lambdas are instantiated in it. With dependent arguments they are patterns (#1549).
+  s.declaration_part = true;
+  const bool dependent_args = std::ranges::any_of(args.levels, [&](const auto& level) {
+    return std::ranges::any_of(level, [&](const auto& a) { return a && caller.dependent(*a); });
+  });
+  s.closure_patterns = dependent_args;
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
   ps.set_questions(q);
   ps.seek(item.begin + pattern.begin);
@@ -3461,7 +3487,13 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   ps.substituting_partial_arguments = pattern.call.qualified_type_arguments;
   try {
     auto type = ps.type_id();
-    if (type && ps.at_end() && !s.has_error_since(before)) return type;
+    if (type && ps.at_end() && !s.has_error_since(before)) {
+      if (!dependent_args && !s.closures.empty()) {
+        auto& b = caller.builder();
+        p_->alias_closures(b.commit(b.seq(std::span<const ast::ClosureDef>(s.closures))), pattern.item);
+      }
+      return type;
+    }
   } catch (const TooDeep&) {
     // The parser has already diagnosed its limit.
   }
@@ -3910,6 +3942,7 @@ public:
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
   ast::Compatibility compatibility() const override { return p_->compatibility(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
+  EntityId enclosing_namespace() override { return at_.enclosing_namespace(); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
     return at_.replay_alias_calls(caller, alias, args);
@@ -4436,6 +4469,8 @@ private:
         const auto checks = ps_.deferred_argument_checks();
         const auto ranks = ps_.deferred_rank_checks();
         const auto type_arguments = ps_.deferred_alias_type_arguments();
+        const std::size_t closures = s_.closures.size();
+        const u32 closure_aliases = s_.closure_alias_uses;
         ps_.namespace_alias_type = true;
         auto t = [&] {
           const Parser::GccSignatureScope spelling{ps_};
@@ -4453,6 +4488,10 @@ private:
         } else if (!pattern.rank_checks && !s_.templates().structural_operand(*t)) {
           pattern.kind = Kind::unrepresented;
         }
+        // [temp.alias]/5: a lambda's closure type is each specialization's own, read again, also
+        // where it is another alias template's.
+        pattern.closures = s_.closures.size() != closures || s_.closure_alias_uses != closure_aliases;
+        if (pattern.closures && pattern.kind == Kind::none) pattern.kind = Kind::unrepresented;
         if (pattern.kind != Kind::none || pattern.rank_checks || pattern.qualified_type_arguments)
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), pattern});
         if (!ps_.expect(Tk::semi)) bad();
@@ -15477,6 +15516,7 @@ void Program::instantiate_all() {
   std::size_t walked_member_values = 0;
   std::size_t walked_instances = 0;
   std::size_t walked_variable_values = 0;
+  std::size_t walked_alias_closures = 0;
   std::set<EntityId> included_initializers;
   auto require_initializer = [&](const MemberInitializer& initializer) {
     if (!included_initializers.insert(initializer.member).second) return;
@@ -15492,6 +15532,8 @@ void Program::instantiate_all() {
         if (initializer.emits_closures() && w_->ins.seqs.size(initializer.closures) != 0)
           require_initializer(initializer);
       }
+      for (; walked_alias_closures < alias_closures_.size(); ++walked_alias_closures)
+        required_part(NodeId::none, alias_closures_[walked_alias_closures].closures, id(alias_closures_[walked_alias_closures].item));
       depth.resize(work.size(), 1);
       // Class-specialization replay can add member cells while processing this worklist.
       for (; walked_members < class_member_order_.size(); ++walked_members) {

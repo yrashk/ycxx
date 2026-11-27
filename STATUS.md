@@ -4820,10 +4820,42 @@ or a class template), or a variable template, and in a constraint-expression. Th
   objects), `unit.darwin_lambda_declarations`, `unit.linux_lambda_declarations`, and
   `unit.linux_namespace_lambda` (daemon edits with a cold comparison).
 - Not yet ([#338](https://github.com/yrashk/ycxx/issues/338)): default member initializers, default
-  arguments, `static_assert`, and unevaluated operands (`decltype([]{})`). Captures by reference in constant evaluation
+  arguments and `static_assert`. Unevaluated operands are the next section (#1549). Captures by reference in constant evaluation
   (#262), and weak definitions of variable
   template specializations, closure objects that are class templates' members and static locals
   of closures (#124) wait on their issues.
+
+## Lambdas in unevaluated operands of declarations (#1549)
+
+A lambda can be in an unevaluated operand (`decltype([] { … }())`, `sizeof`) of a declaration that
+no variable owns: an alias-declaration, a member alias of a class or class template, an alias
+template, and a function's declarator ([expr.prim.lambda.general]/3). libycxx's
+`iterator_traits` uses it (`iterator_core.hpp`, `iterator_adaptors.hpp`).
+
+- **Owner:** `Sema::unevaluated_closure_owner`, used by `open_lambda` where no function, enclosing
+  lambda or `closure_owner` owns the closure: the class around it (`current_class`) or the item's
+  namespace (`Questions::enclosing_namespace`), TU-local, with a discriminator of the item and the
+  template arguments bound. A class template specialization's member alias has its own closure
+  types, as its type-id is read again for it.
+- **Alias templates:** one whose type-id makes closures, or names an alias template that does
+  (`AliasCallPattern::closures`), is read again for each specialization, so `A<int>` and `A<char>`
+  have different closure types ([temp.alias]/5). The same arguments name one type, as in GCC;
+  Clang gives each use its own (#1593, `docs/compatibility.toml`). The read is a declaration part:
+  its generic lambdas are instantiated in it, and `Program::alias_closures` keeps its closures,
+  each once, for constant evaluation and emission where they are referred to. With dependent
+  arguments its closures are patterns (`Sema::closure_patterns`).
+- **Names:** such a closure is `$_N` in its class's or namespace's `<nested-name>`
+  (`ClassName::closure_in_scope`), N unique in the unit, so a closure type can be a template
+  argument and its members have code; in a local class, inside the function's `<local-name>`. A
+  function or variable template specialization naming one is TU-local (`names_tu_local`). Clang
+  and GCC give a class template's member closures vague linkage and per-class `Ul…E` names
+  (#1593). A constraint's closures keep their structural names.
+- Tests: `tests/own/lambda-unevaluated/` (Clang 23 and GCC 16 agree; also run on x86-64 Linux in
+  the `gcc:16` image), and two units naming each its own closure type in
+  `unit.{darwin,linux}_lambda_declarations`.
+- Not yet: a lambda in a function template's signature, which stays Dependent like any dependent
+  `decltype` there (#1269; an XFAIL test), or in a default template argument (#1608). An
+  out-of-line definition with a lambda in its return type matches its declaration (#1609).
 
 ## Floating point, the μ slice (#336, 2026-11-19)
 
