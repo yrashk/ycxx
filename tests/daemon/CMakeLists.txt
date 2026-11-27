@@ -166,6 +166,9 @@ add_test(NAME daemon.project_toolchain_probe
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_toolchain_probe.py
           $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
 
+add_test(NAME daemon.project_native_rule_probe
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_native_rule_probe.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_capability_header
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_capability_header.py
           $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})

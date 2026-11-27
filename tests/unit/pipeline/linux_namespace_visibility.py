@@ -8,6 +8,9 @@ import tempfile
 
 from linux_compile import run
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 def check_functions(readelf, scope, env, obj, expected):
     table = run([readelf, '-Ws', obj], scope, env)
@@ -139,7 +142,7 @@ def check_resident_header(options, readelf, scope, env):
     env = {key: value for key, value in env.items()
            if key not in ('YCXX_NO_DAEMON', 'YCXX_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
     ycxx = options[0]
-    with tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+    with tempfile.TemporaryDirectory(prefix='yd-', dir=runtime_root('yd-')) as runtime:
         env.update(YCXX_RUNTIME_DIR=runtime, XDG_CACHE_HOME=str(scope / 'cache'))
         cold, resident = dict(env, YCXX_NO_DAEMON='1'), dict(env, YCXX_DAEMON='require')
         initial_pid = None
