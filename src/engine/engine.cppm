@@ -1483,6 +1483,97 @@ private:
   Frame* frame_;
 };
 
+// Runs synchronous work on the request's pool without blocking its workers.
+template <class F>
+class parallel_for_awaitable {
+public:
+  parallel_for_awaitable(Frame& frame, std::size_t count, F work)
+      : frame_(&frame), count_(count), work_(std::move(work)) {}
+
+  bool await_ready() const noexcept {
+    const Pool* pool = frame_->db->pool();
+    return count_ < 2 || !pool || pool->size() < 2;
+  }
+
+  bool await_suspend(std::coroutine_handle<> continuation) {
+    Pool& pool = *frame_->db->pool();
+    const Priority priority = frame_->root->priority;
+    lanes_ = std::min<std::size_t>(count_, pool.size());
+    tasks_ = std::make_unique<Lane[]>(lanes_);
+    continuation_ = continuation;
+    // The submitting thread holds one count until the last task has been queued.
+    pending_.store(lanes_ + 1, std::memory_order_relaxed);
+    for (std::size_t i = 0; i < lanes_; ++i) {
+      Lane& lane = tasks_[i];
+      lane.owner = this;
+      lane.run = [](Task* task) noexcept {
+        auto& lane = *static_cast<Lane*>(task);
+        auto& batch = *lane.owner;
+        {
+          memory::Target target(&lane.usage);
+          try {
+            batch.run();
+          } catch (...) {
+            lane.error = std::current_exception();
+          }
+        }
+        if (batch.pending_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+          batch.continuation_.resume();
+      };
+      pool.push(&lane, priority);
+    }
+    memory::exchange_target(nullptr);
+    return pending_.fetch_sub(1, std::memory_order_acq_rel) != 1;
+  }
+
+  void await_resume() {
+    if (!tasks_) {
+      run();
+      return;
+    }
+    memory::exchange_target(&frame_->mem);
+    auto& mem = frame_->mem;
+    const auto before = memory::snapshot(mem);
+    std::int64_t peak_bound = before.net;
+    std::exception_ptr error;
+    for (std::size_t i = 0; i < lanes_; ++i) {
+      const auto usage = memory::snapshot(tasks_[i].usage);
+      mem.allocated.fetch_add(usage.allocated, std::memory_order_relaxed);
+      mem.count.fetch_add(usage.count, std::memory_order_relaxed);
+      mem.net.fetch_add(usage.net, std::memory_order_relaxed);
+      peak_bound += usage.peak;
+      if (!error) error = tasks_[i].error;
+    }
+    // Individual peaks may occur at different times.
+    mem.peak.store(std::max(before.peak, peak_bound), std::memory_order_relaxed);
+    if (error) std::rethrow_exception(error);
+  }
+
+private:
+  struct Lane : Task {
+    parallel_for_awaitable* owner = nullptr;
+    memory::Usage usage;
+    std::exception_ptr error;
+  };
+
+  void run() {
+    const auto stop = frame_->root->stop.get_token();
+    while (!stop.stop_requested()) {
+      const std::size_t i = next_.fetch_add(1, std::memory_order_relaxed);
+      if (i >= count_) break;
+      std::as_const(work_)(i);
+    }
+  }
+
+  Frame* frame_;
+  std::size_t count_;
+  F work_;
+  std::size_t lanes_ = 0;
+  std::unique_ptr<Lane[]> tasks_;
+  std::atomic<std::size_t> next_{0}, pending_{0};
+  std::coroutine_handle<> continuation_;
+};
+
 }  // namespace ycxx::engine
 
 export namespace ycxx::engine {
@@ -1518,6 +1609,12 @@ public:
     std::vector<CellId> cells;
     for (auto&& k : keys) cells.push_back(db_->cell_for<Q>(k));
     return {*db_, *frame_, std::move(cells)};
+  }
+  // Runs indexed, synchronous work with up to one lane per pool worker. The callback
+  // must not use this context. Follow with a stop point before consuming the results.
+  template <class F>
+  auto parallel_for(std::size_t count, F work) {
+    return parallel_for_awaitable<F>(*frame_, count, std::move(work));
   }
   // Direct input keys in the fetched parent's dependency order. Inspection records no reads.
   // Fetch the returned inputs to track their changes when the parent's value stays equal.

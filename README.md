@@ -902,7 +902,9 @@ written default member initializer are value-initialized.
   `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   The checked add and multiply builtins report overflow and store the converted signed
-  `intmax_t` result during constant evaluation. [#1077](https://github.com/yrashk/ycxx/issues/1077)
+  `intmax_t` result during constant evaluation. In constant expressions and native code they also accept
+  standard unsigned operands and a writable unsigned destination with widths up to 64 bits.
+  [#1077](https://github.com/yrashk/ycxx/issues/1077) [#1636](https://github.com/yrashk/ycxx/issues/1636)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
   Unary `__builtin_ctzg` counts trailing zero bits in a nonzero `unsigned int` in constant

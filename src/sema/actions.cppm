@@ -9249,12 +9249,33 @@ public:
     const QualType result = builtin(Builtin::bool_);
     if (any_dependent(args)) return dependent_node(args, begin, end, result);
 
+    const auto standard_unsigned = [&](QualType type) {
+      const auto kind = types().builtin_of(type);
+      return kind && ast::is_standard_unsigned(*kind) && ast::width_of(w_->target, *kind) <= 64;
+    };
     const QualType integer = builtin(w_->target.intmax_type);
-    const std::array params{integer, integer, types().pointer(integer)};
+    std::array params{integer, integer, types().pointer(integer)};
+    const bool unsigned_call = standard_unsigned(args[0].type());
+    if (unsigned_call) {
+      if (!standard_unsigned(args[1].type())) {
+        diag(args[1].begin, Diag::builtin_overflow_unsigned_operand, args[1].type());
+        return invalid;
+      }
+      const QualType output = types().canonical(args[2].type());
+      params[2] = types().is_array(output) ? types().pointer(types().rec(output).inner) : Types::unqualified(output);
+      const auto object = types().is_pointer(params[2])
+                              ? std::optional(types().canonical(types().pointee(params[2]))) : std::nullopt;
+      if (!object || Types::is_const(*object) || !standard_unsigned(*object)) {
+        diag(args[2].begin, Diag::builtin_overflow_unsigned_result, args[2].type());
+        return invalid;
+      }
+      // Both the exact sum and the exact product of two unsigned operands up to 64 bits fit here.
+      params[0] = params[1] = builtin(Builtin::unsigned_int128);
+    }
     std::array<Child, 3> children;
     for (std::size_t i = 0; i < params.size(); ++i) {
       Ex arg = args[i];
-      if (!same_unqualified(arg.type(), params[i])) {
+      if (!unsigned_call && !same_unqualified(arg.type(), params[i])) {
         diag(arg.begin, Diag::builtin_overflow_operand, params[i], arg.type());
         return invalid;
       }

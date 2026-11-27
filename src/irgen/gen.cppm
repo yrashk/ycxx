@@ -1937,8 +1937,21 @@ class Gen {
         case ast::BuiltinOp::mul_overflow: {
           const At left = child(a, args[0]);
           const ValueId operands[] = {rvalue(left), rvalue(child(a, args[1]))};
-          const ValueId destination = rvalue(child(a, args[2]));
+          const At output = child(a, args[2]);
+          const ValueId destination = rvalue(output);
           const ast::QualType integer = info(left).type;
+          if (ast::builtin_of(in_, integer) == ast::Builtin::unsigned_int128) {
+            // Sema widened the operands to hold the exact unsigned result.
+            const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::add : ir::Op::mul;
+            const ValueId exact = pure(op, integer, {operands[0], operands[1]});
+            const ast::QualType object = facts_.pointee(info(output).type);
+            const ast::QualType narrowed_type = ast::without_cv(ty(object));
+            const ValueId narrowed = arithmetic(integer, narrowed_type, exact);
+            const ValueId restored = arithmetic(narrowed_type, integer, narrowed);
+            const ValueId overflow = pure(ir::Op::icmp, t, {exact, restored}, {word(ir::Pred::ne)});
+            store({destination, object}, narrowed, ir::bit(ir::Flag::call_body));
+            return overflow;
+          }
           const ir::Ty results[] = {vty(integer), vty(t)};
           const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::sadd_overflow : ir::Op::smul_overflow;
           const ir::NodeId checked = emit(op, results, operands);

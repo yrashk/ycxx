@@ -462,6 +462,7 @@ public:
   }
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
+  const std::set<EntityId>& unapplied_declaration_attributes() const { return unapplied_declaration_attributes_; }
   bool class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 item, bool friend_declaration) const;
   bool peer_root_vtable_visible(EntityId cls) const;
   bool plain_class_template_type(EntityId cls) const;
@@ -1409,6 +1410,20 @@ public:
       if (Program::passes(*ix_, Probe::declares, path, j, k) && !after_running_member(j)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
+  }
+  // Native ABI checks run after semantic analysis. Materialize late declarations
+  // of the class and slots through the same recorded name queries as ordinary lookup.
+  void ensure_virtual_abi_declarations(EntityId cls) {
+    ensure_declared(cls, end());
+    const auto* record = classes_.find(cls);
+    if (!record) return;
+    for (const auto& member : record->members)
+      if (member.is_virtual) ensure_declared(member.entity, end());
+    for (const auto& base : record->bases) ensure_virtual_abi_declarations(base.cls);
+  }
+  std::optional<ItemId> class_definition_item(EntityId cls) const {
+    const auto found = class_items_.find(std::to_underlying(cls));
+    return found == class_items_.end() ? std::nullopt : std::optional(id(found->second));
   }
   std::optional<ast::DeclSema> declaration(EntityId e, u32 item) {
     ensure_declared(e, item);
