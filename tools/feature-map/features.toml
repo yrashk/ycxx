@@ -2013,7 +2013,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'Member function templates and member alias templates, also as `Q::template M<args>` and as template template arguments, work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, static data member templates and `&S::f<int>` remain.'
+note = 'Member function templates, member alias templates (also as `Q::template M<args>` and as template template arguments) and static data member templates work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, specializations of static data member templates (#1594), defining one of a class template outside the class (#256) and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };

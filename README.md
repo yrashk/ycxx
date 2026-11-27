@@ -21,7 +21,7 @@ executable passes its self-check.
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-26). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-27). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -152,8 +152,12 @@ Constrained `C auto` and `auto*` or `auto&` parameters are not supported yet.
 [#1244](https://github.com/yrashk/ycxx/issues/1244) [#1401](https://github.com/yrashk/ycxx/issues/1401)
 
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
-`typename Q::template M<args>` and as template template arguments.
-[#340](https://github.com/yrashk/ycxx/issues/340)
+`typename Q::template M<args>` and as template template arguments. They can also declare static
+data member templates (`template<class T> static constexpr bool v = …;`), used in the class, as
+`C::v<args>` and as `object.v<args>`. They cannot be partially or explicitly specialized yet, and
+a class template's cannot be defined outside the class yet.
+[#340](https://github.com/yrashk/ycxx/issues/340) [#1594](https://github.com/yrashk/ycxx/issues/1594)
+[#256](https://github.com/yrashk/ycxx/issues/256)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
