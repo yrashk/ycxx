@@ -9756,6 +9756,7 @@ public:
       case ctz:
       case ctzg:
       case clzll:
+      case clz:
       case library:
       case constant_p:
       case add_overflow:
