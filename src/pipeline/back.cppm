@@ -222,6 +222,7 @@ struct ClassShape {
 struct EnumShape {
   EntityId entity = EntityId::none;
   QualType underlying{};
+  bool layout_uncertain = false;
 };
 struct Shapes {
   std::vector<ClassShape> classes;  // in order of definition
@@ -1052,9 +1053,11 @@ std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const
   std::uint8_t mask = 0;
   for (const ir::SubObject& f : l.fields) {
     auto builtin = ast::builtin_of(in, f.type);
-    if (in.types.is<ast::TEnum>(f.type))
-      if (const EnumShape* enumeration = enum_of(in.types.get<ast::TEnum>(f.type).entity))
-        builtin = ast::builtin_of(in, enumeration->underlying);
+    if (in.types.is<ast::TEnum>(f.type)) {
+      const EnumShape* enumeration = enum_of(in.types.get<ast::TEnum>(f.type).entity);
+      if (!enumeration || enumeration->layout_uncertain) return 0;
+      builtin = ast::builtin_of(in, enumeration->underlying);
+    }
     ast::BuiltinLayout field;
     if (builtin && ast::is_integral(*builtin))
       field = (*target_)[*builtin];

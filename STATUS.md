@@ -865,9 +865,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
 - Fixed-prototype calls support nonempty naturally aligned flat records with integral, enum,
   ordinary object-pointer or object lvalue-reference fields. Enum fields use their known
-  underlying integer layout ([dcl.enum]/8, [#1682](https://github.com/yrashk/ycxx/issues/1682)).
-  A record must be trivial for calls and occupy up to 16 bytes with alignment up to eight.
-  The AMD64 INTEGER eightbytes follow from the laid-out fields. If an entire argument cannot
+  underlying integer layout ([dcl.enum]/8). Unapplied enum layout annotations prevent this
+  classification ([#1682](https://github.com/yrashk/ycxx/issues/1682)). A record must be trivial
+  for calls and occupy up to 16 bytes with alignment up to eight. The AMD64 INTEGER eightbytes
+  follow from the laid-out fields. If an entire argument cannot
   fit in the remaining registers, it goes by value on the stack and later arguments can use
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
   tests exercise both directions and check by-value object identity. Source packing and
