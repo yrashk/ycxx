@@ -887,8 +887,9 @@ written default member initializer are value-initialized.
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Class-template static constexpr members can use these reads in their initializers.
   [#991](https://github.com/yrashk/ycxx/issues/991)
-  Constant expressions can also iterate over a local array of flat aggregates with integral
-  or enumeration fields. [#1642](https://github.com/yrashk/ycxx/issues/1642)
+  Constant expressions can iterate over a named local array of flat aggregate records
+  initialized with braced lists for their integral or enumeration fields.
+  [#1642](https://github.com/yrashk/ycxx/issues/1642)
   A constant expression can return a named empty or flat aggregate and use the result,
   including an initialized fixed-size `char` member array.
   [#975](https://github.com/yrashk/ycxx/issues/975)

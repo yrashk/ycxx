@@ -1392,12 +1392,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   a namespace-scope constexpr array of supported flat aggregates. L1 keeps the array element
   and field in the address path and checks the index against the array bound ([expr.sub],
   [expr.ref], [expr.const]). [#1403](https://github.com/yrashk/ycxx/issues/1403)
-- Constant evaluation supports one-dimensional automatic arrays of nonempty nonunion aggregates
-  with trivial destruction and direct, non-overlapping integral or enumeration fields. Each
-  field becomes readable at its own initialization step. Element aliases retain the array's
-  bounds and storage lifetime, including through a range-for's reference. Calling a member on
-  an array element, copying a whole element, and starting or ending an element's lifetime
-  separately still require broader support ([dcl.init.aggr], [basic.life], [expr.const]).
+- Constant evaluation supports named one-dimensional automatic arrays of nonempty nonunion
+  aggregates with trivial destruction and direct, non-overlapping integral or enumeration
+  fields. A braced initializer initializes those fields directly, including zero initialization
+  of omitted scalar fields when no default member initializer applies. Each field becomes
+  readable at its own initialization step. Element aliases retain the array's bounds and storage
+  lifetime, including through a range-for's reference. Direct initialization from a conditional
+  prvalue with a value-initialized arm, such as `b ? Entry() : Entry{9}`, remains open, as do
+  whole-element copies, member calls on elements, and separate element lifetime operations
+  ([dcl.init.aggr], [basic.life], [expr.const]).
   [#1642](https://github.com/yrashk/ycxx/issues/1642) · [#1140](https://github.com/yrashk/ycxx/issues/1140)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
