@@ -104,6 +104,8 @@ In an incomplete plan, you can also explore resolved components that are
 disconnected from the selected target.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
+The native leaf example pins `cxx("ycxx")` and measures native shared-library linking
+and loading. [Native leaf rule example](examples/project-build/native-leaf-rule/README.md)
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can run its own witness and export a support
