@@ -1801,9 +1801,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations
   and using-directives, namespace aliases, `using enum`s, static locals, and constants for their
   values. Unevaluated uses of enclosing automatic variables preserve the declaration's type.
-  Non-odr-uses may read enclosing scalar and record constants, including references usable in
-  constant expressions. Creating an odr-use of an enclosing automatic object still requires a
-  diagnostic ([basic.def.odr], [class.local], #1447). Lookup reaches the block after the local class and before
+  Non-odr-uses may read enclosing scalar constants and scalar members of supported record
+  constants. Constant references can retain the identity of supported complete objects with
+  static storage duration. An odr-use of an enclosing automatic object still requires a diagnostic
+  ([basic.def.odr], [class.local], #1447). Lookup reaches the block after the local class and before
   the function's class ([basic.lookup.unqual]), including a class still being defined around a
   lambda in a static member's initializer. Access is the function's ([class.local]/1).
 - In a template's definition a local class is dependent; each specialization of the function,
@@ -4775,8 +4776,9 @@ checked against Clang 23 and GCC 16 probes).
   parsed inside the enclosing part with its own locals; a name that resolves to an enclosing
   function's local or an init-capture is captured by every lambda between, by copy or by
   reference, explicitly or by the capture-default, outermost first. A captureless lambda may
-  read an enclosing scalar or record constant in a non-odr-use. The analysis preserves the
-  declaration and initializer context during template replay. Taking the address of an
+  read an enclosing scalar constant or a scalar member of a supported record constant in a
+  non-odr-use. The analysis preserves the declaration and initializer context during template
+  replay. Taking the address of an
   enclosing automatic object still requires capture. [#1447](https://github.com/yrashk/ycxx/issues/1447)
   `this` and `*this`, init-captures, `mutable`,
   trailing return types and deduced return types (step 1). Captures are `Member`s of `This` in
