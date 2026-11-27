@@ -14593,6 +14593,11 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   t.call_constant = [&parameter_sema](EntityId templ, std::span<const ast::TemplateArg> args) {
     return parameter_sema.evaluate_dependent_call(templ, args, 0);
   };
+  // A deferred alias in a parameter's type is read again with the bound arguments ([temp.alias]/2).
+  t.alias_type = [&parameter_sema](const ast::DeclSema& alias, std::span<const ast::TemplateArg> args,
+                                   const sema::Bindings& b, sema::AliasSubstitution use) {
+    return parameter_sema.substitute_alias(alias, args, b, 0, use);
+  };
   std::vector<ast::ParamSema> params;
   // A parameter's type is adjusted again after substitution ([dcl.fct]/5): an array or function
   // becomes a pointer; the body's object keeps its cv-qualifiers. A function parameter pack is a

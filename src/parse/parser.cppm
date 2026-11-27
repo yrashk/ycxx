@@ -3321,7 +3321,7 @@ public:
     if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
     const auto value = literal->value;
     if (s_->ins().values.is<ast::VInt>(value) ||
-        s_->ins().values.is<ast::VDepVariable>(value) ||
+        s_->ins().values.is<ast::VDepVariable>(value) || s_->ins().values.is<ast::VDepConcept>(value) ||
         (s_->ins().values.is<ast::VDepOp>(value) &&
          s_->ins().values.get<ast::VDepOp>(value).op == ast::DepOp::logical_and))
       return value;
