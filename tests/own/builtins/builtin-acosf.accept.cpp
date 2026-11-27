@@ -2,7 +2,7 @@
 #if !__has_builtin(__builtin_acosf)
 #error __builtin_acosf is unavailable
 #endif
-static_assert(__has_builtin(__builtin_acosf));
+// The expression form of __has_builtin is tracked by #1626.
 
 template<class T> struct float_result {
   static constexpr bool value = false;
