@@ -716,8 +716,17 @@ class Planner {
       for (const auto& value : as<List>(*native_args, "a list of native compiler arguments"))
         prefix.push_back({literal, as<std::string>(value, "a native compiler argument")});
     }
+    const auto discovery_started = std::chrono::steady_clock::now();
     const auto compilers = discover_rule_compilers(invoking_directory, toolchain.path,
                                                   toolchain.executable, selector->compiler);
+    if (const auto* trace = std::getenv("YCXX_COMPILER_HASH_EVIDENCE")) {
+      const auto elapsed = std::chrono::steady_clock::now() - discovery_started;
+      const auto ended = std::chrono::system_clock::now().time_since_epoch();
+      std::ofstream(trace, std::ios::app) << std::format("discovery\t{}\t{}\t{}\t{}\t{}\n",
+          std::chrono::duration_cast<std::chrono::nanoseconds>(ended).count(),
+          path_text(cwd_), target, compilers ? compilers->tools.size() : 0,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    }
     if (!compilers) fail(tool.location, compilers.error());
     if (watch_) watch_->paths.insert(compilers->observed_paths.begin(), compilers->observed_paths.end());
     if (toolchain.path && std::ranges::none_of(plan.action.environment, [](const auto& variable) {
@@ -843,7 +852,19 @@ class Planner {
     observe(tool_path);
     const auto status = regular_file(tool_path, at);
     if (!executable(status.permissions())) fail(at, std::format("tool '{}' is not executable", spelling));
-    const auto fp = Hasher{}.bytes(read_file(tool_path, at)).finish();
+    const auto reading = std::chrono::steady_clock::now();
+    const auto bytes = read_file(tool_path, at);
+    const auto hashing = std::chrono::steady_clock::now();
+    const auto fp = Hasher{}.bytes(bytes).finish();
+    const auto hashed = std::chrono::steady_clock::now();
+    if (const auto* trace = std::getenv("YCXX_COMPILER_HASH_EVIDENCE")) {
+      const auto ended = std::chrono::system_clock::now().time_since_epoch();
+      std::ofstream(trace, std::ios::app) << std::format("hash\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+          std::chrono::duration_cast<std::chrono::nanoseconds>(ended).count(),
+          path_text(cwd_), spelling, path_text(tool_path), bytes.size(),
+          std::chrono::duration_cast<std::chrono::nanoseconds>(hashing - reading).count(),
+          std::chrono::duration_cast<std::chrono::nanoseconds>(hashed - hashing).count(), tool_digest(fp));
+    }
     if (watch_) watch_->values.push_back(fp);
     return tools_.emplace(std::string(spelling), ExecutableObservation{path_text(tool_path), fp}).first->second;
   }
