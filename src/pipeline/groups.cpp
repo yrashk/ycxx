@@ -494,14 +494,40 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   };
   // Analyse each top-level item of the main file, and each run of the headers' items,
   // with a Program that reads other items as needed.
+  auto from_header = [&](std::uint32_t item) { return region.locs[items.items[item].begin].file != 0; };
   std::vector<std::pair<std::uint32_t, std::uint32_t>> groups;
   for (std::uint32_t g : items.top) {
     std::uint32_t last = g;
     while (!items.items[last].members.empty()) last = items.items[last].members.back();
-    const bool header = region.locs[items.items[g].begin].file != 0;
-    if (header && !groups.empty() && region.locs[items.items[groups.back().first].begin].file != 0)
+    if (from_header(g) && !groups.empty() && from_header(groups.back().first))
       groups.back().second = last + 1;
     else groups.push_back({g, last + 1});
+  }
+  // Each Program reads the unit's specializations at END. With template-heavy headers a
+  // handful of source declarations can repeat that work many times. Analyse a small source
+  // run together while keeping it independent of the surrounding header runs.
+  constexpr std::uint32_t small_run_items = 32;
+  constexpr std::uint32_t small_run_tokens = 2048;
+  if (std::ranges::count_if(index->specializations, from_header) >= small_run_items) {
+    decltype(groups) batched;
+    batched.reserve(groups.size());
+    for (std::size_t i = 0; i < groups.size();) {
+      const auto first = groups[i].first;
+      if (from_header(first)) {
+        batched.push_back(groups[i++]);
+        continue;
+      }
+      std::size_t next = i + 1;
+      while (next < groups.size() && !from_header(groups[next].first)) ++next;
+      const auto end = groups[next - 1].second;
+      const auto tokens = items.items[groups[next - 1].first].end - items.items[first].begin;
+      if (end - first <= small_run_items && tokens <= small_run_tokens)
+        batched.emplace_back(first, end);
+      else
+        for (std::size_t j = i; j < next; ++j) batched.push_back(groups[j]);
+      i = next;
+    }
+    groups = std::move(batched);
   }
   // A group's analysis is reused when what it read gives the same answers (`GroupTrace`). Token
   // ranges held for pragmas are positions: a unit with them analyses every group again.

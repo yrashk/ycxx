@@ -341,6 +341,43 @@ void headers() {
   fs::remove_all(dir);
 }
 
+void template_heavy_header_groups() {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / std::format("ycxx-template-headers-{}", std::random_device{}());
+  fs::create_directories(dir);
+  std::string templates = "template<int> struct Tag;\n";
+  for (int i = 0; i < 32; ++i)
+    templates += std::format("template<> struct Tag<{}> {{ static constexpr int value = {}; }};\n", i, i + 1);
+  std::ofstream(dir / "templates.h") << templates;
+  std::ofstream(dir / "tail.h") << "inline int extra() { return 6; }\n";
+  auto link = [&](pl::Session& s, int value) {
+    const auto text = std::format(
+        "#include \"templates.h\"\n"
+        "int first() {{ return Tag<0>::value; }}\n"
+        "int second() {{ return 2; }}\n"
+        "#include \"tail.h\"\n"
+        "int tail() {{ return first() + extra(); }}\n"
+        "int main() {{ return tail() + second() - {}; }}\n", value);
+    s.set_source(tu, "m.cpp", text, "m.o", dir.native());
+    s.set_program(program, {{tu}, {}, "m"});
+    const auto& linked = s.get<pl::Link>(program);
+    check(linked.errors.empty() && !linked.image.empty(), "a unit with template-heavy headers links");
+    return linked.image;
+  };
+  engine::Pool pool(4, 7);
+  pl::Session warm(pool);
+  const auto first = link(warm, 9);
+  const auto before = warm.group_counts();
+  check(before.first == 4, "two headers and two small source runs have four groups");
+  const auto edited = link(warm, 10);
+  const auto after = warm.group_counts();
+  check(after.first - before.first == 1 && after.second - before.second == 3,
+        "editing a small source run reuses the headers and the other source run");
+  pl::Session cold;
+  check(edited != first && edited == link(cold, 10), "a pooled edit matches the inline cold build");
+  fs::remove_all(dir);
+}
+
 // The editor view (daemon design §6): its unit reads open buffers over the disk, a buffer edit or
 // close reaches it, and no disk-view cell executes or reads a buffer: a build after a keystroke
 // executes nothing, and its bytes are the disk's.
@@ -995,6 +1032,7 @@ int main() {
   moved_warning();
   two_units();
   headers();
+  template_heavy_header_groups();
   editor_view();
   generated_view();
   pooled();

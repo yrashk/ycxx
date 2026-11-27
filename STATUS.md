@@ -678,7 +678,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     - Units are analysed a group at a time (#947, #978;
       `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
       headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
-      other items only as the group asks. Cache misses run on the session pool, and their results
+      other items only as the group asks. With specialization-heavy headers, a short run of
+      main-file items shares a Program. Cache misses run on the session pool, and their results
       merge in source order. `unit_of` makes each group's `UnitPart`, and
       `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
       hidden declarations anywhere, unwind checks, virtual table ownership and RTTI).
