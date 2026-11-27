@@ -781,6 +781,8 @@ written default member initializer are value-initialized.
 - Dependent `alignof(type-id)` and `sizeof(type-id)` arguments to namespace variable templates
   replay when an initializer or a nested record's direct field array bound needs them. This
   includes pack expansions. [#1371](https://github.com/yrashk/ycxx/issues/1371)
+- A class template's non-static array member can use `sizeof(T)` as its bound. The bound is
+  checked when the specialization is completed. [#1191](https://github.com/yrashk/ycxx/issues/1191)
 - `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
   and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
