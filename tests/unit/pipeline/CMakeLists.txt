@@ -58,6 +58,9 @@ endif()
 add_test(NAME unit.darwin_shared_output
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_shared_output.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/resources/rules ${darwin_shared_host})
+add_test(NAME unit.darwin_dylib_input
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_dylib_input.py
+          $<TARGET_FILE:ycxxc> ${darwin_shared_host})
 # PARITY: by design: runs what it links with the host's linker; the Linux block registers its own
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
   # The Mach-O counterpart of unit.linux_inline (#124).
