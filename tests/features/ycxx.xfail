@@ -12,7 +12,6 @@ draft/basic/basic.def.odr-4.reject.cpp errors elsewhere: 'auto' is not supported
 draft/basic/basic.def.odr-8.accept.cpp '[' not supported yet
 draft/basic/basic.fundamental-2.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.life-2.accept.cpp preprocessing directives are not supported yet
-draft/basic/basic.life-5.accept.cpp preprocessing directives are not supported yet
 draft/basic/basic.link-1.accept.cpp 'extern' not supported yet
 draft/basic/basic.lookup.argdep-3.accept.cpp 'namespace' not supported yet
 draft/basic/basic.lookup.elab-1.reject.cpp errors elsewhere: 'struct' not supported yet

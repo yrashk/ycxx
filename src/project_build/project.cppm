@@ -71,11 +71,22 @@ namespace fs = std::filesystem;
 using Apply = std::function<void(const std::function<void(engine::Db&)>&)>;
 using HostInputOverlay = std::shared_ptr<const pp::HostOverlay>;
 
+struct HostInputs {
+  HostInputOverlay overlay;
+  std::optional<pipeline::ArchiveLinkInputs> archives;
+
+  std::optional<Fp128> key() const {
+    if (!overlay && !archives) return std::nullopt;
+    const auto files = overlay ? std::optional{overlay->fingerprint()} : std::nullopt;
+    return fingerprint(std::tie(files, archives));
+  }
+};
+
 struct Planned {
   Fp128 workspace;
   ProjectPlan resolved;
   std::vector<pipeline::RequestId> host_requests;
-  std::vector<std::optional<Fp128>> host_overlay_keys;
+  std::vector<std::optional<Fp128>> host_input_keys;
 };
 struct [[=engine::input{engine::Durability::low}]] WorkspacePlan {
   using Key = Fp128;  // The requested executable's output path.
@@ -372,12 +383,36 @@ struct LinkArtifact {
   std::span<const std::uint8_t> bytes;
 };
 
+enum class ArchivePath { selected, host };
+
 LinkArtifact link_artifact(const ProjectPlan& plan, const LinkInputPlan& input, LookupActionOutputs output_at,
-                           std::string_view native_triple = {}) {
+                           std::string_view native_triple = {}, ArchivePath path = ArchivePath::selected) {
   const auto& generator = plan.generators[input.producer];
   const auto& output = generator.action.outputs[input.output];
-  return {generated_path({}, generator.name, output.filename, native_triple),
-          (*output_at(input.producer))[input.output].contents.bytes};
+  auto name = path == ArchivePath::host ? host_generated_path({}, generator.name, output.filename)
+                                        : generated_path({}, generator.name, output.filename, native_triple);
+  return {std::move(name), (*output_at(input.producer))[input.output].contents.bytes};
+}
+
+std::optional<pipeline::ArchiveLinkInputs> archive_link_inputs(
+    std::span<const LinkInputPlan> inputs, std::size_t units, const ast::Target* target,
+    std::function_ref<LinkArtifact(const LinkInputPlan&)> artifact_at) {
+  if (inputs.empty()) return std::nullopt;
+  using enum pipeline::LinkOperand::Kind;
+  const auto format = target == &ast::x86_64_linux ? obj::target::x86_64_linux : obj::target::aarch64_macos;
+  pipeline::ArchiveLinkInputs result{.target = format, .operands = {}, .archives = {}};
+  for (std::size_t i = 0; i < units; ++i) result.operands.push_back({source, i});
+
+  std::map<std::pair<std::size_t, std::size_t>, std::size_t> positions;
+  for (const auto& input : inputs) {
+    const auto [position, inserted] = positions.try_emplace({input.producer, input.output}, result.archives.size());
+    if (inserted) {
+      auto [name, bytes] = artifact_at(input);
+      result.archives.emplace_back(std::move(name), std::string(bytes.begin(), bytes.end()));
+    }
+    result.operands.push_back({archive, position->second});
+  }
+  return result;
 }
 
 Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<Fp128>>& keys,
@@ -672,14 +707,49 @@ pipeline::TuId register_project_unit(pipeline::Session& session, const std::stri
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
 
+HostInputOverlay host_overlay_for(const std::vector<std::string>& directories, const HostInputOverlay& staged) {
+  // An empty view still owns misses in the reserved host directory.
+  static const auto empty = std::make_shared<const pp::HostOverlay>(pp::HostOverlay::Files{});
+  if (!staged) return empty;
+  pp::HostOverlay::Files files;
+  for (const auto& [path, bytes] : staged->files())
+    if (std::ranges::contains(directories, native(fs::path(path).parent_path())))
+      files.emplace(path, bytes);
+  if (files.empty()) return empty;
+  if (files.size() == staged->files().size()) return staged;
+  return std::make_shared<const pp::HostOverlay>(std::move(files));
+}
+
 pipeline::RequestId register_host_executable(pipeline::Session& session, const std::string& cwd,
                                              const HostExecutablePlan& executable, const ast::Target* host_target,
-                                             const HostInputOverlay& overlay) {
+                                             const HostInputs& inputs) {
   pipeline::BuildKey build;
-  for (const auto& [index, source] : std::views::enumerate(executable.sources))
-    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk,
-        static_cast<std::size_t>(index) >= executable.first_own_source ? overlay : nullptr));
-  build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name});
+  const auto& overlay = inputs.overlay;
+  const auto generated_main_directory = [&](const SourcePlan& source) -> std::optional<std::string> {
+    if (overlay && overlay->files().contains(source.path)) return native(fs::path(source.path).parent_path());
+    return std::nullopt;
+  };
+  std::vector<std::string> own_generated_directories;
+  for (const auto& source : std::span(executable.sources).subspan(executable.first_own_source))
+    if (auto directory = generated_main_directory(source))
+      own_generated_directories.push_back(std::move(*directory));
+  std::map<std::vector<std::string>, HostInputOverlay> overlays;
+  for (const auto& [index, source] : std::views::enumerate(executable.sources)) {
+    const bool own_source = static_cast<std::size_t>(index) >= executable.first_own_source;
+    auto visible = overlay;
+    if (overlay || !own_source) {
+      // Visible siblings do not change the translation unit's include search.
+      auto directories = source.includes;
+      if (own_source) directories.append_range(own_generated_directories);
+      else if (auto directory = generated_main_directory(source)) directories.push_back(std::move(*directory));
+      auto [view, inserted] = overlays.try_emplace(std::move(directories));
+      if (inserted) view->second = host_overlay_for(view->first, overlay);
+      visible = view->second;
+    }
+    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk, std::move(visible)));
+  }
+  build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name,
+                                   .archive_link = inputs.archives});
   return session.request(std::move(build));
 }
 
@@ -690,23 +760,9 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   const auto view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
   for (const auto& source : plan.sources)
     build.units.push_back(register_project_unit(session, cwd, source, native_target, view));
-  std::optional<pipeline::ArchiveLinkInputs> archives;
-  if (!plan.link_inputs.empty()) {
-    using enum pipeline::LinkOperand::Kind;
-    const auto format = native_target == &ast::x86_64_linux ? obj::target::x86_64_linux : obj::target::aarch64_macos;
-    archives.emplace(pipeline::ArchiveLinkInputs{.target = format, .operands = {}, .archives = {}});
-    for (std::size_t i = 0; i < build.units.size(); ++i) archives->operands.push_back({source, i});
-
-    std::map<std::pair<std::size_t, std::size_t>, std::size_t> positions;
-    for (const auto& input : plan.link_inputs) {
-      const auto [position, inserted] = positions.try_emplace({input.producer, input.output}, archives->archives.size());
-      if (inserted) {
-        auto [name, bytes] = link_artifact(plan, input, output_at, native_triple);
-        archives->archives.emplace_back(std::move(name), std::string(bytes.begin(), bytes.end()));
-      }
-      archives->operands.push_back({archive, position->second});
-    }
-  }
+  auto archives = archive_link_inputs(plan.link_inputs, build.units.size(), native_target, [&](const auto& input) {
+    return link_artifact(plan, input, output_at, native_triple);
+  });
   build.program = session.program({.tus = build.units, .objects = {}, .identifier = target,
                                    .archive_link = std::move(archives)});
   return session.request(std::move(build));
@@ -964,7 +1020,7 @@ struct BuiltHostTools {
 };
 
 using BuildHostTools = std::function<std::optional<BuiltHostTools>(
-    const ProjectPlan&, std::span<const std::size_t>, std::span<const HostInputOverlay>)>;
+    const ProjectPlan&, std::span<const std::size_t>, std::span<const HostInputs>)>;
 using FindActionReceipt = std::function_ref<const ActionOutputs*(Fp128)>;
 using AdmitRuleValue = std::function<void(std::string_view, std::string_view, RuleValueRecord)>;
 using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePackagePlan&, const RulePackageAction&)>;
@@ -1070,7 +1126,11 @@ std::expected<StagedProducers, std::string> stage_producers(
 
 ProducerClosure host_input_closure(const ProjectPlan& plan, std::span<const std::size_t> needed) {
   std::vector<ArtifactOutputPlan> requested;
-  for (const auto index : needed) requested.append_range(plan.host_executables[index].generated_inputs);
+  for (const auto index : needed) {
+    const auto& executable = plan.host_executables[index];
+    requested.append_range(executable.generated_inputs);
+    requested.append_range(executable.link_inputs);
+  }
   return producer_closure(plan, requested);
 }
 
@@ -1094,13 +1154,25 @@ HostInputOverlay host_input_overlay(const fs::path& cwd, const ProjectPlan& plan
   return std::make_shared<const pp::HostOverlay>(std::move(files));
 }
 
-std::expected<std::vector<HostInputOverlay>, std::string> stage_host_inputs(
-    const fs::path& cwd, const ProjectPlan& plan, std::span<const std::size_t> needed,
+std::optional<HostInputs> resolve_host_inputs(const fs::path& cwd, const ProjectPlan& plan, std::size_t index,
+                                               const ast::Target* host_target, LookupActionOutputs output_at) {
+  const auto& executable = plan.host_executables[index];
+  auto overlay = host_input_overlay(cwd, plan, index, output_at);
+  if (!overlay && !executable.generated_inputs.empty()) return std::nullopt;
+  if (std::ranges::any_of(executable.link_inputs, [&](const auto& input) { return !output_at(input.producer); }))
+    return std::nullopt;
+  auto archives = archive_link_inputs(executable.link_inputs, executable.sources.size(), host_target,
+    [&](const auto& input) { return link_artifact(plan, input, output_at, {}, ArchivePath::host); });
+  return HostInputs{std::move(overlay), std::move(archives)};
+}
+
+std::expected<std::vector<HostInputs>, std::string> stage_host_inputs(
+    const fs::path& cwd, const ProjectPlan& plan, std::span<const std::size_t> needed, const ast::Target* host_target,
     const RunRuleAction& run, std::function_ref<bool(std::size_t, Fp128)> current_action,
     std::function_ref<bool()> current_recipe, std::function_ref<std::unexpected<std::string>()> changed) {
-  std::vector<HostInputOverlay> overlays(needed.size());
+  std::vector<HostInputs> inputs(needed.size());
   const auto closure = host_input_closure(plan, needed);
-  if (closure.generators.empty()) return overlays;
+  if (closure.generators.empty()) return inputs;
   if (!closure.hosts.empty()) return std::unexpected("generated host inputs require host-independent producers");
   if (!current_recipe()) return changed();
   auto staged = stage_producers(plan, closure.generators, {}, run, current_action);
@@ -1108,9 +1180,12 @@ std::expected<std::vector<HostInputOverlay>, std::string> stage_host_inputs(
   if (!current_recipe()) return changed();
 
   const auto output_at = [&](std::size_t index) { return staged->output_at(index); };
-  for (auto&& [index, overlay] : std::views::zip(needed, overlays))
-    overlay = host_input_overlay(cwd, plan, index, output_at);
-  return overlays;
+  for (auto&& [index, source] : std::views::zip(needed, inputs)) {
+    auto resolved = resolve_host_inputs(cwd, plan, index, host_target, output_at);
+    if (!resolved) return std::unexpected("generated host input receipt unavailable");
+    source = std::move(*resolved);
+  }
+  return inputs;
 }
 
 std::optional<Fp128> current_producer_key(const ProjectPlan& plan, const ProducerClosure& closure,
@@ -1152,7 +1227,7 @@ struct HostProducerStage {
   const BuildHostTools& build;
   FindActionReceipt receipt;
   std::shared_ptr<const BuiltHostTools> hosts = {};
-  std::optional<std::vector<HostInputOverlay>> overlays = std::nullopt;
+  std::optional<std::vector<HostInputs>> inputs = std::nullopt;
 
   bool current() const {
     return closure.hosts.empty() || (hosts && current_host_files(hosts->files));
@@ -1167,16 +1242,16 @@ struct HostProducerStage {
       std::function_ref<bool()> current_recipe,
       std::function_ref<void(const std::vector<HostFileObservation>&)> observe,
       std::function_ref<std::unexpected<std::string>()> changed) {
-    if (!overlays) {
-      auto staged = stage_host_inputs(cwd, plan, closure.hosts, run,
+    if (!inputs) {
+      auto staged = stage_host_inputs(cwd, plan, closure.hosts, pp::native_target, run,
           [&](std::size_t, Fp128) { return current_recipe(); }, current_recipe, changed);
       if (!staged) return std::unexpected(std::move(staged.error()));
-      overlays = std::move(*staged);
+      inputs = std::move(*staged);
     }
     const auto refresh = [&] {
       if (!current_recipe()) return false;
       if (current()) return true;
-      auto updated = build(plan, closure.hosts, *overlays);
+      auto updated = build(plan, closure.hosts, *inputs);
       if (!updated) return false;
       hosts = std::make_shared<const BuiltHostTools>(std::move(*updated));
       observe(hosts->files);
@@ -1959,12 +2034,12 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   };
   const std::function<void()> check_revision = [] {};
   const BuildHostTools build_host_tools = [&](const ProjectPlan& plan, std::span<const std::size_t> needed,
-                                             std::span<const HostInputOverlay> overlays)
+                                             std::span<const HostInputs> inputs)
       -> std::optional<BuiltHostTools> {
     std::vector<pipeline::RequestId> requests;
-    for (const auto& [i, overlay] : std::views::zip(needed, overlays))
+    for (const auto& [i, staged] : std::views::zip(needed, inputs))
       requests.push_back(register_host_executable(session_, workspace_path, plan.host_executables[i],
-                                                  host_target, overlay));
+                                                  host_target, staged));
     while (!cancelled()) {
       refresh();
       const auto before = session_.db().revision();
@@ -2255,9 +2330,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
     const bool has_generated_host_inputs = std::ranges::any_of(plan.host_executables, [](const auto& executable) {
-      return !executable.generated_inputs.empty();
+      return !executable.generated_inputs.empty() || !executable.link_inputs.empty();
     });
-    std::vector<std::optional<Fp128>> host_overlay_keys;
+    std::vector<std::optional<Fp128>> host_input_keys;
     if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id) {
       std::vector<std::size_t> needed;
       needed.append_range(std::views::iota(std::size_t{0}, plan.host_executables.size()));
@@ -2278,24 +2353,24 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         const auto at = static_cast<std::size_t>(action - observed->generators.begin());
         return current_producer_key(*observed, closure, at, {}, receipt) == id;
       };
-      auto overlays = stage_host_inputs(cwd, plan, needed, run_rule, current_host_input_action, current_recipe, [&] {
+      auto inputs = stage_host_inputs(cwd, plan, needed, host_target, run_rule, current_host_input_action, current_recipe, [&] {
         superseded = true;
         return std::unexpected(std::string("generated host inputs changed during preparation"));
       });
-      if (!overlays) {
+      if (!inputs) {
         if (superseded) continue;
-        return fail(std::move(overlays.error()));
+        return fail(std::move(inputs.error()));
       }
       std::vector<pipeline::RequestId> host_requests;
-      for (const auto& [executable, overlay] : std::views::zip(plan.host_executables, *overlays)) {
-        host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target, overlay));
-        host_overlay_keys.push_back(overlay ? std::optional{overlay->fingerprint()} : std::nullopt);
+      for (const auto& [executable, staged] : std::views::zip(plan.host_executables, *inputs)) {
+        host_requests.push_back(register_host_executable(session_, workspace_path, executable, host_target, staged));
+        host_input_keys.push_back(staged.key());
       }
       apply([&](engine::Db& db) {
-        db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests), host_overlay_keys});
+        db.set<WorkspacePlan>(key, Planned{native_workspace, plan, std::move(host_requests), host_input_keys});
       });
     } else {
-      host_overlay_keys = prior->host_overlay_keys;
+      host_input_keys = prior->host_input_keys;
     }
 
     for (;;) {
@@ -2326,7 +2401,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
               if (actions.keys[at] != id) return false;
               if (!current->host_dependent || !has_generated_host_inputs || fingerprint(*observed) == plan_id)
                 return true;
-              // Only the reachable host overlays affect this action. Check
+              // Only reachable host inputs affect this action. Check
               // bytes from known receipts without starting a producer.
               const auto hosts = producer_closure(*observed, current->artifact_inputs, current->host_inputs).hosts;
               const auto known_output = [&](std::size_t producer) -> const ActionOutputs* {
@@ -2334,9 +2409,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                 return key ? receipt(*key) : nullptr;
               };
               return std::ranges::all_of(hosts, [&](std::size_t host) {
-                if (!host_overlay_keys[host]) return true;
-                const auto overlay = host_input_overlay(cwd, *observed, host, known_output);
-                return overlay && overlay->fingerprint() == *host_overlay_keys[host];
+                if (!host_input_keys[host]) return true;
+                const auto inputs = resolve_host_inputs(cwd, *observed, host, host_target, known_output);
+                return inputs && inputs->key() == host_input_keys[host];
               });
             }
             // The plan only describes host source paths. Re-demand the images so an
