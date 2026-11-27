@@ -14,7 +14,9 @@ out of the checkout and build it there.
 | [Host generated headers](host-generated-headers/README.md) | [build.ycxx](host-generated-headers/build.ycxx) | Give a host scanner a generated header and compare edits that preserve or change its bytes. |
 | [Host generated sources](host-generated-sources/README.md) | [build.ycxx](host-generated-sources/build.ycxx) | Generate a host scanner's C++ source and sibling header, then trace equal and changed outputs. |
 | [Host library generated headers](host-library-generated-headers/README.md) | [build.ycxx](host-library-generated-headers/build.ycxx) | Give a library shared by the host scanner and foreign app a generated header, then watch its score change. |
+| [Role-bound library headers](role-bound-library-headers/README.md) | [build.ycxx](role-bound-library-headers/build.ycxx) | Give a shared library different host and target versions of the same generated header and watch either change. |
 | [Host library generated sources](host-library-generated-sources/README.md) | [build.ycxx](host-library-generated-sources/build.ycxx) | Mix disk and generated sources in a shared library and watch a private generated sibling change. |
+| [Role-bound library sources](role-bound-library-sources/README.md) | [build.ycxx](role-bound-library-sources/build.ycxx) | Give a shared library distinct generated host and target implementations with private sibling headers. |
 | [Host static archive inputs](host-static-archive-inputs/README.md) | [build.ycxx](host-static-archive-inputs/build.ycxx) | Link a generated archive into a native scanner and watch an archive edit change the app score. |
 | [Host library static archives](host-library-static-archive-inputs/README.md) | [build.ycxx](host-library-static-archive-inputs/build.ycxx) | Inherit a generated host archive through a library diamond and trace its binding in the HTML graph. |
 | [Archive consumer bindings](archive-consumer-bindings/README.md) | [build.ycxx](archive-consumer-bindings/build.ycxx) | Link different host and target archives through one shared library and watch either archive change. |
@@ -26,6 +28,7 @@ out of the checkout and build it there.
 | [Module providers](module-providers/README.md) | [build.ycxx](module-providers/build.ycxx) | Resolve a shared module through two import paths and compare its provider on Linux and macOS. |
 | [Native C++](native/README.md) | [build.ycxx](native/build.ycxx) | Watch a generator input change and inspect the library dependency and source glob. |
 | [Custom rule](custom-rule/README.md) | [build.ycxx](custom-rule/build.ycxx) | Use a C++ workspace plugin to generate a retry-limit header and compare a whitespace edit with a digit edit. |
+| [Native leaf rule](native-leaf-rule/README.md) | [build.ycxx](native-leaf-rule/build.ycxx) | Pin a rule plugin to ycxx and inspect the native shared-library link and load probes. |
 | [Typed capability header](typed-capabilities/README.md) | [build.ycxx](typed-capabilities/build.ycxx) | Inspect the compiler's `<filesystem>` probe and run the app that uses its generated constant. |
 | [Package-defined probe](package-probe/README.md) | [build.ycxx](package-probe/build.ycxx) | Edit a codec profile and trace how a plugin classifies shell output as a typed support state. |
 | [Shader bundle](shader-bundle/README.md) | [build.ycxx](shader-bundle/build.ycxx) | Generate an inventory, add and remove a shader, and update managed runtime assets under watch. |

@@ -16,6 +16,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     cannot regenerate data that needs a build, and `merge=ours` keeps it silently stale.
   - Rule: DECISIONS §6.9. Learned on #366.
 
+- **Give subagents the exact stage-named test command, and commit only after they stop.**
+  - A brief to a spec-only test author said `tools/test --cxx clang <path>`. A bare path also
+    runs `tools/build`, which started a second build in the session's `build/` and broke the
+    session's own build of modules.
+  - Separately, `git add tests` while the author was still writing swept two unfinished files
+    into a commit.
+  - Do: brief with `tools/test --cxx clang core <path>`, never a bare path. Wait for the author's
+    report before staging its directory, or stage files by name.
+  - Learned on #356.
 - **A session cannot run on a model above its parent's.** A session asked to run on Fable
   silently started on Opus.
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
@@ -230,6 +239,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     gates of #1294 and #1306, one of them started at load 5. #1295's and #1304's gates passed on the
     same Mac the same day. #1123 measured about 10 s for the first launch of a new executable; why
     is not established.
+- **Search open PRs for a feature before implementing it, even inside a broader batch.** #1416
+  implemented placeholder constant template parameters for #1244, with a comment on #286. Twelve
+  hours later, #1533 implemented bare `auto` parameters a second way as part of a compatibility
+  batch: it kept the `auto` placeholder as the parameter's type, while #1416 gave the parameter
+  its own position as its type. #1533 merged first. Merging `main` into #1416 then meant choosing
+  one representation, moving #1533's GCC array-bound rule onto it, and deleting #1533's code
+  paths. Those paths could no longer match a parameter, though the merge itself was clean.
+  - Do: before writing code for a language feature, run `gh pr list -R yrashk/ycxx --search
+    '<feature>'` and read the feature's issue comments. If another PR has it, build on that PR
+    or leave the feature to it. On a merge that brings in a second implementation, keep one
+    representation and move the other's mode-specific rules onto it. Delete the paths that no
+    longer apply, and say so in the PR.
+  - Learned on #1244.
 
 ## Working with Fable subagents
 
@@ -675,6 +697,21 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **A replay skips what the template's analysis measured; it does not re-scan tokens.** On #340,
+  a class template specialization skipped a static data member template's initializer by
+  balancing `()[]{}` up to `;` or `,`, so `P<N, 1>::value` ended at the comma (a review P0). The
+  splitter cannot tell `<` from less-than either.
+  - Do: record the extent in the pattern's analysis (`Program::set_static_initializer`) and
+    `seek` to it in the replay, as lazy static members do.
+- **Small semantic groups can repeat large headers.** On #978, the seven main-file groups of one
+  standard-library fixture each analysed thousands of the same header items. The largest
+  costs were in semantic analysis and the END worklist, and collecting the dependency trace
+  took under a tenth of a second per group in the isolated profile.
+  - Compare CPU time as well as wall time, and time item analysis, END and tracing
+    separately. Test the largest header fixtures together, as the Linux test driver does.
+    A small source run can share the specialization work in one group and run concurrently
+    with the headers.
+
 - **A point is not an item.** `Program::is_complete(c, item)` and its kin also get points past
   the item table (`end()`, an instantiation point). On #117 a helper that walked `items[k].parent`
   from such a point read past the table, and the `<iostream>` run segfaulted with no diagnostic
@@ -723,6 +760,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: give a bounded query a tri-state result (`yes`, `no`, `unknown`), as `base_path` and
     `PointerConversion` now do, and let each caller decide what `unknown` means.
   - Learned on #218.
+
+- **Order-dependent wrong bodies or false "redeclaration" errors: check entity identity first.**
+  On #1417 two members of a class template that differed only in their trailing requires-clauses
+  got one `EntityId`, because `Entities::identity` mixed `EntityRec::constraints` only for function
+  templates. The first record published won, so whichever declaration came first supplied the
+  other's body, and same-signature copy constructors were "redeclarations". Swapping the two
+  declarations' order flipped the result, which is what pointed at identity.
+  - Do: when a new property distinguishes declarations ([basic.scope.scope]/4), add it to
+    `identity` in the same change, and test both declaration orders.
+  - Learned on #1417.
 
 - **`Program`'s per-entity maps hold only the items analysed so far.** Top-level items are
   analysed one group at a time and earlier ones only when asked (#947). So `class_items_` and
@@ -852,6 +899,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `= X::none` (or intern the empty list as index 0), and test with the argument declared first.
   - Rule: AGENTS.md, "While working".
   - Learned on #25 and #88 steps 6 and 8.
+- **The global namespace is `EntityId::none`.** On #1549 a fallback owner bailed out when its
+  scope was `EntityId::none`, meaning "no scope". That guard silently dropped every case at global
+  namespace scope, which was most of the tests.
+  - Do: before treating `EntityId::none` as "nothing there", check whether the place can mean the
+    global namespace (an enclosing namespace, a scope, a lookup context). Test at global scope and
+    inside a named namespace.
 - **Test blocked storage past its first block.** #107's chunked pools passed a concurrency test
   that never left block 0; the review found that any list longer than the next block aborted,
   which one 3,000-statement function triggers.

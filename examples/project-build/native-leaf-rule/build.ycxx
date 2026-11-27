@@ -1,0 +1,5 @@
+use plugin("rules/package") as leaf
+
+leaf.header "score" {}
+
+leaf.executable "app" {}

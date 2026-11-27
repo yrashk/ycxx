@@ -58,6 +58,7 @@ pattern and          : (and ?a ?b)                      => ANDrr ?d ?a ?b
 pattern or           : (or ?a ?b)                       => ORRrr ?d ?a ?b
 pattern xor          : (xor ?a ?b)                      => EORrr ?d ?a ?b
 pattern ctz          : (ctz ?a)                         => RBIT ?t0 ?a ; CLZ ?d ?t0
+pattern clz          : (clz ?a)                         => CLZ ?d ?a
 
 # Narrow operands are extended to 32 bits where the upper bits matter (a register holding an
 # i1, i8 or i16 leaves the bits above its width unspecified).

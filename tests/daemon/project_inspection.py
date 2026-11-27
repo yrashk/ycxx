@@ -211,6 +211,15 @@ def check_value_bindings_html(document, plan):
     assert not any(node.attrs.get('data-value-probe') == '1' for node in parsed.elements)
 
 
+def graph_target_ids(plan):
+    graph = plan['dependency_graph']
+    names = {plan['target']}
+    for edge in graph['edges'] + graph['value_edges']:
+        names.update((edge['consumer'], edge['producer']))
+    ordered = sorted(names, key=lambda name: name.encode('utf-8'))
+    return {name: f'plan-target-{index}' for index, name in enumerate(ordered)}
+
+
 def check_target_dependencies_html(document, plan):
     from project_module_graph import PlanHTML
 
@@ -223,14 +232,11 @@ def check_target_dependencies_html(document, plan):
     assert (incomplete in navigation.visible()) == (not graph['complete']), navigation.visible()
 
     outgoing = defaultdict(list)
-    names = {plan['target']}
     for edge in graph['edges'] + graph['value_edges']:
         outgoing[edge['consumer']].append(edge)
-        names.update((edge['consumer'], edge['producer']))
-    ordered = sorted(names, key=lambda name: name.encode('utf-8'))
-    ids = {name: f'plan-target-{index}' for index, name in enumerate(ordered)}
+    ids = graph_target_ids(plan)
     selected = plan['target']
-    order = [selected, *(name for name in ordered if name != selected)]
+    order = [selected, *(name for name in ids if name != selected)]
     cards = [node for node in navigation.descendants if node.tag == 'article']
     assert [card.attrs.get('id') for card in cards] == [ids[name] for name in order]
     document_ids = (node.attrs.get('id', '') for node in parsed.elements)
@@ -320,8 +326,10 @@ def check_target_graph_html(document, plan):
     anchors = {node.attrs.get('id'): node for node in manifest.descendants}
     lines = plan['definition'].splitlines()
     kinds = {'source', 'include', 'rule', 'output', 'host-target', 'native-target', 'link-input'}
-    wanted = Counter((row['target'], row['kind'], row['value'], row['line'], row['column'])
-                     for row in plan['facts'] if row['kind'] in kinds)
+    ids = graph_target_ids(plan)
+    wanted = Counter((ids[row['target']], row['kind'], row['value'].replace('\x7f', r'\x7F'),
+                      row['line'], row['column']) for row in plan['facts']
+                     if row['kind'] in kinds and row['target'] in ids)
     found = Counter()
     for row in parsed.elements:
         if not {'data-graph-target', 'data-graph-kind'} & row.attrs.keys():
@@ -335,7 +343,8 @@ def check_target_graph_html(document, plan):
             _, line, column = link.visible().split(':')
             line, column = int(line), int(column)
             assert link.attrs['href'] == f'#manifest-line-{line}', link.attrs
-            assert anchors[f'manifest-line-{line}'].visible() == lines[line - 1]
+            line_text = lines[line - 1].replace('\x7f', r'\x7F')
+            assert anchors[f'manifest-line-{line}'].visible() == line_text
         else:
             line = column = 0
         found[target, kind, value.visible(), line, column] += 1

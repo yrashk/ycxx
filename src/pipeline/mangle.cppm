@@ -41,6 +41,8 @@ struct LocalFunction {
   std::optional<TemplateSpec> spec;
   bool internal_name = false;
   bool c_name = false;
+  // A non-template member's trailing requires-clause, which its <encoding> ends with (`Q`).
+  ast::WrittenConstraint trailing{};
 };
 
 // The declaration named by a symbolic function template argument.
@@ -88,6 +90,9 @@ struct ClassName {
   bool local_class = false;
   std::optional<std::uint32_t> private_closure_number{};
   bool static_closure = false;
+  // A TU-local closure in a class or namespace (`scope`), owned by no function or variable
+  // (#1549): `$_N` (`private_closure_number`) in its scope's <nested-name>.
+  bool closure_in_scope = false;
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -111,7 +116,8 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
                                                          bool special = false, const FunctionNames& functions = {},
                                                          const ObjectNames& objects = {},
                                                     ast::Compatibility compatibility = ast::Compatibility::spec,
-                                                    const ast::Target& target = ast::aarch64_darwin);
+                                                    const ast::Target& target = ast::aarch64_darwin,
+                                                    const ast::WrittenConstraint& trailing = {});
 
 // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
@@ -136,7 +142,8 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     bool leading_underscore = true, const FunctionNames& functions = {},
                                                     const ObjectNames& objects = {},
                                                     ast::Compatibility compatibility = ast::Compatibility::spec,
-                                                    const ast::Target& target = ast::aarch64_darwin);
+                                                    const ast::Target& target = ast::aarch64_darwin,
+                                                    const ast::WrittenConstraint& trailing = {});
 
 }  // namespace ycxx::pipeline
 
@@ -453,8 +460,19 @@ class Mangler {
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
     if (n.closure) {
-      if (n.closure_variable != ast::EntityId::none)
+      // In a local class: `Z <encoding> E N <prefix> E [<discriminator>]` (§5.1.6).
+      if (auto root = n.closure_in_scope ? local_root(e) : std::nullopt) {
+        auto l = local_encoding(*root->second.local);
+        if (!l) return l;
+        return prefix(e).transform([&](std::string p) { return "Z" + *l + "EN" + p + "E" + discriminator(root->second); });
+      }
+      if (n.closure_variable != ast::EntityId::none || (n.closure_in_scope && n.scope != ast::EntityId::none))
         return prefix(e).transform([](std::string p) { return "N" + p + "E"; });
+      if (n.closure_in_scope) {  // in the global namespace: an <unscoped-name>
+        auto component = closure_component(n);
+        if (component) candidates_.push_back(key);
+        return component;
+      }
       // A closure type as a type: the <local-name> `Z <encoding> E <closure-type-name>` (§5.1.6).
       if (!n.local) return std::unexpected("a closure type whose function is unknown");
       auto l = local_encoding(*n.local);
@@ -509,7 +527,11 @@ class Mangler {
       // n-th closure of one signature in its context is numbered n − 2 (§5.1.8). Its context is
       // the <local-name> before the nested-name it begins.
       std::string r;
-      if (n.closure_variable != ast::EntityId::none) {
+      if (n.closure_in_scope && n.scope != ast::EntityId::none) {
+        auto owner = prefix(n.scope);
+        if (!owner) return owner;
+        r = *owner;
+      } else if (n.closure_variable != ast::EntityId::none) {
         auto owner = prefix(n.closure_variable);
         if (!owner) return owner;
         r = *owner;
@@ -561,7 +583,7 @@ class Mangler {
   std::optional<std::pair<ast::EntityId, ClassName>> local_root(ast::EntityId e) const {
     for (int depth = 0; e != ast::EntityId::none && classes_ && depth < 64; ++depth) {
       ClassName n = classes_(e);
-      if (!n.is_class || n.closure) return std::nullopt;
+      if (!n.is_class || (n.closure && !n.closure_in_scope)) return std::nullopt;
       if (n.local_class) {
         if (!n.local) return std::nullopt;
         return std::pair{e, std::move(n)};
@@ -613,8 +635,11 @@ class Mangler {
   // A function's <encoding> (§5.1.2), without `_Z`: its <name>, a <nested-name> in a class or
   // namespace, then its parameter types. A member of a closure type is in a <local-name>, the
   // closure's function's <encoding> first (§5.1.6).
+  // `trailing`: a non-template member's trailing requires-clause, as Clang and GCC encode it after
+  // the parameters.
   std::expected<std::string, std::string> encoding(std::string_view name, ast::QualType type, ast::EntityId scope,
-                                                  bool special, bool internal_name = false) {
+                                                  bool special, bool internal_name = false,
+                                                  const ast::WrittenConstraint& trailing = {}) {
     ast::QualType c = in_.types.canon(type);
     if (!in_.types.is<ast::TFunction>(c)) return std::unexpected("not a function type");
     auto f = in_.types.get<ast::TFunction>(c);
@@ -637,7 +662,7 @@ class Mangler {
     if (scope != ast::EntityId::none) {
       std::string local;
       std::string disc;  // a local class's discriminator, after the whole nested-name (§5.1.6)
-      if (sc.closure && sc.closure_variable == ast::EntityId::none) {
+      if (sc.closure && sc.closure_variable == ast::EntityId::none && !sc.closure_in_scope) {
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;
@@ -663,7 +688,9 @@ class Mangler {
     }
     auto sig = signature(f, false);
     if (!sig) return sig;
-    return out + *sig;
+    auto constraint = constraint_suffix(trailing, false);
+    if (!constraint) return constraint;
+    return out + *sig + *constraint;
   }
   // A function template specialization's <encoding>, without `_Z` (§5.1.2).
   // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
@@ -690,7 +717,7 @@ class Mangler {
       const bool gcc_generated = compatibility_ == ast::Compatibility::gcc && in_.seqs.size(spec.generic_invoker_head) != 0;
       if (gcc_generated && !conversion) name = "_FUN";
       std::string local;
-      if (sc.closure_variable == ast::EntityId::none) {  // else the variable is its <closure-prefix>
+      if (sc.closure_variable == ast::EntityId::none && !sc.closure_in_scope) {  // else its <closure-prefix> or scope
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;
@@ -818,7 +845,7 @@ class Mangler {
   std::expected<std::string, std::string> local_encoding(const LocalFunction& f) {
     if (f.c_name) return source_name(f.name);
     if (f.spec) return specialization_encoding(f.name, *f.spec, f.scope, f.special, f.internal_name);
-    return encoding(f.name, f.type, f.scope, f.special, f.internal_name);
+    return encoding(f.name, f.type, f.scope, f.special, f.internal_name, f.trailing);
   }
 
   // <bare-function-type>: the return type when `with_return`, then the parameter types, `v` for
@@ -900,7 +927,7 @@ class Mangler {
       }
       // Any other value-dependent argument: `X <expression> E` (§5.1.5.7, §5.1.6).
       if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value) ||
-          in_.values.is<ast::VDepCall>(a.value)) {
+          in_.values.is<ast::VDepConcept>(a.value) || in_.values.is<ast::VDepCall>(a.value)) {
         auto e = expression(a.value);
         if (!e) return e;
         return "X" + *e + "E";
@@ -1836,9 +1863,9 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
                                                          ast::QualType type, const ClassNames& classes,
                                                          ast::EntityId scope, bool special, const FunctionNames& functions,
                                                          const ObjectNames& objects, ast::Compatibility compatibility,
-                                                         const ast::Target& target) {
+                                                         const ast::Target& target, const ast::WrittenConstraint& trailing) {
   Mangler m(in, classes, functions, objects, compatibility, target);
-  auto e = m.encoding(name, type, scope, special);
+  auto e = m.encoding(name, type, scope, special, false, trailing);
   if (!e) return e;
   return "_Z" + *e;
 }
@@ -1859,7 +1886,8 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     const ClassNames& classes, ast::EntityId scope,
                                                     bool special, const TemplateSpec* spec, bool leading_underscore,
                                                     const FunctionNames& functions, const ObjectNames& objects,
-                                                    ast::Compatibility compatibility, const ast::Target& target) {
+                                                    ast::Compatibility compatibility, const ast::Target& target,
+                                                    const ast::WrittenConstraint& trailing) {
   const std::string prefix = leading_underscore ? "_" : "";
   if (spec) {
     auto m = mangled_specialization(in, name, *spec, classes, scope, special, functions, objects, compatibility, target);
@@ -1876,7 +1904,7 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
   // [basic.start.main]: only the global namespace's `main` is the program's.
   if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
     return prefix + std::string(name);
-  auto m = mangled_function(in, name, type, classes, scope, special, functions, objects, compatibility, target);
+  auto m = mangled_function(in, name, type, classes, scope, special, functions, objects, compatibility, target, trailing);
   if (!m) return m;
   return prefix + *m;
 }

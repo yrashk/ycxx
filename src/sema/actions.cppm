@@ -107,6 +107,7 @@ struct AliasCallPattern {
   bool class_result = false;
   bool rank_checks = false;
   bool qualified_type_arguments = false;
+  bool closures = false;  // its type-id makes closure types, each specialization its own (#1549)
 };
 
 struct PresumedSource {
@@ -205,6 +206,9 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
+  // Whether the default argument of parameter `parameter` of function `f` still waits for its
+  // class to be complete ([class.mem.general]), so a call before then cannot take it.
+  virtual bool defaults_pending(EntityId, std::size_t) { return false; }
   // The effective specification of a written trivial destructor whose class is being completed.
   virtual std::optional<bool> replay_destructor_exception(Sema&, EntityId, u32) { return std::nullopt; }
   // A selected specialization's exception specification ([except.spec]/13): of a member template,
@@ -303,6 +307,9 @@ public:
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
+  // The unit's normal forms of concept-ids (`Sema::concept_constraint`), keyed by the concept and
+  // its interned arguments; none where nothing keeps them.
+  virtual std::map<std::pair<u32, u32>, ConstId>* concept_normal_forms() { return nullptr; }
   virtual void record_nested_constraint_operand(u32 /*begin*/, u32 /*end*/) {}
   virtual std::optional<u32> nested_constraint_operand_end(u32 /*begin*/) { return std::nullopt; }
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
@@ -340,6 +347,9 @@ public:
   virtual const ClassRec& publish_class(EntityId c, ClassRec r, Sema& context) = 0;
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
+  // The namespace the item being analysed is in: what owns the closure types of lambdas in its
+  // unevaluated operands outside every class and declaration that owns them (#1549).
+  virtual EntityId enclosing_namespace() { return EntityId::none; }
   virtual ~Questions() = default;
 };
 
@@ -1103,6 +1113,7 @@ public:
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
     if (auto block = block_type_template(name); block.found) return block.declaration;
+    if (injected_class_template(name) != EntityId::none) return class_template(name);
     bool found_member = false;
     if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
@@ -1164,15 +1175,38 @@ public:
                                                  bool initializer = false) {
     return named_template(name, ast::DeclKind::variable, at, initializer);
   }
+  // The template whose name `name` is in the current class, or none. In a class template, or a
+  // specialization of one, its injected-class-name followed by `<` is the template's name
+  // ([temp.local]/1): `A<U>` in `A` names the specialization `A<U>`. The class's constructors
+  // share the name but are not found by lookup ([class.ctor]/1), so they do not hide it. The only
+  // member that can, a non-static data member of a class without a user-declared constructor
+  // ([class.mem.general]), makes `A < 2` a comparison.
+  EntityId injected_class_template(NameId name) {
+    if (current_class == EntityId::none) return EntityId::none;
+    const EntityRec& c = w_->entities.rec(current_class);
+    if (c.templ == EntityId::none || c.name != name) return EntityId::none;
+    if (const ClassRec* r = class_rec(current_class))
+      return std::ranges::contains(r->fields, name, &FieldRec::name) ? EntityId::none : c.templ;
+    if (auto m = q_->earlier_member(name); m && m->kind == ast::DeclKind::data_member) return EntityId::none;
+    return c.templ;
+  }
+
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
   // every earlier declaration of it ([temp.param]/12).
   std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind,
                                              std::optional<u32> at = std::nullopt, bool initializer = false) {
-    if (names_member(name)) return std::nullopt;
+    // A static data member template of the class, a base or an enclosing class ([temp.mem]); any
+    // other member hides the namespace's templates ([basic.scope.class]).
+    if (kind == ast::DeclKind::variable)
+      if (auto member = unqualified_member_variable_template(name)) return member;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
         if (p->first == name) return std::nullopt;
     if (template_param(name)) return std::nullopt;
+    const EntityId injected = kind == ast::DeclKind::class_ ? injected_class_template(name) : EntityId::none;
+    // A block-scope using-declaration is found before the class's members ([basic.lookup.unqual]).
+    if (injected == EntityId::none && names_member(name) && !std::ranges::contains(block_usings_, name, &BlockUsing::name))
+      return std::nullopt;
     std::optional<ast::DeclSema> found;
     // Block-scope using-declarations, innermost first ([namespace.udecl]).
     for (auto u = block_usings_.rbegin(); u != block_usings_.rend() && !found; ++u)
@@ -1199,6 +1233,11 @@ public:
       if (matching != decls.rend()) found = *matching;
     }
     if (!found && !decls.empty()) found = decls.back();
+    if (injected != EntityId::none && (!found || found->entity != injected)) {
+      // The template ordinary lookup outside the class would not find (a member template).
+      found = q_->template_decl(injected);
+      if (!found) return std::nullopt;
+    }
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
     // The deferred argument retains no entity. Ordinary lookup at the initializer must
     // determine one before replay. A tag from another namespace can make the name ambiguous.
@@ -1368,6 +1407,7 @@ public:
       if (hard_error || !sat.value_or(true)) return std::nullopt;
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
+    if (pattern.closures) ++closure_alias_uses;
     if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks || pattern.qualified_type_arguments) {
       // Replay checks obligations that become concrete now. The enclosing alias, member or
       // signature retains checks whose arguments still depend on its own parameters.
@@ -1385,6 +1425,14 @@ public:
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
       if (pattern.kind == AliasCallPattern::Kind::may_erase) return std::nullopt;
+      // The expansion holds a placeholder for an operand it cannot represent, which every such
+      // alias shares. The alias-id keeps its identity ([temp.alias]/2) and is read again once its
+      // arguments are known.
+      if (pattern.kind == AliasCallPattern::Kind::unrepresented) {
+        auto expanded = templates_for_use(at).substitute(tmpl.type, bindings);
+        if (!expanded) return std::nullopt;
+        return types().deferred_alias(tmpl.entity, args, *expanded, substituting_default);
+      }
     }
     if (compatibility() == ast::Compatibility::gcc) {
       // A dependent alias still carries the written transformations of its concrete
@@ -1444,6 +1492,12 @@ public:
   // the specialization, of the template's type with the arguments substituted. Its entity is the
   // template and the canonical arguments (§B1.5), as a function template specialization's is.
   Ex variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    // A static data member template of the current instantiation is value-dependent: each
+    // specialization of the class names its own ([temp.dep.constexpr]/2.3, [temp.inst]/3).
+    if (const EntityId owner = w_->entities.rec(tmpl.entity).scope;
+        owner != EntityId::none && w_->entities.rec(owner).kind == EntityKind::class_ &&
+        types().is_dependent(types().class_type(owner)))
+      return dependent_variable_template_id(tmpl, args, begin, end);
     auto full = template_arguments(tmpl, args, begin);
     if (!full) return {NodeId::none, begin, end};
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
@@ -1774,11 +1828,23 @@ public:
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
+  // Memoized for the unit: a concept-id's normal form depends only on the concept and its
+  // arguments, and what satisfaction makes of it is the program's first answer anyway
+  // ([temp.constr.atomic]/3). A member template's type-constraint is formed again in each
+  // specialization of its class that is instantiated (#1653). What diagnosed something is not kept,
+  // so each use says it again.
   std::optional<ConstId> concept_constraint(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 at) {
+    auto* memo = q_->concept_normal_forms();
+    const auto key = memo ? std::pair(std::to_underlying(c.entity), ins().intern_seq(args).index) : std::pair(0u, 0u);
+    if (memo)
+      if (auto it = memo->find(key); it != memo->end()) return it->second;
+    const std::size_t before = diag_count();
     auto full = template_arguments(c, args, at);
     if (!full) return std::nullopt;
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(c.template_params);
-    return templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+    auto normal = templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+    if (memo && normal && diag_count() == before) memo->emplace(key, *normal);
+    return normal;
   }
   // Check the immediately-declared constraint on the type deduced for the placeholder itself
   // ([dcl.type.auto.deduct], [temp.param]), before publishing the completed declarator type.
@@ -3284,6 +3350,102 @@ public:
     }
     return std::nullopt;
   }
+  static bool is_variable_template(const ast::DeclSema& d) {
+    return d.kind == ast::DeclKind::variable && (d.flags & decl_flag::template_);
+  }
+  // The static data member template `n` of class `c` or of a base ([temp.mem],
+  // [class.static.data]): from its record where it is complete, or in the class being defined or
+  // instantiated, among the members declared so far ([basic.scope.class]). None when the name
+  // finds anything else.
+  std::optional<ast::DeclSema> member_variable_template(EntityId c, NameId n, bool unqualified = false) {
+    if (class_rec(c)) {
+      auto found = find_member(c, n, unqualified);
+      if (!found || found->ambiguous || !found->member || found->member->is_function || !found->member->is_template)
+        return std::nullopt;
+      return q_->template_decl(found->member->entity);
+    }
+    if (c != current_class) {  // an enclosing class being defined: its members so far
+      auto m = q_->enclosing_earlier_member(c, n, /*type_only=*/false);
+      return m && is_variable_template(*m) ? m : std::nullopt;
+    }
+    if (auto m = q_->earlier_member(n))  // any earlier member of the name hides the bases'
+      return is_variable_template(*m) ? std::optional(*m) : std::nullopt;
+    // [temp.dep.general]: a dependent base is not searched.
+    for (const BaseRec& b : q_->defining_base_records(c))
+      if (!b.dependent_in_pattern)
+        if (auto r = member_variable_template(b.cls, n, unqualified)) return r;
+    return std::nullopt;
+  }
+  // Unqualified lookup of `name` as a static data member template ([basic.lookup.unqual],
+  // [class.member.lookup]): of the class whose member is analysed or a base, then of the
+  // enclosing classes, innermost first. None when a block-scope name, a block-scope
+  // using-declaration, a template parameter or another member of the name is found first.
+  std::optional<ast::DeclSema> unqualified_member_variable_template(NameId name, EntityId* naming = nullptr) {
+    if (current_class == EntityId::none || template_param(name)) return std::nullopt;
+    for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
+      for (auto p = s->rbegin(); p != s->rend(); ++p)
+        if (p->first == name) return std::nullopt;
+    if (std::ranges::contains(block_usings_, name, &BlockUsing::name)) return std::nullopt;
+    for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls)) {
+      if (auto m = member_variable_template(cls, name, /*unqualified=*/true)) {
+        if (naming) *naming = cls;
+        return m;
+      }
+      const bool other = cls == current_class ? names_member(name)
+                         : class_rec(cls)     ? find_member(cls, name, /*unqualified=*/true).has_value()
+                                              : q_->enclosing_earlier_member(cls, name, /*type_only=*/false).has_value();
+      if (other) return std::nullopt;
+    }
+    return std::nullopt;
+  }
+  // Whether static data member template `tmpl`, named unqualified as `name` at `at`, is
+  // accessible here ([class.access]); diagnosed if not.
+  void unqualified_variable_template_access(const ast::DeclSema& tmpl, NameId name, u32 at) {
+    if (!(tmpl.flags & decl_flag::member) || current_class == EntityId::none) return;
+    EntityId naming = EntityId::none;
+    const auto found = unqualified_member_variable_template(name, &naming);
+    if (!found || found->entity != tmpl.entity) return;
+    const ClassPrefixScope prefix(*this, current_class, static_initializer_name_);
+    check_member_template_access(naming, tmpl.entity, name, at);
+  }
+  // `object.v<args>` or `pointer->v<args>` naming a static data member template v of the
+  // object's class ([expr.ref], [temp.mem]): its declaration, none otherwise.
+  std::optional<ast::DeclSema> object_variable_template(const Ex& object, bool arrow, NameId name) {
+    if (!object.ok() || dependent(object)) return std::nullopt;
+    QualType t = object.type();
+    if (arrow) {
+      if (!types().is_pointer(t)) return std::nullopt;
+      t = types().pointee(t);
+    }
+    if (!types().is_class(t)) return std::nullopt;
+    return member_variable_template(types().class_of(t), name);
+  }
+  // The specialization `object.v<args>` names: the object expression is evaluated, then
+  // discarded, as for any static data member ([expr.ref]/2).
+  Ex object_variable_template_id(const Ex& object, bool arrow, const ast::DeclSema& tmpl,
+                                 std::span<const TemplateArg> args, u32 name_at, u32 end) {
+    const u32 begin = object.begin;
+    QualType t = arrow ? types().pointee(object.type()) : object.type();
+    const NameId name = w_->entities.rec(tmpl.entity).name;
+    check_member_template_access(types().class_of(t), tmpl.entity, name, name_at);
+    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); }))
+      return dependent_node({object}, begin, end);
+    Ex ref = variable_template_id(tmpl, args, name_at, end);
+    if (!ref.ok()) return {NodeId::none, begin, end};
+    ExprInfo info = ref.info;
+    Ex receiver = discarded(object);
+    if (!receiver.ok()) return {NodeId::none, begin, end};
+    Ex effects = convert_node(receiver, ast::ConversionKind::to_void, builtin(Builtin::void_));
+    return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(effects, begin), at(ref, begin)}, begin, end, info);
+  }
+  // `C::v<args>` naming a static data member template of class C ([temp.mem]): its declaration.
+  // A dependent C other than the current instantiation is known only once it is substituted.
+  std::optional<ast::DeclSema> scope_variable_template(const Scope& s, NameId name) {
+    if (!s.type || !types().is_class(*s.type)) return std::nullopt;
+    const EntityId c = types().class_of(*s.type);
+    if (types().is_dependent(*s.type) && c != current_class) return std::nullopt;
+    return member_variable_template(c, name);
+  }
   // Unqualified lookup skips the current class's dependent direct bases even during replay.
   // A non-template member or an ambiguous lookup still hides outer declarations
   // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
@@ -3863,8 +4025,12 @@ public:
     }
     if (!types().is_class(t)) return false;
     const ClassRec* c = class_rec(types().class_of(t));
-    return c && std::ranges::any_of(std::array{std::span(c->members), std::span(c->introduced)} | std::views::join,
-                                    [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
+    if (c && std::ranges::any_of(std::array{std::span(c->members), std::span(c->introduced)} | std::views::join,
+                                 [&](const MemberDeclRec& m) { return m.name == name && m.is_template; }))
+      return true;
+    // Or one of a base ([class.member.lookup]).
+    auto found = c ? find_member(types().class_of(t), name) : std::nullopt;
+    return found && !found->ambiguous && found->member && found->member->is_template;
   }
   // Explicit template arguments for the function templates `e` names, a member or an overload set
   // ([temp.arg.explicit]).
@@ -3876,8 +4042,9 @@ public:
     const ClassRec* r = class_rec(c);
     if (!r && c != EntityId::none && c == current_class) {  // the class being defined: its members so far
       std::vector<ast::DeclSema> functions;
-      q_->earlier_member(name, /*type_only=*/false, &functions);
-      return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
+      const auto last = q_->earlier_member(name, /*type_only=*/false, &functions);
+      return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; }) ||
+             (last && is_variable_template(*last));
     }
     return r && std::ranges::any_of(std::array{std::span(r->members), std::span(r->introduced)} | std::views::join,
                                     [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
@@ -4007,6 +4174,10 @@ public:
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
       const MemberDeclRec& m = *found->member;
+      if (m.is_template) {
+        diag(name_at, Diag::variable_template_without_arguments, name);
+        return fail;
+      }
       ExprInfo info{m.type, ValueCategory::lvalue, 0};
       Ex ref = node(ast::DeclRef{info, m.entity}, name_at, end, info);
       Ex discarded = convert_node(object, ast::ConversionKind::to_void, builtin(Builtin::void_));
@@ -5000,6 +5171,15 @@ public:
     for (const PackRef& r : packs) note_pack(r);
     return packs;
   }
+  // After one element of an expansion is read in an instantiation (begun with `begin_pattern`):
+  // the packs the expansion names are bound to that element, so only the others are the enclosing
+  // operand's. Without this, `h(g(xs...))` reported `xs` as unexpanded in `h`'s argument.
+  void end_element(const std::vector<PackRef>& expanded) {
+    std::vector<PackRef> packs = std::move(pattern_packs_.back());
+    pattern_packs_.pop_back();
+    for (const PackRef& r : packs)
+      if (!std::ranges::contains(expanded, r)) note_pack(r);
+  }
   NameId pack_name(const PackRef& r) {
     if (r.fn != NameId{}) return r.fn;
     for (const auto& scope : template_scopes)
@@ -5291,12 +5471,19 @@ public:
         if (p->first == name) return false;
     if (template_param(name)) return false;
     // A member template of the class whose member is being analysed ([temp.mem]).
+    // A static data member template of the class, a base or an enclosing class ([temp.mem]).
+    if (unqualified_member_variable_template(name)) return true;
+    // Of a complete class, the member its lookup finds, perhaps in a base ([class.member.lookup]).
+    if (current_class != EntityId::none && class_rec(current_class))
+      if (auto member = find_member(current_class, name, /*unqualified=*/true);
+          member && !member->ambiguous && member->member && member->member->is_template)
+        return true;
     if (names_member(name)) {
       if (class_has_member_template(current_class, name)) return true;
       const auto bases = class_prefix_bases(current_class);
       if (!bases.empty() && !static_initializer_has_own_name(name) && !q_->earlier_member(name))
         if (auto member = find_base_member(bases, name, /*unqualified=*/true);
-            member && !member->ambiguous && member->member && member->member->is_function)
+            member && !member->ambiguous && member->member && (member->member->is_function || member->member->is_template))
           return class_has_member_template(member->owner, name);
       return false;
     }
@@ -5312,7 +5499,10 @@ public:
   // A template-id naming a function template ([temp.names]): the overload set of `name`, with its
   // explicitly specified template arguments ([temp.arg.explicit]).
   Ex template_id(NameId name, std::vector<TemplateArg> args, u32 begin, u32 end) {
-    if (auto v = variable_template(name)) return variable_template_id(*v, args, begin, end);
+    if (auto v = variable_template(name)) {
+      unqualified_variable_template_access(*v, name, begin);
+      return variable_template_id(*v, args, begin, end);
+    }
     if (auto c = concept_named(name)) return concept_id_expr(*c, args, begin, end);
     Ex r = name_expr(name, begin, end);
     if (!r.ok()) return r;
@@ -5785,6 +5975,11 @@ public:
     // closures of the declaration being analysed (docs/design/closures.md, decision 3).
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
     const ClosureOwner* owner = scope == EntityId::none && closure_owner ? &*closure_owner : nullptr;
+    // A lambda in an unevaluated operand outside every function body and every declaration that
+    // owns its closures (a `decltype` in an alias-declaration or a function's declarator,
+    // [expr.prim.lambda.general]/3): a closure type no definition can name elsewhere.
+    std::optional<ClosureOwner> unevaluated_owner;
+    if (scope == EntityId::none && !owner && unevaluated > 0) owner = &unevaluated_owner.emplace(unevaluated_closure_owner());
     // [expr.prim.lambda.capture]/3: only a block scope or a default member initializer gives a
     // capture-default something to capture.
     if (owner && spec.default_capture) {
@@ -5839,8 +6034,9 @@ public:
     cr.ordinal = ordinal;
     cr.static_closure = spec.static_;
     // In a template's definition, its own template-head (pushed already) aside.
-    cr.closure_pattern = declaration_part && (in_generic_definition() ||
-                                              (template_scopes.size() > (spec.head.empty() ? 0u : 1u) && !instantiating() && !satisfying_atom));
+    cr.closure_pattern = closure_patterns ||
+                         (declaration_part && (in_generic_definition() || (template_scopes.size() > (spec.head.empty() ? 0u : 1u) &&
+                                                                           !instantiating() && !satisfying_atom)));
     for (const ast::TemplateParamSema& h : spec.head)
       if (h.name != invented_name()) cr.closure_head.push_back(h);
     const u16 depth = spec.head.empty() ? 0 : spec.head.front().depth;
@@ -5970,9 +6166,31 @@ public:
     Fp128 discriminator{};
   };
   std::optional<ClosureOwner> closure_owner;
+  // The owner of a closure type of a lambda in an unevaluated operand of a declaration part that
+  // no `closure_owner` covers (#1549): TU-local, in the class or namespace around it, like a
+  // constraint's (docs/design/closures.md, "Closures of declarations" 2). Its discriminator tells
+  // the item's closures from other items' and each substitution's from the others'
+  // ([expr.prim.lambda.closure]/1, [temp.alias]/5): the template arguments bound.
+  ClosureOwner unevaluated_closure_owner() {
+    // The global namespace is `EntityId::none`.
+    const EntityId around = current_class != EntityId::none ? current_class : q_->enclosing_namespace();
+    Fp128 d = ast::mix(ast::seed("ycxx.sema.unevaluated-closure"), ins().items.fp(item_));
+    d = ast::mix(d, u64(loc_base_));
+    for (const auto& level : template_args.levels) {
+      d = ast::mix(d, u64(level.size()));
+      for (const auto& a : level) d = a ? w_->entities.mix_arg(ast::mix(d, u64(1)), *a) : ast::mix(d, u64(0));
+    }
+    return ClosureOwner{around, ast::Linkage::internal, d};
+  }
   // The part being analysed is no function's body: its generic lambdas are instantiated in it
   // (`GenericClosure::part`).
   bool declaration_part = false;
+  // An alias template's type-id read again with dependent arguments: its closure types are
+  // patterns, which each specialization's replace (#1549).
+  bool closure_patterns = false;
+  // How many alias template specializations named here made closure types (#1549): an alias
+  // template naming one is read again for each of its own specializations ([temp.alias]/5).
+  u32 closure_alias_uses = 0;
   struct ClosureOwnerScope {
     Sema& sema;
     std::optional<ClosureOwner> saved;
@@ -7323,7 +7541,8 @@ public:
       records.push_back({.name = name, .entity = d.entity, .type = d.type, .is_function = true, .is_static = is_static,
                          .is_deleted = (d.flags & decl_flag::deleted) != 0,
                          .is_template = (d.flags & decl_flag::template_) != 0, .defaults = defaults_of(d),
-                         .is_virtual = d.is_virtual, .is_pure = d.is_pure});
+                         .is_virtual = d.is_virtual, .is_pure = d.is_pure,
+                         .constraints = (d.flags & decl_flag::template_) ? ConstId::none : trailing_constraints(d)});
       if (is_static) statics.push_back(d);
     }
     std::vector<const MemberDeclRec*> candidates;
@@ -7431,7 +7650,10 @@ public:
     // A static member, data or function, is named like a namespace-scope entity
     // ([expr.prim.id.qual]): `S::f` can have its address taken or be called. A member function
     // template is a set to deduce from, as overloads are.
-    if (!m.is_function || (m.is_static && !m.is_template && member_functions(c, name).size() == 1)) {
+    // A constrained one is a set of one, whose constraints the use checks ([over.match.viable]/3,
+    // [over.over]/5).
+    if (!m.is_function || (m.is_static && !m.is_template && m.constraints == ConstId::none && !m.ineligible &&
+                           member_functions(c, name).size() == 1)) {
       if (m.is_function && !check_access(c, m.entity, name, name_at, naming)) return fail;
       if (!m.is_function) return static_member(c, m.entity, m.type, begin, end);
       auto mt = deduced_function(m.entity, m.type, begin);
@@ -7461,7 +7683,7 @@ public:
       d.type = member->type;
       d.kind = ast::DeclKind::function;
       d.flags = member->is_deleted ? decl_flag::deleted : 0;
-      d.constraints = ConstId::none;
+      d.constraints = member->ineligible ? unsatisfiable_constraint() : member->constraints;
       statics.push_back(d);
     }
     if (!statics.empty()) overloads_[key] = std::move(statics);
@@ -7472,6 +7694,10 @@ public:
   // initializer is value-dependent is value-dependent ([temp.dep.constexpr]/2.3); of a
   // specialization, naming it instantiates its initializer ([temp.inst]/3).
   Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
+    if (w_->entities.rec(v).kind == EntityKind::variable_template) {
+      diag(begin, Diag::variable_template_without_arguments, w_->entities.rec(v).name);
+      return {NodeId::none, begin, end};
+    }
     bool dep = types().is_dependent(types().class_type(c)) && q_->value_dependent_member(v);
     if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v, unevaluated != 0))
       return {NodeId::none, begin, end};
@@ -7639,12 +7865,13 @@ public:
         continue;
       }
       if (!c->is_template) {
-        if (ex != explicit_args_.end()) continue;
+        if (ex != explicit_args_.end() || c->ineligible || !trailing_constraints_satisfied(c->constraints)) continue;
         // [over.match.funcs.general]/8: a defaulted move assignment operator defined as deleted is
         // no candidate.
         if (c->explicit_defaulted_assignment && types().rec(types().rec(c->type).params.front()).rvalue_ref &&
             (c->copy_assignment == CopyAssignment::deleted || c->copy_assignment == CopyAssignment::const_member)) continue;
         cands.push_back({c->entity, c->type, c->is_static, c->is_deleted, nullptr, c->defaults});
+        cands.back().constraints = c->constraints;
         recs.push_back(c);
         deduced.emplace_back();
         continue;
@@ -7899,6 +8126,8 @@ public:
     bool is_explicit = false;
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
     bool is_consteval = false;  // an immediate function ([dcl.constexpr])
+    // A non-template function's trailing requires-clause, for [over.match.best.general]/2.6.
+    ConstId constraints = ConstId::none;
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -8313,6 +8542,13 @@ public:
       const Candidate& f1 = cands[viable[a].first];
       const Candidate& f2 = cands[viable[b].first];
       if (!f1.pattern && f2.pattern) return true;
+      // [over.match.best.general]/2.6: of non-template functions with the same parameter-type-lists,
+      // the more constrained ([temp.constr.order]).
+      if (!f1.pattern && !f2.pattern && (f1.constraints != ConstId::none || f2.constraints != ConstId::none) &&
+          same_parameter_types(f1.type, f2.type)) {
+        Templates t = templates();
+        return t.subsumes(f1.constraints, f2.constraints) && !t.subsumes(f2.constraints, f1.constraints);
+      }
       if (f1.pattern && f2.pattern) {
         Templates t = templates();
         auto [a12, a21] = t.ordering(*f1.pattern, *f2.pattern, args.size());
@@ -8448,7 +8684,11 @@ public:
             types().rec(fr.params.front()).rvalue_ref) continue;
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
         k.is_consteval = m.is_consteval;
+        k.constraints = m.constraints;
+        // A user-declared copy constructor suppresses the implicit one even when it is not a
+        // candidate ([class.copy.ctor]/6, [over.match.viable]/3).
         user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
+        if (m.ineligible || !trailing_constraints_satisfied(m.constraints)) continue;
         // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
         if (copy_init && (m.is_explicit || fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
         cands.push_back(std::move(k));
@@ -9249,12 +9489,33 @@ public:
     const QualType result = builtin(Builtin::bool_);
     if (any_dependent(args)) return dependent_node(args, begin, end, result);
 
+    const auto standard_unsigned = [&](QualType type) {
+      const auto kind = types().builtin_of(type);
+      return kind && ast::is_standard_unsigned(*kind) && ast::width_of(w_->target, *kind) <= 64;
+    };
     const QualType integer = builtin(w_->target.intmax_type);
-    const std::array params{integer, integer, types().pointer(integer)};
+    std::array params{integer, integer, types().pointer(integer)};
+    const bool unsigned_call = standard_unsigned(args[0].type());
+    if (unsigned_call) {
+      if (!standard_unsigned(args[1].type())) {
+        diag(args[1].begin, Diag::builtin_overflow_unsigned_operand, args[1].type());
+        return invalid;
+      }
+      const QualType output = types().canonical(args[2].type());
+      params[2] = types().is_array(output) ? types().pointer(types().rec(output).inner) : Types::unqualified(output);
+      const auto object = types().is_pointer(params[2])
+                              ? std::optional(types().canonical(types().pointee(params[2]))) : std::nullopt;
+      if (!object || Types::is_const(*object) || !standard_unsigned(*object)) {
+        diag(args[2].begin, Diag::builtin_overflow_unsigned_result, args[2].type());
+        return invalid;
+      }
+      // Both the exact sum and the exact product of two unsigned operands up to 64 bits fit here.
+      params[0] = params[1] = builtin(Builtin::unsigned_int128);
+    }
     std::array<Child, 3> children;
     for (std::size_t i = 0; i < params.size(); ++i) {
       Ex arg = args[i];
-      if (!same_unqualified(arg.type(), params[i])) {
+      if (!unsigned_call && !same_unqualified(arg.type(), params[i])) {
         diag(arg.begin, Diag::builtin_overflow_operand, params[i], arg.type());
         return invalid;
       }
@@ -9661,13 +9922,14 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
-    if (b.function == ctz) {
+    if (b.function == ctz || b.function == clzll) {
       if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return {NodeId::none, begin, end};
-      const QualType param = builtin(Builtin::unsigned_int);
+      const QualType param = builtin(b.function == ctz ? Builtin::unsigned_int : Builtin::unsigned_long_long);
+      const auto op = b.function == ctz ? ast::BuiltinOp::ctz_gcc_zero : ast::BuiltinOp::clzll;
       Ex operand = args.front();
       if (!dependent(operand) && types().is_class(operand.type()))
         operand = exact_conversion_call(operand, param, operand.begin, /*allow_explicit=*/false).value_or(operand);
-      return builtin_value_call(ast::BuiltinOp::ctz_gcc_zero, builtin(Builtin::int_), param, operand, begin, end);
+      return builtin_value_call(op, builtin(Builtin::int_), param, operand, begin, end);
     }
     if (b.function == ctzg) {
       const Ex invalid{NodeId::none, begin, end};
@@ -9732,6 +9994,7 @@ public:
       case strlen:
       case ctz:
       case ctzg:
+      case clzll:
       case library:
       case constant_p:
       case add_overflow:
@@ -10407,7 +10670,42 @@ public:
     return shape;
   }
 
+  // Whether a non-template function with constraints `c` in normal form (its trailing
+  // requires-clause) is a candidate ([over.match.viable]/3): satisfied, or still dependent. An
+  // atom whose check was a hard error leaves it in, as for a template's.
+  bool trailing_constraints_satisfied(ConstId c) {
+    if (c == ConstId::none || templates().constraint_dependent(c)) return true;
+    return q_->satisfied(c).value_or(true);
+  }
+  // Whether function types `a` and `b` have the same parameter-type-lists and implicit object
+  // parameters, for comparing non-template candidates by constraints ([over.match.best.general]/2.6).
+  bool same_parameter_types(QualType a, QualType b) {
+    const TypeRec x = types().rec(types().canonical(a));
+    const TypeRec y = types().rec(types().canonical(b));
+    if (x.params.size() != y.params.size() || x.variadic != y.variadic || x.fn_cv != y.fn_cv || x.fn_ref != y.fn_ref)
+      return false;
+    for (std::size_t i = 0; i < x.params.size(); ++i)
+      if (types().canonical(x.params[i]) != types().canonical(y.params[i])) return false;
+    return true;
+  }
+  // A non-template function's trailing requires-clause: a class member's as its class records it,
+  // with a specialization's arguments substituted; otherwise as declared.
+  ConstId trailing_constraints(const ast::DeclSema& d) {
+    if (d.constraints == ConstId::none || d.entity == EntityId::none) return d.constraints;
+    if (const ClassRec* cr = class_rec(w_->entities.rec(d.entity).scope))
+      for (const MemberDeclRec& m : cr->members)
+        if (m.entity == d.entity) return m.ineligible ? unsatisfiable_constraint() : m.constraints;
+    return d.constraints;
+  }
+  // Never satisfied: an empty disjunction.
+  ConstId unsatisfiable_constraint() {
+    return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});
+  }
   bool constraints_satisfied(const ast::DeclSema& d, std::span<const TemplateArg> args = {}) {
+    // A non-template function: its trailing requires-clause. A pattern with a template head (a
+    // generic lambda's call operator, unflagged) substitutes `args` below.
+    if (!(d.flags & decl_flag::template_) && args.empty() && ins().seqs.size(d.template_params) == 0)
+      return trailing_constraints_satisfied(trailing_constraints(d));
     if (d.constraints == ConstId::none) return true;
     std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(d.template_params);
     auto nf = templates().substitute_constraint(d.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, args));
@@ -10877,9 +11175,18 @@ public:
     if (!record || !record->bases.empty()) return std::nullopt;
     auto candidates = member_functions(cls, name);
     const bool lvalue = object.cat() == ValueCategory::lvalue;
+    // [over.match.conv]: explicit results must match these value types up to qualification.
+    // Keep the existing conservative handling of pointer qualification and reference results
+    // that name the target type.
+    const bool scalar_value_target = types().is_arithmetic(target) || types().is_enum(target) ||
+                                     types().is(target, Builtin::nullptr_t);
     std::erase_if(candidates, [&](const MemberDeclRec* candidate) {
       if (!allow_explicit && candidate->is_explicit) return true;
       const TypeRec fn = types().rec(candidate->type);
+      if (scalar_value_target && candidate->is_explicit) {
+        const QualType result = types().is_reference(fn.inner) ? types().referee(fn.inner) : fn.inner;
+        if (!same_unqualified(result, target)) return true;
+      }
       if (!cv_within(Types::cv(object.type()), fn.fn_cv)) return true;
       if (fn.fn_ref == ast::RefQual::rvalue) return lvalue;
       return fn.fn_ref == ast::RefQual::lvalue && !lvalue && fn.fn_cv != Cv::const_;
@@ -11322,6 +11629,44 @@ public:
     });
   }
 
+  // The written default constructor must be a usable, unambiguous trivial leaf.
+  bool gcc_union_variant_trivial_default(const ClassRec& record) {
+    if (!record.defined || !record.member_declarations_valid || !record.trivial_defaulted_default_ctor)
+      return false;
+    const EntityId ctor = record.defaulted_default_ctor;
+    const auto member = std::ranges::find(record.members, ctor, &MemberDeclRec::entity);
+    if (member == record.members.end() || !member->is_ctor || member->is_template || member->is_deleted ||
+        record.access_of(ctor) != ast::Access::public_)
+      return false;
+    if (const auto destructor = record.destructor_declaration();
+        destructor != EntityId::none && record.access_of(destructor) != ast::Access::public_)
+      return false;
+    return std::ranges::none_of(record.members, [&](const MemberDeclRec& other) {
+      if (!other.is_ctor || other.entity == ctor) return false;
+      const auto params = types().rec(other.type).params.size();
+      return other.is_template || params == 0 ||
+             (other.defaults.size() == params && !std::ranges::contains(other.defaults, NodeId::none));
+    });
+  }
+
+  // GCC's direct empty allocation checks the implicit union default constructor. Use the
+  // ordinary base and field defaults without treating a trivial defaulted leaf as nontrivial.
+  bool gcc_union_variant_prevents_implicit_default(QualType type, std::set<EntityId>& visited) {
+    type = types().innermost_array_element(type);
+    if (!types().is_class(type)) return false;
+    const EntityId cls = types().class_of(type);
+    const ClassRec* record = class_rec(cls);
+    if (!record || !visited.insert(cls).second) return false;
+    if (record->user_ctors) return !gcc_union_variant_trivial_default(*record);
+    if (record->implicit_default_ctor != EntityId::none) return true;
+    return std::ranges::any_of(record->bases, [&](const BaseRec& base) {
+      return gcc_union_variant_prevents_implicit_default(types().class_type(base.cls), visited);
+    }) || std::ranges::any_of(record->fields, [&](const FieldRec& field) {
+      return field.dmi || field.init != ConstId::none ||
+             (!record->union_ && gcc_union_variant_prevents_implicit_default(field.type, visited));
+    });
+  }
+
   // [expr.new]/26: the new-initializer initializes the class object as in a declaration
   // ([dcl.init.general]): default-initialization without one, value-initialization for `()`,
   // and direct- or direct-list-initialization otherwise.
@@ -11336,11 +11681,14 @@ public:
         const bool has_default = std::ranges::any_of(fields, [](const FieldRec& field) {
           return field.dmi || field.init != ConstId::none;
         });
+        // A contributing class ends the search, so every previously visited class can be skipped.
+        std::set<EntityId> visited;
         if (!has_default && std::ranges::any_of(fields, [&](const FieldRec& field) {
               const QualType element = types().innermost_array_element(field.type);
               const ClassRec* variant = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+              // Preserve the immediate variant's exemption. The narrower proof applies below it.
               return variant && !variant->trivial_defaulted_default_ctor &&
-                     (has_member_inits(field.type) || default_deleted(field.type));
+                     (gcc_union_variant_prevents_implicit_default(field.type, visited) || default_deleted(field.type));
             })) {
           diag(begin, Diag::deleted_constructor, t);
           return fail;
@@ -11996,6 +12344,40 @@ public:
       e = resolve_address(e, *set, std::nullopt, at_);
       if (!e.ok()) return std::nullopt;
     }
+    // An overload set of functions, none a template: trial deduction from each member whose
+    // constraints are satisfied, a result only when they all agree ([temp.deduct.call]/6.2).
+    // Members that differ only in their trailing requires-clauses can (#1417).
+    std::optional<QualType> overload_argument;
+    if (auto set = address_set(e); set && types().kind(t) == TypeKind::placeholder && !set->decls->empty()) {
+      bool templates_in_set = false, disagree = false;
+      for (const ast::DeclSema& d : *set->decls) {
+        if (d.flags & decl_flag::template_) templates_in_set = true;
+        if (templates_in_set || !constraints_satisfied(d) || types().has_placeholder(types().rec(d.type).inner)) continue;
+        const QualType ft = types().canonical(d.type);
+        if (overload_argument && *overload_argument != ft) disagree = true;
+        overload_argument = ft;
+      }
+      if (templates_in_set || disagree) overload_argument.reset();
+      if (overload_argument && set->address) overload_argument = types().pointer(*overload_argument);
+    }
+    if (overload_argument) {
+      Templates tm = templates();
+      const u16 depth = u16(template_scopes.size());
+      Bindings invent;
+      invent.placeholder = types().template_param(depth, 0);
+      std::vector<std::optional<TemplateArg>> out(1);
+      if (auto p0 = tm.substitute(t, invent)) {
+        auto [p, a, allow] = tm.call_pair(*p0, ArgShape{*overload_argument, !types().is_pointer(*overload_argument)}, depth);
+        if (tm.deduce(p, a, depth, out, allow) && out[0]) {
+          Bindings deduced;
+          deduced.placeholder = out[0]->type;
+          if (replaced) *replaced = out[0]->type;
+          if (auto r = tm.substitute(t, deduced)) return *r;
+        }
+      }
+    }
+    // Any other overload set, or its address, deduces nothing ([temp.deduct.call]/6); a
+    // template-id naming one specialization is not resolved yet (#335).
     if (types().is(e.type(), Builtin::overload_set) || is_bound_member(e) ||
         (types().is_pointer(e.type()) && types().is(types().pointee(e.type()), Builtin::overload_set))) {
       diag(at_, Diag::auto_deduction_failed, t, e.type());
@@ -13927,8 +14309,18 @@ public:
   // [expr.call]: a call to a named function or through a pointer to function. Each argument
   // copy-initializes its parameter; arguments matching a C-style ellipsis get the default
   // argument promotions.
+  // A call that takes a default still dependent in a template's definition has a value only
+  // its instantiation knows ([temp.dep.constexpr]): its type stays, its value is dependent.
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt,
           bool enum_operator = false) {
+    const bool outer = std::exchange(dependent_default_, false);
+    Ex r = resolved_call(callee, std::move(args), end, paren_at, lookup_at, enum_operator);
+    const bool used = std::exchange(dependent_default_, outer);
+    if (used && r.ok() && !dependent(r)) return dependent_node({r}, r.begin, r.end, r.type(), r.info.category);
+    return r;
+  }
+  Ex resolved_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at,
+                   bool enum_operator) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
@@ -14010,8 +14402,11 @@ public:
         bool deleted = (d.flags & decl_flag::deleted) != 0;
         if (!(d.flags & decl_flag::template_)) {
           // Explicit template arguments name only templates ([temp.arg.explicit]).
-          if (ex != explicit_args_.end() || !eligible_operator_type(d.type)) continue;
+          const ConstId constraints = trailing_constraints(d);
+          if (ex != explicit_args_.end() || !eligible_operator_type(d.type) ||
+              !trailing_constraints_satisfied(constraints)) continue;
           cands.push_back(non_template_call_candidate(d, allocation));
+          cands.back().constraints = constraints;
           decls.push_back(&d);
           continue;
         }
@@ -14337,6 +14732,7 @@ public:
   // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
   // tree, analysed at the declaration ([dcl.fct.default]/5). A supported dependent default
   // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
+  bool dependent_default_ = false;  // a call's default stayed dependent (`call`)
   std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                      EntityId function = EntityId::none, QualType parameter = {},
                                      std::optional<u32> invocation = std::nullopt,
@@ -14380,6 +14776,12 @@ public:
                                                            : ins().ast.get<ast::DefaultArg>(committed);
           return use(*replay, committed, concrete);
         }
+      }
+      // In a template's definition the default is instantiated with the call, when the
+      // instantiation analyses the call again ([temp.inst]/12): the argument stays dependent.
+      if (in_pattern()) {
+        dependent_default_ = true;
+        return dependent_node({}, at_, at_);
       }
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
@@ -14509,7 +14911,10 @@ public:
       args.push_back(*a);
     }
     if (args.size() < params.size()) {
-      diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
+      if (default_source != EntityId::none && q_->defaults_pending(default_source, args.size()))
+        diag(paren_at, Diag::default_arg_not_yet_defined);
+      else
+        diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
       return std::nullopt;
     }
     if (args.size() > params.size() && !fr.variadic) {
