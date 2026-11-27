@@ -231,6 +231,9 @@ public:
   // What every Program over one unit's items shares (#947): facts of the items and tokens alone,
   // made once, so a Program that analyses one group of items costs what the group does.
   struct Index {
+    Index() = default;
+    Index(const Index&) = delete;  // its views and `name_scoped` point into itself
+    Index& operator=(const Index&) = delete;
     std::vector<ItemId> ids;
     std::unordered_map<u32, u32> index;  // by ItemId: its item
     // By declared name: (item, index in its names), in order; a lookup visits only its own name's.
@@ -247,12 +250,15 @@ public:
     std::vector<Directive> directives;  // their targets unresolved
     bool says_virtual = false;          // the unit's tokens hold `virtual`
     std::vector<bool> qualified;        // by item: its first declarator's name is qualified
-    std::vector<bool> name_scoped;      // by item: it has `name_scopes`
+    // By item: its `name_scopes`, or none (`name_ns` asks for every declaration lookup visits).
+    std::vector<const std::vector<std::pair<std::string, std::string>>*> name_scoped;
     std::vector<u32> specializations;   // the items outside classes that declare specializations
     // `by_name` by (name, namespace): as declared (`name_ns`), for lookup (`name_eff_ns`), and the
     // item's (`ns_of`); and the qualified declarations, by name. For answering questions (`answer`).
     using Scoped = std::map<std::pair<std::string_view, std::string_view>, std::vector<std::pair<u32, u32>>>;
     Scoped by_scope, by_lookup_scope, by_item_scope;
+    // What `Probe::declared_in` keeps: `by_scope` and `by_lookup_scope` together, in item order.
+    Scoped by_visible_scope;
     std::map<std::string_view, std::vector<std::pair<u32, u32>>> qualified_by_name;
   };
   // Each item's namespace, from the namespace definitions that enclose it; and the using-
@@ -362,8 +368,8 @@ public:
       if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
         x.directives.push_back({k, x.ns_of[k], w.ins.names.intern(r.name(r.tokens[its[k].begin + 1])), std::nullopt});
     }
-    x.name_scoped.assign(items.items.size(), false);
-    for (const auto& [k, scopes] : x.name_scopes) x.name_scoped[k] = true;
+    x.name_scoped.assign(items.items.size(), nullptr);
+    for (const auto& [k, scopes] : x.name_scopes) x.name_scoped[k] = &scopes;
     for (const auto& [name, entries] : x.by_name)
       for (auto [j, k] : entries) {
         x.by_scope[{name, name_ns(x, j, k)}].push_back({j, k});
@@ -371,6 +377,12 @@ public:
         x.by_item_scope[{name, x.ns_of[j]}].push_back({j, k});
         if (x.qualified[j]) x.qualified_by_name[name].push_back({j, k});
       }
+    x.by_visible_scope = x.by_scope;
+    for (const auto& [key, entries] : x.by_lookup_scope) x.by_visible_scope[key].append_range(entries);
+    for (auto& [key, entries] : x.by_visible_scope) {
+      std::ranges::sort(entries);
+      entries.erase(std::ranges::unique(entries).begin(), entries.end());
+    }
     for (u32 k = 0; k < items.items.size(); ++k) {
       const items::Item& it = items.items[k];
       if (!x.in_class[k] && (it.specialization || std::ranges::any_of(it.names, [](const items::DeclName& n) {
@@ -753,14 +765,12 @@ public:
     auto operator<=>(const NameProbe&) const = default;
   };
   static const std::string& name_ns(const Index& x, u32 item, u32 name) {
-    if (!x.name_scoped[item]) return x.ns_of[item];
-    auto it = x.name_scopes.find(item);
-    return it != x.name_scopes.end() && name < it->second.size() ? it->second[name].first : x.ns_of[item];
+    const auto* scopes = x.name_scoped[item];
+    return scopes && name < scopes->size() ? (*scopes)[name].first : x.ns_of[item];
   }
   static const std::string& name_eff_ns(const Index& x, u32 item, u32 name) {
-    if (!x.name_scoped[item]) return x.eff_ns[item];
-    auto it = x.name_scopes.find(item);
-    return it != x.name_scopes.end() && name < it->second.size() ? it->second[name].second : x.eff_ns[item];
+    const auto* scopes = x.name_scoped[item];
+    return scopes && name < scopes->size() ? (*scopes)[name].second : x.eff_ns[item];
   }
   static bool passes(const Index& x, Probe kind, const std::string& path, u32 j, u32 k) {
     switch (kind) {
@@ -938,15 +948,17 @@ public:
       if (hide_function_tags) binding_scopes.push_back(ns);
     };
     ask(inhabit ? Probe::declared_in_inhabit : Probe::declared_in, name, path);
-    for (auto [j, k] : named(name)) {
+    // The index's entries that pass the probe, without visiting the name's other declarations: a
+    // namespace such as `std` is reopened in each header (#1653).
+    const Index::Scoped& scoped = inhabit ? ix_->by_scope : ix_->by_visible_scope;
+    const auto entries = scoped.find({name, path});
+    const auto passing = entries == scoped.end() ? std::span<const std::pair<u32, u32>>{} : std::span(entries->second);
+    for (auto [j, k] : passing) {
       if (j >= item + (self ? 1 : 0)) break;
-      if (!Program::passes(*ix_, inhabit ? Probe::declared_in_inhabit : Probe::declared_in, path, j, k)) continue;
       const items::Item& it = items_->items[j];
       const items::DeclName& n = it.names[k];
-      const bool nested = it.kind == ItemKind::namespace_def;  // only these have per-name scopes
-      const std::string& ns = nested ? name_ns(j, k) : ns_of_[j];
-      if ((in_class_[j] && !n.member_elaborated_candidate) ||
-          (ns != path && (inhabit || (nested ? name_eff_ns(j, k) : eff_ns_[j]) != path))) continue;
+      const std::string& ns = name_ns(j, k);
+      if (in_class_[j] && !n.member_elaborated_candidate) continue;
       if (n.flags & items::name_flag::unknown) {
         if (std::ranges::find(running_, j) != running_.end()) continue;
         item_sema(j);  // resolves its targets
@@ -1051,8 +1063,9 @@ public:
     auto child = std::ranges::find(inlines->second, path, &InlineNamespace::path);
     return child != inlines->second.end() && child->item < limit;
   }
-  static bool encloses(const std::string& outer, const std::string& inner) {
-    return outer.empty() || inner == outer || inner.starts_with(outer + "::");
+  static bool encloses(std::string_view outer, std::string_view inner) {
+    return outer.empty() || inner == outer ||
+           (inner.size() > outer.size() + 2 && inner.starts_with(outer) && inner.substr(outer.size(), 2) == "::");
   }
   static std::string common_ancestor(std::string a, const std::string& b) {
     while (!encloses(a, b)) a = parent_of(a);
@@ -1282,6 +1295,8 @@ public:
   // required).
   std::optional<bool> atom_satisfied(ConstId c, u32 point);
   std::map<u32, std::optional<bool>> atoms_;
+  // The normal forms of concept-ids by (concept, interned arguments) (`Sema::concept_constraint`).
+  std::map<std::pair<u32, u32>, ConstId> concept_normal_forms_;
   // A value-dependent explicit-specifier's condition, atom `c` with its mapping substituted
   // ([dcl.fct.spec]): whether the specialization is explicit, none when substitution into it
   // fails ([temp.deduct.general]). Memoized as satisfaction is.
@@ -2302,16 +2317,9 @@ private:
   std::map<u32, u32> nested_constraint_operand_ends_;  // offsets in this program's token region
   const std::vector<std::string>& ns_of_ = ix_->ns_of;
   const std::vector<std::string>& eff_ns_ = ix_->eff_ns;
-  const std::map<u32, std::vector<std::pair<std::string, std::string>>>& name_scopes_ = ix_->name_scopes;
   const std::vector<ast::GnuVisibility>& namespace_visibility_ = ix_->namespace_visibility;  // by lexical occurrence
-  const std::string& name_ns(u32 item, u32 name) const {
-    auto it = name_scopes_.find(item);
-    return it != name_scopes_.end() && name < it->second.size() ? it->second[name].first : ns_of_[item];
-  }
-  const std::string& name_eff_ns(u32 item, u32 name) const {
-    auto it = name_scopes_.find(item);
-    return it != name_scopes_.end() && name < it->second.size() ? it->second[name].second : eff_ns_[item];
-  }
+  const std::string& name_ns(u32 item, u32 name) const { return name_ns(*ix_, item, name); }
+  const std::string& name_eff_ns(u32 item, u32 name) const { return name_eff_ns(*ix_, item, name); }
   const std::vector<std::string>& inner_of_ = ix_->inner_of;
   const std::vector<bool>& in_class_ = ix_->in_class;
   const std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>>& by_name_ = ix_->by_name;
@@ -2896,6 +2904,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
+  std::map<std::pair<u32, u32>, ConstId>* concept_normal_forms() override { return &p_->concept_normal_forms_; }
   std::optional<bool> explicit_value(ConstId c) override { return p_->explicit_value(c, point()); }
   void record_nested_constraint_operand(u32 begin, u32 end) override {
     p_->nested_constraint_operand_ends_.try_emplace(begin, end);
@@ -3977,6 +3986,7 @@ public:
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
+  std::map<std::pair<u32, u32>, ConstId>* concept_normal_forms() override { return at_.concept_normal_forms(); }
   std::optional<bool> explicit_value(ConstId c) override { return p_->explicit_value(c, p_->end()); }
   void record_nested_constraint_operand(u32 begin, u32 end) override {
     at_.record_nested_constraint_operand(begin, end);

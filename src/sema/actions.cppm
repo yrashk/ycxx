@@ -306,6 +306,9 @@ public:
   virtual std::optional<QualType> specialization_type(EntityId /*v*/) { return std::nullopt; }
   // Whether normal form `c` is satisfied here ([temp.constr.sat]); none while it is dependent.
   virtual std::optional<bool> satisfied(ConstId /*c*/) { return true; }
+  // The unit's normal forms of concept-ids (`Sema::concept_constraint`), keyed by the concept and
+  // its interned arguments; none where nothing keeps them.
+  virtual std::map<std::pair<u32, u32>, ConstId>* concept_normal_forms() { return nullptr; }
   virtual void record_nested_constraint_operand(u32 /*begin*/, u32 /*end*/) {}
   virtual std::optional<u32> nested_constraint_operand_end(u32 /*begin*/) { return std::nullopt; }
   // Whether checking normal form `c`'s satisfaction raised a hard error (an atom not of type
@@ -1808,11 +1811,23 @@ public:
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
+  // Memoized for the unit: a concept-id's normal form depends only on the concept and its
+  // arguments, and what satisfaction makes of it is the program's first answer anyway
+  // ([temp.constr.atomic]/3). A member template's type-constraint is formed again in each
+  // specialization of its class that is instantiated (#1653). What diagnosed something is not kept,
+  // so each use says it again.
   std::optional<ConstId> concept_constraint(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 at) {
+    auto* memo = q_->concept_normal_forms();
+    const auto key = memo ? std::pair(std::to_underlying(c.entity), ins().intern_seq(args).index) : std::pair(0u, 0u);
+    if (memo)
+      if (auto it = memo->find(key); it != memo->end()) return it->second;
+    const std::size_t before = diag_count();
     auto full = template_arguments(c, args, at);
     if (!full) return std::nullopt;
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(c.template_params);
-    return templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+    auto normal = templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+    if (memo && normal && diag_count() == before) memo->emplace(key, *normal);
+    return normal;
   }
   // Check the immediately-declared constraint on the type deduced for the placeholder itself
   // ([dcl.type.auto.deduct], [temp.param]), before publishing the completed declarator type.
