@@ -826,6 +826,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Naturally aligned 32-bit GNU atomics on Linux x86-64 use stateful L1 and L2 nodes
+  for loads, stores, exchange, compare-exchange, additive and bitwise updates, and
+  thread fences. The target defines the six GNU order macros and supports the null
+  alignment lock-free query for sizes 3 and 4. See [Extensions](docs/EXTENSIONS.md#gnu-atomics-on-linux-x86-64).
+  [#1293](https://github.com/yrashk/ycxx/issues/1293) · [#328](https://github.com/yrashk/ycxx/issues/328)
 - Fixed-prototype definitions and direct calls also transport `float` and `double` constants,
   loads, stores and results. INTEGER registers and XMM registers are assigned independently.
   `unit.linux_scalar_sse` exchanges objects with a native peer, checks exact bits, mixed spills
@@ -2089,6 +2094,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
   The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
   initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
+- Named `const_cast` changes cv-qualification on ordinary pointers with matching shapes,
+  including cv `void*`, and on scalar lvalues and xvalues ([expr.const.cast],
+  [#1424](https://github.com/yrashk/ycxx/issues/1424)). It keeps the original address and
+  gives a reference cast the requested value category. In a constant expression, an access
+  still respects the qualifiers of the underlying object. A by-value class parameter object uses
+  the definition's declared qualifiers ([dcl.fct]/5) and permits writes to mutable members.
+  Pointer-to-member casts and class or array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
 - Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
   and pointer-width integral types. A too-narrow integer destination is ill-formed, and
   an evaluated cast is disallowed in a core constant expression. Smaller integer sources
@@ -3736,6 +3748,21 @@ unrelated library compiles. A library declaration shared with the selected
 target retains its distinct target include view. Plans show both include
 paths and one dependency edge for the authored header binding.
 [Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
+
+Host-linked libraries can mix generated C++ source artifacts and disk
+sources (#1600). Each generated main keeps its own producer's siblings
+available for quoted includes. The library's public search directories
+continue to come from its headers and dependencies. Inspection shows
+the host and selected-target source paths with one authored source edge.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
+
+A `cpp.host_executable` can declare direct `link_inputs` from ordinary
+host-independent action chains (#1616). The native link preserves operand order
+and repeated archives under foreign target selection. Archive-only edits leave
+translation unit inputs unchanged. Equal staged images reuse consuming actions,
+including those for early planning and witnesses. Read-only plans show each
+authored archive reference and its host path.
+[Native host archive example](examples/project-build/host-static-archive-inputs/README.md)
 
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated

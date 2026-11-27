@@ -74,6 +74,8 @@ generator in `sources`, alongside disk paths and globs.
 Libraries linked into a host tool can also declare generated headers. A
 shared library can use the same declaration in a native scanner and a
 foreign app. [Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
+Host-linked libraries can also mix disk sources and generated C++ artifacts.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
 A typed witness can select the native artifact directly with
 `tool = input("name")` or use an executable generated from it.
 [Native host witness](examples/project-build/native-host-witness/README.md) ·
@@ -96,6 +98,8 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 can be compared with the checkout and rendered as a standalone HTML report.
 In the HTML report, **Target dependencies** lets you follow producers and
 open their use sites in `build.ycxx`.
+The **Graph** view lets you expand a target's dependencies and dependents
+and inspect each connection's declaration in the same standalone report.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
@@ -115,6 +119,8 @@ the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
+Native host tools can link ordered generated archives through `link_inputs`,
+including when the selected app targets another platform.
 Generators and witnesses can track helper executables by path and run
 generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
@@ -828,6 +834,8 @@ written default member initializer are value-initialized.
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Named `const_cast` changes cv-qualification on matching ordinary pointer types and scalar
+  glvalues while retaining the original address.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
   [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)

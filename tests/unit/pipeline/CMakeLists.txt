@@ -189,6 +189,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_function_addresses
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_function_addresses.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  # PARITY: #328 tracks GNU atomics on other targets.
+  add_test(NAME unit.linux_atomic32
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_atomic32.py
+            $<TARGET_FILE:ycxxc>)
   # PARITY: by design: runs the freestanding ELF counterpart of builtin-line.run.cpp.
   add_test(NAME unit.linux_builtin_line
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_line.py

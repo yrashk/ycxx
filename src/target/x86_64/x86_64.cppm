@@ -853,6 +853,67 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[2]);
       e_.store(rcx, 0, rax, l2::bytes(body_.type(ops[2])));
       return {};
+    case Op::atomic_load:
+      // Aligned 32-bit loads are indivisible. TSO provides acquire ordering, and
+      // the locked sequentially consistent stores prevent reordering across those stores.
+      read(ops[1], rcx);
+      e_.load(rax, rcx, 0, 4);
+      write(body_.result(n, 1));
+      return {};
+    case Op::atomic_store:
+      read(ops[1], rcx);
+      read(ops[2]);
+      if (ir::MemOrder(imms[0]) == ir::MemOrder::seq_cst) e_.exchange32(rcx, rax);
+      else e_.store(rcx, 0, rax, 4);
+      return {};
+    case Op::atomic_rmw: {
+      read(ops[1], rcx);
+      switch (ir::Rmw(imms[0])) {
+        case ir::Rmw::xchg:
+          read(ops[2]);
+          e_.exchange32(rcx, rax);
+          break;
+        case ir::Rmw::add:
+        case ir::Rmw::sub:
+          read(ops[2]);
+          if (ir::Rmw(imms[0]) == ir::Rmw::sub) e_.reg({0xf7}, 3, rax, false);  // neg eax
+          e_.atomic_add32(rcx, rax);
+          break;
+        case ir::Rmw::and_:
+        case ir::Rmw::or_:
+        case ir::Rmw::xor_: {
+          const auto rmw = ir::Rmw(imms[0]);
+          const std::uint8_t opcode = rmw == ir::Rmw::and_ ? 0x21 : rmw == ir::Rmw::or_ ? 0x09 : 0x31;
+          read(ops[2], rdi);
+          e_.load(rax, rcx, 0, 4);
+          const auto retry = e_.offset();
+          e_.reg({0x89}, rax, rdx, false);  // mov edx, eax
+          e_.reg({opcode}, rdi, rdx, false);
+          e_.compare_exchange32(rcx, rdx);
+          e_.emit({0x0f, 0x85});  // jne retry, with the newly observed value in EAX
+          if (!e_.patch_relative(e_.displacement(), retry))
+            return at_node(n, op, "atomic retry branch displacement out of range");
+          break;
+        }
+        default: return at_node(n, op, "unsupported atomic read-modify-write operation");
+      }
+      write(body_.result(n, 1));
+      return {};
+    }
+    case Op::atomic_cmpxchg:
+      read(ops[1], rcx);
+      read(ops[2]);
+      read(ops[3], rdx);
+      e_.compare_exchange32(rcx, rdx);
+      write(body_.result(n, 1));  // the i32 write preserves ZF
+      e_.emit({0x0f, 0x94, 0xc0});  // sete al
+      write(body_.result(n, 2));
+      return {};
+    case Op::fence:
+      // TSO already orders the acquire and release cases. The state dependency is
+      // needed at every order, including when the fence has no machine instruction.
+      if (ir::MemOrder(imms[0]) == ir::MemOrder::seq_cst) e_.emit({0x0f, 0xae, 0xf0});  // mfence
+      return {};
     case Op::va_start:
       va_start(ops[1]);
       return {};
