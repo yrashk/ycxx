@@ -1421,14 +1421,12 @@ class Planner {
     if (const auto* inputs = public_inputs ? public_inputs : private_inputs) {
       const auto field_name = public_inputs ? "public_link_inputs" : "link_inputs";
       for (const auto& value : as<List>(*inputs, "a list of linker archive inputs")) {
-        if (traversal.host && kind != Primitive::host_executable)
-          fail(value.location, std::format("{} is not supported in host executable dependencies", field_name));
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
         const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
                                         : std::string{};
         const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", value.location)
                                               : artifact(ref, value.location);
-        artifact_dependency(decl, requested, field_name, value.location);
+        if (emit_facts) artifact_dependency(decl, requested, field_name, value.location);
         target.link_inputs.push_back({requested, origin, value.location});
       }
     }
