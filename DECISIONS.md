@@ -26,7 +26,9 @@ reasoning; do not leave decisions only in issue threads.
    - arm64 macOS [leaf shared output](docs/design/darwin-shared-output.md) builds a signed
      dylib from freestanding position-independent objects. Its install name enters the
      link query. It exports strong functions and resolves direct local references (#393).
-     Native dylib inputs are tracked in #392.
+   - arm64 macOS [explicit dylib inputs](docs/design/darwin-dylib-input.md) let signed executables
+     import strong functions from leaf libraries. Ordered content snapshots enter the link key.
+     The native linker uses their recorded install names and version fields (#392).
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
