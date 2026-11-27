@@ -16,6 +16,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     cannot regenerate data that needs a build, and `merge=ours` keeps it silently stale.
   - Rule: DECISIONS §6.9. Learned on #366.
 
+- **Give subagents the exact stage-named test command, and commit only after they stop.**
+  - A brief to a spec-only test author said `tools/test --cxx clang <path>`. A bare path also
+    runs `tools/build`, which started a second build in the session's `build/` and broke the
+    session's own build of modules.
+  - Separately, `git add tests` while the author was still writing swept two unfinished files
+    into a commit.
+  - Do: brief with `tools/test --cxx clang core <path>`, never a bare path. Wait for the author's
+    report before staging its directory, or stage files by name.
+  - Learned on #356.
 - **A session cannot run on a model above its parent's.** A session asked to run on Fable
   silently started on Opus.
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
@@ -230,6 +239,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     gates of #1294 and #1306, one of them started at load 5. #1295's and #1304's gates passed on the
     same Mac the same day. #1123 measured about 10 s for the first launch of a new executable; why
     is not established.
+- **Search open PRs for a feature before implementing it, even inside a broader batch.** #1416
+  implemented placeholder constant template parameters for #1244, with a comment on #286. Twelve
+  hours later, #1533 implemented bare `auto` parameters a second way as part of a compatibility
+  batch: it kept the `auto` placeholder as the parameter's type, while #1416 gave the parameter
+  its own position as its type. #1533 merged first. Merging `main` into #1416 then meant choosing
+  one representation, moving #1533's GCC array-bound rule onto it, and deleting #1533's code
+  paths. Those paths could no longer match a parameter, though the merge itself was clean.
+  - Do: before writing code for a language feature, run `gh pr list -R yrashk/ycxx --search
+    '<feature>'` and read the feature's issue comments. If another PR has it, build on that PR
+    or leave the feature to it. On a merge that brings in a second implementation, keep one
+    representation and move the other's mode-specific rules onto it. Delete the paths that no
+    longer apply, and say so in the PR.
+  - Learned on #1244.
 
 ## Working with Fable subagents
 
@@ -335,6 +357,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on #1.
 
 ## Toolchain
+
+- **GCC's stock contract runtime needs the link driver flag.** Compile and link with
+  `-fcontracts` in the system standard-library configuration. The driver adds
+  `libstdc++exp`, which contains the default contract handler and its reporter.
+  The libycxx configuration gets its handler from libycxx's own runtime.
 
 - **A sandbox command's `/dev/shm` is private to that command.** A compiler built there by one
   command was inaccessible to the next.
@@ -655,9 +682,45 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   with `--pull never` where that platform of it is already local (#1153). On #309 this
   ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
   - Learned on #309.
+- **Without that image, a freestanding static ELF in `busybox` runs the same tests.** Compile with
+  the Mac's ycxx, add a small Clang-built `_start` that runs `.init_array`, calls `main` and exits
+  with its result, link with `ld.lld -static`, and run it with `docker run --platform linux/amd64`.
+  Rosetta rejects some `.bss` segments ("bss_size overflow"), so a linker script puts `.bss` in
+  `.data`. Include a control whose `main` returns 7. No image of several gigabytes is needed, which
+  mattered when the disk was full.
+  - Learned on #157.
+- **Classify by what overload resolution selects, everywhere.** Defaulted special members were
+  classified by resolving each subobject's operation, but array elements, implicit moves and
+  trivial operations with a written `noexcept(false)` still followed older structural shortcuts.
+  An independent review found four P0s there, all where the two disagreed.
+  - Learned on #157.
 
 ## Data the front end needs
 
+- **A replay skips what the template's analysis measured; it does not re-scan tokens.** On #340,
+  a class template specialization skipped a static data member template's initializer by
+  balancing `()[]{}` up to `;` or `,`, so `P<N, 1>::value` ended at the comma (a review P0). The
+  splitter cannot tell `<` from less-than either.
+  - Do: record the extent in the pattern's analysis (`Program::set_static_initializer`) and
+    `seek` to it in the replay, as lazy static members do.
+- **Small semantic groups can repeat large headers.** On #978, the seven main-file groups of one
+  standard-library fixture each analysed thousands of the same header items. The largest
+  costs were in semantic analysis and the END worklist, and collecting the dependency trace
+  took under a tenth of a second per group in the isolated profile.
+  - Compare CPU time as well as wall time, and time item analysis, END and tracing
+    separately. Test the largest header fixtures together, as the Linux test driver does.
+    A small source run can share the specialization work in one group and run concurrently
+    with the headers.
+
+- **A point is not an item.** `Program::is_complete(c, item)` and its kin also get points past
+  the item table (`end()`, an instantiation point). On #117 a helper that walked `items[k].parent`
+  from such a point read past the table, and the `<iostream>` run segfaulted with no diagnostic
+  (exit 139, an empty log that first read as "0 errors"). Bound-check any per-item helper a point
+  can reach, and check a compiler run's exit status before its error count.
+- **Items inside bodies need their owner in their identity.** Local classes (#117) are items whose
+  scope paths name no function, so same-shaped classes of two functions got one id: `instance()`
+  threw, diagnostics landed in the other function, and group reuse switched off. The review found
+  it with two functions; a test with one local class per program could not.
 - **Deferred analysis reads committed parameter lists.** On #713, the exception-specification
   replay read a declaration copied by `Program::declared` before its item committed. A draft
   `SeqId<ParamSema>` happened to name a different parameter list in the global interner.
@@ -698,6 +761,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `PointerConversion` now do, and let each caller decide what `unknown` means.
   - Learned on #218.
 
+- **Order-dependent wrong bodies or false "redeclaration" errors: check entity identity first.**
+  On #1417 two members of a class template that differed only in their trailing requires-clauses
+  got one `EntityId`, because `Entities::identity` mixed `EntityRec::constraints` only for function
+  templates. The first record published won, so whichever declaration came first supplied the
+  other's body, and same-signature copy constructors were "redeclarations". Swapping the two
+  declarations' order flipped the result, which is what pointed at identity.
+  - Do: when a new property distinguishes declarations ([basic.scope.scope]/4), add it to
+    `identity` in the same change, and test both declaration orders.
+  - Learned on #1417.
+
 - **`Program`'s per-entity maps hold only the items analysed so far.** Top-level items are
   analysed one group at a time and earlier ones only when asked (#947). So `class_items_` and
   `decls_` can miss an earlier definition. On #306 a second `struct O::I { … }` was accepted
@@ -710,6 +783,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     emitted an empty body. Test a construct that adds a later item inside an earlier one with a
     field of that type, not only with uses after the closing brace.
   - Learned on #306.
+
+- **A query that every lookup asks must not start analyses.** On #1150 a `Questions` hook that
+  unqualified name lookup calls (`dependent_member_using`) ran `item_sema` on the class's using items
+  to be sure they were recorded. On `<iostream>` it re-entered an item whose analysis was running
+  (a contract violation in `item_sema`). The own tests all passed, and the crash was in a worker,
+  so lldb showed no stack.
+  - Do: have such a hook read only what is recorded, and rely on the order the definition
+    analyses items in (member items before bodies). Run the `<iostream>` hello program after every
+    change to lookup, not only the gate.
+  - Learned on #1150.
 
 ## Evidence and tests
 
@@ -816,6 +899,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `= X::none` (or intern the empty list as index 0), and test with the argument declared first.
   - Rule: AGENTS.md, "While working".
   - Learned on #25 and #88 steps 6 and 8.
+- **The global namespace is `EntityId::none`.** On #1549 a fallback owner bailed out when its
+  scope was `EntityId::none`, meaning "no scope". That guard silently dropped every case at global
+  namespace scope, which was most of the tests.
+  - Do: before treating `EntityId::none` as "nothing there", check whether the place can mean the
+    global namespace (an enclosing namespace, a scope, a lookup context). Test at global scope and
+    inside a named namespace.
 - **Test blocked storage past its first block.** #107's chunked pools passed a concurrency test
   that never left block 0; the review found that any list longer than the next block aborted,
   which one 3,000-statement function triggers.
@@ -987,14 +1076,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Run `git status` after `git merge -q … | tail`: the pipe hides a conflict's exit code, and a gate
     ran for half an hour on a half-merged tree.
   - Learned on #1243.
-- **The item splitter must learn every token-level construct that looks like `name(`.** It decides
-  what a namespace-scope item declares from tokens alone, and a miss is silent: `typedef
-  __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never existed and
-  only its uses failed, far away.
+- **The item splitter guesses from tokens, and a wrong guess is silent.** It decides what a
+  namespace-scope item or member declares from tokens alone.
+  - `typedef __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never
+    existed and only its uses failed, far away (#211).
+  - It read `requires` after any `&&` as a requires-expression. While templated members with `&&`
+    were rejected, that guess was never reached. Once #311 accepted them,
+    `int a() && requires (C) { … }` took its `(…)` and `{…}` as the expression's parts and ran the
+    next member's body: a miscompile that every own test missed and an independent review caught.
   - Do: when adding a specifier that takes parentheses (`decltype`, `__attribute__`, the type-trait
-    built-ins), teach `items.cppm`'s declarator scan and its function detection, and test a
-    namespace-scope typedef, variable and function template whose type begins with it.
-  - Learned on #211.
+    built-ins), or when a gate stops rejecting a token form, grep `items.cppm` for the token. Test
+    the form in a namespace-scope typedef, variable and function template, and as a member followed
+    by each thing that can come next (a requires-clause, `noexcept`, `->`, `= 0`, `= delete`, a
+    body, another member).
+  - Rule: AGENTS.md ("While working"). Learned on #211 and #311.
 - **The Clang oracle is upstream Clang (the driver's toolchain), not `/usr/bin/clang++`.** Apple
   Clang and upstream Clang differ in ABI corners: on arm64 macOS, Apple Clang 21 passes a class
   with a user-provided move constructor in registers, while Clang 23 and GCC pass it by address
@@ -1067,3 +1162,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`
   (`find_program(... clang++)`), not `${CMAKE_CXX_COMPILER}`.
   - Learned on #650.
+- **A tentative parse decides on syntax diagnostics, not on errors or on where it stopped.** The
+  first #1190 version took a template argument as a type-id only if its parse gave no error. That
+  accepted the ill-formed type-id `IC<P(P(p))[1]>` as an expression and hid type errors behind
+  expression diagnostics. The second version took "the parse reached `>`" instead. But the
+  declarator parser reports `unexpected identifier` and then keeps going to the argument's end,
+  so `bool(&g)` stayed a type-id.
+  - Do: use `Sema::has_syntax_error_since` (expected or unexpected tokens) together with the end
+    position. When both readings fail, report the diagnostics of the reading the grammar prefers.
+  - Learned on #1190.
+- **Draft and published AST node handles use separate storage.** The parser can read a draft
+  through its builder. A tree walked after commit uses the interner. The numeric handle does
+  not identify which storage owns it.
+  - Pass the storage context when a helper reads both. For a draft that adopts a published node,
+    look up the adopted node through the builder before reading it from the interner.
+  - The discarded-cast and `noexcept` probes exercise both paths.

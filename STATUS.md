@@ -3,6 +3,15 @@
 What is true of the code today. Work in progress and its owners are tracked in
 [GitHub issues](https://github.com/yrashk/ycxx/issues).
 
+## Embedding
+
+- CMake builds independently linkable static or shared libraries for the query engine,
+  preprocessor, front end, IR, object formats, linker, compiler and project build.
+- The bootstrap build can use libycxx or GCC's system libstdc++. The system build uses
+  libycxx's portable execution provider for senders, scopes and the scheduler.
+- The CMake SDK exports typed C++ module interfaces. The engine and compiler samples exercise
+  build-tree and installed-package consumption. See [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+
 ## Bootstrapping (2026-11-17)
 
 - Charter written: [README.md](README.md), [DECISIONS.md](DECISIONS.md) (scope, provenance,
@@ -78,6 +87,18 @@ What is true of the code today. Work in progress and its owners are tracked in
   translation-unit configuration and is read from editor compilation commands. The
   [compatibility table](docs/compatibility.toml) records prior choices, mode behavior and probes. Constrained function
   templates use the current `Q` and `Tk` forms for supported requires-clauses and type constraints.
+  Mode-specific symbols also cover nested and lambda templates, including written folds,
+  member and allocation expressions, casts, and target floating-point literals. The table records
+  the fallback for builtin expressions whose symbols the two compilers cannot emit.
+  GCC mode selects the last nonzero class-head alignment and carries a preceding alignment
+  into a definition that supplies none. Clang mode checks alignment consistency on opaque
+  class declarations. The compatibility table records Clang's underalignment case separately.
+  Spec mode distinguishes C and C++ function types and encodes the C type with `FY` in a
+  mangled signature. GCC and Clang modes use one type for both. C function names retain their
+  C linkage and unmangled symbols in every mode.
+  Compiler modes also select the documented wide array bound conversions, constexpr byte
+  comparisons, empty union initializers, abstract result checks, and over-width bit-field layout
+  and diagnostics.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -654,12 +675,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     `TuFront(TU)` places its messages in files from `pp`'s full region, so an edit that changes
     no token (a comment, blank lines) stops at `PpTokens` and analysis does not run again (#947,
     slice 0).
-    - A unit whose tokens never say `virtual` is analysed a group at a time (#947, slice 1;
+    - Units are analysed a group at a time (#947, #978;
       `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
       headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
-      other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
+      other items only as the group asks. With specialization-heavy headers, a short run of
+      main-file items shares a Program. Cache misses run on the session pool, and their results
+      merge in source order. `unit_of` makes each group's `UnitPart`, and
       `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
-      hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+      hidden declarations anywhere, unwind checks, virtual table ownership and RTTI).
+      Peer ABI checks record the late declarations they read and merge layout uncertainty and
+      ownership in source order.
     - The unit combines layout uncertainty from all groups before the native ABI checks class
       shapes and chooses base-object constructor and destructor variants.
       [#992](https://github.com/yrashk/ycxx/issues/992)
@@ -805,6 +830,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
+- Naturally aligned 32-bit GNU atomics on Linux x86-64 use stateful L1 and L2 nodes
+  for loads, stores, exchange, compare-exchange, additive and bitwise updates, and
+  thread fences. The target defines the six GNU order macros and supports the null
+  alignment lock-free query for sizes 3 and 4. See [Extensions](docs/EXTENSIONS.md#gnu-atomics-on-linux-x86-64).
+  [#1293](https://github.com/yrashk/ycxx/issues/1293) · [#328](https://github.com/yrashk/ycxx/issues/328)
 - Fixed-prototype definitions and direct calls also transport `float` and `double` constants,
   loads, stores and results. INTEGER registers and XMM registers are assigned independently.
   `unit.linux_scalar_sse` exchanges objects with a native peer, checks exact bits, mixed spills
@@ -1043,7 +1073,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   local and hidden definitions use position-independent relocations. Source inputs require
   `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
   imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
-  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
+- On arm64 macOS, `-shared` or `-dynamiclib` with `-nostdlib` writes a signed leaf `MH_DYLIB`.
+  The install name is the output basename unless overridden by `-Wl,-install_name,<name>`.
+  Source inputs require `-fPIC` or `-fpic`. Strong functions can use direct local and hidden
+  references and immutable data. The platform loader and rule worker can consume the image.
+  [Design](docs/design/darwin-shared-output.md) · [#393](https://github.com/yrashk/ycxx/issues/393)
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -1362,6 +1396,20 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- A constant expression can read a scalar field through a reference to an indexed element of
+  a namespace-scope constexpr array of supported flat aggregates. L1 keeps the array element
+  and field in the address path and checks the index against the array bound ([expr.sub],
+  [expr.ref], [expr.const]). [#1403](https://github.com/yrashk/ycxx/issues/1403)
+- Constant evaluation supports named one-dimensional automatic arrays of nonempty nonunion
+  aggregates with trivial destruction and direct, non-overlapping integral or enumeration
+  fields. A braced initializer initializes those fields directly, including zero initialization
+  of omitted scalar fields when no default member initializer applies. Each field becomes
+  readable at its own initialization step. Element aliases retain the array's bounds and storage
+  lifetime, including through a range-for's reference. Direct initialization from a conditional
+  prvalue with a value-initialized arm, such as `b ? Entry() : Entry{9}`, remains open, as do
+  whole-element copies, member calls on elements, and separate element lifetime operations
+  ([dcl.init.aggr], [basic.life], [expr.const]).
+  [#1642](https://github.com/yrashk/ycxx/issues/1642) · [#1140](https://github.com/yrashk/ycxx/issues/1140)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
   initializer's object, including through a conditional glvalue. Reading a later field on
@@ -1420,7 +1468,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   §2.4) are computed by `QueryLayout` from the unit's shapes (`UnitShapes`, #115); data with
   `VAggregate` initializers; Itanium names for global-namespace class types in parameters.
 - Tests: `tests/own/classes/s1-*` (spec-only, plus seven from the review). Further cases are
-  tracked under classes by value (#116), local classes (#117) and records in the interpreter (#25).
+  tracked under classes by value (#116) and records in the interpreter (#25); local classes came with #117.
 - Not yet: unions, bit-fields, constructors, bases (access checking came with #119).
 
 - Ordinary named, non-template records with only scalar fields and no bases or unions can use
@@ -1449,6 +1497,23 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   lexical point. An unbound class template pattern leaves dependent expressions for a selecting
   initialization ([class.mem.general], [temp.res], [temp.inst]).
   [#732](https://github.com/yrashk/ycxx/issues/732)
+- An array member whose innermost element is a scalar (not a pointer to member) keeps no value at
+  declaration. Where an initialization selects its default member initializer,
+  `AtItem::replay_default_member` replays the tokens for the class or specialization and folds
+  them with `Evaluator::evaluate_initializer` into an aggregate literal. This applies to dependent
+  bounds and element types (`T w[N] = {}`), partial lists and nested arrays, and generalizes
+  #1192's braced `char` arrays, whose mode independence the next item now checks
+  ([class.mem.general], [dcl.init.aggr], [temp.inst]/3). A nonconstant array default remains
+  #118, and constant evaluation of the object remains #1140
+  (`tests/own/templates/array-default-member/`).
+  [#1418](https://github.com/yrashk/ycxx/issues/1418)
+- The interpreter reports when an `if consteval` took its consteval edge
+  (`Outcome::observed_constant_context`, from the `observes_context` flag on its `consteval_br`).
+  A default member initializer's value that observed it is not kept at declaration. The use-site
+  fold keeps it only in a constant context, because a runtime initialization is not manifestly
+  constant-evaluated ([expr.const], [stmt.if]). Those runtime uses are diagnosed until they are
+  evaluated at run time.
+  [#1459](https://github.com/yrashk/ycxx/issues/1459)
 - In non-template code, ordinary scalar aggregates replay written defaults in braced expressions,
   `T()` value initialization, result objects, and aggregate arguments. The expanded runtime path
   checks built-in scalar operations and ordinary calls for nonthrowing behavior. IR binds receiver
@@ -1511,7 +1576,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   value result, checking the implicit object's cv qualifiers and value category. Ordinary
   in-class conversion functions may declare `&` and `&&` qualifiers. Among viable exact-result
   candidates with the same cv qualifiers, an rvalue prefers the `&&` candidate.
-  General conversion selection remains tracked in #339.
+  Ordinary in-class conversion functions accept bare `explicit` in either order with
+  `constexpr`. The exact-result named `static_cast` can call them and copy-initialization
+  excludes them (#1468). General conversion selection remains tracked in #339.
 - Bodies of member functions are complete-class contexts: class member lookup comes before
   namespace lookup, and their class is complete there. `This` and implicit member access
   (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
@@ -1528,17 +1595,27 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   specializations retain strong definitions. [#1051](https://github.com/yrashk/ycxx/issues/1051)
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
   in the interpreter (#25). In-class member functions are weak definitions on both targets (#422, #124).
-- First-declaration deleted copy assignments can carry a ref-qualifier. Other class-template
-  member ref-qualifiers and defaulted assignment remain open.
+- First-declaration deleted copy assignments can carry a ref-qualifier. Defaulted assignment
+  remains open. Other ref-qualified members are under #311 below.
 
 ## Ref-qualified member functions (#311)
 
 - Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
   receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
   names encode the ref qualifier for mixed-object calls.
+- Members of namespace-scope class templates, their nested classes, partial and explicit
+  specializations and member templates keep their ref-qualifier through instantiation, and
+  calls rank the implicit object parameter by the object's value category. Out-of-class
+  definitions of members and member templates match on the ref-qualifier, and a redeclaration
+  that corresponds only after instantiation is diagnosed. A member function template's Itanium
+  `<nested-name>` encodes the ref-qualifier, checked against Clang's symbols in both link
+  directions.
 - GCC mode also permits an unqualified nonstatic member or conversion to overload its
   ref-qualified counterpart. Spec and Clang modes diagnose the corresponding declarations.
-- Ref-qualified virtual calls and broader template cases remain open.
+- Ref-qualified virtual calls and joint ranking of ref-qualified member and nonmember operators
+  remain open here. Ref-qualified members of local classes wait for local classes
+  ([#117](https://github.com/yrashk/ycxx/issues/117)); out-of-class definitions of
+  nested-class members of class templates wait for [#1187](https://github.com/yrashk/ycxx/issues/1187).
 
 ## Classes, δ step 3: constructors, destructors, references, overloading (#86, 2026-11-18)
 
@@ -1562,31 +1639,57 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checked across an out-of-class definition ([dcl.constexpr], #157). These constructors use the
   ordinary runtime construction path. Constant evaluation of class objects is tracked in #25,
   and named exception specifications are tracked in #219.
-- Ordinary constructors can spell bare `explicit` in class, in either order with `constexpr`.
+- Constructors and constructor templates, in ordinary classes and class templates, can spell
+  `explicit` or `explicit(constant-expression)` in class, in either order with `constexpr`.
   A matching out-of-class definition inherits the property. Copy-initialization excludes these
   constructors. Direct initialization includes them. Copy-list-initialization ranks them and
   diagnoses an explicit winner, including a default constructor or a temporary for a reference
-  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
+  argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157, #715).
+  The condition is a contextually converted constant expression of type `bool`, and narrowing
+  is diagnosed. A condition that depends on a class template's parameters is evaluated when the
+  member is instantiated. One that is value-dependent on a constructor template's own parameters
+  is kept as an atom and read again after deduction, once the template's constraints are
+  satisfied. A substitution failure there fails deduction, and an explicit specialization leaves
+  copy-initialization ([temp.deduct.general], [over.match.funcs.general]). Conversion functions
+  (#339) and deduction guides (#316) do not take the specifier yet.
+- Constructor templates take part in overload resolution only when their associated
+  constraints are satisfied ([temp.deduct.general]/5, #1398). An atom spelled in a member of a
+  class template specialization, such as a member template's constraint, reads the enclosing
+  class's parameters with the specialization's arguments.
 - Both native targets coalesce eligible inline complete-object constructors across translation
   units. This covers in-class bodies and out-of-class bodies marked inline by a declaration
   ([dcl.inline], [basic.def.odr]). Translation-unit-local classes retain local constructor
   symbols, and non-inline out-of-class definitions retain strong symbols.
   [#1096](https://github.com/yrashk/ycxx/issues/1096)
-- A first-declaration in-class `C() = default` is supported for non-template, nonunion tag
-  classes at namespace scope without fields, bases, virtual functions, or a nontrivial or deleted destructor.
-  The constructor participates in overload selection and access checks, including bare `explicit`.
-  Default-initialization is vacuous and value-initialization zero-initializes without a callable
-  constructor body. An `inline constexpr C tag{}` uses the existing empty record constant
-  representation while the class has a user-declared constructor ([dcl.fct.def.default],
-  [class.default.ctor], [dcl.init.general], #157).
-- A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
-  constructor, including with `constexpr` or a concrete `noexcept` specification. It participates in overload
-  selection, access checking and deletion. For ordinary namespace-scope records without
-  bases, copies proven trivial use the existing representation copy and the usual by-value
-  ABI. This includes supported scalar fields, lvalue references, arrays, and class members
-  with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
-  is diagnosed at use. Native by-value boundaries require a known copy classification.
-  [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
+- A default, copy or move constructor, a copy or move assignment operator and a nonvirtual
+  destructor can be defaulted on their first declaration in a class or class template
+  ([dcl.fct.def.default], #157). The member stays declared: it takes part in overload
+  resolution, access checks and aggregate rules, and is not user-provided.
+  - When its class is complete, or its specialization is instantiated,
+    `Program::classify_special_member` runs overload resolution for each base and member from
+    the class's context and finds the function deleted, trivial, nontrivial, or beyond ycxx
+    (diagnosed at use). A type that the implicit declaration cannot have deletes it, and a deleted
+    move is no candidate ([over.match.funcs.general]). A class whose implicit copy depends on a
+    defaulted one is classified the same way.
+  - A trivial operation is a representation copy, `DefaultInit` or `ValueInit`. A nontrivial one
+    is defined where something uses it: initialization or assignment of the bases, then the
+    members, with an array element by element. The definition is `constexpr` and weak, and its
+    analysis for a specialization is at the end of the unit.
+  - The implicit exception specification is decided where `noexcept` asks for it
+    (`Program::defaulted_nonthrowing`); it does not include subobject destructors ([except.spec]).
+  - A class is POD for layout by the `-fcompat` mode's definition, where defaulted and deleted
+    constructors are not user-provided: C++11's in Clang mode on arm64 macOS, C++03's otherwise
+    (public members, no bases).
+  - Outside the class (#1541, #1565): a non-template, non-union class with no bases or virtual
+    functions, defined in an enclosing namespace, can default its default, copy and move
+    constructors and its destructor when its members are scalars or arrays of them (a const one
+    with an initializer, for the default constructor), and its copy and move assignment when
+    they are scalars, none const, volatile or `[[no_unique_address]]`. Such a definition is
+    user-provided and keeps the first declaration's exception specification. An array member
+    in the assignment case gets a diagnostic about the signature instead.
+  - Not yet: local classes, defaulting outside the class for classes with bases, class members
+    or virtual functions, a virtual assignment operator, member pointers in assignment.
+  [Design](docs/design/defaulted-special-members.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
 - An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
   available implicit move constructor for scalar fields and class fields with proven nonthrowing
   initialization and destruction. The fields initialize in declaration order from the source
@@ -1631,8 +1734,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   #157, #309, and #25.
 - Tests: `tests/own/classes/s3-*` (spec-only, plus two from the review): 16 of 16 pass. 10 more draft examples pass.
 - Not yet: temporaries with destructors created in a conditional operand, value-initializing a
-  member subobject whose class has an implicit constructor, conditional
-  `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
+  member subobject whose class has an implicit or defaulted nontrivial constructor, and other
+  `= default` forms (#157, #244). Pack expansions in mem-initializers: "Pack expansions in
+  mem-initializers (#1400)" below.
 
 - Ordinary explicit class returns copy-initialize from an eligible named local or
   parameter as an xvalue, including parenthesized names. A written move constructor
@@ -1673,6 +1777,51 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Not yet: member class templates (#340) and a class head qualified by a namespace
   (`class N::X { … }`, #1188). Found on the way: #1201 (members declared after a body), #1202
   (hiding in the class's own scope), #124 (`static inline` members are strong).
+
+## Local classes (#117)
+
+- A class defined in a block ([class.local]) is an item of its own
+  ([design](docs/design/local-classes.md), decided by Fable): the splitter cuts the class-specifier
+  out of the function body, consteval block or declaration (a lambda in an initializer) that holds
+  it (`Splitter::local_classes`, `Item::local_owner`), and its members are member items. The name
+  index puts it on a level of its own (`ns::(local k)`), so no lookup outside its block finds it.
+- The body's analysis defines it where the class-specifier is (`Parser::define_class`,
+  `Program::define_local_class`): an entity local to the function or lambda
+  (`EntityRec::local_class`), numbered among its local classes of that name in token order; its
+  name in the block; and the class itself through `ItemAnalysis` and `class_def`, so constructors,
+  destructors, default member initializers, special members, emission and constant evaluation are
+  those of any class. Unnamed local classes (named by a typedef for linkage) and declarators
+  after the `}` work, as do `struct X;` and `struct X* p;` naming no class, which declare a
+  local class a later definition completes ([basic.scope.pdecl]). Local items' ids include their
+  owner's, so same-shaped classes of different functions stay distinct.
+- Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations
+  and using-directives, namespace aliases, `using enum`s, static locals, and constants for their
+  values. An automatic variable is usable
+  only unevaluated ([basic.def.odr]). Lookup reaches the block after the local class and before
+  the function's class ([basic.lookup.unqual]), including a class still being defined around a
+  lambda in a static member's initializer. Access is the function's ([class.local]/1).
+- In a template's definition a local class is dependent; each specialization of the function,
+  including a member function template of a class template, has its own, instantiated from the
+  item with the arguments bound (`replay_class`). Its members are emitted where used.
+- Member templates, static data members and friend function definitions in a local class are
+  diagnosed ([temp.mem], [class.static.data], [class.friend]).
+- Symbols are Itanium `<local-name>`s with discriminators (`_ZZ1hvENK1A3getE_0v`), checked
+  against Clang 23 objects.
+- `#include <iostream>` hello: 2,698 errors before, 2,660 after. libycxx's `resize_and_overwrite`
+  guards and `tuple_cat` plan compile; its ctype and errno tables wait on constant evaluation of
+  class and array subobjects (#1140).
+- Tests: `tests/own/local-classes` (39 spec-only, Clang 23 and GCC 16 agree; 3 for libycxx's
+  shapes and 1 from the review), `tests/own/abi/local-class-names.run.cpp` (a Clang peer), `unit.items` (the
+  splitter), and the δ tests `s1-locals-scopes` and `s1-elaborated`.
+- Not yet: block-scope enumerations ([#1442](https://github.com/yrashk/ycxx/issues/1442)), a
+  member class of a local class defined later in the block
+  ([#1443](https://github.com/yrashk/ycxx/issues/1443)), local classes with virtual functions
+  ([#1155](https://github.com/yrashk/ycxx/issues/1155)), constant evaluation of local
+  aggregates with class or array members ([#1140](https://github.com/yrashk/ycxx/issues/1140)),
+  which uses of an enclosing constant are odr-uses, shared with lambdas
+  ([#1447](https://github.com/yrashk/ycxx/issues/1447)), and the discriminators where Clang and
+  GCC disagree ([#1448](https://github.com/yrashk/ycxx/issues/1448)).
+  [[class.local]](https://eel.is/c++draft/class.local) · [#117](https://github.com/yrashk/ycxx/issues/117)
 
 ## Nested classes of class templates (#1187)
 
@@ -1786,7 +1935,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [#893](https://github.com/yrashk/ycxx/issues/893)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
-  (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
+  (#157). Enumerations in a block are tracked in #1442. Qualified lookup of earlier enumerators
   while the unnamed definition is open is tracked in #879.
 
 ## Direct explicit destructor calls (#722)
@@ -1803,9 +1952,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
 - **Scopes:** a namespace is named by its path (`a::b`; `(anonymous)` for an unnamed one);
-  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, that
-  namespace with inline and unnamed components dropped, so their members are found in the
-  enclosing one ([namespace.def]/7, [namespace.unnamed]). Namespace entities (`EntityKind::
+  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, every
+  namespace that encloses that one through inline and unnamed namespaces only, so their members
+  are found in the enclosing ones ([namespace.def.general]/7, [namespace.unnamed]). A namespace
+  inside an inline one keeps its own inline set (`std::__y1::ranges::__cpo::begin` is
+  `std::ranges::begin`), an extension without `inline` of an inline namespace is still inline, and
+  making a namespace inline when it is reopened is an error. [#153](https://github.com/yrashk/ycxx/issues/153)
+  Namespace entities (`EntityKind::
   namespace_`) are the scope of their members' entities, so `geo::value` and `::value` are two;
   members of an unnamed namespace have internal linkage.
 - **Lookup:** unqualified lookup ([basic.lookup.unqual]) walks the enclosing namespaces from the
@@ -1973,6 +2126,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   an accessible, unambiguous base subobject. A compatible bit-field is read into a temporary.
   The tests in `tests/own/casts` cover identity, qualification, overloads and direct reference
   initialization. [#199](https://github.com/yrashk/ycxx/issues/199)
+- Named `const_cast` changes cv-qualification on ordinary pointers with matching shapes,
+  including cv `void*`, and on scalar lvalues and xvalues ([expr.const.cast],
+  [#1424](https://github.com/yrashk/ycxx/issues/1424)). It keeps the original address and
+  gives a reference cast the requested value category. In a constant expression, an access
+  still respects the qualifiers of the underlying object. A by-value class parameter object uses
+  the definition's declared qualifiers ([dcl.fct]/5) and permits writes to mutable members.
+  Pointer-to-member casts and class or array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
 - Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
   and pointer-width integral types. A too-narrow integer destination is ill-formed, and
   an evaluated cast is disallowed in a core constant expression. Smaller integer sources
@@ -2039,6 +2199,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   observe the union and member destructor effects independently.
 - An omitted aggregate member of union type is initialized from an empty braced list,
   so its first variant can run a constructor.
+- In GCC mode, a direct empty union allocation walks ordinary variant members and bases.
+  A proven public trivial defaulted constructor leaves the enclosing variant eligible,
+  while a user-provided default constructor still triggers the deleted-default diagnostic
+  without a default member initializer. Nested union declarations and initializers on
+  later variants remain in #203. [#1483](https://github.com/yrashk/ycxx/issues/1483)
 - A union constructor that selects a nontrivially destructible member can use the hosted
   Linux cleanup subset above or a nonthrowing exception specification. A potentially
   throwing delegating constructor with a nontrivial variant receives a diagnostic.
@@ -2111,8 +2276,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   most 16 bytes passes and returns in one or two 8-byte registers; a larger or non-trivial one by
   address, an indirect result in x8 (`l2::Function::indirect_result`, the call's fourth
   immediate). A class needing more registers than are left goes whole on the stack and leaves the
-  rest unused (C.11). An empty class passes nothing, as in Clang. Which classes are trivial for
-  calls follows the published Itanium rule by default. On x86-64 Linux, GCC mode passes
+  rest unused (C.11). Spec and Clang modes omit the tested empty-class arguments on Darwin.
+  GCC mode transports a naturally aligned one-byte empty argument in direct calls on Darwin.
+  The published Itanium rule selects which classes are trivial for calls by default. On x86-64 Linux, GCC mode passes
   supported classes whose copy is implicitly deleted by a class subobject in stack slots.
   The explicit
   `-fclass-call-abi=itanium` and `-fclass-call-abi=apple` flags override that choice (DECISIONS §1.6).
@@ -2140,7 +2306,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Both the interpreter and native code use the L1 join with nullable temporary addresses. Conditional
   nontrivial destruction and reference lifetime extension remain under [#157](https://github.com/yrashk/ycxx/issues/157).
 
-## Local class prvalue selection (#740)
+## Class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
   aggregate field, or a fixed-array element directly ([expr.cond], [expr.comma], [dcl.init.aggr],
@@ -2151,6 +2317,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   later initializer clauses and are destroyed with the rest of the full-expression's
   temporaries in reverse order ([class.temporary]). Tests in `tests/own/class-selection/`
   check both arms, later sibling initialization, and temporary and object destruction.
+- A native by-value return can initialize its result object from a built-in conditional
+  with nonthrowing evaluation and cleanup. In the supported mixed case, overload
+  resolution copy-initializes a prvalue from the cv-unqualified lvalue arm of the same
+  class. A selected prvalue can initialize the result even when copy and move are deleted.
+  The result's lifetime starts before temporary destruction, which precedes destruction
+  of the function's locals ([stmt.return], [basic.life]).
 - This slice supports nonthrowing initializers and cleanup. More general cleanup during
   unwinding remains in #219. Potentially overlapping subobjects remain under #301 and #304,
   other class initializer contexts under #740, and other conditional temporaries under #157.
@@ -2221,6 +2393,12 @@ template's tokens again with the arguments bound.
   ([temp.deduct.type]/8) and mangled as `A T_ _`; the reference tie-break of
   [temp.deduct.partial]/9. Reference binding reads an array's cv-qualifiers from its elements
   ([basic.type.qualifier]/3), for templates and other code.
+- A whole `sizeof(type-id)` bound with a dependent type operand stays dependent in a
+  class template's non-static array member. Completing a specialization replays the member's
+  declaration and checks
+  the ordinary layout and bound there. Merely naming a pointer to the specialization leaves
+  the operand unchecked until a completion demand ([dcl.array], [expr.sizeof], [temp.inst],
+  [#1191](https://github.com/yrashk/ycxx/issues/1191)).
 - Tests: `tests/own/templates/f1-*` (spec-only, plus ten from the review): 47 of 48 pass; the
   other calls through a function pointer (#24). 9 more draft examples pass ([temp.over], [temp.deduct.general],
   [temp.deduct.partial], [temp.arg.general], [temp.deduct.type]).
@@ -2282,6 +2460,34 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Concept-ids and comparisons as dependent template arguments (#1548)
+
+- A concept-id with dependent arguments read as an evaluated template argument is a
+  `VDepConcept` value in every declaration context, unqualified or namespace-qualified, and under
+  `!` ([temp.names]/8, [temp.dep.constexpr]/2). Substitution evaluates it once the arguments are
+  known (`Templates::substitute_concept_value`). `typename cond<C<I>, …>::type` in an alias
+  template, a member alias or a function signature works, as libycxx's `iter_difference_t` needs.
+- In a function signature it is `X <expression> E` (Itanium C++ ABI §5.1.6), GCC's form in every
+  mode. Clang qualifies a concept outside the global namespace (`dependent-concept-symbol` in
+  `docs/compatibility.toml`, #1589).
+- A dependent value with no `VDep*` form, such as `(sizeof(I) > 4)` or `I == 0`, gets
+  `template_value`'s placeholder in a namespace alias template and in an ordinary member alias of
+  a class template, as in a class base. The alias is parsed again with its arguments bound
+  (`AliasCallPattern::Kind::unrepresented`, `AtItem::replay_alias_calls`), the member alias with
+  its class. Named with dependent arguments, such an alias is a `TDeferredAlias`: its identity is
+  the alias and its arguments, not the shared placeholder, so `gt<T> f(T)` and `lt<T> f(T)` are
+  different templates. Substituting concrete arguments replays the alias, also for a function
+  specialization's parameter types; deduction binds a bare parameter to the deferred alias itself,
+  which keeps partial ordering of a partial specialization like `P<T, gt<T>>` exact. Two
+  different aliases with token-identical comparisons stay distinct, though [temp.over.link]/5 makes
+  them equivalent (#209). A signature through such an alias has no symbol yet. Member alias
+  templates and function signatures that write the comparison directly still reject it (#209).
+- `C<I> && D<I>` of concept-ids is a `VDepOp` conjunction, as for variable templates; `||` waits for
+  the replay. A conjunction in a signature has no symbol yet (#209).
+- Tests: `tests/own/templates/concept-id-alias-argument.{accept,reject}.cpp`,
+  `tests/own/templates/dependent-comparison-alias-{argument,identity}.accept.cpp`,
+  `tests/own/abi/dependent-concept-args.run.cpp` (linked with a Clang peer).
+
 ## Enumeration-typed template parameters (#774)
 
 - A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or
@@ -2292,8 +2498,29 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   specialization work.
 - Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
   as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
-- Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
-  `h<E(5)>()`, which the template-argument parser takes for a type-id (#810).
+- Tests: `tests/own/templates/enum-parameters/`. A functional cast as a template argument,
+  `h<E(5)>()`, is an expression (#810, `tests/own/templates/functional-cast-argument-tentative.accept.cpp`).
+
+## Placeholder non-type template parameters (#1244)
+
+- `template<auto X>`, `template<decltype(auto) X>` and `auto... Xs` ([temp.param]/7). Each
+  argument, written, defaulted or deduced through a specialization or an array bound, gives the
+  parameter its own type without cv ([temp.arg.nontype]/1, [dcl.type.auto.deduct]): integral,
+  enumeration, pointer, `std::nullptr_t` or a flat structural class. That type is part of the
+  argument, so `v<1>` (`int`) and `v<sizeof(char)>` (`std::size_t`) are different
+  specializations ([temp.type]).
+- Inside the template the parameter's type is its own position's `TTemplateParam`, which
+  substitution reads from the bound value, so `decltype(X)` is dependent and later parameters and
+  defaults may use it. As an independent parameter type it is a non-deduced context.
+  `TemplateParamSema::placeholder` records `auto` or `decltype(auto)` for the template-head's
+  identity and for symbols, which write `TnDa`/`TnDc` (`TpTnDa` for a pack) before the argument, as
+  Clang and GCC do (GCC writes none for an empty pack).
+- Tests: `tests/own/templates/placeholder-parameters/`, with a Clang peer for the symbols.
+- Not yet: `C auto X` (#286), `auto* P`, `auto& R`, and `decltype(auto)` of a parenthesized lvalue
+  or a reference, which deduces the prvalue's type instead of a reference (#1401). A floating-point
+  argument is rejected (#317), and a `nullptr` argument has no symbol yet (#64). `decltype(X)` in
+  a function template's signature is mangled as `T_`, not `DtT_E` (#1406), and an alias template
+  passes `I<'a'>` on as a `char` where its pattern's parameter is `int` (#1405).
 
 ## Pack-index-specifiers (#297)
 
@@ -2312,20 +2539,47 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - In symbols, `Dy <type> <expression>` is a substitution candidate. Spec and GCC modes use the
   converted constant index and the bound pack as `J <args> E`. Clang mode preserves a written
   literal's type and uses a placeholder for a bound pack (DECISIONS §1.7).
-- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
-  parameter-index form, and asm labels pin GCC's constant form.
+- GCC and Clang modes retain the written identity of supported named indices and operator
+  expressions. Spec mode uses the converted value. A named enumerator keeps its enum type in
+  compiler modes, and a named constant uses an entity reference.
+- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*` and
+  `tests/daemon/compatibility.py`. The cross-target and native mixed-object checks cover written
+  and literal indices, repeated substitutions, and class-bound packs.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. ycxx mangles an enumerator or a named
-  constant as a converted integer. Clang and GCC write the enumerator as an enum-typed literal
-  and a namespace constant as an external-name primary (#796). With these,
-  libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+  signature (#209). In a body that arithmetic works.
 
 ## Functional conversions with pack expansions (#915)
 
 - `T(a...)` expands its arguments as a call does ([expr.type.conv], [temp.variadic]/5). This is
   also the path a call through a still-dependent alias's member takes at the definition, as in
   libycxx's `invoke`. Test: `tests/own/templates/functional-cast-pack.run.cpp`.
+
+## Pack expansions in mem-initializers (#1400)
+
+- A mem-initializer's parenthesized expression-list reads each clause as an expandable operand,
+  as a call's arguments are: `value(static_cast<A&&>(args)...)`, `m(1, args..., 2)`. The braced
+  form `value{args...}` already did. An empty expansion value-initializes the member. In the
+  definition an unexpanded clause, or a member of dependent type, leaves the initializer
+  dependent, and the instantiation checks it ([class.base.init], [temp.variadic]).
+- A mem-initializer followed by `...` is a mem-initializer-list expansion. The definition
+  records it, and an instantiation reads it once for each element, as `expandable` does. Its
+  mem-initializer-id must name a pack of base classes ([class.base.init]); `B(t)...` and
+  `m(t)...` are diagnosed, as Clang and GCC do. A base named by a template parameter, `B(x)`,
+  `T(t)` or `Ts(ts)...`, is checked in the instantiation; while one is written, the definition
+  default-initializes no base. An element that is no direct base is reported by its type.
+- Nested expansions: an instantiation's element of an expansion or fold no longer notes its
+  packs to the enclosing operand (`Sema::end_element`), and a binary fold's operand probe keeps
+  its packs, so `h(g(args...))`, `s((a + ...))` and `id((a + ...))` work in bodies and
+  initializers. Packs of different lengths are reported once, without a second error for the
+  pattern.
+- Tests: `tests/own/mem-initializer-packs/` (spec-only author, plus the regression tests and
+  the review's): 11 pass. The base-pack cases are XFAIL: `struct D : Bs...` itself is
+  #308. Not yet: `V v(args...)` as a declaration's initializer (#1596), and a template-id
+  mem-initializer-id such as libycxx's `__tuple_leaf<_Ip, _Ts>(…)...` or a base named by a
+  member alias (#1267).
+- `<iostream>` hello (#776): 2,468 errors at `07e6d567` → 2,435. No errors remain at
+  `optional.hpp:107`, `:201`, `:205`, `:234`, `tuple.hpp:35`–`49`, `:338`, or `pair.hpp:226`.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -2625,8 +2879,14 @@ session's.*
   `cv void*` targets with added pointee qualifiers, Derived* to Base* through an accessible,
   unambiguous base of a complete Derived (an incomplete one gives false; virtual functions do not
   matter), the null pointer value, and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]). An
-  array pointee's qualifiers are its elements'. Function, member and multi-level pointers and
-  conversions to an array of unknown bound are diagnosed. Supported class-template bases and variable-template initializers
+  array pointee's qualifiers are its elements'. Multi-level pointers convert by qualification
+  conversions, with each level that adds qualifiers below const ones only, and a pointer to a
+  noexcept function converts to one to the plain function ([conv.fctptr]). References to
+  arithmetic, pointer and `std::nullptr_t` types follow [dcl.init.ref]/5: direct binding of a
+  reference-compatible operand (a qualification conversion of pointers to them), otherwise a
+  converted temporary for a const lvalue or rvalue reference, never for a reference-related
+  (similar) operand (/5.4, CWG2352; Clang 23 differs, GCC 16 agrees) (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
+  sources, are diagnosed (#1399). Supported class-template bases and variable-template initializers
   replay dependent operands and check class completeness at the demand. Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
@@ -2745,13 +3005,27 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
-## Trailing-zero count builtin (#1381)
+## Trailing-zero count builtins (#1381, #1479)
 
 `__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
 operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
 after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
 Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
 Other unsigned operand types and the optional fallback argument remain in #248.
+
+`__builtin_ctz` uses the same lowering after implicitly converting its single argument to
+`unsigned int`. The result type is `int` and `__has_builtin` answers 1. Spec and Clang
+modes diagnose a reached zero operand in a required constant expression. GCC mode yields the
+width of `unsigned int` during constant evaluation. At run time the GNU builtin's zero
+operand has undefined behavior. The other fixed-width spellings remain in #248.
+
+## Leading-zero count builtin (#1539)
+
+`__builtin_clzll` implicitly converts one argument to `unsigned long long`, evaluates it once
+and counts its leading zero bits as an `int`. Constant evaluation uses the target operand width.
+Spec and Clang modes diagnose a reached zero operand in a required constant expression. GCC
+mode returns the operand width during constant evaluation. Runtime zero has undefined behavior.
+Native lowering uses BSR on x86-64 and CLZ on AArch64. `__has_builtin` answers 1.
 
 ## C library string and memory builtins (#248, #1093, #1170)
 
@@ -2810,13 +3084,15 @@ Calls to user functions and values from the active constexpr frame remain outsid
 proof domain. `__has_builtin` answers 0 while support is partial.
 [Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
 
-## Checked signed integer builtins (#1077)
+## Checked integer builtins (#1077, #1636)
 
 The direct GNU `__builtin_add_overflow` and `__builtin_mul_overflow` calls accept matching
-signed target-`intmax_t` operands with a writable destination of the same type. Constant
-evaluation writes the width-converted result on both outcomes and returns whether the
-mathematical result exceeds the signed range. The destination uses the usual object and
-lifetime rules. `__has_builtin` answers 0 for the partial domain.
+signed target-`intmax_t` operands with a writable destination of the same type during
+constant evaluation. Constant evaluation and native code also accept differing standard
+unsigned integer operand and destination types up to 64 bits. The call evaluates each argument
+once, stores the converted result once and returns whether it differs from the exact arithmetic
+result. The destination uses the usual object and lifetime rules. `__has_builtin` answers 0 for
+the partial domain. [#1636](https://github.com/yrashk/ycxx/issues/1636)
 
 Native emission can omit an unreferenced immediate function template specialization. A named
 namespace-scope specialization with checked arithmetic that is retained by the reference
@@ -2855,14 +3131,15 @@ Other arguments diagnose an unsupported spelling when the body is instantiated.
 
 ## Source location builtins (#327)
 
-`__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
-source line, including through macro expansion and `#line`. An omitted ordinary function
+`__builtin_LINE()` is a zero-argument constant expression. Its type is `unsigned int` in spec
+and Clang modes and `int` in GCC mode. It uses the presumed source line, including through
+macro expansion and `#line`. An omitted ordinary function
 argument evaluates its default with the invocation line, which nested defaults inherit.
 The interpreter and native code share the same scoped evaluation. Translation units with the
 builtin track presumed lines in their semantic input.
 [Design](docs/design/source-line-defaults.md)
 
-Linux x86-64 supports the pinned libycxx `std::source_location::current()` descriptor
+x86-64 Linux and arm64 Darwin support the pinned libycxx `std::source_location::current()` descriptor
 for ordinary omitted arguments. The descriptor stores the presumed filename, line,
 one-based byte column and enclosing function in translation-unit-local storage.
 Resident results observe edits to presumed filenames and columns as well as lines.
@@ -2945,6 +3222,45 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   outside ordinary block declarations (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
+
+## Trailing requires-clauses on members of class templates (#1417)
+
+- A member function, constructor or prospective destructor of a class template, a nested class of
+  one, or a member template can have a trailing requires-clause ([class.mem.general],
+  [dcl.decl.general]/4), defaulted (`B() requires C<T> = default;`), deleted or user-provided, and
+  so can its out-of-class definition, which must repeat it ([temp.over.link]/6). A non-templated
+  function with one is an error.
+- The clause is part of the member's identity (`EntityRec::constraints`, its own tokens, mixed for
+  non-template functions only when present, [basic.scope.scope]/4), so members that differ only in
+  it are overloads. Each member-declarator has its own (GCC agrees; Clang gives a later declarator
+  the earlier clause, docs/compatibility.toml). An explicit specialization names the member its
+  specialization satisfies. The clause is mangled after the parameters (`Q`), as Clang and GCC
+  do; a concept-id clause matches them exactly, other expressions use the vendor form templates use
+  too ([#236](https://github.com/yrashk/ycxx/issues/236)). A specialization reads it as the pattern does and substitutes its arguments into
+  the atoms' mappings ([temp.constr.normal]); nothing in it is checked before the member is a
+  candidate ([temp.inst]), and a mapping that cannot be formed is unsatisfied
+  ([temp.constr.atomic]/3). `MemberDeclRec::constraints` keeps the specialization's normal form.
+- Member calls, constructor selection, qualified calls and addresses of static members skip a
+  candidate whose constraints are not satisfied ([over.match.viable]/3, [over.over]/5) and prefer
+  the more constrained of non-template functions with the same parameters
+  ([over.match.best.general]/2.6). `auto` deduces from such a set when its satisfied members agree
+  ([temp.deduct.call]/6.2).
+- When a specialization is complete, `Program::eligible_special_members` marks the special members
+  that are not eligible: unsatisfied, or outranked by a more constrained satisfied one of their kind
+  and parameters ([special]/6). They stay user-declared and suppress implicit declarations, but are
+  no candidates, are never defined and do not count for the class's triviality or POD layout. Of the
+  prospective destructors one is selected ([class.dtor]/4); none or several is an error.
+- Not yet: constrained friends are
+  [#1180](https://github.com/yrashk/ycxx/issues/1180); type-trait built-ins on class template
+  specializations are [#218](https://github.com/yrashk/ycxx/issues/218); a qualified call of an
+  overloaded static member also instantiates the overloads it did not select
+  ([#1461](https://github.com/yrashk/ycxx/issues/1461)); a non-static member in `sizeof` in a clause
+  ([#1299](https://github.com/yrashk/ycxx/issues/1299)); the injected-class-name naming a dependent
+  base's member in a clause ([#1524](https://github.com/yrashk/ycxx/issues/1524)); out-of-class
+  constructors of a class template with a requires-clause in its head are never emitted
+  ([#1530](https://github.com/yrashk/ycxx/issues/1530)).
+- Tests: `tests/own/member-requires/` (52: a spec-only author's, the review's and regressions;
+  XFAILs cite #218, #157, #1150, #1299, #1461, #1524 and #1530).
 
 ## Access control and friends (#119, 2026-11-18)
 
@@ -3062,6 +3378,21 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 ([temp.local]/6, `Sema::declared_template_param`).
 - Tests: `tests/own/temp-local/` (one run test, two reject tests).
 - The same rule applies through enclosing classes of an in-class member-class definition (#1187).
+
+## The injected-class-name as a template-name (#1567, #1177)
+
+In a class template, a partial specialization or a specialization, the class's own name followed
+by `<` names the template, so `A<U>` is the specialization `A<U>` ([temp.local]/1). This covers
+constructor and member function parameters, return types, and qualifiers such as `A<U>::member`
+and `typename A<U>::type`, in the class and in out-of-class member definitions. This is the
+converting-constructor pattern of `allocator`, `pair` and `optional`. The class's constructors
+share its name but are not found by lookup ([class.ctor]/1). They no longer hide it
+(`Sema::injected_class_template`). Plain `A` is still the current specialization.
+- Tests: `tests/own/temp-local/injected-template-name.run.cpp`, `injected-template-name-args.reject.cpp`.
+- Open: a non-dependent other specialization (`A<long>` by value, `A<long>::f()`) in the class's
+  own member bodies is still reported incomplete (#1149). A member class template's injected
+  name waits for member class templates (#340). A base's injected-class-name without arguments
+  (`struct D : B<int> { B b; }`) is #1590.
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
@@ -3229,8 +3560,9 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   GCC as black boxes). A class holding one is placed the same way.
 - Not yet:
   - A 128-bit integer through an ellipsis, or named in a variadic function on x86-64 (#1247).
-  - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
-    are diagnosed as not supported (#1176).
+- **Enumerations**: retain extended integer values and use them in fixed underlying types.
+  The modes select the unfixed underlying type and overflow behavior documented in
+  [the compatibility matrix](docs/compatibility.toml) (#1176).
 - Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
   peer, native arithmetic against constant evaluation, and calls in both directions with a Clang
   peer), and `unit.linux_int128` runs the native ones on x86-64 Linux with GCC and Clang peers.
@@ -3324,6 +3656,17 @@ exports and their consumers are scoped by triple. Package bootstrap recipes
 continue to describe host builds. Inspection shows the argument source and
 the action trace shows its position and resolved word.
 
+Project generators and rule witnesses can use `host_triple()` in their
+arguments to get the canonical host triple independently of target selection
+(#1534). Receipts key on the resolved argument, so builds for different
+targets can share an action with identical resolved arguments and inputs.
+Inspection and traces identify the host selector.
+
+Project generators and rule witnesses can also use both selectors in
+their `environment` records (#1540). The resolved strings enter the action
+identity and can share receipts with equal literals. Inspection reports
+each resolved environment value and its selector origin.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
@@ -3350,6 +3693,40 @@ planner field, and manifest location. Artifact edges name the output, and
 named input edges also give the consumer binding. Unresolved rules can yield
 an incomplete graph with the edges resolved so far. The HTML report shows
 these records under **Dependencies**, with links into the manifest.
+
+The `dependency_graph.value_edges` array records resolved typed export
+bindings (#1477). A value edge names the consumer, usage (`capabilities`
+or `facts`), binding, producer, and export, with the manifest location of
+the `value(...)` reference. Graph completeness applies to both edge arrays.
+HTML plans and comparisons show current edges under **Value bindings**,
+with source links.
+
+`ycxx show --against` compares occurrence counts by consumer, usage,
+producer, output, and binding when both plans have complete dependency
+graphs (#1464).
+JSON includes before and after edge records for each changed count. HTML
+shows those counts under **Dependency changes** and links current sites to
+the manifest. Moved references preserve the count, and older snapshots
+without a dependency graph can still compare plan facts.
+
+When both plans have complete graphs with `value_edges`, `ycxx show --against`
+also compares typed binding occurrence counts by consumer, usage, binding,
+producer, and export (#1493). JSON records before and after occurrences in
+`value_binding_changes`. HTML shows counts and source sites under
+**Value binding changes**, with links for sites in the current manifest.
+
+The **Target dependencies** panel in standalone HTML plans and comparisons
+starts at the selected target (#1499). Artifact and value uses link to the
+producer's card and to their sites in `build.ycxx`. Shared producers have
+one card, and incomplete plans show the links resolved so far.
+
+The explorable **Graph** in standalone HTML plans and comparisons opens
+at the selected target and its immediate inputs (#1604). Its buttons expand
+dependencies and dependents, with one node per target. The sidebar links
+the selected target's facts and authored edges to `build.ycxx`. Targets
+with identical visible labels keep distinct details (#1611). Incomplete
+plans also show an entry point and its resolved inputs in each component
+disconnected from the selected target.
 
 `ycxx show --targets` catalogs declared targets in the working directory's
 `build.ycxx` (#1392). The read-only manifest parse lists names in byte order
@@ -3411,6 +3788,9 @@ bundled and workspace packages use the same worker. `cxx()` in a package recipe
 tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
 selects one compiler. Package compilation and worker execution appear in the
 build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Rule packages share a resolved compiler's content fingerprint within one validation
+pass. Discovery still follows each candidate's invocation path. Watch polls and
+effect admission checks start fresh passes. [#1671](https://github.com/yrashk/ycxx/issues/1671)
 Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
 when inserting a prefix into a temporary string.
 
@@ -3491,14 +3871,143 @@ Inspection reports current helper identity or availability without launching
 the action. The Make adapter uses these declarations for its C compiler and
 archiver. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
+Rule witnesses also accept `tool_inputs`. A helper change invalidates the
+witness receipt, and an equal classified value preserves downstream reuse.
+The staged-witness walkthrough passes an absolute helper path to its
+analyzer and watches helper-only edits. [#1526](https://github.com/yrashk/ycxx/issues/1526)
+
+A rule-emitted generator can select an executable artifact with
+`tool = input("name")` (#1505). The producer's named output is staged using
+its bytes and executable mode, which enter the consumer's ordinary action
+identity. Inspection reports the staged path and selector and links the
+input edge to the producer. The staged tool example watches an executable
+script that writes a generated C++ header.
+
+A `cpp.host_executable` rule compiles disk sources and their includes with
+the resident host compiler and linker (#1559). An ordinary generator can
+stage `artifact("name", "executable")` as an argument or as its selected tool.
+Target variants reuse the host request, and generator receipts use the bytes
+and executable mode of the staged image. Watch follows the tool's C++ inputs.
+Read-only plans show its host triple and the artifact dependency.
+[Native host tool example](examples/project-build/native-host-tool/README.md)
+
+A `cpp.host_executable` can link disk-backed `cpp.library` dependencies
+through `deps` (#1576). Each executable's closure includes its transitive
+public include directories and visits each library declaration once. The
+same declaration can also serve the selected target app. Inspection shows
+the shared declaration and each authored dependency edge.
+[Shared library diamond example](examples/project-build/host-cxx-libraries/README.md)
+
+A `cpp.host_executable` can consume `generated_headers` through ordinary
+action producers (#1579). The resident host compile sees a virtual include
+directory with the producer's output names and bytes. Equal header bytes
+preserve the host compile, and real disk lookup observations continue to
+drive watch. Normal builds, planning inputs, and witnesses share the
+header producer receipts.
+[Generated host header example](examples/project-build/host-generated-headers/README.md)
+
+A `cpp.host_executable` can also use a generated artifact directly in
+`sources` (#1583). The resident compiler reads the source and its quoted
+generated siblings from the same host snapshot. Real disk includes remain
+observed. Planning and witness snapshots retain a completed observation
+even when the host tool read no disk source or include files.
+[Generated host source example](examples/project-build/host-generated-sources/README.md)
+
+A disk-backed `cpp.library` linked into a host executable can declare
+`generated_headers` (#1588). Each library translation unit sees its own
+and inherited generated directories, so an edit to one branch preserves
+unrelated library compiles. A library declaration shared with the selected
+target retains its distinct target include view. Plans show both include
+paths and one dependency edge for the authored header binding.
+[Generated host library header example](examples/project-build/host-library-generated-headers/README.md)
+
+Host-linked libraries can mix generated C++ source artifacts and disk
+sources (#1600). Each generated main keeps its own producer's siblings
+available for quoted includes. The library's public search directories
+continue to come from its headers and dependencies. Inspection shows
+the host and selected-target source paths with one authored source edge.
+[Generated host library source example](examples/project-build/host-library-generated-sources/README.md)
+
+A `cpp.host_executable` can declare direct `link_inputs` from ordinary
+host-independent action chains (#1616). The native link preserves operand order
+and repeated archives under foreign target selection. Archive-only edits leave
+translation unit inputs unchanged. Equal staged images reuse consuming actions,
+including those for early planning and witnesses. Read-only plans show each
+authored archive reference and its host path.
+[Native host archive example](examples/project-build/host-static-archive-inputs/README.md)
+
+A host-linked `cpp.library` can export ordinary generated archives through
+`public_link_inputs` (#1622). The host link orders direct archives first
+and emits a shared library's operands once in a diamond, retaining explicit
+repeats. Host and selected links use the same bytes for a shared reference
+and report their own effective paths. Archive-only edits reuse the host's
+translation unit inputs.
+[Inherited host archive example](examples/project-build/host-library-static-archive-inputs/README.md)
+
+A `cpp.library.public_link_inputs` position can choose explicit `host`
+and `target` artifact references (#1629). The host tool and selected app
+resolve their own role, including when both links use the host triple.
+They can inherit one library while using distinct archive formats, or
+select two named outputs of one ordinary producer. Plans report each
+active role, resolved path, and authored site.
+[Archive roles example](examples/project-build/archive-consumer-bindings/README.md)
+
+A `cpp.library.generated_headers` position can select explicit `host`
+and `target` artifact references (#1637). A host tool and selected app
+can share a library while seeing different versions of an include.
+Each traversal keeps its own first-use include order and generated file
+paths. Plan facts preserve both role-specific sequences and the authored
+sites, including inherited directories whose positions differ.
+[Generated header roles example](examples/project-build/role-bound-library-headers/README.md)
+
+A `cpp.library.sources` position can select explicit `host` and
+`target` artifact references (#1647). A native host tool and selected
+app can compile different generated implementations from the same library
+declaration, even when their triples match. Each implementation retains
+its producer's quoted sibling lookup and authored position. Inspection
+shows its logical source path, role, and artifact reference location.
+[Generated source roles example](examples/project-build/role-bound-library-sources/README.md)
+
+A witness can also use `tool = input("name")` to run a staged executable
+artifact (#1515). The staged-witness example classifies the generated
+analyzer's stdout into a typed score and generates a C++ constant from it.
+An analyzer edit with the same score updates the witness evidence and
+reuses the header and native build.
+
+A typed witness can select a `cpp.host_executable` artifact directly as
+its tool (#1566). The resident host build records source and include
+lookups, including misses. Read-only inspection and watch check those
+observations. The witness receipt uses the staged image, so an edit that
+preserves the linked bytes refreshes the observations and reuses the
+witness. [Native host witness example](examples/project-build/native-host-witness/README.md)
+
+An ordinary generator chain can stage a host executable upstream of a typed
+witness (#1571). The coordinator captures the reachable host images and
+file observations together. Staged bytes and executable mode enter the
+action keys. The witness receipt stores raw evidence, and the classifier
+supplies the typed value. Equivalent artifacts or equal classified results
+allow downstream reuse.
+[Host producer witness example](examples/project-build/host-producer-witness/README.md)
+
+Rule workers can read a generated inventory through `plan_inputs` when a
+native host tool runs upstream (#1574). Host observations drive watch and
+read-only staleness checks. Equal selected bytes reuse the rule worker and
+refresh provenance. A rule that also classifies a witness revalidates the
+planning reads and witness inputs before admitting the result.
+[Host planning input example](examples/project-build/host-planning-inputs/README.md)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
 adding receipt provenance to the consumer's arguments. The shader reflection
 example consumes the same fragment SPIR-V receipt as its runtime bundle and
-generates a C++ header from the descriptor layout. An equal layout preserves
-native work. Read-only inspection and watch reobserve the producer graph,
-including the selected tools and input files. [#1258](https://github.com/yrashk/ycxx/issues/1258)
+generates a C++ header from the descriptor layout. The sample includes uniform
+buffers and one-dimensional literal `sampler2D` arrays, with typed descriptor
+kinds and element counts. Its executable checks the count in the bundled SPIR-V.
+An equal layout preserves native work. Read-only inspection and watch reobserve
+the producer graph, including the selected tools and input files.
+[#1258](https://github.com/yrashk/ycxx/issues/1258)
+[#1486](https://github.com/yrashk/ycxx/issues/1486)
 
 ## The engine trace (#245, 2026-11-19)
 
@@ -3688,10 +4197,19 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   decltype-specifier as a mem-initializer-id (#1286) are missing. Namespace-scope function template signatures,
   variable template types and default arguments with an unrepresented operand stay dependent (#1269).
   Tests: `tests/own/templates/decltype-*`, `tests/own/inherit/decltype-base*` (#1243).
-- **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
-  type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
-  are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
-  `R(A...)` with a type parameter `R` is #1186.
+- **Functional casts as template arguments** (`function_type_argument_ahead`,
+  `tentative_type_argument`): `T(…)` is a type-id only if it can be a function type
+  ([temp.arg.general]/2, [dcl.ambig.res]/2). T is a simple-type keyword, a typedef-name, a class
+  or enumeration name, a class template-id, a qualified type name or a `typename`-specifier.
+  The token lookahead settles most shapes: `bool(x) || y`, `int(3) + 1`, `bool(T::value)`, `U(3)`
+  and `typename T::type{4}` are expressions, and `int()` and `void(...)` are types. When the
+  parentheses begin with a ptr-operator, a `(`, attributes or a type name, the argument is parsed
+  tentatively as a type-id. It is one if that parse ends at the argument's end with no new
+  error. Otherwise the parser's position, diagnostics and deferred-check counters are restored and
+  the argument is read as an expression: `bool(&g)`, `int((n))`, `int(E{2})` and `int(auto(3))`
+  are expressions, while `int(&)[3]`, `U(int)` and `int(*(int))` stay types (#1190, #810).
+  `bool(S{})` with a conversion function parses, but conversion functions are #339. `R(A...)` with
+  a type parameter `R` is #1186.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
@@ -3769,16 +4287,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - A user-declared copy or move assignment suppresses the implicit move constructor. A move
   assignment also deletes an otherwise implicit copy constructor. The resulting constructor
   availability determines call triviality. [#244](https://github.com/yrashk/ycxx/issues/244)
-- Ordinary namespace-scope non-template classes without bases support copy assignment defaulted
-  on its first in-class declaration. The selected operator preserves its access, source type and
-  any written exception specification. The memberwise body is built on demand, assigns fields
-  in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
-  [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
-  [#244](https://github.com/yrashk/ycxx/issues/244)
+- Copy and move assignment defaulted on its first in-class declaration is described with the
+  other defaulted special members above (#157). Deleted copy assignments participate in overload
+  resolution. [#244](https://github.com/yrashk/ycxx/issues/244)
 - Namespace-scope class templates accept a deleted copy assignment on the first in-class
   declaration, including with an lvalue or rvalue ref-qualifier. Specializations preserve
   deletion and diagnose a selected deleted overload.
   [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
+- Ordinary classes and class templates accept an unconstrained, nonvirtual deleted move assignment
+  on its first in-class declaration. It affects implicit special members and remains a candidate
+  after specialization. A diagnostic is required when it wins overload resolution.
+  [#244](https://github.com/yrashk/ycxx/issues/244) · [#1417](https://github.com/yrashk/ycxx/issues/1417)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
@@ -4063,7 +4582,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), trailing requires-clauses on member templates, static data member templates,
+  templates (#339), static data member templates (done since: see "Static data member templates";
+  trailing requires-clauses on member templates came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
 
@@ -4141,6 +4661,33 @@ static argument tracked in #1301 and #209.
   still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
+
+## Static data member templates (#340, 2026-11-27)
+
+- **Declared** in a class or class template as `template<…> static T v = …;` ([temp.mem],
+  [class.static.data]): a `variable_template` entity scoped in the class, its head one level inside
+  the class's, kept among the class's static members with `is_template`. Its in-class initializer is
+  a pattern; a class template specialization declares its own member template and skips the
+  initializer ([temp.inst]/3). A non-static one is diagnosed ([temp.pre]/2).
+- **Instantiated** per specialization used (`Program::variable_instance`, [temp.inst]/7): the member
+  item is analysed again with the class's arguments and the member template's bound, through the
+  static data member path, so `inline` non-constexpr ones have storage and `constexpr` ones are
+  usable in constant expressions. `static constexpr auto` deduces per specialization; lambdas in
+  initializers are owned by the specialization.
+- **Named** unqualified in the class and in derived classes (initializers, member function bodies,
+  default arguments, requires-clauses, `if constexpr`), as `C::v<args>`, `T::template v<args>`,
+  `object.v<args>` and `p->v<args>`. One of the current instantiation is value-dependent. Access and
+  constraints are checked.
+- **Defined outside** a non-template class: `template<class T> const int N::w = …;`.
+- **Emitted** with Clang's names (`_ZN1SIiE7counterIcEE`), strong, as other variable template
+  specializations are until #124.
+- Tests: `tests/own/templates/member-variable-template-*` (24; 17 by the spec-only author, a PEER
+  test links Clang's uses, two XFAIL for the gaps below).
+  `<iostream>` on macOS arm64: errors 2,468 → 2,423 at `07e6d567`; `basic_string.hpp` 156 → 111.
+  Its remaining `__sv_like` errors are `__is_convertible` gaps (#1399, #218).
+- Not yet: partial and explicit specializations (#1594); defining one of a class template outside
+  the class (#256). Found on the way: #1595 (an undefined specialization's constant use reports an
+  internal error).
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
@@ -4308,10 +4855,42 @@ or a class template), or a variable template, and in a constraint-expression. Th
   objects), `unit.darwin_lambda_declarations`, `unit.linux_lambda_declarations`, and
   `unit.linux_namespace_lambda` (daemon edits with a cold comparison).
 - Not yet ([#338](https://github.com/yrashk/ycxx/issues/338)): default member initializers, default
-  arguments, `static_assert`, and unevaluated operands (`decltype([]{})`). Local classes in a lambda
-  (#117), captures by reference in constant evaluation (#262), and weak definitions of variable
+  arguments and `static_assert`. Unevaluated operands are the next section (#1549). Captures by reference in constant evaluation
+  (#262), and weak definitions of variable
   template specializations, closure objects that are class templates' members and static locals
   of closures (#124) wait on their issues.
+
+## Lambdas in unevaluated operands of declarations (#1549)
+
+A lambda can be in an unevaluated operand (`decltype([] { … }())`, `sizeof`) of a declaration that
+no variable owns: an alias-declaration, a member alias of a class or class template, an alias
+template, and a function's declarator ([expr.prim.lambda.general]/3). libycxx's
+`iterator_traits` uses it (`iterator_core.hpp`, `iterator_adaptors.hpp`).
+
+- **Owner:** `Sema::unevaluated_closure_owner`, used by `open_lambda` where no function, enclosing
+  lambda or `closure_owner` owns the closure: the class around it (`current_class`) or the item's
+  namespace (`Questions::enclosing_namespace`), TU-local, with a discriminator of the item and the
+  template arguments bound. A class template specialization's member alias has its own closure
+  types, as its type-id is read again for it.
+- **Alias templates:** one whose type-id makes closures, or names an alias template that does
+  (`AliasCallPattern::closures`), is read again for each specialization, so `A<int>` and `A<char>`
+  have different closure types ([temp.alias]/5). The same arguments name one type, as in GCC;
+  Clang gives each use its own (#1593, `docs/compatibility.toml`). The read is a declaration part:
+  its generic lambdas are instantiated in it, and `Program::alias_closures` keeps its closures,
+  each once, for constant evaluation and emission where they are referred to. With dependent
+  arguments its closures are patterns (`Sema::closure_patterns`).
+- **Names:** such a closure is `$_N` in its class's or namespace's `<nested-name>`
+  (`ClassName::closure_in_scope`), N unique in the unit, so a closure type can be a template
+  argument and its members have code; in a local class, inside the function's `<local-name>`. A
+  function or variable template specialization naming one is TU-local (`names_tu_local`). Clang
+  and GCC give a class template's member closures vague linkage and per-class `Ul…E` names
+  (#1593). A constraint's closures keep their structural names.
+- Tests: `tests/own/lambda-unevaluated/` (Clang 23 and GCC 16 agree; also run on x86-64 Linux in
+  the `gcc:16` image), and two units naming each its own closure type in
+  `unit.{darwin,linux}_lambda_declarations`.
+- Not yet: a lambda in a function template's signature, which stays Dependent like any dependent
+  `decltype` there (#1269; an XFAIL test), or in a default template argument (#1608). An
+  out-of-line definition with a lambda in its return type matches its declaration (#1609).
 
 ## Floating point, the μ slice (#336, 2026-11-19)
 
@@ -4356,6 +4935,11 @@ values, end to end; results match Clang's bit for bit.
 - On Linux x86-64, a dependent `__builtin_fabsl` call in a template definition keeps its
   `long double` result type. When instantiation selects the call and the operand is concrete,
   a well-formed call receives the unsupported x87 value diagnostic ([stmt.if], [temp.inst], #201).
+- `__builtin_nansl("")` is recognized as a `long double` prvalue in libycxx's `<limits>`
+  template, including when the arm is discarded or the expression is unevaluated. A reached
+  constant evaluation or native emission diagnoses the unsupported signaling NaN value.
+  `__has_builtin` answers 0 on all targets. x87 signaling NaN values remain in #645, and other
+  GNU builtin payloads remain in #248. [#1397](https://github.com/yrashk/ycxx/issues/1397)
 - `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
 - Tests: `tests/own/floating` (84 spec-only, and 4 from the review: literals, conversions, constant evaluation, run
   tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
@@ -4463,11 +5047,29 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   declarations in different scopes have their own. A copy or move constructor's other parameters
   may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
   forbid them (`defaults_allowed`, `defaults_trail`).
-- Omitted scalar defaults on free function templates replay with the selected bindings at the
-  written declaration. Explicit arguments bypass replay.
-- Not yet: other dependent defaults (#356); defaults added by an out-of-class
+- Omitted defaults of function templates replay with the selected bindings at the written
+  declaration, for any parameter type. Explicit arguments bypass replay.
+- **Class templates (#356):** member defaults wait for the complete class in the template's
+  definition and in each specialization (the `member_template_name` gate in `ItemAnalysis`).
+  So do a templated class's member templates' defaults. An ordinary class's member templates'
+  defaults bind at their declaration, as its exception specifications do (#1607). Class
+  completion binds each default on first need (`bind_destructor_and_defaults`), so a default
+  that uses itself or a later one is diagnosed (`default_arg_recursive`,
+  `default_arg_not_yet_defined`). A call made before then says the same (`defaults_pending`).
+  The definition checks defaults unbound (`bind_member_default` with the enclosing heads). A specialization keeps each as a pending `DefaultArg` marker
+  (`Program::pend_member_defaults`). `AtItem::replay_member_default` analyses it for the call that
+  uses it ([temp.inst]/12), with the class's arguments bound and the definition's dependent calls
+  completed by argument-dependent lookup at the point of instantiation. Member function templates
+  replay in `replay_function_default` with the class's arguments at the enclosing levels. In a
+  template's definition, a call that selects a dependent default is value-dependent (`call`).
+  A specialization does not replay a default its definition failed to analyse. Nested
+  replays count toward the instantiation limit ([temp.inst]/16).
+- Not yet: lambdas in deferred member defaults (#338); a nested class's defaults naming later
+  members of the enclosing class (#1602); later members in an ordinary class's member template
+  defaults (#1607); defaults added by an out-of-class
   or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
-- Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #356, #357 and #102).
+- Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #357 and #102), including
+  `class-template-*` and `function-template-*` for #356.
 
 ## Dynamic initialization of namespace-scope variables, ι (#94, #337, 2026-11-19)
 
@@ -4621,6 +5223,39 @@ for calls and for selection against a static function-pointer target.
   internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and
   [temp.deduct.call] enabled.
+
+## Member using-declarations of base member functions (#1150, 2026-11-26)
+
+- `using B::f;`, `using B::operator();` and `using B::operator T;` in a class's
+  member-specification ([namespace.udecl]) name member functions of a base class, direct or
+  indirect, of an ordinary class, a class template or a partial specialization
+  (`member_using_declarator` in parse.cppm). A dependent base (`using Fn::operator();`) is named
+  again by each specialization's analysis of the member item. What lookup in the base finds is
+  kept in `Program::member_usings_` by (member item, class entity).
+- `Program::introduce_members` puts them in `ClassRec::introduced` once the class's own members are
+  known. It leaves out those that one of the class's own member functions hides or overrides: the
+  same name, parameter-type-list, cv-qualifier and ref-qualifier (/11). A conversion function also
+  compares its conversion type. A member function template also compares its template-head's
+  parameter kinds and depths (a class template's member template never hides an ordinary base's:
+  #1437). A constrained declaration hides nothing. The using-declaration's access goes in
+  `ClassRec::access` (/16). A data member or member type of the same name conflicts with it.
+- In a template definition, a name taken from a dependent base (`using Fn::name;`) is
+  type-dependent ([temp.dep.expr]/3; `Program::dependent_member_usings_`), so unqualified calls of
+  it are resolved in each specialization. In an incomplete class (a static member's initializer, a
+  `static_assert`), lookup also finds what earlier using-declarations introduced (`members_before`),
+  and a static initializer's call ranks every earlier declaration of the name.
+- Lookup (`direct_member`, `member_functions`) finds them as members of the class, so they join
+  its overload set ([over.match.funcs.general]/4). A call selecting one converts the object to
+  the declaring base subobject, whatever the base's access, and a virtual one dispatches through
+  that base's table.
+- A call of a class object finds `operator()` in a base too ([over.call.object]), through the base
+  subobject unless every candidate is static.
+- Checks: the nominated class is a base (/3), the member exists and each function is accessible
+  (/14), and a declarator is not repeated in its class.
+- Not yet: member types, data members and enumerators (#1425); inheriting constructors and pack
+  expansions `using Fs::operator()...;` (#308). Conversions do not consider a class with bases
+  (#339). Operator expressions do not find a base's member operators (#1426), and overloaded
+  `operator[]` is not supported (#219). Access to an inherited injected-class-name is not checked (#1427).
 
 ## Pointer-to-member types and declarators (#238)
 
@@ -4791,6 +5426,10 @@ Each is removed once ycxx compiles itself.
   - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
     its importers cannot read ("failed to read compiled module cluster: Bad file data").
   - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
+- **The interpreter's byte comparison is defined in its implementation unit** (`src/interp/ops.cpp`).
+  - Cause: with stock libstdc++, GCC 16.2 cannot read the `ycxx.interp:machine` partition when
+    it contains the body of `Machine::compare_bytes`.
+  - Fix: belongs in GCC. The definition can return to the partition when ycxx compiles itself.
 - **Defaulted comparisons are members, not hidden friends** (`src/ast`, `src/ir`, `ycxx.hash`'s `Fp128`).
   - Cause: GCC 16.2 crashes (segfault) in an importer that compares two values of an exported
     struct whose defaulted `operator==` is a friend, with or without `-freflection` (found by

@@ -151,12 +151,19 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
+// `__builtin_nansl("")` is recognized separately from the quiet NaN builtins.
 // A `library` builtin `__builtin_f` is the C library's function `f`, and calls it; its signature is
 // sema's (`sema::string_functions`).
 enum class BuiltinFunction : std::uint8_t {
   fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
-  source_line, source_location, ctzg,
+  source_line, source_location, ctzg, nansl, ctz, atomic, clzll,
 };
+
+enum class AtomicBuiltin : std::uint8_t {
+  load, store, exchange, compare_exchange, fetch_add, add_fetch, fetch_sub, sub_fetch,
+  fetch_and, and_fetch, fetch_or, or_fetch, fetch_xor, xor_fetch, fence, always_lock_free,
+};
+
 inline constexpr std::string_view builtin_line_name = "__builtin_LINE";
 inline constexpr std::string_view builtin_source_location_name = "__builtin_source_location";
 struct BuiltinFunctionInfo {
@@ -164,6 +171,7 @@ struct BuiltinFunctionInfo {
   BuiltinFunction function;
   char type = 0;
   bool advertised = true;
+  AtomicBuiltin atomic_op = AtomicBuiltin::load;  // only for BuiltinFunction::atomic
 };
 inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_addressof", BuiltinFunction::addressof},
@@ -179,8 +187,11 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nanf", BuiltinFunction::nan, 'f'},
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
+    BuiltinFunctionInfo{"__builtin_nansl", BuiltinFunction::nansl, 'l', false},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
+    BuiltinFunctionInfo{"__builtin_ctz", BuiltinFunction::ctz},
     BuiltinFunctionInfo{"__builtin_ctzg", BuiltinFunction::ctzg},
+    BuiltinFunctionInfo{"__builtin_clzll", BuiltinFunction::clzll},
     BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memcpy", BuiltinFunction::library},
@@ -198,6 +209,38 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{.name = "__builtin_mul_overflow", .function = BuiltinFunction::mul_overflow, .advertised = false},
     BuiltinFunctionInfo{builtin_line_name, BuiltinFunction::source_line},
     BuiltinFunctionInfo{builtin_source_location_name, BuiltinFunction::source_location},
+    BuiltinFunctionInfo{.name = "__atomic_load_n", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::load},
+    BuiltinFunctionInfo{.name = "__atomic_store_n", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::store},
+    BuiltinFunctionInfo{.name = "__atomic_exchange_n", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::exchange},
+    BuiltinFunctionInfo{.name = "__atomic_compare_exchange_n", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::compare_exchange},
+    BuiltinFunctionInfo{.name = "__atomic_fetch_add", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::fetch_add},
+    BuiltinFunctionInfo{.name = "__atomic_add_fetch", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::add_fetch},
+    BuiltinFunctionInfo{.name = "__atomic_fetch_sub", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::fetch_sub},
+    BuiltinFunctionInfo{.name = "__atomic_sub_fetch", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::sub_fetch},
+    BuiltinFunctionInfo{.name = "__atomic_fetch_and", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::fetch_and},
+    BuiltinFunctionInfo{.name = "__atomic_and_fetch", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::and_fetch},
+    BuiltinFunctionInfo{.name = "__atomic_fetch_or", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::fetch_or},
+    BuiltinFunctionInfo{.name = "__atomic_or_fetch", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::or_fetch},
+    BuiltinFunctionInfo{.name = "__atomic_fetch_xor", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::fetch_xor},
+    BuiltinFunctionInfo{.name = "__atomic_xor_fetch", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::xor_fetch},
+    BuiltinFunctionInfo{.name = "__atomic_thread_fence", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::fence},
+    BuiltinFunctionInfo{.name = "__atomic_always_lock_free", .function = BuiltinFunction::atomic,
+                        .atomic_op = AtomicBuiltin::always_lock_free},
 };
 inline constexpr std::string_view builtin_prefix = "__builtin_";
 // The C library function a `library` builtin calls.

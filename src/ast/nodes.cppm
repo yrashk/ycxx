@@ -108,6 +108,8 @@ struct Assign {
 // and only one of `then_` and `else_` is evaluated. The condition is converted to bool; the two
 // operands are converted to the result type.
 struct Conditional {
+  // In ExprInfo::flags when a class glvalue used the legacy value conversion.
+  static constexpr u8 unchecked_class_copy = 0x80;
   ExprInfo info;
   [[=sequenced(0)]] Child condition;
   [[=sequenced(1)]] Child then_;
@@ -171,10 +173,22 @@ struct DeleteArray {
 };
 
 // Built-in functions handled during evaluation (docs/EXTENSIONS.md).
-enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable, add_overflow, mul_overflow, ctz };
+enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable, add_overflow, mul_overflow, ctz, nansl, ctz_gcc_zero, clzll };
 struct BuiltinCall {
   ExprInfo info;
   BuiltinOp op;
+  [[=indeterminately_sequenced]] ChildList args;
+};
+
+// GNU atomic operations. Orders and the update operation use ir::MemOrder and ir::Rmw values.
+enum class AtomicOp : u8 { load, store, rmw, compare_exchange, fence };
+struct AtomicCall {
+  ExprInfo info;
+  AtomicOp op;
+  u8 order;
+  u8 failure_order;
+  u8 update;
+  bool returns_new;
   [[=indeterminately_sequenced]] ChildList args;
 };
 
@@ -660,7 +674,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
                           ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation,
-                          ImmediateVirtualCall, BitCast>;
+                          ImmediateVirtualCall, BitCast, AtomicCall>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -327,6 +327,16 @@ def main():
             assert nonkey_warm.read_bytes() == (scope / 'nonkey-cold.o').read_bytes()
 
             check_owned_root(compile, linux, scope, cold, daemon, host_cxx, readelf)
+            # Competing table owners in independent groups keep the second declaration's diagnostic.
+            header = 'struct Root { int member; virtual int first(); virtual int second(); };'
+            key = 'int Root::first() { return member; }'
+            (scope / 'two-table-owners.cpp').write_text(
+                f'namespace first_group {{\n{header}\n{key}\n}}\n'
+                f'namespace second_group {{\n{header}\n{key}\n}}\n')
+            for workers in ('1', '4'):
+                compile(linux, '-c', 'two-table-owners.cpp', '-o', 'two-table-owners.o',
+                        env=dict(cold, YCXX_THREADS=workers), error='two-table-owners.cpp:6:27: error: native output')
+
             hidden_namespace = (scope / 'owned-root' / 'prior-namespace.cpp').read_bytes()
             forward_declaration = b'    struct Gauge;\n'
             assert hidden_namespace.count(forward_declaration) == 1

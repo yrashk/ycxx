@@ -28,9 +28,8 @@ struct Literal {
   bool raw = false;  // a raw string literal
   bool bad = false;  // ill-formed and diagnosed: has no value
   // [lex.icon]: base 2, 8, 10 or 16; `value` is the value, `overflow` set if it exceeds 64 bits.
-  // [lex.fcon]: base 10 or 16; `value` holds the IEEE bits of the value for the suffixes none
-  // and l (binary64) and f (binary32), and is 0 for the others. A `long double` literal's bits and
-  // range check are its type's only where `long double` is binary64; sema checks the format.
+  // [lex.fcon]: base 10 or 16; `value` holds binary64 for none or l and binary32 for f.
+  // A long double also records x87 bits. Sema chooses the target format and checks its range.
   // [lex.ccon]: `value` is the code unit, or the numeric escape's value before conversion to the
   // literal's type, or a multicharacter literal's int value (as two's-complement bits).
   u8 base = 0;
@@ -39,6 +38,9 @@ struct Literal {
   bool overflow = false;
   bool multichar = false;
   u64 value = 0;
+  std::array<u64, 2> x87{};
+  bool x87_overflow = false;
+  bool nonzero_float_spelling = false;
   // [lex.string]: on the first string literal of a run that phase 5 concatenates, the code units
   // of the whole run without the terminating null, and the run's common encoding and ud-suffix;
   // the run's other tokens are flagged `tok_flag::continued`.

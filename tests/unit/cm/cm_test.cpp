@@ -1,5 +1,6 @@
 import std;
 import ycxx.cm;
+import ycxx.execution;
 import ycxx.unit;
 
 using namespace ycxx::cm;
@@ -14,7 +15,7 @@ void test_prefix_solver() {
         "the byte-weighted solver skips an earlier feasible endpoint to save more bytes");
   check(solve_prefix_choices(fusion_choices, 3) == std::unexpected(PrefixFailure::budget_exhausted),
         "an exhausted deterministic budget returns no solution");
-  std::inplace_stop_source stop;
+  ycxx::exec::inplace_stop_source stop;
   stop.request_stop();
   check(solve_prefix_choices(fusion_choices, 4, stop.get_token()) == std::unexpected(PrefixFailure::stopped),
         "a stopped solve returns no solution");

@@ -1,4 +1,4 @@
-add_library(ycxxc_build_manifest STATIC)
+add_library(ycxxc_build_manifest ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_build_manifest PUBLIC FILE_SET CXX_MODULES FILES manifest.cppm)
 target_link_libraries(ycxxc_build_manifest PUBLIC ycxxc_options)
 
@@ -9,7 +9,7 @@ if(APPLE)
 else()
   set(YCXXC_PUBLICATION_OS publication_linux.cppm)
 endif()
-add_library(ycxxc_project_build STATIC)
+add_library(ycxxc_project_build ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_project_build PUBLIC FILE_SET CXX_MODULES FILES
   rule_compilers.cppm
   rule_protocol.cppm

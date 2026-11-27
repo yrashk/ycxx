@@ -2,12 +2,13 @@
 // providers, the `editor` and `ambient` durabilities, `set` reporting a change,
 // `reset_unobserved`, and counts per request and per query kind.
 import std;
+import ycxx.execution;
 import ycxx.engine;
 import ycxx.unit;
 
 using namespace ycxx::engine;
 using ycxx::unit::check;
-namespace ex = std::execution;
+namespace ex = ycxx::exec;
 
 namespace {
 
@@ -106,7 +107,7 @@ void providers() {
                     ex::upon_error([](std::exception_ptr) noexcept {}),
                 scope.get_token());
     }
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
   }
   check(provided_calls == 32, std::format("32 files, provided once each under contention ({})", provided_calls.load()));
   bool right = true;
@@ -196,7 +197,7 @@ void reset_unobserved() {
       if (spin % 500 == 0) std::this_thread::yield();
     }
     const bool reset = early ? early_reset : live.reset_unobserved<BuildTime>(0, value(round, 'r'));
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
     (reset ? succeeded : failed)++;
     const std::string want = reset ? value(round, 'r') : value(round, 's');
     for (const auto& r : read) mixed += r != want;
@@ -213,7 +214,7 @@ void sender_across_a_set() {
   auto s = db.request<Stamp>(3);
   db.set_provider<File>(provide_file);
   db.set<BuildTime>(0, "bb");
-  check(std::get<0>(*std::this_thread::sync_wait(std::move(s))) == "bbfile3", "the sender reads the revision it started at");
+  check(std::get<0>(*ycxx::exec::sync_wait(std::move(s))) == "bbfile3", "the sender reads the revision it started at");
   db.set<BuildTime>(0, "cccc");
   check(db.get<Stamp>(3) == "ccccfile3", "and the next set is a new revision");
 }
@@ -251,7 +252,7 @@ void input_races() {
                 scope.get_token());
     }
     (void)fresh.reset_unobserved<File>(k, std::string(100 + k, 'x'));
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
     const std::size_t want = fresh.get<File>(k).size();
     for (std::size_t v : sizes) disagree += v != want;
   }
@@ -268,7 +269,7 @@ void input_races() {
                     ex::upon_error([&](std::exception_ptr) noexcept { ++errors; }),
                 scope.get_token());
     }
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
   }
   check(values == 0 && errors == 8, "a throwing provider fails every reader");
 }
@@ -303,16 +304,16 @@ void counts() {
     ex::spawn(db.request<Many>(0, Priority::background, &b) | ex::then([](const std::size_t&) noexcept {}) |
                   ex::upon_error([](std::exception_ptr) noexcept {}),
               scope.get_token());
-    std::this_thread::sync_wait(scope.join());
+    ycxx::exec::sync_wait(scope.join());
   }
   check(a.stats().executed == 2, "a request counts its own executions");
   check(b.stats().executed + a.stats().executed == db.stats().executed, "and the two requests' counts add up to the Db's");
-  (void)std::this_thread::sync_wait(db.request<DiskView>(100, Priority::background, &waiter));
+  (void)ycxx::exec::sync_wait(db.request<DiskView>(100, Priority::background, &waiter));
   check(waiter.stats().executed == 0 && waiter.stats().hits == 1, "a request that finds its cell done executes nothing");
 
   db.count_per_kind(true);
   db.reset_stats();
-  (void)std::this_thread::sync_wait(db.request<Many>(40));
+  (void)ycxx::exec::sync_wait(db.request<Many>(40));
   const auto per = db.stats_per_kind();
   const auto find = [&](std::string_view name) {
     for (const auto& [k, s] : per) {

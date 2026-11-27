@@ -50,12 +50,58 @@ constexpr std::string_view styles = R"HTML(
   .facts th { color: var(--muted); font-size: .76rem; font-weight: 670; }
   .facts th:first-child { width: 22%; }
   .facts th:last-child { width: 38%; }
-  .catalog th:first-child { width: 40%; }
+  .catalog th:first-child, .dependency-comparison th:first-child { width: 40%; }
   .catalog th:last-child { width: 31%; }
+  .dependency-comparison th:last-child { width: 30%; }
   .dependencies th:last-child { width: 26%; }
-  .catalog code, .dependencies code { white-space: pre-wrap; }
-  .dependencies .origin { display: block; }
+  .catalog code, .dependencies code, .dependency-comparison code { white-space: pre-wrap; }
+  .dependencies .origin, .dependency-comparison .origin { display: block; }
+  .dependency-sites { margin: .15rem 0 0; padding-inline-start: 1rem; }
   .dependency-notice { padding: .75rem 1.1rem; background: #f8f7f2; }
+  .plan-target { padding: .75rem 1.1rem; overflow-wrap: anywhere; scroll-margin-block: .65rem; }
+  .plan-target + .plan-target { border-top: 1px solid var(--border); }
+  .plan-target:target { background: #e5f1f3; box-shadow: inset .18rem 0 var(--link); }
+  .plan-target h3 { margin: 0 0 .3rem; font-size: 1rem; }
+  .plan-target code { white-space: pre-wrap; }
+  .plan-target > ul { margin: 0; padding: 0; list-style: none; }
+  .plan-target li { padding: .3rem 0; }
+  .plan-target li .origin { margin-inline-start: .65rem; }
+  .plan-target .empty { padding: 0; }
+  section#target-graph { margin-bottom: 1.25rem; --graph-edge: #547485; }
+  .graph-explorer { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 29%); }
+  .graph-main { display: flex; flex-direction: column; min-width: 0; padding: .85rem 1.1rem 1.1rem; }
+  .graph-toolbar, .graph-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .7rem; }
+  span#graph-count { color: var(--muted); font-size: .85rem; }
+  button#graph-reset, .graph-controls button, .graph-node {
+    font: inherit; color: inherit; background: #fff; border: 1px solid #bbcbd6; border-radius: .4rem;
+  }
+  button#graph-reset, .graph-controls button { padding: .28rem .6rem; cursor: pointer; font-size: .84rem; }
+  .graph-controls button:disabled { opacity: .6; cursor: default; }
+  button#graph-reset:focus-visible, .graph-controls button:focus-visible, .graph-node:focus-visible,
+  div#graph-viewport:focus-visible { outline: 2px solid #188496; outline-offset: 2px; }
+  div#graph-viewport { flex: 1; margin-top: .75rem; min-height: 13rem; max-height: 27rem; overflow: auto;
+    border: 1px solid var(--border); border-radius: .55rem; background-color: #f8fafc;
+    background-image: radial-gradient(#dce4ec 1px, transparent 1px); background-size: 16px 16px; }
+  div#graph-stage { position: relative; overflow: hidden; }
+  canvas#graph-edges { display: block; position: absolute; inset: 0; pointer-events: none; }
+  div#graph-nodes { position: absolute; inset: 0; }
+  .graph-node { position: absolute; padding: .35rem .55rem; font: 650 .88rem/1.25 var(--mono);
+    white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; cursor: pointer; unicode-bidi: isolate; }
+  .graph-node code { font-size: 1em; }
+  .graph-node[hidden] { display: none; }
+  .graph-node[data-root="true"] { border-color: #658291; }
+  .graph-node[aria-pressed="true"] { color: #104a58; background: #e5f1f3; border-color: var(--link); }
+  .graph-sidebar { min-width: 0; padding: .85rem 1.1rem 1rem; border-left: 1px solid var(--border); }
+  .graph-sidebar h3 { margin: 0 0 .45rem; font: 650 1rem/1.3 var(--mono); overflow-wrap: anywhere; }
+  div#graph-details { max-height: 27rem; overflow: auto; overflow-wrap: anywhere; font-size: .9rem; }
+  .graph-group { margin: .85rem 0 .2rem; }
+  .graph-group > h4 { margin: 0 0 .2rem; color: var(--muted); font-size: .8rem; }
+  .graph-group > ul { margin: 0; padding: 0; list-style: none; }
+  .graph-relation, .graph-fact { padding: .35rem 0; }
+  .graph-relation + .graph-relation, .graph-fact + .graph-fact { border-top: 1px solid #e8edf2; }
+  .graph-relation code, .graph-fact code { white-space: pre-wrap; }
+  .graph-relation .origin { margin-inline-start: .45rem; }
+  .graph-fact > strong { margin-inline-end: .5rem; font-size: .79rem; font-weight: 650; }
   .owner, .fact-name, .location { display: block; }
   .owner, .origin, .fact-name { color: var(--muted); font-size: .86rem; }
   .fact-value, .fact-name, .origin { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -118,6 +164,8 @@ constexpr std::string_view styles = R"HTML(
     .layout { grid-template-columns: minmax(0, 1fr); }
     .manifest { position: static; }
     .source-scroll { max-height: 65vh; }
+    .graph-explorer { grid-template-columns: minmax(0, 1fr); }
+    .graph-sidebar { border-left: 0; border-top: 1px solid var(--border); }
   }
   @media (max-width: 31rem) {
     .facts th, .facts td, .changes li { padding-inline: .6rem; }
@@ -236,7 +284,34 @@ void append_changes(std::string& out, const std::vector<PlanChange>& changes, st
   out += "</ul></section>\n";
 }
 
-void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::size_t lines) {
+struct TargetInputs {
+  std::string id;
+  std::vector<const PlanDependencyEdge*> artifacts;
+  std::vector<const PlanValueDependencyEdge*> values;
+};
+
+using InspectionTargets = std::map<std::string_view, TargetInputs>;
+
+InspectionTargets index_targets(std::string_view selected, const DependencyGraphInspection& graph) {
+  InspectionTargets targets;
+  targets.try_emplace(selected);
+  for (const auto& edge : graph.edges) {
+    targets[edge.consumer].artifacts.push_back(&edge);
+    targets.try_emplace(edge.producer);
+  }
+  if (graph.value_edges) {
+    for (const auto& edge : *graph.value_edges) {
+      targets[edge.consumer].values.push_back(&edge);
+      targets.try_emplace(edge.producer);
+    }
+  }
+  std::size_t id = 0;
+  for (auto& target : targets | std::views::values) target.id = std::format("plan-target-{}", id++);
+  return targets;
+}
+
+void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::size_t lines,
+                  const InspectionTargets& targets) {
   out += R"(<section class="panel" aria-labelledby="facts"><h2 id="facts">Plan facts</h2>)";
   if (facts.empty()) {
     out += R"(<p class="empty">No plan facts.</p></section>)";
@@ -245,13 +320,113 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
   out += R"(<table class="facts" aria-labelledby="facts">
   <thead><tr><th scope="col">Target · Kind</th><th scope="col">Value</th><th scope="col">Defined at</th></tr></thead><tbody>
 )";
+  constexpr std::string_view graph_kinds[] = {
+    "rule", "source", "include", "output", "host-target", "native-target", "link-input",
+  };
   for (const PlanFact& fact : facts) {
-    out += "<tr><td>";
+    out += "<tr";
+    if (const auto target = targets.find(fact.target);
+        target != targets.end() && std::ranges::contains(graph_kinds, std::string_view(fact.kind))) {
+      std::format_to(std::back_inserter(out), R"HTML( data-graph-target="{}" data-graph-kind=")HTML", target->second.id);
+      escaped(out, fact.kind);
+      out += '"';
+    }
+    out += "><td>";
     append_owner(out, fact);
     out += "</td><td>";
     append_fact_value(out, fact);
     out += "</td><td>";
     append_location(out, fact, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_dependency_detail(std::string& out, std::string_view label, std::optional<std::string_view> value) {
+  if (!value) return;
+  out += R"(<span class="origin">)";
+  out += label;
+  out += " <code>";
+  escaped(out, *value);
+  out += "</code></span>";
+}
+
+void append_dependency_location(std::string& out, const ManifestLocation& location, std::size_t lines) {
+  out += R"(<span class="location">)";
+  const auto& [path, line, column] = location;
+  append_manifest_ref(out, path, line, column, path == "build.ycxx" && line > 0 && line <= lines);
+  out += "</span>";
+}
+
+template <class Edge>
+void append_dependency_sites(std::string& out, const std::vector<Edge>& edges, std::size_t lines) {
+  std::format_to(std::back_inserter(out), R"(<span class="origin">{} {}</span>)",
+                 edges.size(), edges.size() == 1 ? "occurrence" : "occurrences");
+  if (edges.empty()) return;
+  out += R"(<ul class="dependency-sites">)";
+  for (const auto& edge : edges) {
+    out += "<li>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</li>";
+  }
+  out += "</ul>";
+}
+
+template <class Edge>
+void append_dependency_identity(std::string& out, const Edge& edge) {
+  out += "<code>";
+  escaped(out, edge.consumer);
+  out += "</code> → <code>";
+  escaped(out, edge.producer);
+  out += R"(</code><code class="origin">)";
+  escaped(out, edge.usage);
+  out += "</code>";
+}
+
+void append_dependency_changes(std::string& out, std::span<const DependencyOccurrenceChange> changes, std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="dependency-changes"><h2 id="dependency-changes">Dependency changes</h2>)";
+  if (changes.empty()) {
+    out += R"(<p class="empty">No dependency changes.</p></section>)";
+    return;
+  }
+  out += R"(<table class="facts dependency-comparison" aria-labelledby="dependency-changes">
+  <thead><tr><th scope="col">Dependency</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>
+)";
+  for (const auto& change : changes) {
+    const auto& edge = change.after.empty() ? change.before.front() : change.after.front();
+    out += "<tr><td>";
+    append_dependency_identity(out, edge);
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, "Output", edge.output);
+    out += "</td><td>";
+    append_dependency_sites(out, change.before, 0);
+    out += "</td><td>";
+    append_dependency_sites(out, change.after, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_value_binding_changes(std::string& out, std::span<const ValueBindingOccurrenceChange> changes,
+                                  std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="value-binding-changes"><h2 id="value-binding-changes">Value binding changes</h2>)";
+  if (changes.empty()) {
+    out += R"(<p class="empty">No value binding changes.</p></section>)";
+    return;
+  }
+  out += R"(<table class="facts dependency-comparison" aria-labelledby="value-binding-changes">
+  <thead><tr><th scope="col">Value binding</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>
+)";
+  for (const auto& change : changes) {
+    const auto& edge = change.after.empty() ? change.before.front() : change.after.front();
+    out += "<tr><td>";
+    append_dependency_identity(out, edge);
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, "Export", edge.export_name);
+    out += "</td><td>";
+    append_dependency_sites(out, change.before, 0);
+    out += "</td><td>";
+    append_dependency_sites(out, change.after, lines);
     out += "</td></tr>\n";
   }
   out += "</tbody></table></section>\n";
@@ -276,25 +451,431 @@ void append_dependencies(std::string& out, const DependencyGraphInspection& grap
     out += "</code></td><td><code>";
     escaped(out, edge.usage);
     out += "</code>";
-    if (edge.binding) {
-      out += R"(<span class="origin">Binding <code>)";
-      escaped(out, *edge.binding);
-      out += "</code></span>";
-    }
+    append_dependency_detail(out, "Binding", edge.binding);
     out += "</td><td><code>";
     escaped(out, edge.producer);
     out += "</code>";
-    if (edge.output) {
-      out += R"(<span class="origin">Output <code>)";
-      escaped(out, *edge.output);
-      out += "</code></span>";
-    }
-    out += R"(</td><td><span class="location">)";
-    const auto& [path, line, column] = edge.location;
-    append_manifest_ref(out, path, line, column, path == "build.ycxx" && line > 0 && line <= lines);
-    out += "</span></td></tr>\n";
+    append_dependency_detail(out, "Output", edge.output);
+    out += "</td><td>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</td></tr>\n";
   }
   out += "</tbody></table></section>\n";
+}
+
+void append_value_bindings(std::string& out, std::span<const PlanValueDependencyEdge> edges,
+                           bool complete, std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="value-bindings"><h2 id="value-bindings">Value bindings</h2>)";
+  if (!complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved value bindings so far.</p>)";
+  if (edges.empty()) {
+    out += R"(<p class="empty">)";
+    out += complete ? "No value bindings." : "No resolved value bindings yet.";
+    out += "</p></section>\n";
+    return;
+  }
+  out += R"(<table class="facts dependencies" aria-labelledby="value-bindings">
+  <thead><tr><th scope="col">Consumer</th><th scope="col">Usage</th><th scope="col">Producer</th><th scope="col">Declared at</th></tr></thead><tbody>
+)";
+  for (const auto& edge : edges) {
+    out += "<tr><td><code>";
+    escaped(out, edge.consumer);
+    out += "</code></td><td><code>";
+    escaped(out, edge.usage);
+    out += "</code>";
+    append_dependency_detail(out, "Binding", edge.binding);
+    out += "</td><td><code>";
+    escaped(out, edge.producer);
+    out += "</code>";
+    append_dependency_detail(out, "Export", edge.export_name);
+    out += "</td><td>";
+    append_dependency_location(out, edge.location, lines);
+    out += "</td></tr>\n";
+  }
+  out += "</tbody></table></section>\n";
+}
+
+void append_target_dependencies(std::string& out, std::string_view selected, const InspectionTargets& targets, bool complete,
+                                std::size_t lines) {
+  out += R"(<section class="panel" aria-labelledby="target-dependencies"><h2 id="target-dependencies">Target dependencies</h2>)";
+  if (!complete)
+    out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved target dependencies so far.</p>)";
+  const auto append_input = [&](const auto& edge, std::string_view label, std::optional<std::string_view> detail) {
+    std::format_to(std::back_inserter(out), R"(<li><a href="#{}"><code>)", targets.at(edge.producer).id);
+    escaped(out, edge.producer);
+    out += R"(</code></a><code class="origin">)";
+    escaped(out, edge.usage);
+    out += "</code>";
+    append_dependency_detail(out, "Binding", edge.binding);
+    append_dependency_detail(out, label, detail);
+    append_dependency_location(out, edge.location, lines);
+    out += "</li>\n";
+  };
+  const auto append_target = [&](std::string_view name, const TargetInputs& target) {
+    std::format_to(std::back_inserter(out), R"(<article class="plan-target" id="{}"><h3><code>)", target.id);
+    escaped(out, name);
+    out += "</code></h3>";
+    if (target.artifacts.empty() && target.values.empty()) {
+      out += R"(<p class="empty">)";
+      out += complete ? "No resolved inputs." : "No resolved inputs yet.";
+      out += "</p>";
+    } else {
+      out += "<ul>";
+      for (const auto* edge : target.artifacts) append_input(*edge, "Output", edge->output);
+      for (const auto* edge : target.values) append_input(*edge, "Export", edge->export_name);
+      out += "</ul>";
+    }
+    out += "</article>\n";
+  };
+  append_target(selected, targets.at(selected));
+  for (const auto& [name, target] : targets)
+    if (name != selected) append_target(name, target);
+  out += "</section>\n";
+}
+
+constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
+(() => {
+  const byId = (id) => document.getElementById(id);
+  const panel = byId("target-graph");
+  const cards = document.querySelector('section[aria-labelledby="target-dependencies"]');
+  if (!panel || !cards) return;
+
+  const viewport = byId("graph-viewport");
+  const stage = byId("graph-stage");
+  const canvas = byId("graph-edges");
+  const nodes = byId("graph-nodes");
+  const heading = byId("graph-target");
+  const count = byId("graph-count");
+  const details = byId("graph-details");
+  const expandInputs = byId("graph-expand-inputs");
+  const expandConsumers = byId("graph-expand-consumers");
+  const reset = byId("graph-reset");
+  if (![viewport, stage, canvas, nodes, heading, count, details, expandInputs, expandConsumers, reset].every(Boolean)) return;
+
+  const targets = new Map();
+  for (const card of cards.querySelectorAll(":scope > article.plan-target")) {
+    const title = card.querySelector(":scope > h3 > code");
+    if (title && card.id) targets.set(card.id, {card, name: title.textContent, inputs: [], consumers: []});
+  }
+  const root = targets.values().next().value;
+  if (!root) return;
+  for (const target of targets.values()) {
+    for (const row of target.card.querySelectorAll(":scope > ul > li")) {
+      const link = row.querySelector("a");
+      const fragment = link?.getAttribute("href");
+      const producer = fragment?.startsWith("#") && targets.get(fragment.slice(1));
+      if (!producer) continue;
+      const edge = {consumer: target, producer, row};
+      target.inputs.push(edge);
+      producer.consumers.push(edge);
+    }
+  }
+
+  const factLabels = new Map([
+    ["rule", "Rule"], ["host-target", "Host target"], ["native-target", "Native target"],
+    ["source", "Source"], ["include", "Include path"], ["output", "Output"], ["link-input", "Link input"],
+  ]);
+  const facts = new Map();
+  for (const row of document.querySelectorAll("tr[data-graph-target][data-graph-kind]")) {
+    const {graphTarget: id, graphKind: kind} = row.dataset;
+    if (!factLabels.has(kind) || row.cells.length < 3) continue;
+    if (!facts.has(id)) facts.set(id, []);
+    facts.get(id).push({row, label: factLabels.get(kind)});
+  }
+
+  // An incomplete plan may retain a dependency reached before its link to the root resolved.
+  function componentSeeds() {
+    const seeds = [root];
+    if (!panel.hasAttribute("data-partial")) return seeds;
+    const visited = new Set();
+    for (const candidate of targets.values()) {
+      if (visited.has(candidate)) continue;
+      const component = [candidate];
+      visited.add(candidate);
+      const visit = (target) => {
+        if (visited.has(target)) return;
+        visited.add(target);
+        component.push(target);
+      };
+      for (const target of component) {
+        for (const edge of target.inputs) visit(edge.producer);
+        for (const edge of target.consumers) visit(edge.consumer);
+      }
+      if (candidate === root) continue;
+      seeds.push(component.find((target) => target.inputs.length && !target.consumers.length)
+                 ?? component.find((target) => target.inputs.length) ?? candidate);
+    }
+    return seeds;
+  }
+
+  const seeds = componentSeeds();
+  const inputsOpen = new Set(seeds);
+  const consumersOpen = new Set();
+  const buttons = new Map();
+  const nodeWidth = 174;
+  const nodeHeight = 54;
+  const columnStep = 242;
+  const rowStep = 74;
+  const margin = 26;
+  let selected = root;
+  let positions = new Map();
+  let links = [];
+  let paintPending = false;
+
+  function nodeNeighborhood() {
+    // A target gets its first breadth-first position, even when another branch shares it.
+    const depths = new Map(seeds.map((target) => [target, 0]));
+    const queue = [...seeds];
+    for (const target of queue) {
+      const depth = depths.get(target);
+      const visit = (neighbor, nextDepth) => {
+        if (depths.has(neighbor)) return;
+        depths.set(neighbor, nextDepth);
+        queue.push(neighbor);
+      };
+      if (inputsOpen.has(target))
+        for (const edge of target.inputs) visit(edge.producer, depth + 1);
+      if (consumersOpen.has(target))
+        for (const edge of target.consumers) visit(edge.consumer, depth - 1);
+    }
+    return depths;
+  }
+
+  function list(title, items) {
+    if (!items.length) return;
+    const group = document.createElement("section");
+    group.className = "graph-group";
+    const label = document.createElement("h4");
+    label.textContent = title;
+    const rows = document.createElement("ul");
+    for (const item of items) rows.append(item);
+    group.append(label, rows);
+    details.append(group);
+  }
+
+  function relations(edges, incoming) {
+    return edges.map((edge) => {
+      const row = edge.row.cloneNode(true);
+      row.classList.add("graph-relation");
+      if (incoming) {
+        const link = row.querySelector("a");
+        link.setAttribute("href", "#" + edge.consumer.card.id);
+        link.querySelector("code").textContent = edge.consumer.name;
+      }
+      return row;
+    });
+  }
+
+  function showSelection() {
+    heading.textContent = selected.name;
+    details.replaceChildren();
+    list("Dependencies", relations(selected.inputs, false));
+    list("Dependents", relations(selected.consumers, true));
+    list("Plan facts", (facts.get(selected.card.id) ?? []).map(({row, label}) => {
+      const item = document.createElement("li");
+      item.className = "graph-fact";
+      const name = document.createElement("strong");
+      name.textContent = label;
+      item.append(name, " ");
+      for (const cell of [row.cells[1], row.cells[2]]) {
+        for (const child of cell.childNodes) item.append(child.cloneNode(true));
+        item.append(" ");
+      }
+      return item;
+    }));
+  }
+
+  function updateControls() {
+    for (const [button, open, label, edges] of [
+      [expandInputs, inputsOpen, "dependencies", selected.inputs],
+      [expandConsumers, consumersOpen, "dependents", selected.consumers],
+    ]) {
+      const expanded = edges.length !== 0 && open.has(selected);
+      button.textContent = (expanded ? "Collapse " : "Expand ") + label;
+      button.disabled = edges.length === 0;
+      button.setAttribute("aria-expanded", String(expanded));
+    }
+  }
+
+  function select(target) {
+    if (selected === target) return;
+    buttons.get(selected)?.setAttribute("aria-pressed", "false");
+    selected = target;
+    buttons.get(selected).setAttribute("aria-pressed", "true");
+    updateControls();
+    showSelection();
+  }
+
+  function nodeButton(target) {
+    if (buttons.has(target)) return buttons.get(target);
+    const button = document.createElement("button");
+    button.className = "graph-node";
+    button.type = "button";
+    button.title = target.name;
+    button.dataset.graphTarget = target.card.id;
+    if (target === root) button.dataset.root = "true";
+    const name = document.createElement("code");
+    name.textContent = target.name;
+    button.append(name);
+    button.addEventListener("click", () => select(target));
+    buttons.set(target, button);
+    nodes.append(button);
+    return button;
+  }
+
+  function curve(from, to) {
+    const startY = from.y + nodeHeight / 2;
+    const endY = to.y + nodeHeight / 2;
+    if (from.x === to.x) {
+      const side = from.x + nodeWidth;
+      if (from === to)
+        return [side, startY - 11, side + 42, startY - 21, side + 42, startY + 21, side, startY + 11];
+      return [side, startY, side + 38, startY, side + 38, endY, side, endY];
+    }
+    const facingRight = from.x < to.x;
+    const startX = from.x + (facingRight ? nodeWidth : 0);
+    const endX = to.x + (facingRight ? 0 : nodeWidth);
+    const middle = (startX + endX) / 2;
+    return [startX, startY, middle, startY, middle, endY, endX, endY];
+  }
+
+  function paint() {
+    paintPending = false;
+    const context = canvas.getContext("2d");
+    const width = viewport.clientWidth;
+    const height = viewport.clientHeight;
+    if (!context || !width || !height) return;
+    const left = viewport.scrollLeft;
+    const top = viewport.scrollTop;
+    const scale = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelsWide = Math.ceil(width * scale);
+    const pixelsHigh = Math.ceil(height * scale);
+    if (canvas.width !== pixelsWide) canvas.width = pixelsWide;
+    if (canvas.height !== pixelsHigh) canvas.height = pixelsHigh;
+    Object.assign(canvas.style, {left: left + "px", top: top + "px", width: width + "px", height: height + "px"});
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, pixelsWide, pixelsHigh);
+    context.setTransform(scale, 0, 0, scale, -left * scale, -top * scale);
+    context.strokeStyle = getComputedStyle(panel).getPropertyValue("--graph-edge").trim() || "#596e83";
+    context.lineWidth = 1.5;
+    for (const [sx, sy, c1x, c1y, c2x, c2y, ex, ey] of links) {
+      if (Math.max(sx, c1x, c2x, ex) < left || Math.min(sx, c1x, c2x, ex) > left + width ||
+          Math.max(sy, c1y, c2y, ey) < top || Math.min(sy, c1y, c2y, ey) > top + height) continue;
+      const angle = Math.atan2(ey - c2y, ex - c2x);
+      context.beginPath();
+      context.moveTo(sx, sy);
+      context.bezierCurveTo(c1x, c1y, c2x, c2y, ex, ey);
+      context.moveTo(ex - 9 * Math.cos(angle - 0.5), ey - 9 * Math.sin(angle - 0.5));
+      context.lineTo(ex, ey);
+      context.lineTo(ex - 9 * Math.cos(angle + 0.5), ey - 9 * Math.sin(angle + 0.5));
+      context.stroke();
+    }
+  }
+
+  function schedulePaint() {
+    if (paintPending) return;
+    paintPending = true;
+    requestAnimationFrame(paint);
+  }
+
+  function render() {
+    const depths = nodeNeighborhood();
+    const rows = new Map();
+    let first = 0;
+    let last = 0;
+    for (const depth of depths.values()) {
+      first = Math.min(first, depth);
+      last = Math.max(last, depth);
+    }
+
+    const previous = positions.get(selected);
+    positions = new Map();
+    let height = 0;
+    for (const [target, depth] of depths) {
+      const row = rows.get(depth) ?? 0;
+      const position = {x: margin + (depth - first) * columnStep, y: margin + row * rowStep};
+      rows.set(depth, row + 1);
+      positions.set(target, position);
+      height = Math.max(height, position.y + nodeHeight + margin);
+      const button = nodeButton(target);
+      Object.assign(button.style, {
+        left: position.x + "px", top: position.y + "px", width: nodeWidth + "px", height: nodeHeight + "px",
+      });
+      button.hidden = false;
+      button.setAttribute("aria-pressed", String(target === selected));
+    }
+    for (const [target, button] of buttons) button.hidden = !positions.has(target);
+
+    links = [];
+    for (const [target, from] of positions) {
+      // Draw one connection per pair. The details retain every authored occurrence.
+      for (const producer of new Set(target.inputs.map((edge) => edge.producer))) {
+        const to = positions.get(producer);
+        if (to) links.push(curve(from, to));
+      }
+    }
+    stage.style.width = (margin * 2 + (last - first) * columnStep + nodeWidth + 42) + "px";
+    stage.style.height = height + "px";
+    if (previous) {
+      const next = positions.get(selected);
+      viewport.scrollLeft += next.x - previous.x;
+      viewport.scrollTop += next.y - previous.y;
+    }
+    count.textContent = positions.size + " of " + targets.size + " targets shown";
+    updateControls();
+    schedulePaint();
+  }
+
+  function toggle(open) {
+    if (!open.delete(selected)) open.add(selected);
+    render();
+  }
+
+  expandInputs.addEventListener("click", () => toggle(inputsOpen));
+  expandConsumers.addEventListener("click", () => toggle(consumersOpen));
+  reset.addEventListener("click", () => {
+    inputsOpen.clear();
+    for (const seed of seeds) inputsOpen.add(seed);
+    consumersOpen.clear();
+    select(root);
+    render();
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
+  });
+  viewport.addEventListener("scroll", schedulePaint, {passive: true});
+  if (typeof ResizeObserver === "function") new ResizeObserver(schedulePaint).observe(viewport);
+  else window.addEventListener("resize", schedulePaint);
+  panel.hidden = false;
+  showSelection();
+  render();
+})();
+</script>
+)YCXX_GRAPH";
+
+void append_graph_explorer(std::string& out, bool complete) {
+  out += R"HTML(<section class="panel" id="target-graph" hidden aria-labelledby="target-graph-heading")HTML";
+  if (!complete) out += " data-partial";
+  out += R"HTML(>
+<h2 id="target-graph-heading">Graph</h2>
+)HTML";
+  if (!complete) out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved connections.</p>)";
+  out += R"HTML(<div class="graph-explorer">
+<div class="graph-main">
+  <div class="graph-toolbar"><button id="graph-reset" type="button">Reset graph</button><span id="graph-count" role="status"></span></div>
+  <div id="graph-viewport" role="region" tabindex="0" aria-label="Build dependency graph">
+    <div id="graph-stage"><canvas id="graph-edges" aria-hidden="true"></canvas><div id="graph-nodes"></div></div>
+  </div>
+</div>
+<div class="graph-sidebar">
+  <h3 id="graph-target"></h3>
+  <div class="graph-controls">
+    <button id="graph-expand-inputs" type="button" aria-controls="graph-nodes">Show dependencies</button>
+    <button id="graph-expand-consumers" type="button" aria-controls="graph-nodes">Show dependents</button>
+  </div>
+  <div id="graph-details"></div>
+</div>
+</div></section>
+)HTML";
 }
 
 std::string_view module_label(std::string_view value) {
@@ -625,11 +1206,17 @@ export namespace ycxx::build {
 
 std::string render_inspection_html(const PlanInspection& inspection,
                                    const std::vector<PlanChange>* changes = nullptr,
-                                   const std::optional<ModuleGraphComparison>& modules = std::nullopt) {
+                                   const std::optional<ModuleGraphComparison>& modules = std::nullopt,
+                                   const std::optional<std::vector<DependencyOccurrenceChange>>& dependency_changes =
+                                       std::nullopt,
+                                   const std::optional<std::vector<ValueBindingOccurrenceChange>>& value_binding_changes =
+                                       std::nullopt) {
   auto out = begin_report(std::format("Build plan · {}", inspection.target));
   out += "<h1>Build plan for <code>";
   escaped(out, inspection.target);
-  out += R"(</code></h1><div class="layout"><div class="results">)";
+  out += "</code></h1>";
+  if (inspection.dependency_graph) append_graph_explorer(out, inspection.dependency_graph->complete);
+  out += R"(<div class="layout"><div class="results">)";
   const std::string_view definition = inspection.definition;
   const auto lines = static_cast<std::size_t>(std::ranges::count(definition, '\n'))
                      + (!definition.empty() && definition.back() != '\n');
@@ -641,11 +1228,22 @@ std::string render_inspection_html(const PlanInspection& inspection,
   } else if (changes) {
     append_changes(out, *changes, lines);
   }
-  if (inspection.dependency_graph) append_dependencies(out, *inspection.dependency_graph, lines);
-  append_facts(out, inspection.facts, lines);
+  if (dependency_changes) append_dependency_changes(out, *dependency_changes, lines);
+  if (value_binding_changes) append_value_binding_changes(out, *value_binding_changes, lines);
+  InspectionTargets targets;
+  if (inspection.dependency_graph) {
+    const auto& graph = *inspection.dependency_graph;
+    targets = index_targets(inspection.target, graph);
+    append_target_dependencies(out, inspection.target, targets, graph.complete, lines);
+    append_dependencies(out, graph, lines);
+    if (graph.value_edges) append_value_bindings(out, *graph.value_edges, graph.complete, lines);
+  }
+  append_facts(out, inspection.facts, lines, targets);
   out += "</div>";
   append_manifest(out, definition);
-  out += "</div></main></body></html>\n";
+  out += "</div></main>";
+  if (inspection.dependency_graph) out += graph_script;
+  out += "</body></html>\n";
   return out;
 }
 

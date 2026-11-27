@@ -26,6 +26,11 @@ using ast::u64;
 using ast::u8;
 using i64 = std::int64_t;
 
+// [dcl.link]: the draft distinguishes function types by language linkage.
+constexpr LangLinkage function_type_linkage(LangLinkage lang, ast::Compatibility mode) {
+  return mode == ast::Compatibility::spec ? lang : LangLinkage::cxx;
+}
+
 // Width in bits and signedness of an integral type on the target.
 struct IntShape {
   u32 bits;
@@ -70,6 +75,7 @@ struct TypeRec {
   bool fn_noexcept = false;
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
+  ConstId written_index = ConstId::none;  // an index whose written expression affects type identity
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   ast::DepNameForm dep_form = ast::DepNameForm::plain;  // a dependent member's: with `args`, or a template
   u16 depth = 0;                     // a template parameter's position ([temp.param])
@@ -140,9 +146,11 @@ public:
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
   // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type;
   // with `elems`, that pack is bound to them and `index` is the dependent part.
-  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0}); }
-  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems) {
-    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1});
+  QualType pack_index(QualType pack, ConstId index, ConstId written = ConstId::none) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0, written});
+  }
+  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems, ConstId written = ConstId::none) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1, written});
   }
   // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
@@ -267,6 +275,7 @@ public:
       r.kind = TypeKind::pack_index;
       r.inner = x.pack;
       r.bound_value = x.index;
+      r.written_index = x.written;
       r.pack = x.bound != 0;  // the pack is bound to `args`
       r.args = x.elems;
     } else if (t.is<ast::TTemplateParam>(c)) {
@@ -511,8 +520,8 @@ public:
     for (u32 unit : units) text.push_back(static_cast<char>(unit));
     return text;
   }
-  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}) {
-    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset});
+  ConstId address(QualType, ConstId base, i64 offset, std::span<const u32> path = {}, bool gcc_nested_end = false) {
+    return ins_->intern_value(ast::VLvalue{base, ins_->intern_seq(path), offset, gcc_nested_end});
   }
   ConstId null_pointer(QualType) { return ins_->intern_value(ast::VNullptr{}); }
   // A declared object or function as the base of an address (§5.5).
@@ -535,10 +544,12 @@ public:
       r.wide = negative ? i.bits.hi != ~u64{0} || i64(i.bits.lo) >= 0 : i.bits.hi != 0;
     } else if (v.is<ast::VFloat>(c)) {
       auto f = v.get<ast::VFloat>(c);
-      r.kind = ValueKind::floating;
       r.type = f.type;
       r.bits = f.bits.lo;
-      r.real = ast::float_double(*ins_, *target_, c);
+      if (ast::computes(ast::float_format(*ins_, *target_, f.type))) {
+        r.kind = ValueKind::floating;
+        r.real = ast::float_double(*ins_, *target_, c);
+      }
     } else if (v.is<ast::VString>(c)) {
       auto s = v.get<ast::VString>(c);
       r.kind = ValueKind::string;
@@ -600,7 +611,7 @@ struct EntityRec {
   DeclId first{};  // internal linkage only
   EntityId scope = EntityId::none;
   Fp128 head{};                          // a template head, scope discriminator or builtin class identity
-  Fp128 constraints{};                   // a function template's constraints (ast.md §4.3)
+  Fp128 constraints{};                   // a function template's constraints, or a function's trailing requires-clause (ast.md §4.3)
   EntityId templ = EntityId::none;       // a specialization's template
   std::vector<ast::TemplateArg> args{};  // a specialization's template arguments
   // A closure type's number among its context's closures of its signature (ast.md §4.3); its
@@ -613,11 +624,24 @@ struct EntityRec {
   // An unnamed enumeration's first enumerator and canonical underlying `type` denote it for
   // linkage purposes ([dcl.enum]/12). Neither binds the type's name in source lookup.
   std::optional<NameId> enum_linkage_name{};
-  // A closure type of a template's definition, outside function bodies: a dependent type, which
-  // each instantiation's own closure types replace (docs/design/closures.md).
+  // A closure type of a template's definition, outside function bodies, or a local class of a
+  // template's definition: a dependent type, which each instantiation's own replaces
+  // (docs/design/closures.md, docs/design/local-classes.md).
   bool closure_pattern = false;
+  // A local class ([class.local]): `scope` is its function; `ordinal` numbers the local classes of
+  // that function with its name, in token order (Itanium C++ ABI §5.1.6 discriminators).
+  bool local_class = false;
+  // The head of a captureless generic lambda's synthesized static invoker template.
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
+  // Lambda constraints use the template head of the declaration which contains their spelling.
+  ConstId lambda_constraints = ConstId::none;
+  ast::WrittenConstraint lambda_head_constraint{};
+  ast::WrittenConstraint lambda_trailing_constraint{};
+  u16 lambda_constraint_depth = 0;
+  Fp128 lambda_signature{};
+  bool static_closure = false;
 };
 
 class Entities {
@@ -658,6 +682,11 @@ public:
         r.kind == EntityKind::namespace_)
       f = ast::mix(f, r.head);
     if (r.kind == EntityKind::function_template) f = ast::mix(f, r.constraints);
+    // A non-template function's trailing requires-clause ([basic.scope.scope]/4): its tokens'
+    // fingerprint. Zero, and not mixed, without one.
+    if ((r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor) &&
+        r.constraints != Fp128{})
+      f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.trailing-constraints")), r.constraints);
     // A closure's `head` includes its signature and ordinal in its scope (docs/design/closures.md).
     // A compiler-owned class uses `head` to distinguish it from declarations of the same name.
     if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
@@ -734,10 +763,12 @@ struct FieldRec {
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
   u8 explicit_alignment = 0;
   u8 written_alignment = 0;
+  u8 wide_bit_width = 0;
 };
 
-// Classification of a defaulted copy affected by an explicit in-class definition. Deletion
-// takes precedence over an unsupported or nontrivial subobject operation.
+// What a complete class makes of a special member explicitly defaulted on its first declaration,
+// or of an implicit copy affected by one ([dcl.fct.def.default]). Deletion takes precedence over
+// an unsupported or nontrivial subobject operation. `ordinary`: not defaulted there.
 enum class CopyState : u8 { ordinary, trivial, nontrivial, unsupported, deleted };
 
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
@@ -764,12 +795,27 @@ struct MemberDeclRec {
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
   CopyAssignment copy_assignment = CopyAssignment::none;
   bool explicit_defaulted_assignment = false;
+  CopyState defaulted = CopyState::ordinary;  // a constructor defaulted on its first declaration
+  // A trivial defaulted member that is called, not lowered to a representation copy: its exception
+  // specification, or that of an operation its definition calls, is potentially-throwing.
+  bool trivial_call = false;
   bool is_virtual = false;
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
   bool is_final = false;
   bool is_pure = false;
   bool is_consteval = false;  // an immediate function ([dcl.constexpr])
+  // A non-template member function's trailing requires-clause in normal form, the specialization's
+  // in a class template specialization; none without one ([class.mem.general]). A candidate only
+  // while satisfied ([over.match.viable]/3).
+  ast::ConstId constraints = ast::ConstId::none;
+  // A special member that is not eligible ([special]/6): its constraints are not satisfied, or
+  // another of its kind is more constrained. Still user-declared, it is no candidate and does not
+  // count for the class's triviality ([class.prop]).
+  bool ineligible = false;
+  // A trailing requires-clause or a template's constraints: it corresponds to no unconstrained
+  // declaration ([basic.scope.scope]/4, [namespace.udecl]/11).
+  bool constrained = false;
 };
 
 struct NestedType {
@@ -843,6 +889,7 @@ struct ClassRec {
   bool member_declarations_valid = false;  // no member declaration was lost to an error
   bool is_final = false;  // the class property's value from the definition ([class.pre])
   u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
+  u8 clang_weak_alignment = 0;  // the reported size and alignment when the peer has no usable layout
   bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
   // Its direct base classes, in declaration order ([class.derived.general]).
   std::vector<BaseRec> bases;
@@ -866,6 +913,12 @@ struct ClassRec {
   EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
+  // The base member functions its using-declarations introduce ([namespace.udecl]/1), each as
+  // its base declares it (`entity` is the base's), except those a member of its own with the
+  // same name, parameter-type-list, cv-qualification and ref-qualifier hides or overrides
+  // (/11). Lookup finds them as members of this class ([class.member.lookup]); access is the
+  // using-declaration's (/16), in `access`.
+  std::vector<MemberDeclRec> introduced;
   // Member alias templates ([temp.alias], [temp.mem]): `type` is the pattern, at the member's own
   // depth; named only with arguments (`Sema::member_alias_template`), so not among `types`.
   std::vector<NestedType> alias_templates;
@@ -879,11 +932,9 @@ struct ClassRec {
   // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
   bool closure = false;
   bool default_deleted = false;
-  // Written zero-parameter defaulting, with the completed class's supported no-op proof.
+  // The default constructor defaulted on its first declaration, and whether it is trivial.
   EntityId defaulted_default_ctor = EntityId::none;
   bool trivial_defaulted_default_ctor = false;
-  // The supported nonempty defaulted constructor initializes one pointer to null.
-  bool null_pointer_defaulted_default_ctor = false;
   EntityId declared_destructor = EntityId::none;  // retains the access of a written trivial destructor
   EntityId destructor = EntityId::none;
   EntityId destructor_declaration() const {
@@ -892,7 +943,6 @@ struct ClassRec {
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
   bool copy_deleted_by_class_subobject = false;
-  std::vector<EntityId> defaulted_copy_declarations;
   CopyState defaulted_copy = CopyState::ordinary;
   bool defaulted_copy_const = true;  // the implicit parameter when it depends on a defaulted copy
   // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
@@ -1216,6 +1266,35 @@ public:
     if (!c) return false;
     return c->move_usable ? c->move_nontrivial : c->copy_nontrivial();
   }
+  // Whether a non-static member of `r` is a volatile class object, or an array of them.
+  bool has_volatile_class_member(const ClassRec& r) const {
+    return std::ranges::any_of(r.fields, [&](const FieldRec& f) {
+      QualType t = types_->canonical(f.type);
+      while (types_->is_array(t)) t = types_->canonical(types_->add_cv(types_->rec(t).inner, Types::cv(t)));
+      return types_->is_class(t) && Types::is_volatile(t);
+    });
+  }
+  // Whether the implicit move constructor of `c` is not the copy that ycxx uses for it: a subobject
+  // is moved by a constructor of its own (#244). False when `c` declares a move constructor. With
+  // `defaulted`, only by one defaulted on its first declaration.
+  bool implicit_move_differs(EntityId c, bool defaulted = false) const {
+    const ClassRec* r = find(c);
+    if (!r || !r->move_usable || declared_move(c, *r)) return false;
+    const auto moved = [&](QualType t) {
+      t = types_->canonical(t);
+      while (types_->is_array(t)) t = types_->canonical(types_->add_cv(types_->rec(t).inner, Types::cv(t)));
+      if (Types::is_const(t)) return false;  // a const source binds no move constructor of its class
+      const TypeRec type = types_->rec(t);
+      const ClassRec* sub = type.kind == TypeKind::class_ ? find(type.entity) : nullptr;
+      if (!sub) return false;
+      if (const MemberDeclRec* m = declared_move(type.entity, *sub))
+        return !m->is_deleted && !(m->defaulted == CopyState::trivial && !sub->copy_nontrivial()) &&
+               !(defaulted && m->defaulted == CopyState::ordinary);
+      return implicit_move_differs(type.entity, defaulted);
+    };
+    return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return moved(types_->class_type(b.cls)); }) ||
+           std::ranges::any_of(r->fields, [&](const FieldRec& f) { return moved(f.type); });
+  }
   // Whether a `t` can be neither copied nor moved: its copy constructor deleted and no move
   // constructor usable; for an array, its elements'.
   bool unmovable(QualType t) const {
@@ -1237,6 +1316,21 @@ public:
     // GCC passes classes with implicitly deleted subobject copies directly in this case.
     if (rule == ast::CallTriviality::gcc && c->copy_deleted_by_class_subobject && !c->move_nontrivial) return true;
     return !c->copy_deleted || c->move_usable;
+  }
+
+  // The move constructor class `c` declares, not a template's; none if it declares none.
+  const MemberDeclRec* declared_move(EntityId c, const ClassRec& r) const {
+    const auto m = std::ranges::find_if(r.members, [&](const MemberDeclRec& m) {
+      if (!m.is_ctor || m.is_template) return false;
+      const auto params = types_->rec(m.type).params;
+      if (params.empty() || !types_->is_reference(params.front())) return false;
+      // [class.copy.ctor]/2: every parameter after the first has a default argument.
+      for (std::size_t i = 1; i < params.size(); ++i)
+        if (i >= m.defaults.size() || m.defaults[i] == ast::NodeId::none) return false;
+      return types_->rec(params.front()).rvalue_ref &&
+             Types::unqualified(types_->canonical(types_->referee(params.front()))) == types_->class_type(c);
+    });
+    return m == r.members.end() ? nullptr : &*m;
   }
 
 private:
@@ -1340,6 +1434,7 @@ struct World {
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
       if (r.enum_linkage_name) return std::string("(unnamed enum)");
       std::string n(ins.names.spelling(r.name));
+      if (n.empty() && r.local_class) return std::string("(unnamed class)");
       return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])
     };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
@@ -1378,7 +1473,7 @@ struct World {
   // specification is the target's `<string.h>`'s, so a written declaration or definition of the
   // function is the same entity, with one symbol ([dcl.link]): glibc's `__THROW` is
   // `noexcept(true)` in C++, the macOS SDK's declarations have none.
-  ast::DeclSema string_function(const StringFunction& f) {
+  ast::DeclSema string_function(const StringFunction& f, ast::Compatibility mode) {
     const auto c_type = [&](CType t) {
       const QualType void_type = types.builtin(Builtin::void_);
       const QualType char_type = types.builtin(Builtin::char_);
@@ -1395,7 +1490,7 @@ struct World {
     std::vector<QualType> params;
     for (CType t : std::span(f.params).first(f.arity)) params.push_back(c_type(t));
     const bool nonthrowing = target.operating_system == ast::OperatingSystem::linux_;
-    const QualType type = types.function(c_type(f.result), params, false, LangLinkage::c, Cv::none,
+    const QualType type = types.function(c_type(f.result), params, false, function_type_linkage(LangLinkage::c, mode), Cv::none,
                                          ast::RefQual::none, nonthrowing);
     ast::DeclSema d = implicit_function(
         entities.entity({.kind = EntityKind::function, .name = ins.names.intern(f.name), .type = type, .lang = LangLinkage::c}),

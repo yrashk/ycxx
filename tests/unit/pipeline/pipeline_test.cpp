@@ -287,7 +287,7 @@ void program(World& w, std::string_view name, int status, std::string_view out =
     return;
   }
   std::filesystem::path captured = *run_dir / (std::string(name) + ".out");
-  int raw = std::system(std::format("'{}' > '{}'", path.native_encoded_string(), captured.native_encoded_string()).c_str());
+  int raw = std::system(std::format("'{}' > '{}'", path.native(), captured.native()).c_str());
   int got = (raw >> 8) & 0xff;
   check(got == status, std::format("{}: exit status {} (raw {}), expected {}", name, got, raw, status), at);
   std::ifstream in(captured);
