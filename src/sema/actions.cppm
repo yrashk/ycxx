@@ -204,6 +204,9 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
+  // Whether function `f`'s default arguments still wait for its class to be complete
+  // ([class.mem.general]), so a call before then cannot take them.
+  virtual bool defaults_pending(EntityId) { return false; }
   // The effective specification of a written trivial destructor whose class is being completed.
   virtual std::optional<bool> replay_destructor_exception(Sema&, EntityId, u32) { return std::nullopt; }
   // A selected specialization's exception specification ([except.spec]/13): of a member template,
@@ -13697,8 +13700,18 @@ public:
   // [expr.call]: a call to a named function or through a pointer to function. Each argument
   // copy-initializes its parameter; arguments matching a C-style ellipsis get the default
   // argument promotions.
+  // A call that takes a default still dependent in a template's definition has a value only
+  // its instantiation knows ([temp.dep.constexpr]): its type stays, its value is dependent.
   Ex call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at = std::nullopt,
           bool enum_operator = false) {
+    const bool outer = std::exchange(dependent_default_, false);
+    Ex r = resolved_call(callee, std::move(args), end, paren_at, lookup_at, enum_operator);
+    const bool used = std::exchange(dependent_default_, outer);
+    if (used && r.ok() && !dependent(r)) return dependent_node({r}, r.begin, r.end, r.type(), r.info.category);
+    return r;
+  }
+  Ex resolved_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, std::optional<u32> lookup_at,
+                   bool enum_operator) {
     u32 begin = callee.begin;
     std::vector<NodeId> defaults;  // the chosen function's default arguments
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
@@ -14107,6 +14120,7 @@ public:
   // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
   // tree, analysed at the declaration ([dcl.fct.default]/5). A supported dependent default
   // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
+  bool dependent_default_ = false;  // a call's default stayed dependent (`call`)
   std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                      EntityId function = EntityId::none, QualType parameter = {},
                                      std::optional<u32> invocation = std::nullopt,
@@ -14153,7 +14167,10 @@ public:
       }
       // In a template's definition the default is instantiated with the call, when the
       // instantiation analyses the call again ([temp.inst]/12): the argument stays dependent.
-      if (in_pattern()) return dependent_node({}, at_, at_);
+      if (in_pattern()) {
+        dependent_default_ = true;
+        return dependent_node({}, at_, at_);
+      }
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
@@ -14282,7 +14299,10 @@ public:
       args.push_back(*a);
     }
     if (args.size() < params.size()) {
-      diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
+      if (default_source != EntityId::none && q_->defaults_pending(default_source))
+        diag(paren_at, Diag::default_arg_not_yet_defined);
+      else
+        diag(paren_at, Diag::too_few_arguments, u64(params.size()), u64(args.size()));
       return std::nullopt;
     }
     if (args.size() > params.size() && !fr.variadic) {
