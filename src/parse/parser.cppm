@@ -5693,6 +5693,7 @@ public:
         if (!replay.deferred.empty()) {
           auto v = s_->variable_template(n, begin, /*initializer=*/true);
           if (!v) return {NodeId::none, begin, pos()};
+          s_->unqualified_variable_template_access(*v, n, begin);
           if (template_argument_replay_ == TemplateArgumentReplay::member_array_bound)
             return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->replayed_variable_template_id(*v, *args, replay.deferred, begin, pos());

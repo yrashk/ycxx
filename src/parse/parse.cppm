@@ -9085,11 +9085,11 @@ private:
     s_.own.push_back({d.name, sem});
     p_->declared(sem, k_);
     Ex init;
+    const u32 ordinal = u32(decls_.size());
     if (skip_initializer) {
-      for (int depth = 0; !ps_.at_end() && !(depth == 0 && (ps_.is(Tk::semi) || ps_.is(Tk::comma))); ps_.bump()) {
-        if (ps_.is(Tk::l_paren) || ps_.is(Tk::l_square) || ps_.is(Tk::l_brace)) ++depth;
-        if (ps_.is(Tk::r_paren) || ps_.is(Tk::r_square) || ps_.is(Tk::r_brace)) --depth;
-      }
+      // Where the template's analysis found the initializer's end; without one, it was diagnosed.
+      if (auto extent = p_->static_initializer(k_, ordinal)) ps_.seek(extent->end);
+      else if (has_init) ps_.skip_to_semi();
       declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), ConstId::none},
                                      d.begin, ps_.pos()));
       decls_.push_back(sem);
@@ -9111,7 +9111,8 @@ private:
         init = s_.convert(x, d.type, x.begin);
       }
     }
-    declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), ConstId::none},
+    if (has_init) p_->set_static_initializer(k_, ordinal, {ps_.index(), false});
+    declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(init, d.begin), ConstId::none},
                                    d.begin, ps_.pos()));
     decls_.push_back(sem);
     return !has_init || init.ok();
@@ -9553,8 +9554,10 @@ private:
       // the current instantiation: X's own parameters, in order, as its arguments ([temp.dep.type]).
       bool class_member = false;
       // [temp.mem]/1: two heads only before a member template of a class template.
+      // A static data member template's definition (#256) is one such member template too.
       if (two_heads_ && !(d.qualified && d.scope.type && s_.types().is_class(*d.scope.type) &&
-                          s_.world().entities.rec(s_.types().class_of(*d.scope.type)).templ != EntityId::none)) {
+                          s_.world().entities.rec(s_.types().class_of(*d.scope.type)).templ != EntityId::none &&
+                          (fn || s_.member_variable_template(s_.types().class_of(*d.scope.type), d.name)))) {
         s_.diag(d.name_at, Diag::extraneous_template_head);
         return false;
       }
