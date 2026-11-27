@@ -241,6 +241,10 @@ value category, and members defined outside the class keep their qualifier.
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
 
+Inside a class template, its own name with template arguments names that specialization, as in
+the converting constructor `template <class U> A(const A<U>&)`, in parameter and return types and
+in `A<U>::member`. [#1567](https://github.com/yrashk/ycxx/issues/1567)
+
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
 [#662](https://github.com/yrashk/ycxx/issues/662)

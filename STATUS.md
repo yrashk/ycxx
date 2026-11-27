@@ -3298,6 +3298,21 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 - Tests: `tests/own/temp-local/` (one run test, two reject tests).
 - The same rule applies through enclosing classes of an in-class member-class definition (#1187).
 
+## The injected-class-name as a template-name (#1567, #1177)
+
+In a class template, a partial specialization or a specialization, the class's own name followed
+by `<` names the template, so `A<U>` is the specialization `A<U>` ([temp.local]/1). This covers
+constructor and member function parameters, return types, and qualifiers such as `A<U>::member`
+and `typename A<U>::type`, in the class and in out-of-class member definitions. This is the
+converting-constructor pattern of `allocator`, `pair` and `optional`. The class's constructors
+share its name but are not found by lookup ([class.ctor]/1). They no longer hide it
+(`Sema::injected_class_template`). Plain `A` is still the current specialization.
+- Tests: `tests/own/temp-local/injected-template-name.run.cpp`, `injected-template-name-args.reject.cpp`.
+- Open: a non-dependent other specialization (`A<long>` by value, `A<long>::f()`) in the class's
+  own member bodies is still reported incomplete (#1149). A member class template's injected
+  name waits for member class templates (#340). A base's injected-class-name without arguments
+  (`struct D : B<int> { B b; }`) is #1590.
+
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
 - A class template's static data members are declared with its other members. A specialization
