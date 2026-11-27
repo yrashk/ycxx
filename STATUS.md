@@ -3803,6 +3803,14 @@ paths. Plan facts preserve both role-specific sequences and the authored
 sites, including inherited directories whose positions differ.
 [Generated header roles example](examples/project-build/role-bound-library-headers/README.md)
 
+A `cpp.library.sources` position can select explicit `host` and
+`target` artifact references (#1647). A native host tool and selected
+app can compile different generated implementations from the same library
+declaration, even when their triples match. Each implementation retains
+its producer's quoted sibling lookup and authored position. Inspection
+shows its logical source path, role, and artifact reference location.
+[Generated source roles example](examples/project-build/role-bound-library-sources/README.md)
+
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated
 analyzer's stdout into a typed score and generates a C++ constant from it.

@@ -122,7 +122,8 @@ a Make-based C library as one build action and links its archive into the app.
 Native host tools can link ordered generated archives through `link_inputs`
 and inherit `public_link_inputs` from libraries, including when the selected
 app targets another platform. A shared library can choose explicit
-`host` and `target` archives or generated headers at the same position.
+`host` and `target` archives, generated headers, or generated sources
+at the same position.
 Generators and witnesses can track helper executables by path and run
 generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
