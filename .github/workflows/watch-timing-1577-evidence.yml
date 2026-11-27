@@ -1,0 +1,157 @@
+name: Watch timing evidence for 1577
+
+on:
+  push:
+    branches: [codex/ycxx-watch-timing-1577]
+
+permissions:
+  contents: read
+
+jobs:
+  historical-arm64:
+    runs-on: macos-15
+    timeout-minutes: 110
+    env:
+      REVISION: efb9b9b17a2a01c4ad5aa6f0a9625652979f0229
+      REVISION_TREE: a6630483bfa83d44590f82b989810e2598fa1dc3
+      SDK_PIN: 4183795d39b9672553d784cf2898ed8aa27dbf57
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: efb9b9b17a2a01c4ad5aa6f0a9625652979f0229
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          path: watch-evidence
+          persist-credentials: false
+
+      - name: Verify exact sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/watch-timing-1577"
+          mkdir -p "$output"
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          test "$(git rev-parse HEAD^{tree})" = "$REVISION_TREE"
+          test "$(git -C deps/libycxx rev-parse HEAD)" = "$SDK_PIN"
+          test "$(git -C watch-evidence rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+          git diff --exit-code HEAD --
+          git -C deps/libycxx diff --exit-code HEAD --
+          grep -F 'deadline = time.monotonic() + 25' tests/daemon/project_build_watch.py
+          {
+            printf 'revision %s\ntree %s\nsdk %s\nharness %s\n' "$REVISION" "$REVISION_TREE" "$SDK_PIN" "$GITHUB_SHA"
+            printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            uname -a
+            sw_vers
+            sysctl hw.ncpu hw.memsize
+            uptime
+            shasum -a 256 tests/daemon/project_build_watch.py
+          } | tee "$output/provenance.txt"
+
+      - uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
+
+      - name: Compile exact historical Debug binary and CTests
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/watch-timing-1577"
+          source deps/libycxx/tools/toolchain/activate.sh
+          unset YCXX_ROOT
+          {
+            "$YCXX_GXX" --version
+            "$YCXX_CLANGXX" --version
+            cmake --version
+            ninja --version
+            python3 --version
+            xcodebuild -version
+            xcrun --show-sdk-path
+            xcrun --show-sdk-version
+            printf 'SDKROOT %s\n' "${SDKROOT:-unset}"
+          } | tee -a "$output/provenance.txt"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$output/build.log"
+          {
+            file build/bin/ycxx
+            shasum -a 256 build/bin/ycxx
+            grep -E '^CMAKE_(BUILD_TYPE|CXX_COMPILER|MAKE_PROGRAM):' build/CMakeCache.txt
+          } | tee -a "$output/provenance.txt"
+          git diff --exit-code HEAD --
+          git -C deps/libycxx diff --exit-code HEAD --
+
+      - name: Run serial fixtures and the original parallel roster
+        shell: bash
+        run: |
+          set -euo pipefail
+          source deps/libycxx/tools/toolchain/activate.sh
+          unset YCXX_ROOT
+          output="$RUNNER_TEMP/watch-timing-1577"
+          harness="$GITHUB_WORKSPACE/watch-evidence/.github/evidence/watch-timing-1577"
+          ctest --test-dir build --show-only=json-v1 > "$output/roster.json"
+          python3 - "$output/roster.json" "$harness/original-roster.txt" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          report = json.loads(Path(sys.argv[1]).read_text())
+          expected = Path(sys.argv[2]).read_text().splitlines()
+          actual = [f'{i} {test["name"]}' for i, test in enumerate(report['tests'], 1)]
+          assert actual == expected, (len(actual), sorted(set(expected) ^ set(actual)))
+          print(f'Historical ordered CTest roster verified ({len(actual)} tests)')
+          PY
+          test ! -e build/Testing/Temporary/CTestCostData.txt
+          export PYTHONPATH="$harness${PYTHONPATH:+:$PYTHONPATH}"
+          run_phase() {
+            phase=$1
+            shift
+            phase_dir="$output/$phase"
+            mkdir -p "$phase_dir/watch"
+            export YCXX_WATCH_EVIDENCE="$phase_dir/watch"
+            ps -axo pid,ppid,pcpu,pmem,comm > "$phase_dir/processes-before.txt"
+            python3 -u - <<'PY' > "$phase_dir/load.jsonl" &
+          import json
+          import os
+          import time
+          while True:
+              print(json.dumps({'monotonic_ns': time.monotonic_ns(), 'utc_ns': time.time_ns(),
+                                'load': os.getloadavg(), 'logical_cpus': os.cpu_count()}))
+              time.sleep(2)
+          PY
+            sampler=$!
+            trap 'kill "$sampler" 2>/dev/null || true' EXIT
+            set +e
+            ctest --test-dir build --output-on-failure "$@" 2>&1 | tee "$phase_dir/ctest.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            kill "$sampler" 2>/dev/null || true
+            wait "$sampler" 2>/dev/null || true
+            trap - EXIT
+            printf '%s\n' "$status" > "$phase_dir/exit.txt"
+            printf 'YCXX_CTEST_PHASE %s exit %s\n' "$phase" "$status"
+            shasum -a 256 build/bin/ycxx > "$phase_dir/binary.txt"
+            if test -d build/Testing; then mv build/Testing "$phase_dir/Testing"; fi
+          }
+          run_phase serial -j 1 -R '^daemon\.project_(package_probe|staged_witness)$'
+          test ! -e build/Testing/Temporary/CTestCostData.txt
+          run_phase parallel -j 3
+          cmp "$output/serial/binary.txt" "$output/parallel/binary.txt"
+          git diff --exit-code HEAD --
+
+      - name: Summarize observed milestones
+        if: always()
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/watch-timing-1577"
+          if test -e "$output/serial/ctest.log"; then
+            python3 "$GITHUB_WORKSPACE/watch-evidence/.github/evidence/watch-timing-1577/report.py" "$output" | tee "$output/measurements.log"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ycxx-1577-arm64-historical-efb9b9b1
+          path: ${{ runner.temp }}/watch-timing-1577
+          retention-days: 14
