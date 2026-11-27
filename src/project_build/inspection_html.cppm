@@ -293,7 +293,9 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
   out += R"(<table class="facts" aria-labelledby="facts">
   <thead><tr><th scope="col">Target · Kind</th><th scope="col">Value</th><th scope="col">Defined at</th></tr></thead><tbody>
 )";
-  constexpr std::string_view graph_kinds[] = {"rule", "source", "include", "output", "host-target", "native-target"};
+  constexpr std::string_view graph_kinds[] = {
+    "rule", "source", "include", "output", "host-target", "native-target", "link-input",
+  };
   for (const PlanFact& fact : facts) {
     out += "<tr";
     if (std::ranges::contains(graph_kinds, std::string_view(fact.kind))) {
@@ -565,7 +567,7 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
 
   const factLabels = new Map([
     ["rule", "Rule"], ["host-target", "Host target"], ["native-target", "Native target"],
-    ["source", "Source"], ["include", "Include path"], ["output", "Output"],
+    ["source", "Source"], ["include", "Include path"], ["output", "Output"], ["link-input", "Link input"],
   ]);
   const facts = new Map();
   for (const row of document.querySelectorAll("tr[data-graph-target][data-graph-kind]")) {

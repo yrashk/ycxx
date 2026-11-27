@@ -119,6 +119,8 @@ the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
 The native link reuses equal archive bytes. A source-built example rule wraps
 a Make-based C library as one build action and links its archive into the app.
+Native host tools can link ordered generated archives through `link_inputs`,
+including when the selected app targets another platform.
 Generators and witnesses can track helper executables by path and run
 generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)

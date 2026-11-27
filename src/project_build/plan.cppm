@@ -55,6 +55,7 @@ struct HostExecutablePlan {
   std::vector<SourcePlan> sources;
   std::vector<ArtifactOutputPlan> generated_inputs = {};
   std::size_t first_own_source = 0;
+  std::vector<ArtifactOutputPlan> link_inputs = {};
 };
 
 using LinkInputPlan = ArtifactOutputPlan;
@@ -1263,11 +1264,16 @@ class Planner {
     return generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_);
   }
 
+  ArtifactOutputPlan resolve_host_artifact(const ArtifactRef& ref, const HostExecutablePlan& host,
+                                           std::string_view kind, SourceLocation at) {
+    const HostGeneratedInput input{host.name, kind};
+    const RestoreHostGeneratedInput restore{host_generated_input_, std::exchange(host_generated_input_, &input)};
+    return artifact(ref, at);
+  }
+
   std::string host_artifact(const ArtifactRef& ref, const TargetDecl& consumer, HostExecutablePlan& host,
                             std::string_view usage, SourceLocation at, bool emit_edge) {
-    const HostGeneratedInput input{host.name, usage == "sources" ? "source" : "header"};
-    const RestoreHostGeneratedInput restore{host_generated_input_, std::exchange(host_generated_input_, &input)};
-    const auto requested = artifact(ref, at);
+    const auto requested = resolve_host_artifact(ref, host, usage == "sources" ? "source" : "header", at);
     if (emit_edge) artifact_dependency(consumer, requested, usage, at);
     host.generated_inputs.push_back(requested);
     const auto& generator = plan_.generators[requested.producer];
@@ -1337,7 +1343,7 @@ class Planner {
     const auto existing = std::ranges::find(plan_.host_executables, decl.name, &HostExecutablePlan::name);
     if (existing != plan_.host_executables.end())
       return static_cast<std::size_t>(existing - plan_.host_executables.begin());
-    check_fields(decl, {"sources", "public_include_dirs", "deps", "generated_headers"});
+    check_fields(decl, {"sources", "public_include_dirs", "deps", "generated_headers", "link_inputs"});
     const auto* host = pp::native_target;
     if (!host) fail(decl.location, "no default native target for this host");
     if (inspection_) {
@@ -1347,8 +1353,9 @@ class Planner {
     }
     HostExecutablePlan tool{decl.name, {}};
     CxxTraversal traversal{tool.sources, false, &tool};
-    cxx_target(decl, Primitive::host_executable, traversal);
+    const auto& native = cxx_target(decl, Primitive::host_executable, traversal);
     if (tool.sources.empty()) fail(decl.location, "host executable has no C++ source files");
+    append_link_inputs(native, traversal);
     const auto index = plan_.host_executables.size();
     plan_.host_executables.push_back(std::move(tool));
     return index;
@@ -1360,6 +1367,7 @@ class Planner {
     std::vector<std::size_t> consumers(traversal.finished.size());
     for (const auto& [name, target] : traversal.finished)
       for (const auto* dep : target.dependencies) ++consumers[dep->order];
+    auto& inputs = traversal.host ? traversal.host->link_inputs : plan_.link_inputs;
 
     // A shared dependency must follow all its consumers. Among ready targets, keep the
     // order in which the dependency traversal first reached them.
@@ -1371,14 +1379,15 @@ class Planner {
         if (inspection_) {
           const auto [producer, output] = input.artifact;
           const auto& generator = plan_.generators[producer];
-          const auto path = generated_path(cwd_, generator.name, generator.action.outputs[output].filename,
-                                           native_triple_);
+          const auto& filename = generator.action.outputs[output].filename;
+          const auto path = traversal.host ? host_generated_path(cwd_, generator.name, filename)
+                                          : generated_path(cwd_, generator.name, filename, native_triple_);
           auto origin = target == &root ? input.origin :
               std::format("inherited from {} ({})", target->declaration->name, input.origin);
-          fact("link-input", *root.declaration, std::to_string(plan_.link_inputs.size()), display_path(path),
+          fact("link-input", *root.declaration, std::to_string(inputs.size()), display_path(path),
                origin, input.location);
         }
-        plan_.link_inputs.push_back(input.artifact);
+        inputs.push_back(input.artifact);
       }
       for (const auto* dep : target->dependencies)
         if (--consumers[dep->order] == 0) ready.emplace(dep->order, dep);
@@ -1395,7 +1404,7 @@ class Planner {
     const auto* assets = field(decl, "runtime_assets");
     if (assets && kind != Primitive::executable) fail(assets->location, "runtime_assets requires an executable target");
     const auto* private_inputs = field(decl, "link_inputs");
-    if (private_inputs && kind != Primitive::executable)
+    if (private_inputs && kind != Primitive::executable && kind != Primitive::host_executable)
       fail(private_inputs->location, "link_inputs requires an executable target");
     const auto* public_inputs = field(decl, "public_link_inputs");
     if (public_inputs && kind != Primitive::library)
@@ -1412,12 +1421,13 @@ class Planner {
     if (const auto* inputs = public_inputs ? public_inputs : private_inputs) {
       const auto field_name = public_inputs ? "public_link_inputs" : "link_inputs";
       for (const auto& value : as<List>(*inputs, "a list of linker archive inputs")) {
-        if (!traversal.generated)
+        if (traversal.host && kind != Primitive::host_executable)
           fail(value.location, std::format("{} is not supported in host executable dependencies", field_name));
         const auto& ref = as<ArtifactRef>(value, "an artifact reference");
         const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
                                         : std::string{};
-        const auto requested = artifact(ref, value.location);
+        const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", value.location)
+                                              : artifact(ref, value.location);
         artifact_dependency(decl, requested, field_name, value.location);
         target.link_inputs.push_back({requested, origin, value.location});
       }

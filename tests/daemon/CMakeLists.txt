@@ -100,6 +100,9 @@ add_test(NAME daemon.project_module_graph
 add_test(NAME daemon.project_link_inputs
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_link_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
 
+add_test(NAME daemon.project_host_static_archive_inputs
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_static_archive_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
+
 add_test(NAME daemon.project_foreign_make
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_foreign_make.py $<TARGET_FILE:ycxxc>)
 
