@@ -14151,6 +14151,9 @@ public:
           return use(*replay, committed, concrete);
         }
       }
+      // In a template's definition the default is instantiated with the call, when the
+      // instantiation analyses the call again ([temp.inst]/12): the argument stays dependent.
+      if (in_pattern()) return dependent_node({}, at_, at_);
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
