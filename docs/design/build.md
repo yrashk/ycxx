@@ -126,14 +126,17 @@ The caller owns cache admission and materialization. A crash, cancellation
 or failed command produces no reusable successful result. The first runner
 can return owned bytes, before deciding on durable artifact storage.
 
-Generators can name helper executables through a record such as
+Generators and witnesses can name helper executables through a record such as
 `tool_inputs = { cc = "/usr/bin/cc", ar = "/usr/bin/ar" }`. Each helper's name,
 declared absolute path, canonical pathname, and executable content fingerprint
 enter the ordinary action receipt identity. The declaration observes the
-helper at its host path. The direct tool still gets the declared arguments
-and environment. Watch reobserves both spellings, and `ycxx show` reports
-the current canonical path and fingerprint or the reason it is unavailable.
+helper at its host path. Pass a helper path through the declared arguments
+or environment when the action needs it. Watch reobserves both spellings.
+`ycxx show` reports the canonical path and fingerprint of a current helper.
+An unavailable generator helper has a diagnostic fact, and a stale witness
+snapshot is reported as a partial plan until the next successful build.
 [#1343](https://github.com/yrashk/ycxx/issues/1343)
+[#1526](https://github.com/yrashk/ycxx/issues/1526)
 
 Keep subprocess execution outside ordinary reevaluation. A query returns
 pending action demands to the build coordinator. The coordinator deduplicates
@@ -143,6 +146,31 @@ epoch for a receipt that requires the epoch to end would deadlock. Engine
 verification rechecks queries using receipts without launching tools.
 Publication uses a completed request's generation and can restore removed
 output files from cached values.
+
+### Staged action tools (#1505)
+
+A rule package can emit an `action.generate` whose tool is a named input
+selected from a producer's artifact. In the staged tool example, the
+`runner` action copies an executable script while preserving its mode.
+The consumer runs the staged copy to write a generated header.
+
+```text
+action.generate "config" {
+    tool = input("runner")
+    args = [output("header")]
+    inputs = { runner = artifact("runner", "runner") }
+    outputs = { header = "generated_config.hh" }
+}
+```
+
+The selector must name an artifact-backed input with the executable bit
+set. The coordinator uses the ordinary producer receipt to stage that input,
+and the consumer action identity includes the staged path, bytes, and
+executable mode. When the producer runs again and returns an equivalent
+selected output, the consumer can reuse its receipt. Watch follows the
+producer's declared inputs. In `ycxx show app --format=html`, the tool
+fact shows the planned staged path and selector, and **Target dependencies**
+links the consumer to its producer. [Runnable example](../../examples/project-build/staged-tool/README.md)
 
 ## Compiler and trace
 
@@ -205,15 +233,124 @@ external actions run on the host and share receipts when their declared inputs
 match. An external action that supplies a linker input must produce an archive
 for the selected target.
 
-An action can opt into that selection by placing `target_triple()` in its
-`args` (#1347). The planner supplies one canonical argv word and the tool
-executes on the host. The default request supplies the host triple. The
-resolved word enters the action key, so requests with the same resolved argv
-and inputs can reuse its receipt. Generated planning inputs and rule witnesses
-resolve the argument with the same target. Typed witness values have a
-separate identity per triple. Read-only inspection shows the argument and its
-manifest location. Value traces show the resolved argv position and origin.
-`host_action` package recipes build the rule package for the host.
+The standard rule package's `cpp.host_executable` rule exposes one named
+`executable` artifact (#1559). Its resident native build uses disk sources,
+ordinary includes, and the canonical host target. The selected app target
+has its own compilation request. A generator stages the linked bytes and
+executable mode in an ordinary input, which can also be used in
+`tool = input("name")`. The build trace includes the host compilation and
+link. The action receipt reuses an equal staged image.
+
+The coordinator verifies the engine revision before launching an action
+that depends on a host build and again before admitting its receipt. Watch
+observes the source and include reads through the same file table as native
+compilation. Host executables are available to ordinary generator recipes
+and staged witness tools. Ordinary generator chains can also run them
+upstream of a generated planning input.
+[Native host tool example](../../examples/project-build/native-host-tool/README.md)
+
+### Libraries for native host tools (#1576)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["shared"]
+}
+```
+
+Host executable dependencies are disk-backed `cpp.library` declarations.
+Each executable collects its own reachable sources and public include
+directories. In a diamond, both dependency paths remain visible in the
+plan and the shared library contributes its sources once per executable.
+The same library declaration can supply both the host scanner and a
+foreign-target app. The scanner's source and include observations cover its
+library translation units, so edits can wake watch and refresh the staged
+host image.
+[Shared library diamond example](../../examples/project-build/host-cxx-libraries/README.md)
+
+### Generated headers on a native host executable (#1579)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    generated_headers = [artifact("scanner_config", "header")]
+}
+```
+
+The declared producer and its ordinary predecessors run before the host
+compile. That action chain must be independent of project-built native host
+tools. Generators keep the requesting plan's argument selectors. C++ still
+compiles the executable for the host.
+
+Each admitted producer directory exposes the declared output names and
+their exact bytes through the executable's own include configuration.
+The immutable snapshot uses stable logical paths under `.ycxx/host/virtual`.
+Disk sources and real include directories use ordinary disk lookup.
+The selected app has its own generated include view.
+Equal visible files preserve the host compile, and equal linked executable
+bytes preserve consuming generator receipts. The coordinator shares staged
+producer outputs across ordinary builds, planning inputs, and witnesses.
+[Generated host header example](../../examples/project-build/host-generated-headers/README.md)
+
+The same producer restriction applies to artifacts in a host executable's
+`sources` list. Such a translation unit reads its main file from the host
+snapshot, and quoted includes can find declared siblings in its logical
+directory. Disk sources and generated artifacts can be mixed in authored
+order. Diagnostics refer to the logical source path and use the snapshot
+bytes. Planning and witness receipts observe real disk includes, including
+misses, and can persist an empty disk observation when the tool is generated.
+[Generated host source example](../../examples/project-build/host-generated-sources/README.md)
+
+### Generated headers in native host library dependencies (#1588)
+
+A disk-backed `cpp.library` can declare `generated_headers` when it is
+linked into a native host executable. The host tool stages the reachable
+ordinary producers once. Each library unit's immutable file view exposes
+the declared siblings in its own and inherited generated include
+directories. An out-of-scope host virtual path resolves as a miss. Edits
+to a sibling's generated files preserve the unit's compile identity,
+and real disk includes continue to drive watch.
+
+The same library declaration can serve the selected target, with the
+target's generated include paths and compile identity. Inspection shows
+both resolved include views and links them to the authored header binding.
+[Generated host library header example](../../examples/project-build/host-library-generated-headers/README.md)
+
+### Generated sources in native host library dependencies (#1600)
+
+A host-linked library can put an artifact reference in `sources`
+alongside disk paths and globs. The library's generated main sees the
+output siblings of its producer at their host logical paths. The main's
+directory participates in quoted include lookup through the includer's
+path. Adding the source leaves the library's public include search
+unchanged. Other units can see that producer's directory when a
+generated header binding makes it visible to them.
+
+Both the selected target and the host tool can compile the shared
+library. The planner stages the ordinary source producers before the
+native host compile and reports the two logical source paths against
+one authored binding. Watch and early planning continue to observe the
+real includes used by each generated main.
+[Generated host library source example](../../examples/project-build/host-library-generated-sources/README.md)
+
+Project generators and rule witnesses accept `target_triple()` (#1347)
+and `host_triple()` (#1534) in `args`. Each selector supplies one canonical
+argv word. `target_triple()` resolves to the selected compiler target and
+defaults to the host. `host_triple()` resolves to the host across all target
+selections. The resolved words enter the action key, so identical argv and
+inputs can reuse a receipt across target selections and equivalent literals.
+Typed witness values have a separate identity per target triple. Read-only
+inspection shows each argument and its manifest location. Value traces show
+the resolved argv position and selector. [Target-aware example](../../examples/project-build/target-aware-action/README.md)
+
+The same selectors can be used as project generator and witness
+`environment` values (#1540). The tool receives the resolved strings.
+Receipt identity includes those strings, so equal literal values can
+reuse a receipt. Plan inspection shows the resolved environment entry
+and the selector that supplied it. [Environment walkthrough](../../examples/project-build/target-aware-action/README.md#pass-the-triples-in-the-action-environment)
+
+`host_action` package recipes build the rule package for the host and
+accept string values in `environment`.
 
 Named-module discovery reads the preprocessor's marked module and import
 directives before the native front end runs (#1349). It uses the registered
@@ -359,6 +496,120 @@ also shows the current plan's dependencies. **Plan changes** compares
 semantic facts. The `link-input` facts describe the executable's effective
 archive order. The read-only report can identify an artifact before its
 bytes exist.
+
+### Typed value bindings (#1477)
+
+In `examples/project-build/package-probe`, the `config` header binds `fast`
+to the `fast-mode` export of the `wire` target.
+
+```text
+capabilities.header "config" {
+    namespace = "example::codec"
+    filename = "codec_config.hh"
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+```
+
+From that example directory, run `ycxx build app` and then
+`ycxx show app --format=html > plan.html`. **Value bindings** shows `config`
+as the consumer, `capabilities` as the usage, `fast` as the binding, and
+`wire` as the producer with export `fast-mode`. The declaration link opens
+the `value(...)` reference in `build.ycxx`. Structured `facts` bindings use
+the same report section.
+
+Schema-1 JSON reports these references in `dependency_graph.value_edges`
+with `consumer`, `usage`, `binding`, `producer`, `export_name`, and
+`location`. A complete plan with no value bindings has an empty array.
+An incomplete plan reports the bindings resolved so far with
+`dependency_graph.complete: false`. The HTML comparison shows the current
+plan's **Value bindings** alongside **Dependency changes**.
+
+### Dependency comparisons (#1464)
+
+`ycxx show app --against before.json --format=json` includes
+`dependency_changes` when both plans have complete dependency graphs. The
+comparison groups occurrences by consumer, usage, producer, output, and
+binding. Each group with different counts has `before` and `after` arrays
+of the original edge records, including every source site on each side.
+An added dependency has an empty `before` array, and a removed dependency
+has an empty `after` array.
+
+Source locations explain where dependencies were used. Moving a reference
+with the same identity and count produces an empty `dependency_changes`
+array. **Plan changes** reports changes in the effective archive order
+through the `link-input` facts. Older schema-1 snapshots without a
+dependency graph can still compare plan facts.
+
+Run `ycxx show app --against before.json --format=html > changes.html` to
+read **Dependency changes** alongside the current **Dependencies**. The
+table shows before and after counts and source sites. After links open
+the relevant lines in the current manifest. Before sites describe the
+saved plan. A comparison with equal counts shows **No dependency changes.**
+
+### Value binding comparisons (#1493)
+
+From the package-probe example, build the plan and save a baseline.
+
+```sh
+ycxx build app
+ycxx show app --format=json > before.json
+```
+
+Rename the producer from `wire` to `wire_alt` in its declaration and its
+`value("wire", "fast-mode")` reference in `build.ycxx`. Make the same rename
+in the observer declaration and target check in `rules/codec.cc`. Build the
+edited plan and open the comparison report.
+
+```sh
+ycxx build app
+ycxx show app --against before.json --format=html > changes.html
+```
+
+**Value binding changes** shows the removed `config` binding to `wire` and the
+added binding to `wire_alt`, with before and after counts. Saved sites give
+the original coordinates. Current links open the reference in the displayed
+manifest. **Value bindings** shows all resolved bindings in the current plan.
+
+The same comparison with `--format=json` reports `value_binding_changes`.
+A binding's identity is its consumer, usage, local binding, producer, and
+export. Each identity with different occurrence counts includes all its
+`before` and `after` edge records. Moving a reference for the same binding
+preserves its count. When counts match, JSON returns an empty array and HTML
+says **No value binding changes.**
+
+The binding comparison requires complete graphs with `value_edges` in both
+snapshots. Older schema-1 baselines still support the comparisons for which
+they have data.
+
+### Target dependency navigation (#1499)
+
+From `examples/project-build/generated-archive`, build the example and
+save its HTML plan.
+
+```sh
+ycxx build app
+ycxx show app --format=html > plan.html
+```
+
+Open **Target dependencies** and start at `app`. Follow `score`, `bonus`,
+and `bonus_archive` to see how the generated archive reaches the executable.
+The `public_link_inputs` reference on `bonus` links to both the archive
+producer card and the use site in `build.ycxx`.
+
+The same navigation follows typed bindings in the shader reflection example.
+From `app`, follow `scene_bindings` and its `facts` binding to
+`fragment_reflection`.
+
+```text
+shaders.bindings "scene_bindings" {
+    facts = { layout = value("fragment_reflection", "layout") }
+}
+```
+
+Each target has one card, so all occurrences of a shared producer lead to
+the same destination. A partial plan shows the resolved paths and marks
+the navigation incomplete. In an HTML comparison, these links navigate
+the current plan. The comparison tables carry the saved occurrence sites.
 
 ### Declared target catalog (#1392)
 
@@ -576,6 +827,24 @@ receipt. Watch follows the generator graph even if it fails or returns an
 invalid inventory. Publication keeps the previous assets until planning,
 the ordinary actions and the native build succeed.
 
+### Host tools upstream of planning inputs (#1574)
+
+The native inventory example builds `scanner` for the host and runs it
+in a generator. A copy action exposes the selected output to the `config`
+rule through `plan_inputs = { inventory = artifact("inventory", "list") }`.
+The worker reads those bytes and emits a generator for a `constexpr` header.
+The app can target a different platform from the scanner.
+
+The coordinator observes the reachable host tools together and records
+source and include lookups, including misses. It revalidates the worker's
+selected bytes before admitting the expansion. Equal bytes preserve the
+worker receipt and update the producer provenance. The coordinator keeps
+planning and witness file evidence separately. When the same rule also
+classifies a witness, both phases must agree on the inputs they share.
+Read-only inspection validates saved evidence, and watch retains failed
+lookups so creating a missing include can wake the build.
+[Host planning input example](../../examples/project-build/host-planning-inputs/README.md)
+
 ## Compiler capability observations
 
 ```sh
@@ -694,6 +963,71 @@ from the shipped catalogue.
 The independent Astra design review identified the stable export address and
 separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)
 
+### Staged witness tools (#1515)
+
+An `action.observe` can select its tool through an executable artifact input.
+In the staged-witness example the producer copies `analyzer.sh` as its named
+`runner` output while preserving its executable mode.
+
+```text
+action.observe "observed" {
+    tool = input("analyzer")
+    inputs = { analyzer = artifact("runner", "runner") }
+    export = "score"
+    schema = "example.score.v1"
+}
+```
+
+The coordinator stages the producer receipt and invokes the selected copy
+as the witness. Its bytes and executable mode are part of the witness action
+key. The classifier turns the output into a typed `score` row, which the
+header rule consumes with `facts = { score = value("observed", "score") }`.
+An edit that preserves the classified score can reuse header generation
+and native compilation. Build the example with `ycxx build app` and inspect
+the artifact and value links with `ycxx show app --format=html`.
+[Runnable example](../../examples/project-build/staged-witness/README.md)
+
+A witness can bind `tool = input("name")` directly to the `executable`
+artifact of a `cpp.host_executable` (#1566). The resident host query captures
+its linked image and the paths and content fingerprints of its source
+and include reads in one revision. The observations include missing
+include candidates so a newly preferred header can invalidate them.
+Read-only inspection checks the saved paths and fingerprints. Watch
+retains the lookups from a failed compile so creating a missing header
+can wake the build.
+
+The witness receipt uses the staged executable bytes and mode. Edits
+that preserve the image refresh the saved file observations and reuse
+the receipt. The coordinator checks the image again if its inputs change
+while the witness runs. [Native host witness example](../../examples/project-build/native-host-witness/README.md)
+
+The same staged analyzer can call a helper at an absolute host path. Declare
+the path in `tool_inputs` to track helper changes as witness inputs. Equal
+classified scores still reuse the app. [Helper walkthrough](../../examples/project-build/staged-witness/README.md#track-a-helper-executable)
+
+### Witnesses with host producers (#1571)
+
+A staged witness can select an ordinary generator output whose producer
+chain consumes native host executables. The example runs the host
+`scanner` in `analyzer_source` to write an executable script. The
+`analyzer` action copies that script and preserves its mode. The emitted
+`observed` witness selects it through `tool = input("analyzer")` and
+`inputs = { analyzer = artifact("analyzer", "executable") }`.
+The `config` rule consumes the classified score with
+`facts = { score = value("observed", "score") }`.
+
+The coordinator collects the linked images and source and include
+observations of all reachable host tools in one current engine revision
+before staging the producers. It revalidates the recipe and staged inputs
+when files change during generation or classification. Generator and
+witness action keys use the concrete staged bytes and executable mode.
+Equal selected outputs can therefore reuse the witness receipt, which
+stores the exit status, stdout, and stderr. The classifier publishes a
+separate typed value. Equal values preserve reuse for downstream consumers
+such as the header generator. Read-only inspection and watch reobserve
+the reachable host tool inputs.
+[Host producer witness example](../../examples/project-build/host-producer-witness/README.md)
+
 ### Structured shader reflection
 
 ```text
@@ -731,9 +1065,10 @@ without demanding reflection.
 The classifier exports the declared schema and a bounded table of named rows
 with named fields. Fields are unsigned 32-bit integers or strings. The worker
 rejects duplicate names and canonicalizes row and field order. The shader
-package defines `shader.descriptors.v1` and emits one row per uniform buffer
-with its descriptor set and binding. Its bindings rule reads the typed table
-and generates C++ constants from it. The existing support-state ABI and
+package defines `shader.descriptors.v2` and emits one row per uniform buffer or
+one-dimensional literal `sampler2D` array, with its descriptor set, binding,
+kind, and element count. Its bindings rule generates `constexpr` C++ values,
+including an enum for descriptor kind. The existing support-state ABI and
 `capabilities` bindings continue to use the same export address.
 
 An implementation edit can change the SPIR-V bytes and the witness receipt

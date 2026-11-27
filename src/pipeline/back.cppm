@@ -121,6 +121,9 @@ struct Entity {
   bool nonthrowing = false;  // including implicit exception specifications on destructors
   bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
   bool unsupported_class_parameter_signature = false;
+  bool inline_function = false;
+  bool namespace_static = false;
+  ast::SeqId<ast::TemplateParamSema> generic_invoker_head{};
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -194,6 +197,7 @@ struct ClassShape {
   bool trivial_calls = true;
   bool gcc_stack_calls = false;  // GCC's System V MEMORY class for an implicit deletion
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
+  std::vector<std::pair<std::uint8_t, std::uint8_t>> wide_bit_fields{};  // extent and alignment
   std::vector<std::uint32_t> overlapping_fields{};  // [[no_unique_address]] ([intro.object])
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
@@ -203,6 +207,7 @@ struct ClassShape {
   bool calls_abi_uncertain = false;
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
+  std::uint8_t clang_weak_alignment = 0;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
   bool dynamic_root = false;  // a dynamic class whose own vptr is at offset zero (#309)
@@ -259,6 +264,7 @@ struct TranslationUnit {
   // startup array slot.
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
+  std::optional<ast::Loc> duplicate_c_definition;  // GCC mode defers the error to native emission
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
@@ -275,10 +281,11 @@ struct TranslationUnit {
   bool has_raw_linkage_names = false;  // written asm labels or attributes with raw names
   // The declared heads of class templates whose own arguments may appear in symbols.
   std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
+  std::map<EntityId, std::pair<ast::Loc, ast::SeqId<ast::TemplateArg>>> class_template_spellings{};
+  std::vector<EntityId> written_constraint_lambdas;
 };
 
-// What failed, at a location in an item when there is one. Every error here is something the α
-// subset does not support yet: valid code that the front end accepted.
+// What failed during native emission, at a location in an item when there is one.
 struct BackError {
   std::optional<ast::Loc> at;
   std::string message;
@@ -464,9 +471,13 @@ struct ConstLayout {
   std::optional<ConstId> object;  // a string literal or compiler-created constant object
 };
 struct [[=engine::cheap]] LayoutConstant {
-  using Key = ConstId;
+  struct Key {
+    ConstId value;
+    bool linux_target;
+    bool operator==(const Key&) const = default;
+  };
   using Value = ConstLayout;
-  static Value run(engine::SyncCtx& cx, ConstId c);
+  static Value run(engine::SyncCtx& cx, Key key);
 };
 
 // A constant object a function or variable uses, and its entity.
@@ -517,7 +528,7 @@ class QueryLayout {
   bool is_class(EntityId e) const { return shape_of(e) != nullptr; }
   bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
-    ConstLayout v = cx_->fetch<LayoutConstant>(c);
+    ConstLayout v = cx_->fetch<LayoutConstant>({c, target_->triple == ast::x86_64_linux.triple});
     if (!v.base) return {v.bits, v.high};
     if (v.object && !std::ranges::contains(objects_, *v.object, &ConstantObjectUse::object))
       objects_.push_back({*v.object, *v.base});
@@ -904,7 +915,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
-            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment};
+            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment,
+            .unusable_class_alignment = e.unusable_class_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -914,8 +926,12 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TClass>(c)) {
     const auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
     // A peer object's field offsets are available through step(), with no native complete-object type.
-    if (const ClassShape* shape = shape_of(EntityId(key)); shape && shape->layout_requires_virtual_support)
-      return {};
+    if (const ClassShape* shape = shape_of(EntityId(key))) {
+      if (shape->clang_weak_alignment)
+        return {.kind = record, .size = shape->clang_weak_alignment, .align = shape->clang_weak_alignment,
+                .unusable_class_alignment = true};
+      if (shape->layout_requires_virtual_support) return {};
+    }
     if (auto done = records_.find(key); done != records_.end()) return done->second;
   }
   if (auto r = class_layout(c)) {
@@ -945,6 +961,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     for (const ir::SubObject& b : r->bases) {
       const auto base = type(b.type);
       l.layout_uncertain |= base.layout_uncertain;
+      l.unusable_class_alignment |= base.unusable_class_alignment;
       l.contains_explicit_alignment |= base.contains_explicit_alignment;
       if (!base.empty) parts.push_back(b);
     }
@@ -961,6 +978,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
       l.layout_uncertain |= m.layout_uncertain;
+      l.unusable_class_alignment |= m.unusable_class_alignment;
       l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
@@ -972,6 +990,10 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     if (hfa && count <= 4 && count * bytes == r->size) {
       l.hfa = std::uint8_t(count);
       l.hfa_bytes = bytes;
+    }
+    if (l.unusable_class_alignment) {
+      l.size = 0;
+      l.align = 1;
     }
     records_[std::to_underlying(in.types.get<ast::TClass>(c).entity)] = l;
     return l;
@@ -1049,6 +1071,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   const ClassShape* it = shape_of(EntityId(key));
+  if (it && it->clang_weak_alignment) return std::nullopt;
   if (!it || (it->layout_requires_virtual_support &&
                                it->peer_virtual_layout == sema::PeerVirtualLayout::none &&
                                it->peer_automatic_primary_base == EntityId::none))
@@ -1062,7 +1085,12 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   }
   for (std::size_t i = 0; i < it->fields.size(); ++i) {
     ast::Placed f = placed(in.canonical(it->fields[i]));
+    f.potentially_overlapping = std::ranges::binary_search(it->overlapping_fields, std::uint32_t(i));
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
+    if (!it->wide_bit_fields.empty()) {
+      f.wide_bit_width = it->wide_bit_fields[i].first;
+      f.wide_bit_alignment = it->wide_bit_fields[i].second;
+    }
     if (!it->field_alignments.empty()) f.align = std::max(f.align, std::uint64_t(it->field_alignments[i]));
     places.push_back(std::move(f));
   }
@@ -1108,12 +1136,15 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
   return {};
 }
 
-ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
+ConstLayout LayoutConstant::run(engine::SyncCtx&, Key key) {
   ast::Interners& in = *universe().in;
+  const ConstId c = key.value;
   if (auto a = universe().consts->address(c)) {
     if (in.values.is<ast::VEntity>(a->object)) {
       const EntityId entity = in.values.get<ast::VEntity>(a->object).entity;
-      if (const auto* world = universe().linux_world) {
+      // Descriptor records are created in the target's semantic world. The same interned
+      // address can be used on both targets before both worlds contain the corresponding record.
+      if (const auto* world = universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin)) {
         if (const auto* record = world->entities.find(entity); record && record->constant_object != ConstId::none)
           return {a->offset, 0, entity, record->constant_object};
       }
@@ -1336,13 +1367,14 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.constructor_table = d.constructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
-  for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
+  bool needs_nonthrowing = facts.classify(facts.return_type(d.decl.type)) == irgen::TypeClass::record;
+  for (std::uint32_t index = 0, count = seqs.size(locals); !needs_nonthrowing && index < count; ++index) {
     QualType type = seqs.at(locals, index).type;
     while (facts.classify(type) == irgen::TypeClass::array) type = facts.element(type);
-    if (facts.classify(type) != irgen::TypeClass::record) continue;
-    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
-    break;
+    needs_nonthrowing = facts.classify(type) == irgen::TypeClass::record;
   }
+  if (needs_nonthrowing)
+    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
   input.guards = d.guards;
   input.guard_acquire = d.guard_acquire;
   input.guard_release = d.guard_release;
@@ -1352,9 +1384,9 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.hosted_catch = true;
     input.catch_int_binding = d.hosted_catch->int_binding;
   }
-  const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = facts.target().triple == ast::x86_64_linux.triple;
   if (input.exceptions_enabled) {
-    if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
+    if (target_is_linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
     else if (facts.target().triple == ast::aarch64_darwin.triple)
       input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
   }
@@ -1367,8 +1399,8 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.cleanup_call = d.cleanup_call;
     input.constructor_cleanup = d.constructor_cleanup;
   }
-  input.native_array_delete = linux;
-  input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
+  input.native_array_delete = target_is_linux;
+  input.native_array_new = target_is_linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) {
@@ -1491,13 +1523,14 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
     if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) return {};
     auto l = layout.type(value);
+    if (l.unusable_class_alignment) return "a class whose requested alignment has no usable object layout";
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
                     : "defaulted copy ABI classification is unavailable for a parameter";
     if (f.variadic && l.kind == ir::TypeKind::integer && l.size == 16)  // #1172
       return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
-        (allow_aggregates && (l.sysv_integer_eightbytes || (l.sysv_stack_record && (result || l.size <= 16))))) return {};
+        (allow_aggregates && (l.sysv_integer_eightbytes || l.sysv_stack_record))) return {};
     if (fixed_direct && l.sysv_empty_record) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
@@ -1543,12 +1576,15 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
 
 engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const FunctionIrValue& f = co_await cx.fetch<FunctionIr>(k);
-  const ast::Target& target = unit_target(cx, k.tu);
-  const bool linux = object_target(target) == obj::target::x86_64_linux;
-  if (!f.body && !linux) co_return Lowered{std::nullopt, {}, f.error};
+  const auto* source_config = unit_config(cx, k.tu);
+  const ast::Target& target = source_config ? *source_config->target : *universe().target;
+  const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
+  if (!f.body && !target_is_linux) co_return Lowered{std::nullopt, {}, f.error};
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
+  config.darwin_passes_empty_argument =
+      !target_is_linux && source_config && source_config->compatibility == ast::Compatibility::gcc;
   if (f.body) {
     const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
       return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
@@ -1561,7 +1597,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         config.unreachable_body = ir::NodeId(std::uint32_t(checked - f.body->nodes.begin()));
     }
   }
-  if (linux) {
+  if (target_is_linux) {
     const ast::Interners& in = *universe().in;
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
     const FunctionDef& def = src.def;
@@ -1694,10 +1730,10 @@ struct TuSymbolAddresses {
   using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     auto [u, index] = co_await cx.par_fetch(engine::q<TuUnit>{tu}, engine::q<UnitIndexQ>{tu});
-    const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
+    const bool target_is_linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
     Value out;
     auto add = [&](EntityId id) {
-      if (linux) {
+      if (target_is_linux) {
         auto e = indexed(index.entities, id);
         if (!e || !u.entities[*e].has_local_binding()) return;
       }
@@ -1705,7 +1741,7 @@ struct TuSymbolAddresses {
     };
     for (const FunctionDef& f : u.functions) add(f.entity);
     for (const Variable& v : u.variables) add(v.entity);
-    if (linux) {
+    if (target_is_linux) {
       for (const Entity& e : u.entities)
         if (!e.has_local_binding() && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
           out.got.push_back(e.id);
@@ -2081,7 +2117,7 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
       if (s.bit_field) {
         if (!in.values.is<ast::VInt>(elems[i])) return std::unexpected("a bit-field initializer is not an integer");
         const auto bits = s.bit_field;
-        auto value = std::uint32_t(in.values.get<ast::VInt>(elems[i]).bits.lo) << bits.shift;
+        auto value = in.values.get<ast::VInt>(elems[i]).bits.lo << bits.shift;
         for (std::uint32_t byte = 0; byte < bits.bytes(); ++byte) {
           auto mask = std::uint8_t(bits.mask() >> (8 * byte));
           auto& dst = out.bytes[offset + s.offset + byte];
@@ -2099,6 +2135,7 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
 std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const QueryLayout& layout, QualType type,
                                                 ConstId init) {
   ir::TypeLayout l = layout.type(type);
+  if (l.unusable_class_alignment) return std::unexpected("an object whose class alignment has no usable layout");
   if (l.contains_member_pointer) return std::unexpected("static storage containing pointers to members");
   Bytes out;
   out.bytes.assign(l.size, 0);
@@ -2366,6 +2403,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   // another type are two entities with one C symbol (#1095). It names this object's strong
   // definition of the name if there is one, else its weak one, else one undefined symbol.
   std::map<EntityId, bool> definitions;  // entity → weak
+  std::vector<EntityId> defined;
+  for (const auto& f : functions) defined.push_back(f.entity);
+  for (const auto& d : data) defined.push_back(d.entity);
+  if (auto error = aarch64::repeated_definition(std::move(defined))) return std::unexpected(std::move(*error));
   for (const auto& f : functions) definitions.emplace(f.entity, f.weak);
   for (const auto& d : data) definitions.emplace(d.entity, d.weak);
   for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
@@ -2566,13 +2607,17 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   const ast::Target& target = config ? *config->target : *universe().target;
   const bool emit_table_type_info = !config || config->rtti_enabled;
   const auto compatibility = config ? config->compatibility : ast::Compatibility::spec;
-  const bool linux = object_target(target) == obj::target::x86_64_linux;
+  const bool target_is_linux = object_target(target) == obj::target::x86_64_linux;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
   if (tu.front_failed) {
     // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
+  }
+  if (tu.duplicate_c_definition) {
+    errors.push_back({tu.duplicate_c_definition, "repeated definition of a C-linkage function"});
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   if (tu.unsupported_typed_dynamic_cast) {
     errors.push_back({tu.unsupported_typed_dynamic_cast,
@@ -2583,7 +2628,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
-  if (linux && tu.namespace_destruction) {
+  if (target_is_linux && tu.namespace_destruction) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
@@ -2632,20 +2677,105 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       }
     }
   }
+  // A private lambda's Clang number is allocated in native reference order. The
+  // bodies of unreferenced closure members must not participate in that walk.
+  std::map<std::uint32_t, const Entity*> by_id;
+  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
+  const sema::World* closure_world = universe().world_for(target);
+  std::map<EntityId, std::uint32_t> written_closure_numbers;
+  if (closure_world) {
+    std::map<Fp128, std::uint32_t> signature_counts;
+    for (const EntityId closure : tu.written_constraint_lambdas) {
+      if (written_closure_numbers.contains(closure)) continue;
+      const auto& record = closure_world->entities.rec(closure);
+      written_closure_numbers.emplace(closure, signature_counts[record.lambda_signature]++);
+    }
+  }
+  auto private_closure_owner = [&](EntityId closure) -> std::optional<EntityId> {
+    if (closure == EntityId::none || !closure_world) return std::nullopt;
+    const auto* record = closure_world->entities.find(closure);
+    if (!record || record->kind != sema::EntityKind::class_ || record->unnamed_type_ordinal ||
+        !closure_world->ins.names.spelling(record->name).empty()) return std::nullopt;
+    auto found = by_id.find(ir::raw(record->scope));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& owner = *found->second;
+    if (!owner.is_function || owner.inline_function || owner.template_type) return std::nullopt;
+    if (owner.scope != EntityId::none) {
+      const auto* scope = closure_world->entities.find(owner.scope);
+      if (scope && scope->kind == sema::EntityKind::class_ &&
+          (scope->templ != EntityId::none || closure_world->ins.names.spelling(scope->name).empty())) return std::nullopt;
+    }
+    return owner.id;
+  };
+  std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
+  std::uint32_t next_constraint_closure_number = 0;
+  auto note_closure = [&](EntityId closure) {
+    if (private_closure_numbers.contains(closure)) return;
+    if (written_closure_numbers.contains(closure)) {
+      private_closure_numbers.emplace(closure, next_constraint_closure_number++);
+    } else if (auto owner = private_closure_owner(closure)) {
+      private_closure_numbers.emplace(closure, next_private_closure_number[*owner]++);
+      if (by_id.at(ir::raw(*owner))->linkage != ast::Linkage::internal) ++next_constraint_closure_number;
+    }
+  };
+  auto note_type = [&](this auto&& visit, ast::QualType type) -> void {
+    const auto t = closure_world->types.rec(type);
+    switch (t.kind) {
+    case sema::TypeKind::class_: note_closure(t.entity); break;
+    case sema::TypeKind::pointer:
+    case sema::TypeKind::reference:
+    case sema::TypeKind::array: visit(t.inner); break;
+    case sema::TypeKind::member_pointer:
+      visit(t.member_owner);
+      visit(t.inner);
+      break;
+    case sema::TypeKind::function:
+      visit(t.inner);
+      for (ast::QualType p : t.params) visit(p);
+      break;
+    default: break;
+    }
+  };
+  auto note_argument = [&](this auto&& visit, const ast::TemplateArg& arg) -> void {
+    if (arg.kind == ast::TemplateArgKind::pack)
+      for (const auto& element : in.seqs.elements(arg.elems)) visit(element);
+    else if (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value)
+      note_type(arg.type);
+  };
+  auto note_constraint = [&](const ast::WrittenConstraint& constraint) {
+    if (constraint.expression == ast::ConstId::none || written_closure_numbers.empty()) return;
+    std::vector<EntityId> written;
+    collect_constraint_lambdas(in, constraint.expression, written);
+    for (const EntityId closure : written) note_closure(closure);
+  };
+  const bool defer_closures = compatibility != ast::Compatibility::spec && !tu.has_raw_linkage_names &&
+                              tu.asm_hidden_symbols.empty();
   std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) {
-    if (f.emit_if_referenced) deferred.insert(ir::raw(f.entity));
+    auto found = by_id.find(ir::raw(f.entity));
+    if (f.emit_if_referenced || (defer_closures && found != by_id.end() && private_closure_owner(found->second->scope)))
+      deferred.insert(ir::raw(f.entity));
     else if (!deferred.contains(ir::raw(f.entity))) fns.push_back({id, f.entity});
   }
 
   // Follow native references in the lowered bodies, where only the runtime edge of an
   // if consteval remains. Each demanded definition can introduce more demands.
   std::set<std::uint32_t> used;
+  std::set<std::uint32_t> numbered_references;
   std::set<EntityId> unreachable_immediate;
   std::vector<FnKey> pending;
-  auto use_entity = [&](std::uint32_t entity) {
-    if (used.insert(entity).second && deferred.contains(entity))
-      pending.push_back({id, EntityId(entity)});
+  auto use_entity = [&](std::uint32_t entity, bool referenced = true) {
+    if (used.insert(entity).second && deferred.contains(entity)) pending.push_back({id, EntityId(entity)});
+    if (referenced && compatibility == ast::Compatibility::clang && closure_world && numbered_references.insert(entity).second) {
+      auto found = by_id.find(entity);
+      if (found != by_id.end()) {
+        note_closure(found->second->scope);
+        for (const auto& arg : found->second->template_args) note_argument(arg);
+        note_constraint(found->second->template_head_constraint);
+        note_type(found->second->type);
+        note_constraint(found->second->template_trailing_constraint);
+      }
+    }
   };
   auto collect_lowered = [&](std::span<const FnKey> keys, const auto& bodies) {
     for (std::size_t i = 0; i < keys.size(); ++i) {
@@ -2653,7 +2783,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (l.error) errors.push_back(*l.error);
       if (!l.body) continue;
       if (l.unreachable_immediate) unreachable_immediate.insert(keys[i].fn);
-      use_entity(ir::raw(keys[i].fn));
+      use_entity(ir::raw(keys[i].fn), false);
       for (const auto& ref : references(l.body->f)) use_entity(ir::raw(ref.entity));
     }
   };
@@ -2696,7 +2826,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     // A weak Mach-O definition stays out of zero-fill: Apple's linkers coalesce weak definitions
     // in content sections, as Clang emits them, but older ones not in __bss (#124).
-    else if (zero && (linux || !d.weak)) {
+    else if (zero && (target_is_linux || !d.weak)) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
       d.bytes.clear();
@@ -2759,7 +2889,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     }
   }
   for (const RuntimeUse& r : runtime)
-    symbols.push_back({r.entity, std::format("{}{}", linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
+    symbols.push_back({r.entity, std::format("{}{}", target_is_linux ? "" : "_", ir::name_of(r.function)), obj::binding::global});
   use(layout.objects());
 
   // Emit the constant objects referenced by functions and variables. A descriptor's
@@ -2796,15 +2926,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     // The cstring section is reserved for strings with one-byte code units.
     auto kind = layout.size == 1 ? aarch64::DataKind::cstring : aarch64::DataKind::rodata;
     data.push_back({entity, kind, std::move(bytes), 0, layout.align, {}});
-    symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
+    symbols.push_back({entity, std::format("{}.str.{}", target_is_linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
   // The declarations that own closure types, by entity (docs/design/closures.md).
-  std::map<std::uint32_t, const Entity*> by_id;
-  for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
   auto spec_of = [](const Entity& e) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads,
-                        e.template_head_constraint, e.template_trailing_constraint};
+                        e.template_head_constraint, e.template_trailing_constraint, e.generic_invoker_head};
   };
   const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
     auto found = by_id.find(ir::raw(id));
@@ -2825,13 +2953,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         fn.lang};
   };
   const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
-    auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) return std::nullopt;
-    const Entity& object = *found->second;
     const sema::World* w = universe().world_for(target);
-    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+    if (!w) return std::nullopt;
     const auto& r = w->entities.rec(id);
-    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
+    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none || r.linkage == ast::Linkage::none)
+      return std::nullopt;
     auto is_namespace = [&](EntityId scope) {
       return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
     };
@@ -2841,7 +2967,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
         return std::nullopt;
     }
-    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    if (auto found = by_id.find(ir::raw(id)); found != by_id.end()) {
+      const Entity& object = *found->second;
+      if (object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+      return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+    }
+    // A constant may occur only in a written type and have no emitted object.
+    return ObjectName{std::string(w->ins.names.spelling(r.name)), r.type, r.scope,
+                      namespace_object && r.linkage == ast::Linkage::internal};
   };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
@@ -2853,24 +2986,53 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     if (n.is_class && r.templ != EntityId::none) {
       auto params = tu.class_template_parameters.find(r.templ);
       if (params != tu.class_template_parameters.end()) n.template_params = params->second;
+      auto spelling = tu.class_template_spellings.find(c);
+      if (spelling != tu.class_template_spellings.end()) n.args = in.seqs.elements(spelling->second.second);
     }
-    if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
+    const auto written = written_closure_numbers.find(c);
+    if (r.kind == sema::EntityKind::class_ && r.local_class) {
+      // A local class ([class.local]): a <local-name> in its function's encoding (§5.1.6).
+      n.local_class = true;
+      n.closure_number = r.ordinal;
+      if (n.name.empty()) n.unnamed_type_ordinal = r.ordinal;
+      if (auto f = by_id.find(ir::raw(r.scope)); f != by_id.end() && f->second->is_function) {
+        const Entity& fe = *f->second;
+        std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+        n.local = std::make_shared<const LocalFunction>(LocalFunction{
+            fname, fe.type, fe.scope, fe.special != Special::none, fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+      }
+    } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
+               (r.scope != EntityId::none || written != written_closure_numbers.end())) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
-      n.closure_number = r.ordinal;
+      n.closure_number = written == written_closure_numbers.end() ? r.ordinal : written->second;
       n.closure_head = r.closure_head;
+      n.closure_constraint = r.lambda_head_constraint;
+      n.closure_constraint_depth = r.lambda_constraint_depth;
+      n.static_closure = r.static_closure;
+      if (compatibility == ast::Compatibility::clang) {
+        note_closure(c);
+        if (auto private_number = private_closure_numbers.find(c); private_number != private_closure_numbers.end())
+          n.private_closure_number = private_number->second;
+      }
       if (f != by_id.end()) {
         const Entity& fe = *f->second;
         if (fe.is_function) {
           std::string fname = fe.special == Special::constructor ? "C1" : fe.special == Special::destructor ? "D1" : fe.name;
+          const bool namespace_function = fe.scope == EntityId::none || w->entities.rec(fe.scope).kind == sema::EntityKind::namespace_;
+          const bool internal_name = namespace_function &&
+              ((compatibility == ast::Compatibility::gcc && !fe.template_type && fe.linkage == ast::Linkage::internal) ||
+               (compatibility == ast::Compatibility::clang && fe.namespace_static));
+          const bool c_name = compatibility != ast::Compatibility::spec &&
+                              (fe.lang == ast::LangLinkage::c || fe.id == tu.main);
           n.local = std::make_shared<const LocalFunction>(LocalFunction{
               fname, fe.type, fe.scope, fe.special != Special::none,
-              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
+              fe.template_type ? std::optional(spec_of(fe)) : std::nullopt, internal_name, c_name});
         } else {
           n.closure_variable = fe.id;
         }
-      } else if (w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
+      } else if (r.scope != EntityId::none && w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
         n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
       }
     }
@@ -2897,19 +3059,19 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::virtual_table || e.special == Special::type_info) {
-      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility);
+      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names, compatibility, target);
       const bool table = e.special == Special::virtual_table;
       if (!encoding) {
         errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
                                             table ? "virtual table's" : "RTTI object's", encoding.error())});
         continue;
       }
-      symbols.push_back({e.id, std::format("{}{}{}", linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
+      symbols.push_back({e.id, std::format("{}{}{}", target_is_linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
                          obj::binding::global});
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
         if (emit_table_type_info && owned->primary_base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names, compatibility, target);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -2924,7 +3086,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
           dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
         std::optional<std::string> base;
         if (dynamic->base != EntityId::none) {
-          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility);
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names, compatibility, target);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
                                                 base_encoding.error())});
@@ -2939,10 +3101,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       continue;
     }
     if (e.special == Special::template_parameter_object) {
-      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility);
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names, compatibility, target);
       if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
       else {
-        symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
+        symbols.push_back({e.id, target_is_linux ? std::move(*name) : "_" + *name, obj::binding::global});
         template_parameter_objects.insert(e.id);
       }
       continue;
@@ -2956,7 +3118,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     const TemplateSpec spec = spec_of(e);
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names, object_names, compatibility);
+                         e.template_type ? &spec : nullptr, !target_is_linux, function_names, object_names, compatibility, target);
     };
     auto name = encode(entry);
     if (!name) {
@@ -2996,7 +3158,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                                   "ordinary ELF symbol named '{}'", directive.name)});
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
-  const std::string_view object_prefix = linux ? "" : "_";
+  const std::string_view object_prefix = target_is_linux ? "" : "_";
   for (const Entity* e : locals) {
     auto f = mangled.find(ir::raw(e->local_function));
     if (f == mangled.end()) {
@@ -3039,7 +3201,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
            !found->second->has_local_binding() && found->second->asm_label.empty();
   };
   auto o = [&] {
-    if (linux) {
+    if (target_is_linux) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
         const auto& def = *definitions[i];

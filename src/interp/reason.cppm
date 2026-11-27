@@ -73,6 +73,8 @@ enum class Reason : std::uint8_t {
   immediate_dispatch_phase [[=says{"an immediate virtual call during construction or destruction is not supported yet"}]],
   virtual_dispatch_phase [[=says{"a virtual call during construction or destruction is not supported yet"}]],
   float_overflow [[=says{"floating-point arithmetic overflows"}]],
+  nansl_unsupported [[=says{"evaluating __builtin_nansl is not supported yet"}]],
+  nansl_x87_unsupported [[=says{"evaluating __builtin_nansl for x87 long double is not supported yet"}]],
 };
 
 consteval auto reason_enumerators() { return std::define_static_array(std::meta::enumerators_of(^^Reason)); }

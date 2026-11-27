@@ -205,14 +205,16 @@ struct FunctionVisibility {
 // The attributes of the unit's symbols, from every declaration in it.
 void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations,
                              const std::set<EntityId>& inline_declarations, const std::set<EntityId>& weak_declarations,
-                             const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+                             const std::map<EntityId, FunctionVisibility>& function_visibility, bool target_is_linux) {
   if (!inline_declarations.empty())
     for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
+  if (!inline_declarations.empty())
+    for (Entity& e : tu.entities) e.inline_function = e.is_function && inline_declarations.contains(e.id);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
     const bool inline_entity = inline_declarations.contains(e.id);
-    e.weak_reference = linux && !e.is_function && !inline_entity && weak_declarations.contains(e.id);
+    e.weak_reference = target_is_linux && !e.is_function && !inline_entity && weak_declarations.contains(e.id);
     // An inline variable falls outside the ordinary data visibility profile.
     e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_entity);
     if (!e.is_function || inline_entity) continue;
@@ -394,7 +396,7 @@ void init_function(sema::World& world, TranslationUnit& tu, std::span<const Dyna
   EntityId atexit = runtime.atexit();
   EntityId dso = runtime.dso();
   QualType fn_type = types.function(void_, {}, false, ast::LangLinkage::cxx);
-  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native_encoded_string();
+  const std::string base = "__GLOBAL__sub_I_" + std::filesystem::path(source).filename().native();
   // One function per declaration, so that what fails points at it; startup runs them in order.
   for (std::size_t first = 0, n = 0; first < dynamic.size(); ++n) {
     std::size_t last = first;
@@ -1176,7 +1178,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   const auto& classes = program.classes();
   const bool has_typed_cast = program.has_typed_dynamic_cast();
   if (!has_typed_cast && !native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
-  const bool linux = world.target.triple == ast::x86_64_linux.triple;
+  const bool target_is_linux = world.target.triple == ast::x86_64_linux.triple;
   const bool exceptions_enabled = program.exceptions_enabled();
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
@@ -1300,7 +1302,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
     // A constructor, destructor or ordinary class-template member binds locally when its
     // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
-    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+    // So does an implicit or defaulted assignment operator, which any unit can emit.
+    const bool synthesized_assignment = r.kind == sema::EntityKind::function && program.synthesized_assignment(e);
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || synthesized_assignment ||
+         ordinary_class_template_member(r)) &&
         linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     return linkage;
@@ -1353,6 +1358,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     Entity& emitted = tu.entities.back();
     if (fn) {
       const auto* owner = r.scope == EntityId::none ? nullptr : world.entities.find(r.scope);
+      emitted.namespace_static = program.is_namespace(r.scope) &&
+          (d.storage == ast::Storage::static_ ||
+           (r.linkage == ast::Linkage::internal && !parse::Program::unnamed(program.namespace_path(r.scope))));
       if (has_class_argument(r) || (owner && has_class_argument(*owner)))
         emitted.unsupported_class_parameter_signature = !default_visible_type(d.type) ||
             !std::ranges::all_of(r.args, default_visible_argument) ||
@@ -1378,13 +1386,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           std::ranges::any_of(type.params, [&](QualType param) { return names_tu_local(program, param); });
     }
     if (r.templ != EntityId::none) {
-      tu.entities.back().template_type = world.entities.rec(r.templ).type;
+      const auto& pattern = world.entities.rec(r.templ);
+      emitted.template_type = pattern.type;
+      emitted.generic_invoker_head = pattern.generic_invoker_head;
+      emitted.template_trailing_constraint = pattern.lambda_trailing_constraint;
+      const bool invoker = ins.seqs.size(pattern.generic_invoker_head) != 0;
       // A generic lambda's operator: its closure's record has the type with the head at depth 0.
-      if (sema::Sema::closure_member(world, r.templ))
-        tu.entities.back().template_type = world.entities.rec(world.entities.rec(r.templ).scope).type;
-      tu.entities.back().template_args = r.args;
+      if (!invoker && sema::Sema::closure_member(world, r.templ))
+        emitted.template_type = world.entities.rec(pattern.scope).type;
+      emitted.template_args = r.args;
       // Only a function template's own arguments carry Clang's <template-param-decl> prefixes.
-      if (world.entities.rec(r.templ).kind == sema::EntityKind::function_template)
+      if (!invoker && pattern.kind == sema::EntityKind::function_template)
         if (auto td = program.declaration(r.templ, program.end())) {
           std::vector<ast::TemplateParamSema> ps = ins.seqs.elements(td->template_params);
           sema::Templates t = program.templates();
@@ -1420,12 +1432,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       // Its typed return is available to lookup, but calls and address formation require the ABI.
       if (c.flags & sema::closure_flag::polymorphic_result) continue;
       std::vector<ast::LocalRec> locals = ins.seqs.elements(c.locals);
-      for (EntityId f : {c.call, c.invoker}) {
+      for (EntityId f : {c.call, c.invoker, c.conversion}) {
         if (f == EntityId::none) continue;
-        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
+        sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, sema::Sema::closure_member_body(c, f), locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
-        if (in_declaration) declaration_closure_member(tu.functions.back());
+        if (in_declaration || (c.flags & (sema::closure_flag::generic_invoker | sema::closure_flag::generated_conversion)))
+          declaration_closure_member(tu.functions.back());
       }
     }
   };
@@ -1575,10 +1588,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     return true;
   };
   auto record_class_rtti_abi = [&](const ast::DeclSema& d, std::uint32_t k) {
-    if (!linux || d.kind != ast::DeclKind::class_ || d.entity == EntityId::none) return;
+    if (!target_is_linux || d.kind != ast::DeclKind::class_ || d.entity == EntityId::none) return;
     const bool friend_declaration = (d.flags & sema::decl_flag::friend_) != 0;
     if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
       classes_with_unapplied_rtti_abi.insert(d.entity);
+  };
+  auto record_class_template_spellings = [&](ast::SeqId<ast::TemplateTypeSpelling> spellings, std::uint32_t k) {
+    for (const auto& spelling : ins.seqs.elements(spellings)) {
+      const auto located = std::pair{ast::Loc{program.id(k), spelling.at}, spelling.arguments};
+      auto [it, added] = tu.class_template_spellings.try_emplace(spelling.specialization, located);
+      if (!added && it->second.first.item == located.first.item && located.first.offset < it->second.first.offset)
+        it->second = located;
+    }
   };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
@@ -1586,18 +1607,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   (program.in_global_scope(it.parent) || program.named_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
+    if (const auto* body = program.analysed_body(k)) record_class_template_spellings(body->template_type_spellings, k);
     // A class template member is not emitted from its pattern. A friend class declaration
     // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
     if (member && !program.enclosing_heads(k).empty()) {
-      if (const auto* pattern = linux ? program.analysed_item(k) : nullptr)
-        for (const auto& declaration : ins.seqs.elements(pattern->decls))
-          if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      if (const auto* pattern = target_is_linux || program.compatibility() == ast::Compatibility::clang ? program.analysed_item(k) : nullptr) {
+        record_class_template_spellings(pattern->template_type_spellings, k);
+        if (target_is_linux)
+          for (const auto& declaration : ins.seqs.elements(pattern->decls))
+            if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      }
       continue;
     }
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
+    record_class_template_spellings(is.template_type_spellings, k);
     if (!ast::is_none(is.asm_hidden_symbol))
       tu.asm_hidden_symbols.push_back({std::string(ins.names.spelling(is.asm_hidden_symbol)),
                                        {program.id(k), is.asm_directive_at}});
@@ -1631,6 +1657,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const auto& d = decls[i];
       declare(d, at[i]);
+      if (d.kind == ast::DeclKind::function) {
+        collect_constraint_lambdas(ins, d.head_constraint.expression, tu.written_constraint_lambdas);
+        collect_constraint_lambdas(ins, d.trailing_constraint.expression, tu.written_constraint_lambdas);
+      }
       record_class_rtti_abi(d, k);
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
           (attributed || ins.seqs.size(d.annotations) != 0) &&
@@ -1660,6 +1690,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if ((d.flags & sema::decl_flag::consteval_) && (immediate_free || immediate_constructor) && !it.template_depth &&
           !it.specialization && entity.templ == EntityId::none && can_defer_body(body))
         continue;
+      // GCC defers repeated C-linkage definitions across namespaces until code generation.
+      if (!tu.duplicate_c_definition && program.compatibility() == ast::Compatibility::gcc &&
+          (d.flags & sema::decl_flag::lang_c) && program.function_defined_before(d.entity, k))
+        tu.duplicate_c_definition = at.front().value_or(ast::Loc{program.id(k), 0});
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       tu.functions.back().emit_if_referenced = immediate_if_referenced(d, entity, body);
       namespace flag = sema::decl_flag;
@@ -1727,12 +1761,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       }
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
-      if (linux && entity.kind == sema::EntityKind::constructor) {
+      if (target_is_linux && entity.kind == sema::EntityKind::constructor) {
         if (exceptions_enabled) hosted_union_constructor(program, tu.functions.back());
       } else if (!member && tu.main != d.entity && !it.specialization &&
                  program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
-        if (linux && exceptions_enabled) {
+        if (target_is_linux && exceptions_enabled) {
           f.hosted_catch = hosted_catch(program, d, body);
           f.unwind = f.hosted_catch ? UnwindEligibility::hosted_catch : cleanup_free_definition(program, d, body);
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
@@ -1741,7 +1775,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         if (exceptions_enabled && f.unwind == UnwindEligibility::none) {
           f.cleanup_call = hosted_cleanup_call(program, d, body);
           if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
-          else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
+          else if (target_is_linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
         }
       }
       coalesce_inline_function(tu.functions.back(), member);
@@ -1909,11 +1943,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
-                                          s.kind == default_constructor ||
-                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
-                                         !internal_class(cls);
-    return dynamic_member(tu.functions.size() - 1);
+    // Implicit and defaulted special members are inline ([class.copy.ctor], [dcl.fct.def.default]).
+    else tu.functions.back().coalesced = !internal_class(cls) && !names_tu_local(program, cls, /*include_value_types=*/true);
+    const std::size_t function = tu.functions.size() - 1;
+    // The lambdas of default member initializers that a constructor runs.
+    closures_of(tu.functions.back().body.closures, program.id(s.item), 0);
+    return dynamic_member(function);
   };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
@@ -2152,7 +2187,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
                            .special = Special::template_parameter_object, .template_args = object.args});
     tu.variables.push_back({.entity = e, .type = object.type, .init = object.args.front().value, .at = {}, .coalesced = true});
   }
-  apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, linux);
+  apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, target_is_linux);
   if (part) {
     part->attributed_members = std::move(attributed_members);
     part->classes_with_unapplied_rtti_abi = std::move(classes_with_unapplied_rtti_abi);
@@ -2183,14 +2218,20 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (UnitPart& p : parts) {
     tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
+    tu.written_constraint_lambdas.append_range(p.tu.written_constraint_lambdas);
+    for (const auto& [specialization, spelling] : p.tu.class_template_spellings) {
+      auto [it, added] = tu.class_template_spellings.try_emplace(specialization, spelling);
+      if (!added && label_order(spelling.first) < label_order(it->second.first)) it->second = spelling;
+    }
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));
-      } else if (!e.asm_label.empty()) {
+      } else if (e.namespace_static || !e.asm_label.empty()) {
         // A group may read another declaration out of order. Compare written positions.
         auto& kept = *std::ranges::find(tu.entities, e.id, &Entity::id);
-        if (kept.asm_label.empty() ||
-            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at))) {
+        kept.namespace_static |= e.namespace_static;
+        if (!e.asm_label.empty() && (kept.asm_label.empty() ||
+            (kept.asm_label_at && e.asm_label_at && label_order(*e.asm_label_at) > label_order(*kept.asm_label_at)))) {
           kept.asm_label = std::move(e.asm_label);
           kept.asm_label_at = e.asm_label_at;
         }
@@ -2202,6 +2243,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       if (variables.insert(v.entity).second) tu.variables.push_back(std::move(v));
     if (tu.main == EntityId::none) tu.main = p.tu.main;
     if (!tu.namespace_destruction) tu.namespace_destruction = p.tu.namespace_destruction;
+    if (!tu.duplicate_c_definition) tu.duplicate_c_definition = p.tu.duplicate_c_definition;
     tu.base_object_variants.insert(p.tu.base_object_variants.begin(), p.tu.base_object_variants.end());
     for (const auto& [function, layouts] : p.base_object_variant_layouts)
       if (uncertain_layouts.empty() || std::ranges::none_of(layouts, [&](EntityId e) { return uncertain_layouts.contains(e); }))
@@ -2377,7 +2419,7 @@ engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx,
   auto absolute = [&](const std::string& name) {
     std::filesystem::path p(name);
     if (p.is_relative() && !source.cwd.empty()) p = std::filesystem::path(source.cwd) / p;
-    return p.lexically_normal().generic_native_encoded_string();
+    return p.lexically_normal().generic_string<char>();
   };
   // The region's number for the file, and the token at the offset: the last whose site in that
   // file starts at or before it (a macro's tokens all sit at its name).

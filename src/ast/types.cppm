@@ -158,6 +158,7 @@ struct TPackIndex {
   ConstId index;
   SeqId<TemplateArg> elems;
   u8 bound;
+  ConstId written = ConstId::none;  // expression identity used by compiler compatibility modes
 };
 
 // A type-transforming built-in applied to a dependent type, `__remove_cv(T)` (docs/EXTENSIONS.md):
@@ -212,9 +213,16 @@ struct STypedef {
   EntityId alias;
 };
 
+// A concrete builtin transformation retained while reading a GCC function template pattern.
+struct SWrittenTransform {
+  [[=canonical]] QualType result;
+  QualType operand;
+  u8 trait;
+};
+
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
                               TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr, TPackIndex,
-                              TDeferredAlias>;
+                              TDeferredAlias, SWrittenTransform>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;

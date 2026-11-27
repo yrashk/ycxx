@@ -737,7 +737,7 @@ std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
 issues = [199, 59, 216, 697]
-note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, remaining named `const_cast` and `reinterpret_cast` forms, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
+note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, remaining named `const_cast` and `reinterpret_cast` forms, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids. A functional cast is a template argument when the text does not parse as a type-id ([dcl.ambig.res]/2): `B<U(3)>`, `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>`, `B<int((n))>` (#1190, #810).'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -978,7 +978,8 @@ clauses = ['over.call', 'expr.prim.lambda.closure']
 std = 'C++23'
 ftm = '__cpp_static_call_operator'
 detect = '\bstatic\s+[\w:<>&* ]*operator\s*\(\s*\)\s*\(|\]\s*(?:\([^)]*\))?\s*static\b'
-status = 'missing'
+status = 'partial'
+note = 'Supports captureless static lambda call operators and function-pointer conversions. The class operator probe still needs support for its temporary object.'
 issues = [350]
 probe = '''
 struct F { static int operator()(int x) { return x; } };
@@ -1414,7 +1415,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Namespace-scope class templates also support first-declaration deleted copy assignment, including with an lvalue or rvalue ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
+note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Defaulting outside the class, in local classes and with a requires-clause remains open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1536,7 +1537,8 @@ group = 'attr'
 clauses = ['dcl.attr.nouniqueaddr', 'intro.object']
 std = 'C++20'
 detect = '\bno_unique_address\b'
-status = 'missing'
+status = 'partial'
+note = 'Supported record layouts overlap empty fields and select eligible member tail padding by compatibility mode. Further layout cases remain open.'
 probe = '''
 struct E {}; struct S { [[no_unique_address]] E e; int i; };
 int main() { return sizeof(S) == sizeof(int) ? 0 : 1; }
@@ -1624,7 +1626,7 @@ std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
 issues = [244, 360, 309, 157, 747]
-note = 'Memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations remain open.'
+note = 'Memberwise implicit copy assignment for ordinary classes without bases. Copy and move operations defaulted on their first declaration, with base, member and array subobjects. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Other implicit moves, implicit assignment with nontrivial base and array subobjects and virtual assignment remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S&) = default; };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
@@ -1644,7 +1646,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'Ordinary constructors support bare explicit and direct, copy, and copy-list selection. In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
+note = 'Constructors and constructor templates, in ordinary classes and class templates, support explicit-specifiers and direct, copy, and copy-list selection (#715). In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
 
 [[feature]]
 id = 'class-explicit-bool'
@@ -1654,12 +1656,13 @@ clauses = ['dcl.fct.spec']
 std = 'C++20'
 ftm = '__cpp_conditional_explicit'
 detect = '\bexplicit\s*\('
-status = 'missing'
+status = 'partial'
 probe = '''
 struct S { explicit(false) S(int) {} };
 int main() { S s = 1; (void)s; return 0; }
 '''
-issues = [157]
+issues = [339, 316]
+note = 'Constructors and constructor templates of ordinary classes and class templates, with a condition that is not dependent, dependent on the class template, or value-dependent on the constructor template and evaluated after deduction (#715). Conversion functions (#339) and deduction guides (#316) remain.'
 
 [[feature]]
 id = 'class-delegating-ctor'
@@ -1692,6 +1695,23 @@ int main() { D d(3); return d.v - 3; }
 issues = [308]
 
 [[feature]]
+id = 'class-member-using'
+name = 'Member using-declarations naming base members'
+group = 'class'
+clauses = ['namespace.udecl', 'class.member.lookup', 'over.match.funcs.general']
+std = 'C++98'
+detect = '''\busing\s+(?:typename\s+)?\w+(?:<[^;]*>)?::(?:operator\b[^;]*|~?\w+)\s*(?:\.\.\.\s*)?;'''
+status = 'partial'
+probe = '''
+struct F { int operator()(int x) const { return x; } int g(long) { return 2; } };
+struct S : F { using F::operator(); using F::g; int g(int) { return 1; } };
+template<class Fn> struct D : Fn { using Fn::operator(); int operator()() const { return 4; } };
+int main() { S s; return s(3) + s.g(1) + s.g(1L) + D<F>{}(5) + D<F>{}() - 15; }
+'''
+issues = [1425, 308, 339]
+note = 'Member functions, operators and conversion functions of ordinary, nondependent and dependent bases. Member types, data members and enumerators (#1425), inheriting constructors and pack expansions (#308) remain; conversions do not yet consider a class with bases (#339).'
+
+[[feature]]
 id = 'class-nsdmi'
 name = 'Default member initializers'
 group = 'class'
@@ -1699,8 +1719,8 @@ clauses = ['class.mem']
 std = 'C++11'
 ftm = '__cpp_nsdmi'
 status = 'partial'
-issues = [118]
-note = 'initializers that are not constants'
+issues = [118, 1140]
+note = 'initializers that are not constants (#118); constant evaluation of objects whose array members use one (#1140)'
 probe = '''
 int seven() { return 7; }
 struct S { int a = 1; int b{2}; int c = seven(); };
@@ -1754,8 +1774,9 @@ name = 'Local classes'
 group = 'class'
 clauses = ['class.local']
 std = 'C++98'
-status = 'missing'
-issues = [117]
+status = 'partial'
+issues = [1140, 1155, 1442, 1443]
+note = 'Local classes in functions, lambdas and templates, with members, constructors and destructors. Block-scope enumerations (#1442), member classes defined later in the block (#1443), virtual functions (#1155) and constant evaluation of class or array members (#1140) remain.'
 probe = '''
 int main() { struct L { int v; }; L l{0}; return l.v; }
 '''
@@ -1858,8 +1879,8 @@ probe = '''
 struct S { int f() & { return 1; } int f() && { return 2; } };
 int main() { S s; return s.f() + S().f() - 3; }
 '''
-issues = [311, 339]
-note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Namespace-scope class templates support ref-qualified deleted copy assignment. Ref-qualified virtual calls and broader template cases remain open'
+issues = [311, 339, 117, 1187]
+note = 'Members of namespace-scope classes and class templates, their nested classes and member templates, and conversion functions distinguish lvalue and rvalue receivers, through instantiation and out-of-class definitions. Ref-qualified virtual calls, joint ranking of ref-qualified member and nonmember operators, ref-qualified members of local classes (#117) and out-of-class definitions of nested-class members of class templates (#1187) remain open'
 
 [[feature]]
 id = 'class-deducing-this'
@@ -2145,8 +2166,9 @@ clauses = ['temp.param']
 std = 'C++17'
 ftm = '__cpp_nontype_template_parameter_auto'
 detect = '''\btemplate\s*<[^;{<>]*\bauto\b'''
-status = 'missing'
-issues = [286]
+status = 'partial'
+issues = [286, 1401]
+note = '`auto`, `decltype(auto)` and `auto...` parameters deduce the type of each argument, which is part of the identity and the name of the specialization (#1244), including the mode-specific array-bound deduction. Constrained `C auto` (#286), `auto*` and `auto&`, and `decltype(auto)` of a parenthesized lvalue (#1401) remain open.'
 probe = '''
 template<auto N> int get() { return N; }
 int main() { return get<3>() + get<'a'>() - 100; }
@@ -2205,7 +2227,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
@@ -2376,7 +2398,8 @@ group = 'const'
 clauses = ['expr.const.imm']
 std = 'C++23'
 ftm = '__cpp_consteval'
-status = 'missing'
+status = 'partial'
+note = 'Supports immediate escalation for the tested constexpr function templates and direct function-pointer arguments. The compatibility table records the mode differences.'
 issues = [102]
 probe = '''
 consteval int id(int x) { return x; }
@@ -2622,7 +2645,7 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. __is_trivial and __is_pod evaluate non-record operands, including in supported dependent bases and variable template initializers. Other object-model traits remain partial'
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void, object and multi-level pointers and references to pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. __is_trivial and __is_pod evaluate non-record operands, including in supported dependent bases and variable template initializers. Other object-model traits remain partial'
 issues = [218, 211, 1082, 1318]
 probe = '''
 enum E { e };
