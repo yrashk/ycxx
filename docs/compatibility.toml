@@ -1075,7 +1075,7 @@ gcc_observed = "GCC 16.2 accepts comparing pointers formed before the start or b
 clang_observed = "Clang 23.1.6 rejects the five address formation probes and the dereference probe on Linux x86-64 and Darwin arm64."
 limits = "An out-of-bounds pointer cannot access storage, even if its byte address matches a valid element of another row. The modeled byte offset is limited to the target's signed pointer difference width."
 probe = 'constexpr int a[] = {1, 2}; static_assert(a + 3 == a + 3);'
-evidence = ["tests/daemon/compatibility.py", "Black-box -std=c++2c -pedantic-errors -fsyntax-only probes on GCC 16.2 and Clang 23.1.6 (Linux x86-64 and Darwin arm64)"]
+evidence = ["tests/daemon/compatibility.py", "tests/own/consteval/local-scalar-array/12-form-beyond-one-past.reject.cpp", "Black-box -std=c++2c -pedantic-errors -fsyntax-only probes on GCC 16.2 and Clang 23.1.6 (Linux x86-64 and Darwin arm64)"]
 
 [[divergence]]
 id = "structured-binding-array-cv"
@@ -1841,3 +1841,15 @@ gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future 
 clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
 limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "constexpr-local-scalar-array-subobject-lifetime"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "unverified" }
+reference = "[dcl.init.aggr], [basic.life], [expr.const.core], #1140"
+spec = "Reject reads and ordinary writes before the scalar array element's initializer completes, including through a reference parameter. Permit accesses to earlier initialized elements."
+gcc = "Preserve the draft rejection in this slice. The observed GCC acceptance is pending."
+clang = "Same as spec."
+gcc_observed = "Strict GCC 16.2.0 on x86-64 Linux accepts the tested read and write of a later array element from an earlier element's initializer."
+clang_observed = "Strict Clang 23.1.6 on x86-64 Linux and arm64 Darwin rejects both accesses because the element's lifetime has not begun."
+evidence = ["tests/own/consteval/local-scalar-array/06-read-future-element.reject.cpp", "tests/own/consteval/local-scalar-array/07-write-future-element.reject.cpp", "https://github.com/yrashk/ycxx/issues/1140"]

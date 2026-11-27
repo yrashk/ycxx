@@ -153,14 +153,14 @@ using ast::NodeId;
 using ir::ValueId;
 
 // Only the destination walked by the local initializer carries this information.
-enum class ArrayRecordInit : std::uint8_t { none, array, element, field };
+enum class SubobjectInit : std::uint8_t { none, record_array, flat_record, scalar_array_record, scalar_array, scalar };
 
 // An lvalue designates an addressable object or a bit-field projected from its record pointer.
 struct Place {
   ValueId ptr{};
   ast::QualType type{};
   std::optional<std::uint32_t> bit_field{};
-  ArrayRecordInit array_record_init = ArrayRecordInit::none;
+  SubobjectInit subobject_init = SubobjectInit::none;
 };
 
 // A node of the tree and its item-relative token offset (the red view's position, ast.md §3.5).
@@ -271,8 +271,9 @@ class Gen {
     stateful(ir::Op::store, {}, ops, imms, access_flags(p.type) | flags);
   }
   void store_initializer(const Place& p, ValueId value) {
-    const ir::Flags flags = p.array_record_init == ArrayRecordInit::field ? ir::bit(ir::Flag::initializing_store) : 0;
-    store(p, value, flags);
+    const bool ordered = p.subobject_init == SubobjectInit::scalar;
+    store(p, value, ordered ? ir::bit(ir::Flag::ordered_subobjects) : 0);
+    if (ordered) begin_lifetime(p);
   }
   // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
   Place initializing_place(Place p) {
@@ -321,11 +322,12 @@ class Gen {
 
   // ------------------------------------------------------------------ objects and scopes
 
-  Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic) {
+  Place begin_object(ast::QualType type, ir::Init init, ir::Storage storage = ir::Storage::automatic,
+                     ir::Flags flags = 0) {
     ir::Ty r[] = {vty(facts_.pointer_to(type))};
     // The allocated object retains its declared cv even when an access changes the glvalue type.
     std::uint64_t imms[] = {word(in_.canonical(type)), std::to_underlying(storage), std::to_underlying(init)};
-    ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms);
+    ir::NodeId n = stateful(ir::Op::alloc, r, {}, imms, flags);
     return {b_.result(n, 1), type};
   }
   // An object a scope ends: its destructor (none if trivial) runs, then its lifetime and storage
@@ -852,14 +854,24 @@ class Gen {
       const auto alloc = stateful(ir::Op::alloc_peer_root, results, {}, imms);
       p = {b_.result(alloc, 1), rec.type};
     } else {
-      p = begin_object(rec.type, zeroed ? ir::Init::zero
-                                  : indeterminate ? ir::Init::indeterminate
-                                                  : ir::Init::erroneous);
+      const ir::Init init = zeroed ? ir::Init::zero : indeterminate ? ir::Init::indeterminate : ir::Init::erroneous;
+      bool ordered = false;
+      if constexpr (F::evaluating_constants) {
+        if (has_init && cls(rec.type) == TypeClass::record && v.destructor == ast::EntityId::none) {
+          const At direct = strip_parens(initializer);
+          const bool direct_aggregate = is<ast::InitList>(direct) || is<ast::ValueInit>(direct) ||
+              is<ast::DefaultInit>(direct) ||
+              (is<ast::Literal>(direct) && in_.values.is<ast::VAggregate>(get<ast::Literal>(direct).value));
+          ordered = direct_aggregate && facts_.uses_local_scalar_array_layout(rec.type);
+        }
+      }
+      p = begin_object(rec.type, init, ir::Storage::automatic, ordered ? ir::bit(ir::Flag::ordered_subobjects) : 0);
+      if (ordered) p.subobject_init = SubobjectInit::scalar_array_record;
     }
     debug_.vars.push_back({ir::LocalId(v.local), {last_node()}});
     // The name is in scope in its own initializer ([basic.scope.pdecl]); reading it there reads an
     // object whose lifetime has not begun.
-    slots_[v.local] = p;
+    slots_[v.local] = Place{p.ptr, p.type};
     if (auto b = jump_bindings_.find(v.local); b != jump_bindings_.end()) store(b->second, p.ptr);
     if (has_init && !peer_root) {
       selecting_initializer_ = selection;
@@ -867,7 +879,7 @@ class Gen {
         Place destination = initializing_place(p);
         if (v.destructor == ast::EntityId::none && cls(p.type) == TypeClass::array &&
             cls(facts_.element(p.type)) == TypeClass::record)
-          destination.array_record_init = ArrayRecordInit::array;
+          destination.subobject_init = SubobjectInit::record_array;
         initialize(destination, initializer, zeroed, selection);
         if (selection) begin_lifetime(p);
         return 0;
@@ -1038,11 +1050,16 @@ class Gen {
       return {p.ptr, t, index};
     std::uint64_t path[] = {1, ir::encode({step, index})};
     Place result{pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
-    if (p.array_record_init == ArrayRecordInit::array && step == ir::Step::elem)
-      result.array_record_init = ArrayRecordInit::element;
-    if (p.array_record_init == ArrayRecordInit::element && step == ir::Step::field &&
-        (cls(t) == TypeClass::bool_ || cls(t) == TypeClass::integer))
-      result.array_record_init = ArrayRecordInit::field;
+    if (step == ir::Step::elem) {
+      if (p.subobject_init == SubobjectInit::record_array) result.subobject_init = SubobjectInit::flat_record;
+      if (p.subobject_init == SubobjectInit::scalar_array) result.subobject_init = SubobjectInit::scalar;
+    } else if (step == ir::Step::field) {
+      if (p.subobject_init == SubobjectInit::scalar_array_record)
+        result.subobject_init = cls(t) == TypeClass::array ? SubobjectInit::scalar_array : SubobjectInit::scalar;
+      if (p.subobject_init == SubobjectInit::flat_record &&
+          (cls(t) == TypeClass::bool_ || cls(t) == TypeClass::integer))
+        result.subobject_init = SubobjectInit::scalar;
+    }
     return result;
   }
 
@@ -1078,26 +1095,34 @@ class Gen {
     return b_.param(join, 1);
   }
 
-  // [dcl.struct.bind]/1: copy in element order and retain each access's own cv-qualifiers.
-  void copy_array(const Place& dst, const Place& src) {
-    Place dst_first = subobject(dst, ir::Step::elem, 0, facts_.element(dst.type));
-    Place src_first = subobject(src, ir::Step::elem, 0, facts_.element(src.type));
-    ast::QualType index_type = facts_.ptrdiff_type();
-    ValueId count = int_constant(index_type, std::int64_t(facts_.bound(dst.type)));
+  void for_array_indices(ast::QualType array, auto&& emit_element) {
+    const ast::QualType index_type = facts_.ptrdiff_type();
+    const ValueId count = int_constant(index_type, std::int64_t(facts_.bound(array)));
     ir::BlockId head = new_block({index_type}), body = new_block(), done = new_block();
     br(head, {int_constant(index_type, 0)});
     enter(head);
-    ValueId index = b_.param(head, 1);
+    const ValueId index = b_.param(head, 1);
     cond_br(pure(ir::Op::icmp, facts_.bool_type(), {index, count}, {std::to_underlying(ir::Pred::slt)}), edge(body), edge(done));
     enter(body);
-    auto element = [&](const Place& first) -> Place {
-      return {pure(ir::Op::ptr_add, facts_.pointer_to(first.type), {first.ptr, index}, {word(ty(first.type))}), first.type};
-    };
-    Place dst_element = element(dst_first), src_element = element(src_first);
-    if (cls(dst_element.type) == TypeClass::array) copy_array(dst_element, src_element);
-    else store(dst_element, load(src_element));
+    emit_element(index);
     br(head, {arith(ast::BinaryOp::add, index_type, index, int_constant(index_type, 1))});
     enter(done);
+  }
+
+  Place indexed_element(Place first, ValueId index) {
+    first.ptr = pure(ir::Op::ptr_add, facts_.pointer_to(first.type), {first.ptr, index}, {word(ty(first.type))});
+    return first;
+  }
+
+  // [dcl.struct.bind]/1: copy in element order and retain each access's own cv-qualifiers.
+  void copy_array(const Place& dst, const Place& src) {
+    const Place dst_first = subobject(dst, ir::Step::elem, 0, facts_.element(dst.type));
+    const Place src_first = subobject(src, ir::Step::elem, 0, facts_.element(src.type));
+    for_array_indices(dst.type, [&](ValueId index) {
+      const Place dst_element = indexed_element(dst_first, index), src_element = indexed_element(src_first, index);
+      if (cls(dst_element.type) == TypeClass::array) copy_array(dst_element, src_element);
+      else store(dst_element, load(src_element));
+    });
   }
 
   // [class.ctor]: the constructor initializes the supplied object in place.
@@ -1122,7 +1147,6 @@ class Gen {
     const TypeClass kind = cls(p.type);
     if (kind != TypeClass::array && kind != TypeClass::record) {
       store_initializer(p, constant(p.type, value));
-      if (p.array_record_init == ArrayRecordInit::field) begin_lifetime(p);
       return;
     }
     if (!in_.values.is<ast::VAggregate>(value)) throw Unsupported{"an aggregate constant of the wrong kind"};
@@ -1268,7 +1292,7 @@ class Gen {
           }
           // [basic.life], [dcl.init.aggr]: a later default can read an earlier initialized
           // scalar member before initialization of the complete aggregate finishes.
-          if (!array && bases.empty() && !destination.bit_field) {
+          if (!array && bases.empty() && !destination.bit_field && destination.subobject_init != SubobjectInit::scalar) {
             TypeClass kind = cls(type);
             if (kind == TypeClass::bool_ || kind == TypeClass::integer) begin_lifetime(destination);
           }
@@ -1286,12 +1310,29 @@ class Gen {
       }
       return;
     }
-    if (is<ast::DefaultInit>(e)) return;
-    if (is<ast::ValueInit>(e)) {
+    if (is<ast::DefaultInit>(e) || is<ast::ValueInit>(e)) {
+      const bool value = is<ast::ValueInit>(e);
+      if (p.subobject_init == SubobjectInit::scalar_array) {
+        const auto type = facts_.element(p.type);
+        const Place first = subobject(p, ir::Step::elem, 0, type);
+        // Complete even an omitted array before evaluating the next member's initializer.
+        for_array_indices(p.type, [&](ValueId index) {
+          const Place leaf = indexed_element(first, index);
+          if (value && !zeroed) store_initializer(leaf, zero(type));
+          else begin_lifetime(leaf);
+        });
+        return;
+      }
+      if (p.subobject_init == SubobjectInit::scalar) {
+        if (value && !zeroed) store_initializer(p, zero(p.type));
+        else begin_lifetime(p);
+        return;
+      }
+      if (!value) return;
       if (zeroed) {
         // An omitted flat record can be represented as one ValueInit rather than a list.
         // Commit each field's lifetime before the next array element is evaluated.
-        if (p.array_record_init == ArrayRecordInit::element) {
+        if (p.subobject_init == SubobjectInit::flat_record) {
           const auto owner = facts_.class_entity(p.type);
           for (uint32_t i = 0; auto type = facts_.field_type(owner, i); ++i)
             if (cls(*type) == TypeClass::bool_ || cls(*type) == TypeClass::integer)
