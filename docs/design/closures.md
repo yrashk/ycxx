@@ -106,8 +106,17 @@ How decisions 3, 4, 6 and 11 apply to a declaration part, an item outside functi
    what names it waits for an instantiation, whose own closure types replace it. So is one in a
    generic lambda's definition, in an instantiation too.
 
+6. **An unevaluated operand with no owner** (#1549): a lambda in `decltype` or `sizeof` of an
+   alias-declaration, an alias template or a function's declarator belongs to the class or
+   namespace around it, TU-local like a constraint's, with a discriminator of the item and the
+   template arguments bound. An alias template whose type-id makes closures is read again for each
+   specialization ([temp.alias]/5). Such a closure is named `$_N` in its scope, N unique in the
+   unit. *Rejected for now:* a class template member's closure with vague linkage and per-class
+   `Ul…E` names, as both compilers have it; it needs ordinals across the class's members
+   ([basic.def.odr], #1593).
+
 Astra checked the application to internal namespace variables. Default member initializers,
-default arguments, `static_assert` and unevaluated operands remain under
+default arguments and `static_assert` remain under
 [#338](https://github.com/yrashk/ycxx/issues/338).
 
 ## Probes (Clang 23, GCC 16; 2026-11-19)
