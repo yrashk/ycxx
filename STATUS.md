@@ -2405,6 +2405,25 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Concept-ids and comparisons as dependent template arguments (#1548)
+
+- A concept-id with dependent arguments read as an evaluated template argument is a
+  `VDepConcept` value in every declaration context, unqualified or namespace-qualified, and under
+  `!` ([temp.names]/8, [temp.dep.constexpr]/2). Substitution evaluates it once the arguments are
+  known (`Templates::substitute_concept_value`). `typename cond<C<I>, …>::type` in an alias
+  template, a member alias or a function signature works, as libycxx's `iter_difference_t` needs.
+- In a function signature it is `X <expression> E` (Itanium C++ ABI §5.1.6), GCC's form in every
+  mode. Clang qualifies a concept outside the global namespace (`dependent-concept-symbol` in
+  `docs/compatibility.toml`, #1589).
+- A dependent value with no `VDep*` form, such as `(sizeof(I) > 4)` or `I == 0`, gets
+  `template_value`'s placeholder in a namespace alias template and in an ordinary member alias of
+  a class template, as in a class base. The alias is parsed again with its arguments bound
+  (`AliasCallPattern::Kind::unrepresented`, `AtItem::replay_alias_calls`), the member alias with
+  its class. Member alias templates and function signatures still reject it (#209).
+- Tests: `tests/own/templates/concept-id-alias-argument.{accept,reject}.cpp`,
+  `tests/own/templates/dependent-comparison-alias-argument.accept.cpp`,
+  `tests/own/abi/dependent-concept-args.run.cpp` (linked with a Clang peer).
+
 ## Enumeration-typed template parameters (#774)
 
 - A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or
