@@ -7,6 +7,7 @@ the parts that need no compiler: markers, the incremental format, sharding, stat
 """
 import json, os, re, runpy, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 from . import discover, incremental, kinds, state, toolchain
 
@@ -94,6 +95,18 @@ class Parts(unittest.TestCase):
                     '--- a\nx\n=== edit\n--- delete b\n'):
             with self.assertRaises(ValueError, msg=bad):
                 incremental.parse(bad)
+
+    def test_incremental_daemon_runtime_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            scope = Path(d) / 'scope'
+            runtime = Path(d) / 'runtime'
+            runtime.mkdir()
+            for root, expected in (('/short temp', '/short temp'), ('/' + 'x' * 108, '/tmp')):
+                with (self.subTest(root=root), mock.patch.dict(os.environ, TMPDIR=root),
+                      mock.patch.object(incremental.tempfile, 'mkdtemp', return_value=str(runtime)) as mkdir):
+                    daemon = incremental.Daemon('unused', scope)
+                    mkdir.assert_called_once_with(prefix='yi', dir=expected)
+                    self.assertEqual(daemon.env['YCXX_RUNTIME_DIR'], str(runtime))
 
     def test_normalize_pp(self):
         self.assertEqual(kinds.normalize_pp('# 1 "a.cpp"\n\nint   x =  1 ;\n#line 3\n#pragma once\n'),
