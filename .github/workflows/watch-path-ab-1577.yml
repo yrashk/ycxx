@@ -1,0 +1,123 @@
+name: Isolate watch timing PATH for 1577
+
+on:
+  push:
+    branches: [codex/ycxx-watch-path-ab-1577]
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-path-control:
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: efb9b9b17a2a01c4ad5aa6f0a9625652979f0229
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          path: watch-evidence
+          persist-credentials: false
+
+      - name: Verify sources and SDK pin
+        run: |
+          test "$(git rev-parse HEAD)" = efb9b9b17a2a01c4ad5aa6f0a9625652979f0229
+          test "$(git rev-parse HEAD^{tree})" = a6630483bfa83d44590f82b989810e2598fa1dc3
+          test "$(git -C deps/libycxx rev-parse HEAD)" = 4183795d39b9672553d784cf2898ed8aa27dbf57
+          test "$(git -C watch-evidence rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+          git diff --exit-code HEAD --
+          grep -F 'deadline = time.monotonic() + 25' tests/daemon/project_build_watch.py
+
+      - uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
+
+      - name: Compile one historical Debug binary
+        shell: bash
+        run: |
+          source deps/libycxx/tools/toolchain/activate.sh
+          unset YCXX_ROOT
+          tools/build -j 3 --no-smoke
+
+      - name: Alternate only the oracle directory in the invoking PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          source deps/libycxx/tools/toolchain/activate.sh
+          unset YCXX_ROOT
+          with_oracle="$PATH"
+          without_oracle=$(python3 -c 'import os; print(":".join(p for p in os.environ["PATH"].split(":") if p != os.environ["YCXX_CLANG_BIN"]))')
+          test "$with_oracle" != "$without_oracle"
+          test "$(PATH="$with_oracle" command -v python3)" = "$(PATH="$without_oracle" command -v python3)"
+          ctest_bin=$(command -v ctest)
+          output="$RUNNER_TEMP/watch-path-ab-1577"
+          mkdir -p "$output"
+          {
+            printf 'revision %s\ntree %s\nlibycxx %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" "$(git -C deps/libycxx rev-parse HEAD)"
+            printf 'image %s %s\noracle directory %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" "$YCXX_CLANG_BIN"
+            xcrun --show-sdk-version
+            file build/bin/ycxx
+            shasum -a 256 build/bin/ycxx
+          } | tee "$output/provenance.txt"
+          shasum -a 256 build/bin/ycxx > "$output/binary.sha256"
+          harness="$GITHUB_WORKSPACE/watch-evidence/.github/evidence/watch-timing-1577"
+          export PYTHONPATH="$harness${PYTHONPATH:+:$PYTHONPATH}"
+
+          run_trial() (
+            trial=$1
+            variant=$2
+            export PATH="$3"
+            trial_dir="$output/$trial-$variant"
+            mkdir -p "$trial_dir/watch"
+            export YCXX_WATCH_EVIDENCE="$trial_dir/watch"
+            python3 - <<'PY' | tee "$trial_dir/candidates.json"
+          import json
+          from pathlib import Path
+          import shutil
+          data = []
+          for name in ('c++', 'clang++', 'g++'):
+              path = shutil.which(name)
+              resolved = Path(path).resolve() if path else None
+              data.append({'name': name, 'path': path, 'resolved': str(resolved) if resolved else None,
+                           'size': resolved.stat().st_size if resolved else None})
+          print(json.dumps(data))
+          PY
+            set +e
+            "$ctest_bin" --test-dir build --output-on-failure -j 1 -R '^daemon\.project_staged_witness$' 2>&1 | tee "$trial_dir/ctest.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            printf 'YCXX_PATH_TRIAL %s %s exit %s\n' "$trial" "$variant" "$status"
+            python3 - "$trial_dir" "$trial" "$variant" "$status" <<'PY' | tee "$trial_dir/timings.jsonl"
+          import json
+          from pathlib import Path
+          import sys
+          from report import summarize
+          root, trial, variant, status = sys.argv[1:]
+          observations = list((Path(root) / 'watch').glob('*.json'))
+          assert len(observations) == 1, observations
+          for watch in json.loads(observations[0].read_text())['watches']:
+              for attempt in summarize(watch):
+                  report = {key: attempt.get(key) for key in ('label', 'build', 'outcome', 'watch_timeout', 'seconds', 'load_at_await')}
+                  report.update(trial=trial, variant=variant, ctest_exit=int(status))
+                  print('YCXX_PATH_TIMING ' + json.dumps(report, separators=(',', ':')))
+          PY
+          )
+
+          run_trial 1 with-oracle "$with_oracle"
+          run_trial 2 without-oracle "$without_oracle"
+          run_trial 3 without-oracle "$without_oracle"
+          run_trial 4 with-oracle "$with_oracle"
+          shasum -a 256 -c "$output/binary.sha256"
+          git diff --exit-code HEAD --
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ycxx-1577-matched-path-efb9b9b1
+          path: ${{ runner.temp }}/watch-path-ab-1577
+          retention-days: 30
