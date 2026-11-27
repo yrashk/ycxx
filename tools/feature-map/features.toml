@@ -737,7 +737,7 @@ std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
 issues = [199, 59, 216, 697]
-note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids. A functional cast is a template argument when the text does not parse as a type-id ([dcl.ambig.res]/2): `B<U(3)>`, `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>`, `B<int((n))>` (#1190, #810).'
+note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, remaining named `const_cast` and `reinterpret_cast` forms, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids. A functional cast is a template argument when the text does not parse as a type-id ([dcl.ambig.res]/2): `B<U(3)>`, `B<ns::I(4)>`, `B<typename T::type{4}>`, `B<bool(&g)>`, `B<int((n))>` (#1190, #810).'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -1082,8 +1082,8 @@ int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }
 '''
 status = 'partial'
-issues = [356, 354]
-note = 'Ordinary non-template member defaults use complete-class lookup. Scalar defaults on free function templates replay when omitted. Other dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
+issues = [356, 354, 1602, 1607, 338]
+note = 'Member defaults of classes and class templates use complete-class lookup. Dependent defaults of function templates, member templates and class template members are instantiated when a call uses them. Lambdas in member defaults (#338), nested classes naming later members of the enclosing class (#1602), member templates of ordinary classes naming later members (#1607), out-of-class additions and defaults on qualified namespace definitions remain'
 
 [[feature]]
 id = 'dcl-variadic-fn'
@@ -1415,7 +1415,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Defaulting outside the class, in local classes and with a requires-clause remains open.'
+note = 'Default, copy and move constructors, copy and move assignment operators and nonvirtual destructors can be defaulted on their first declaration in ordinary classes and class templates, trivial or not. Ordinary classes and namespace-scope class templates also support first-declaration deleted copy assignment and unconstrained, nonvirtual deleted move assignment, including with an lvalue or rvalue ref-qualifier. Constrained ones (a trailing requires-clause, #1417) are candidates only when satisfied, and an ineligible one does not count for triviality. Defaulting outside the class and in local classes remains open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1919,8 +1919,9 @@ name = 'Conditionally trivial special members (constrained destructors)'
 group = 'class'
 clauses = ['class.dtor', 'over.match.best']
 std = 'C++20'
-status = 'missing'
-issues = [234]
+status = 'done'
+issues = [234, 1417]
+note = 'A class template specialization selects among its prospective destructors, and its other special members are eligible only when their trailing requires-clauses are satisfied and no satisfied one of the same kind is more constrained (#1417). Type-trait queries on class template specializations are #218.'
 probe = '''
 template<class T> struct W { ~W() requires (sizeof(T) > 4) {} ~W() = default; };
 int main() { W<int> w; (void)w; return 0; }
@@ -2013,7 +2014,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'Member function templates, member alias templates (also as `Q::template M<args>` and as template template arguments) and static data member templates work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, specializations of static data member templates (#1594), defining one of a class template outside the class (#256) and `&S::f<int>` remain.'
+note = 'Member function templates, member alias templates (also as `Q::template M<args>` and as template template arguments) and static data member templates work. Member class templates (#306), conversion function templates (#339), specializations of static data member templates (#1594), defining one of a class template outside the class (#256) and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
@@ -2061,7 +2062,7 @@ clauses = ['temp.res', 'temp.res.general', 'temp.local', 'temp.dep', 'temp.dep.g
 std = 'C++98'
 core = true
 status = 'partial'
-issues = [263, 241, 209]
+issues = [263, 241, 209, 1590]
 probe = '''
 template<class T> struct H { using type = int; };
 template<class T> typename H<T>::type g(T) { return 0; }
@@ -2069,7 +2070,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open. In a class template or its partial specialization, its injected-class-name followed by template arguments names that specialization ([temp.local]/1, #1567); the injected-class-name of a base specialization used without arguments in a derived class remains (#1590).'
 
 [[feature]]
 id = 'temp-ttp'
@@ -2096,7 +2097,8 @@ std = 'C++11'
 ftm = '__cpp_variadic_templates'
 detect = '\b(?:typename|class)\s*\.\.\.|\bsizeof\s*\.\.\.'
 status = 'done'
-issues = [210]
+issues = [210, 1400]
+note = 'Pack expansions in mem-initializers and nested expansions such as `h(g(xs...))` (#1400). Base-specifier packs and their `Bs(x)...` initializers (#308) and `V v(xs...)` declarations (#1596) remain.'
 probe = '''
 template<class... T> int count(T...) { return sizeof...(T); }
 int main() { return count(1, 'a', 2L) - 3; }
@@ -2111,7 +2113,7 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\btemplate\s*<[^;{]*>\s*using\s+\w+\s*='
 status = 'done'
-note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630).'
+note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630). Dependent concept-ids and comparisons can select the type, as in `typename conditional_t<C<I>, A, B>::type` (#1548).'
 
 [[feature]]
 id = 'temp-var'
@@ -2226,8 +2228,8 @@ std = 'C++20'
 ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
-issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Broader template and member constraints and constraint mangling remain.'
+issues = [234, 236, 1180]
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Constructor templates, including members of class template specializations whose constraints name the class template parameters, check their constraints in overload resolution (#1398). Trailing requires-clauses on members of class templates (functions, constructors, prospective destructors, defaulted and deleted special members, out-of-class definitions) are checked when the member is a candidate, with the more constrained preferred (#1417). Broader template constraints, constrained friends (#1180) and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
@@ -2364,7 +2366,7 @@ clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core
 std = 'C++11'
 ftm = '__cpp_constexpr'
 detect = '\bconstexpr\b'
-issues = [102, 157, 262, 862, 876, 900, 1174]
+issues = [102, 157, 262, 862, 876, 900, 1174, 1642]
 probe = '''
 constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
 struct P { int x; constexpr P(int v) : x(v) {} };
@@ -2373,7 +2375,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Constructor calls evaluate for classes without bases, class-typed fields or a destructor. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Eligible private static constexpr helpers used only in constant evaluation can omit native code. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Constructor calls evaluate for classes without bases, class-typed fields or a destructor. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Constant expressions can also read and iterate over named automatic arrays of flat aggregates with braced field initializers, integral or enumeration fields, and trivial destruction. Direct initialization from a conditional prvalue with a value-initialized arm remains open (#1140). Eligible private static constexpr helpers used only in constant evaluation can omit native code. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'

@@ -58,6 +58,7 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | `__builtin_nansl` | libycxx's `include/ycxx/core/limits.hpp`, included by `<limits>` and `<exception>` | A call with one empty ordinary string literal has type `long double` and is a prvalue. Unevaluated operands and discarded `if constexpr` arms can use it. Constant evaluation and native emission diagnose an evaluated call. `__has_builtin` answers 0 on all targets. | #1397, #645, #248 |
 | `__builtin_addressof(x)` | libycxx's `<ycxx/core/move.hpp>` (`std::addressof`, [specialized.addressof]) | Uses ycxx's built-in address operation on an lvalue, preserving the operand type and bypassing `operator&`. Bit-fields and rvalues are ill-formed. Ordinary address-of limitations apply, including static member function names accessed through an object expression. The result can be a constant expression for supported addresses, such as a scalar global. `__has_builtin` answers 1, and a declaration of the same name hides it. | #330 |
 | `__builtin_strlen(s)` | libycxx's `<ycxx/core/stdexcept.hpp>` | An unqualified direct call converts its argument to `const char*` and returns the number of characters before the first zero as the target's `size_t`. Constant evaluation checks each read against the interpreter's object and lifetime rules. Native code scans the supplied storage directly and requires readable bytes through the terminator. `__has_builtin` answers 1, and a declaration of the same name hides it. | #531 |
+| `__builtin_clzll(x)` | libycxx's `include/ycxx/core/cmath_fp.hpp` through `<complex>` | An unqualified direct call converts one argument to `unsigned long long`, evaluates it once and returns the number of leading zero bits as an `int` prvalue. Class operands support the same bounded exact conversion as `__builtin_ctz`, here to `unsigned long long`. A reached zero operand fails constant evaluation in spec and Clang modes. GCC mode returns the operand width during constant evaluation. Runtime zero has undefined behavior. `__has_builtin` answers 1. | #1539 |
 | `__builtin_ctz(x)` | libycxx's `include/ycxx/core/charconv.hpp` | An unqualified direct call converts one argument to `unsigned int`, evaluates it once and returns the number of trailing zero bits as an `int` prvalue. For class operands, the supported slice is an unambiguous non-explicit `operator unsigned int` in a complete class without bases. General conversion-function overload resolution remains unsupported. A reached zero operand fails constant evaluation in spec and Clang modes. GCC mode returns the width of `unsigned int` during constant evaluation. Runtime zero has undefined behavior. `__has_builtin` answers 1. The other fixed-width spellings are tracked in #248. | #1479 |
 | `__builtin_ctzg(x)` | libycxx's `include/ycxx/core/bit.hpp` (`std::bit_expand`) | An unqualified direct call takes one `unsigned int` operand, evaluates it once, and returns the number of trailing zero bits as an `int` prvalue. The unary form has undefined behavior for zero. The call supports constant evaluation and native code. `__has_builtin` answers 1 for this implementation. Other unsigned operand types and the optional fallback argument are tracked in #248. | #1381 |
 | `__builtin_memchr(s, c, n)`, `__builtin_memcmp(s1, s2, n)` | libycxx's `<cstring>` (`memchr`) and `include/ycxx/core/mem_builtins.hpp` (`__rt_memchr`, `__rt_memcmp`, behind `<string_view>`, `<string>` and `<iostream>`), `<ycxx/core/atomic_base.hpp>` | A direct call is a call of the C library's function: `void* memchr(const void*, int, size_t)` and `int memcmp(const void*, const void*, size_t)`, with C language linkage and the exception specification of the target's `<string.h>` (`noexcept` as glibc's `__THROW`, none as the macOS SDK's), so a written declaration or definition is the same function. The arguments convert as any call's, and the unit references `memchr` or `memcmp` as one undefined symbol. In constant evaluation, spec and Clang modes read through pointers to modeled narrow-character objects or array elements. Spec mode allows `memchr` to stop at a match and requires readable ranges for `memcmp`. Clang mode checks bytes as it reads them and stops at the first match or difference. GCC mode generally requires the full range, supports additional integer and array object representations, folds some equal-pointer comparisons without reads, and can evaluate calls to recognized C declarations. The result of `memchr` points to the byte found. See the constexpr-memory entries in [the compatibility table](compatibility.toml). At run time both remain library calls. `__has_builtin` answers 1, and a declaration of the same name hides them. | #248, #1092 |
@@ -69,7 +70,7 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | `__PRETTY_FUNCTION__` | libycxx's `include/ycxx/core/compare_alg.hpp` (`__type_spelling<T>()`, used by `std::type_order`) | An unqualified use in a namespace-scope function body denotes a static `const char[N]` lvalue. A function template's body uses the selected specialization's arguments and an implementation-defined spelling. | #1361 |
 | `__builtin_alloca` | `alloca.h`'s `alloca` | Not yet: diagnosed as above where a program calls `alloca` | — |
 | `__builtin_constant_p(e)` | libycxx's `core/type_traits.hpp` and the SDK's `libkern/_OSByteOrder.h` | Gives an `int` prvalue of 1 for a proved scalar or string constant, and 0 when the operand cannot be proved to fold safely. A known false expression is still constant. Operand formation and exception checks use the original expression. Neither native execution nor constant evaluation of the result executes the operand. Dependent operands are checked when the template body is instantiated. This slice does not probe the active constexpr frame or call user functions to prove a fold. `__has_builtin` answers 0 while support is partial. | #1065 |
-| `__builtin_add_overflow(a, b, p)`, `__builtin_mul_overflow(a, b, p)` | libycxx's `<ratio>` | Constant evaluation accepts matching signed target-`intmax_t` operands and a writable pointer to that type. The call returns a `bool` overflow result and stores the width-converted value on both outcomes. `__has_builtin` answers 0 while support is partial. | #1077 |
+| `__builtin_add_overflow(a, b, p)`, `__builtin_mul_overflow(a, b, p)` | libycxx's `<ratio>` and `<charconv>` | Constant evaluation accepts matching signed target-`intmax_t` operands and a writable pointer to that type. Constant evaluation and native code also accept standard unsigned integer operands and a writable standard unsigned integer destination, with types up to 64 bits and widths allowed to differ. The call evaluates each argument once, stores the converted result once and returns whether it differs from the exact sum or product. `__has_builtin` answers 0 while support is partial. | #1077, #1636 |
 | `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | `size_t` constant from the target record layout for a direct non-static data member of an ordinary standard-layout class or union. Diagnoses an invalid member or bit-field. | #248 |
 | `__builtin_expect` | the SDK's `assert.h`'s `assert` | Not yet: diagnosed as above where a program uses `assert`, which did not compile before #229 either (its other path calls `abort` undeclared; this one also needs `__func__`, [dcl.fct.def.general], which ycxx does not have yet) | — |
 
@@ -85,6 +86,33 @@ The other `__GNUC__` tests in those headers select nothing new for ycxx: `sys/cd
 `_stdio.h`'s inline `__sputc` wants `__STDC__`; the `_FORTIFY_SOURCE` paths are C only; and
 `libkern/arm/_OSByteOrder.h`'s byte swaps use `__builtin_bswap32` and `__builtin_bswap64` only
 under `__llvm__` (their portable path has a local union, which ycxx does not have yet).
+
+### GNU atomics on Linux x86-64
+
+The [GNU atomic builtins](https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html)
+work on naturally aligned 32-bit `int` and `unsigned int` objects (#1293).
+`__atomic_load_n`, `__atomic_store_n`, `__atomic_exchange_n`, and
+`__atomic_compare_exchange_n` are available, along with the `fetch_OP` and
+`OP_fetch` forms of add, subtract, AND, OR, and XOR, and `__atomic_thread_fence`.
+Weak compare-exchange uses the strong machine operation. Its expected
+pointer has the same unqualified pointee type as the atomic object's
+pointer. A failed compare-exchange writes the observed value through
+that pointer. The arithmetic forms wrap at the object width. Each access
+requires naturally aligned storage, including accesses through a cast or
+to a packed field.
+
+This target predefines the six `__ATOMIC_*` order constants from relaxed (0)
+through sequentially consistent (5). Consume has acquire ordering. The
+compiler diagnoses illegal order combinations it can prove from fixed
+values. Otherwise it evaluates the order and uses sequentially consistent
+ordering.
+
+`__atomic_always_lock_free` with constant null alignment returns true for size
+4 and false for size 3. The compiler needs to prove the size and null
+value without calling a runtime function. Queries that need values from
+a constexpr function's active frame remain open in #328, along with other
+sizes and non-null alignment arguments. `__has_builtin` reports these builtin names on Linux
+x86-64. Other widths, GNU builtin forms, and AArch64 are tracked in #328.
 
 The standard `[[…]]` attribute syntax is available on declarations and statements. The parser
 skips unrecognized attributes ([dcl.attr.grammar]/6).

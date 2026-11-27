@@ -1,23 +1,24 @@
 # Builds through the resident engine
 
-Epic #1251. Design issue #1252. This document proposes an initial contract and
-an executable test of it.
+Epic #1251. Design issue #1252. This document records the accepted build
+contract, its first resident build, and subsequent extensions.
 
 ## First build
 
-Build an executable, one library and a generator using one host configuration.
-The library and executable export named artifacts. An edge for a generated
-header orders the generator before compilation. The edge for the library
-object or archive orders linking independently of header production. A
-configured target has a stable workspace name and configuration. Local names
-can be ordinary strings. Generated output paths belong to the build rather
-than the source checkout.
+The first fixture builds an executable, a library and a generator in one host
+configuration. The generator declares named outputs for a source and a header.
+The app consumes them via `artifact(...)` references. The library contributes
+objects and public include directories, and the app publishes its configured
+executable. Local target names are ordinary strings. Generated inputs have
+logical paths under the workspace's build directory.
 
-The first build runs the expected tools. The second launches zero tools.
-Changing only one generator output schedules only its consumers. A newly
-created header that shadows an old include invalidates the compile. A failed
-tool cannot publish a partial result. After each edit, compare the runnable
-output with a fresh build of that workspace.
+The acceptance test checks that the first build runs the expected tools and
+the second launches none. Changing only the generated source recompiles it
+while the unchanged header preserves the app translation unit. A new header
+earlier in the search path shadows the previous match and invalidates the
+compile. A failed tool leaves the previous executable usable. The test checks
+runnable results through the edits and compares the final accepted executable
+byte for byte with a cold build. [Acceptance fixture](../../tests/daemon/project_build.py)
 
 ### Using the first slice
 
@@ -46,9 +47,9 @@ the watch continues. The library in this slice is an ordered group of
 native objects included in the executable link. The generator example in
 `tests/daemon/project_build.py` shows how to bind named staged paths with
 `input("name")` and `output("name")`. Tools must use the inputs declared by
-their rule. The first runner uses an explicit host executable and a private
-working directory. The coordinator rechecks the executable fingerprint before admitting a result. Support for outer toolchain envelopes follows #1254
-and #1259.
+their rule. The local runner uses an explicit host executable and a private
+working directory. The coordinator rechecks the action identity before
+admitting a result. Broader project layouts are tracked in #1259.
 
 ### Generated static archives (#1339)
 
@@ -105,8 +106,9 @@ local name, located fields and named artifact references. Explicit globs expand
 against tracked directory listings. Match order is stable, exclusions are
 visible, and recursion uses an explicit pattern. Track membership of observed
 directories, including previously absent roots. File-content misses alone
-cannot account for files whose names a glob has never seen. The runner handles
-artifact references to outputs even before their files exist. Locations and expansion
+cannot account for files whose names a glob has never seen. The planner resolves
+artifact references before their files exist. The coordinator stages the selected
+outputs from admitted receipts for consuming actions. Locations and expansion
 reasons are provenance, which can change without changing a resolved value.
 
 A build root demands the target's exported artifacts. Internally, give
@@ -123,8 +125,8 @@ environment, staged input snapshots and named output paths. The tool runs
 in a private working directory. Verify its declared outputs and return them
 as one successful result. The runner owns process lifecycle and diagnostics.
 The caller owns cache admission and materialization. A crash, cancellation
-or failed command produces no reusable successful result. The first runner
-can return owned bytes, before deciding on durable artifact storage.
+or failed command produces no reusable successful result. The local runner
+returns owned output bytes and executable modes.
 
 Generators and witnesses can name helper executables through a record such as
 `tool_inputs = { cc = "/usr/bin/cc", ar = "/usr/bin/ar" }`. Each helper's name,
@@ -174,15 +176,13 @@ links the consumer to its producer. [Runnable example](../../examples/project-bu
 
 ## Compiler and trace
 
-Native compilation should run as a descendant of the workspace root in the
-same pipeline session database (#1255, #1256). The root can fetch
-`pipeline::Build` through its query context. Use existing compiler
-dependencies, including unsuccessful include lookups. The preprocessor's
-include callback is synchronous, so the native adapter first fetches the
-declared generated-output projections and prepares an immutable file view.
-The callback keeps observing earlier disk candidates in search order. Cover
-the compiler's separate main-file text and readability paths before
-supporting generated main sources.
+The selected target's native compilation runs as a descendant of the workspace
+root in the same pipeline session database (#1255, #1256). The root fetches
+`pipeline::Build` through its query context. The coordinator prepares an
+immutable file view from the admitted generated outputs before compilation.
+The synchronous include callback uses that view and still observes disk
+candidates in search order, including misses. Generated translation units use
+the same view for main-file text and readability.
 
 An external compiler path needs an explicit input envelope including its
 include search space and toolchain identity before its results can be reused.
@@ -193,15 +193,14 @@ process. Add finer external discovery once its observations suffice for
 validation.
 
 Astra independently checked the native root, generated-input and action
-receipt boundaries for #1252.
+receipt boundaries. [Review in #1252](https://github.com/yrashk/ycxx/issues/1252#issuecomment-7147146213)
 
-Carry the existing request tracer. Keep `--trace-engine=interactive`,
+Project builds use the existing request tracer with `--trace-engine=interactive`,
 `--trace-engine=stream`, and `--trace-engine=json` (JSON Lines on stderr).
-A reused tool result should be reported as reuse. Native compiler descendants
-retain their existing query events. A subprocess boundary can report the
-invocation, diagnostics and observed input/output identities. The resolved
-view should expose source and expansion provenance, support semantic diffs,
-and share its data with the CLI and eventual HTML view (#1256).
+The trace includes native compiler descendants, external action events and
+engine reuse. The read-only `ycxx show` command exposes resolved facts and
+their provenance in the CLI and standalone HTML, and compares plans with a
+saved JSON snapshot (#1256). [Runner and watch evidence](https://github.com/yrashk/ycxx/issues/1254)
 
 ## Extensions and broader project layouts
 
@@ -332,6 +331,133 @@ native host compile and reports the two logical source paths against
 one authored binding. Watch and early planning continue to observe the
 real includes used by each generated main.
 [Generated host library source example](../../examples/project-build/host-library-generated-sources/README.md)
+
+### Direct generated archives for native host tools (#1616)
+
+```text
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    link_inputs = [artifact("scanner_archive", "archive")]
+}
+```
+
+The coordinator stages the ordinary archive producer chain together with
+generated host sources and headers before registering the host build. The
+archive chain must be independent of project-built host tools. Its actions
+keep the selected target's argument selectors, and the native linker reads
+archives in the host format. The host's source objects precede the archive
+operands. Authored order and repeated references are preserved.
+
+The archive names and exact bytes enter the host program key. Archive-only
+producers stay outside the preprocessor's host file view, so an archive
+edit can relink without recompiling the host sources. Equal host images
+reuse consumer receipts. Before admitting a result against a revised
+plan, the coordinator can compare the staged inputs with existing receipts
+without running their producers. The plan shows each archive operand's host
+path, output binding, and manifest location.
+[Host archive example](../../examples/project-build/host-static-archive-inputs/README.md)
+
+### Archives inherited by native host tools (#1622)
+
+```text
+cpp.library "scanner_codec" {
+    sources = ["codec.cc"]
+    public_link_inputs = [artifact("codec_archive", "archive")]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["scanner_codec"]
+}
+```
+
+The host link puts direct archives before inherited archives. Each library
+contributes its authored operands after all of its reachable consumers,
+so a shared library contributes once in a diamond. Explicit repeats retain
+their positions and use the same staged archive bytes.
+
+The host tool and selected executable can inherit from the same library.
+Each plain artifact reference selects one ordinary producer receipt. Both
+links read those bytes and check them against their own object formats.
+The plan shows each link's resolved operand sequence and paths alongside
+the shared authored edge.
+[Inherited host archive example](../../examples/project-build/host-library-static-archive-inputs/README.md)
+
+### Explicit archive choices by link role (#1629)
+
+```text
+cpp.library "archive_bridge" {
+    public_link_inputs = [{
+        host = artifact("host_archive", "archive")
+        target = artifact("target_archive", "archive")
+    }]
+}
+```
+
+The record occupies one position in the ordered list and requires both
+artifact references. The host-tool link resolves `host` and the selected
+app link resolves `target`, even when they use the same target triple.
+Each traversal plans only its chosen output. The two references can use
+distinct producers or name two outputs of one ordinary action. A plain
+artifact reference still shares its receipt across both links.
+
+Direct inputs come first and explicit repeats retain their positions.
+The coordinator stages the host choice through the existing
+host-independent producer path. `host_triple()` and `target_triple()`
+keep their existing meanings. The plan links each active role to its
+resolved archive path, operand position, and authored reference.
+[Archive roles example](../../examples/project-build/archive-consumer-bindings/README.md)
+
+### Explicit generated headers by link role (#1637)
+
+```text
+cpp.library "bridge" {
+    generated_headers = [{
+        host = artifact("host_config", "header")
+        target = artifact("target_config", "header")
+    }]
+}
+```
+
+Each position requires both artifact references. A host-tool traversal
+resolves `host` and the selected app traversal resolves `target`, even
+when the triples match. A plain artifact reference retains its shared
+behavior. The generators still receive the existing triple selectors,
+and the host choice uses the ordinary host-independent producer path.
+Separate producers can supply a different version of `config.hh` for
+each role. Declared siblings of one producer remain in the same directory.
+
+Both traversals keep the first occurrence of a directory and inherit
+their dependency's search order. A role choice can make one traversal
+deduplicate a directory that the other keeps. For libraries with owned
+or inherited choices, the plan records each role's full include sequence,
+including disk directories, and links generated entries to their
+authored artifact sites.
+[Generated header roles example](../../examples/project-build/role-bound-library-headers/README.md)
+
+### Explicit generated sources by link role (#1647)
+
+```text
+cpp.library "bridge" {
+    sources = [
+        "bridge.cc",
+        { host = artifact("host_impl", "source"), target = artifact("app_impl", "source") }
+    ]
+}
+```
+
+Each record requires both artifact references. The host tool and selected
+app resolve their own arm, even when the triples match. The chosen source
+takes its declared position alongside disk paths, globs, and plain
+generated sources. A duplicate effective source is diagnosed in the
+traversal that selects it.
+
+The generated source retains its logical path and can include its
+producer's declared siblings with quotes. The source's directory stays
+private to that include lookup unless an explicit header binding makes
+it visible elsewhere. Plan facts show each selected source path and link
+its role-labeled dependency edge to the inner artifact reference.
+[Generated source roles example](../../examples/project-build/role-bound-library-sources/README.md)
 
 Project generators and rule witnesses accept `target_triple()` (#1347)
 and `host_triple()` (#1534) in `args`. Each selector supplies one canonical

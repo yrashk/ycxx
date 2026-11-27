@@ -63,6 +63,20 @@ class Encoder {
     memory({std::uint8_t(width == 1 ? 0x88 : 0x89)}, src, base, disp, width == 8);
   }
 
+  // XCHG with memory is implicitly locked (Intel SDM vol. 2).
+  void exchange32(Reg base, Reg value) { memory({0x87}, value, base, 0, false); }
+
+  void atomic_add32(Reg base, Reg value) {
+    emit({0xf0});
+    memory({0x0f, 0xc1}, value, base, 0, false);  // LOCK XADD
+  }
+
+  // EAX compares with memory and receives the observed value on failure.
+  void compare_exchange32(Reg base, Reg desired) {
+    emit({0xf0});
+    memory({0x0f, 0xb1}, desired, base, 0, false);  // LOCK CMPXCHG
+  }
+
   void store_immediate32(Reg base, std::int32_t disp, std::uint32_t value) {
     memory({0xc7}, 0, base, disp, false);
     immediate(value, 4);

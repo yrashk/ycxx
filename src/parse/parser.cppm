@@ -58,6 +58,7 @@ struct DeclSpec {
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   DeclAttributes attributes;
   std::optional<u32> virtual_at;
+  std::optional<u32> explicit_at;
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
@@ -761,6 +762,15 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_explicit:
+        if (!class_member || !allow_conversion_id || kind(1) == Tk::l_paren) goto done;
+        if (d.explicit_at) {
+          s_->diag(pos(), Diag::duplicate_specifier, k);
+          d.ok = false;
+        } else {
+          d.explicit_at = pos();
+        }
+        break;
       case Tk::kw_mutable:
         if (!class_member) {
           s_->diag(pos(), Diag::mutable_placement);
@@ -1058,7 +1068,7 @@ public:
     }
     // [dcl.typedef]/1: `typedef` is combined only with type-specifiers.
     if (d.is_typedef && (d.is_static || d.is_extern || d.is_inline || d.is_constexpr || d.is_consteval || d.is_constinit ||
-                         d.virtual_at)) {
+                         d.virtual_at || d.explicit_at)) {
       s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_typedef);
       d.ok = false;
     }
@@ -1177,11 +1187,13 @@ public:
   };
 
   enum class NamedExceptionSpec { ordinary, class_member, defaulted_assignment, member_template };
+  enum class MemberArrayBounds { none, sizeof_type, nested_layout };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
                         NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false,
-                        bool reject_parameter_defaults = false, bool replay_member_array_bounds = false) {
+                        bool reject_parameter_defaults = false,
+                        MemberArrayBounds member_array_bounds = MemberArrayBounds::none) {
     Declarator d;
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
@@ -1192,7 +1204,7 @@ public:
                                  (s_->templated() && !typedef_ &&
                                   (named_exception == NamedExceptionSpec::class_member ||
                                    named_exception == NamedExceptionSpec::ordinary));
-    Level top = level(abstract, d.ok, conversion, defer_exception, replay_member_array_bounds);
+    Level top = level(abstract, d.ok, conversion, defer_exception, member_array_bounds);
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -1720,7 +1732,7 @@ public:
   }
 
   Level level(bool abstract, bool& ok, bool conversion = false, bool defer_exception = false,
-              bool replay_member_array_bounds = false) {
+              MemberArrayBounds member_array_bounds = MemberArrayBounds::none) {
     Level l;
     pointer_operators(l, ok);
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
@@ -1793,7 +1805,7 @@ public:
       // instead of naming the entity declared ([dcl.ambig.res]).
       bump();
       l.inner = std::make_unique<Level>(level(abstract, ok, /*conversion=*/false, /*defer_exception=*/false,
-                                             replay_member_array_bounds));
+                                             member_array_bounds));
       ok = expect(Tk::r_paren) && ok;
     } else if (!abstract) {
       s_->diag(pos(), Diag::expected_unqualified_id);
@@ -1862,17 +1874,26 @@ public:
           continue;
         }
         Suffix s;
-        // [dcl.array]: a converted constant expression of integral type. A nested class
-        // specialization reads this member's declared type when the class must be complete.
-        const auto replay = replay_member_array_bounds && names_array_member(l)
+        // [dcl.array]: retain a direct member's dependent sizeof(type-id) until the
+        // class specialization replays its member declaration with the arguments bound.
+        const bool array_member = member_array_bounds != MemberArrayBounds::none && names_array_member(l);
+        const auto replay = array_member && member_array_bounds == MemberArrayBounds::nested_layout
             ? TemplateArgumentReplay::member_array_bound : TemplateArgumentReplay::none;
         const TemplateArgumentReplayScope bound(*this, replay);
+        const auto saved_layout = layout_argument_at_;
+        if (array_member) {
+          u32 offset = 0;
+          while (kind(offset) == Tk::l_paren) ++offset;
+          if (kind(offset) == Tk::kw_sizeof) layout_argument_at_ = pos() + offset;
+        }
         Ex e = s_->promote(constant_expression());
+        layout_argument_at_ = saved_layout;
         sema::Evaluated ev = sema::Evaluator(*s_, questions()).evaluate(e);
         auto v = ev.value;
         if (ev.dependent) {
           s.dependent_bound = template_value(e, s_->types().canonical(e.type()));
-          if (s.dependent_bound && s_->ins().values.is<ast::VDepOp>(*s.dependent_bound)) {
+          if (s.dependent_bound && s_->ins().values.is<ast::VDepOp>(*s.dependent_bound) &&
+              (!array_member || s_->ins().values.get<ast::VDepOp>(*s.dependent_bound).op != ast::DepOp::sizeof_type)) {
             s_->diag(e.begin, Diag::not_supported, Tk::l_square);
             s.dependent_bound.reset();
           }
@@ -3321,7 +3342,7 @@ public:
     if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
     const auto value = literal->value;
     if (s_->ins().values.is<ast::VInt>(value) ||
-        s_->ins().values.is<ast::VDepVariable>(value) ||
+        s_->ins().values.is<ast::VDepVariable>(value) || s_->ins().values.is<ast::VDepConcept>(value) ||
         (s_->ins().values.is<ast::VDepOp>(value) &&
          s_->ins().values.get<ast::VDepOp>(value).op == ast::DepOp::logical_and))
       return value;
@@ -3363,10 +3384,13 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
-      // Class bases and type requirements replay with their arguments bound. A dependent
-      // value whose expression has no representation can wait until replay, provided it
-      // contains no pack that an expansion needs to retain.
-      if ((class_template_base || in_type_requirement_) && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+      // Class bases, type requirements, namespace alias templates and the ordinary member
+      // aliases of a class template replay with their arguments bound ([temp.alias]/2). A
+      // dependent value whose expression has no representation can wait until replay,
+      // provided it contains no pack that an expansion needs to retain.
+      const bool replayed = class_template_base || in_type_requirement_ || namespace_alias_type ||
+                            replayed_member_alias_type;
+      if (replayed && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       }
@@ -3733,8 +3757,15 @@ public:
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
+      const std::size_t before = s_->diag_count();
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
+      if (!n && s_->diag_count() != before) {  // packs of different lengths, diagnosed: no operand
+        i_ = begin_ + e.end;
+        expect(Tk::ellipsis);
+        out.push_back({NodeId::none, begin, pos()});
+        return out;
+      }
       if (!n) {
         // A pack not bound yet (an enclosing template's): the expansion stays dependent.
         if (unexpanded) *unexpanded = true;
@@ -3747,9 +3778,11 @@ public:
       }
       for (std::size_t i = 0; i < *n; ++i) {
         i_ = begin_ + begin;
+        s_->begin_pattern();
         s_->push_frame(e.packs, u32(i));
         out.push_back(read());
         s_->pop_frame();
+        s_->end_element(e.packs);
       }
       i_ = begin_ + e.end;
       expect(Tk::ellipsis);
@@ -4535,7 +4568,8 @@ public:
         std::size_t n = s_->diag_count();
         s_->begin_pattern();
         cast_expression();
-        a_is_pattern = !s_->end_pattern(false, first, 0).empty();
+        // A probe: its packs are neither an expansion nor the enclosing operand's.
+        a_is_pattern = !s_->end_pattern(true, first, 0, /*record=*/false).empty();
         s_->truncate_diags(n);
         i_ = begin_ + first;
       }
@@ -4616,9 +4650,11 @@ public:
       if (n)
         for (std::size_t i = 0; i < *n; ++i) {
           i_ = begin_ + begin;
+          s_->begin_pattern();
           s_->push_frame(e.packs, u32(i));
           const Ex element = cast_expression();
           s_->pop_frame();
+          s_->end_element(e.packs);
           out.push_back(element);
           if (!constraint) continue;
           if (!element.ok()) break;
@@ -4746,6 +4782,10 @@ public:
     if (is(Tk::question)) return conditional_rest(l);
     return l;
   }
+
+  // A concept-id read as an evaluated template argument keeps a `VDepConcept` value while its
+  // arguments are dependent ([temp.arg.nontype], [temp.dep.constexpr]/2).
+  bool preserve_concept_value() const { return in_template_value_argument_ && !s_->unevaluated; }
 
   bool structural_member_argument() const {
     return member_alias_type && in_template_value_argument_ && !s_->unevaluated;
@@ -5705,6 +5745,9 @@ public:
             if (auto v = s_->variable_template(n, begin))
               return s_->dependent_variable_template_id(*v, *args, begin, pos());
             if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+            // A value-dependent concept-id ([temp.dep.constexpr]/2) keeps its value as the
+            // argument, substituted when the template-id's own arguments are.
+            if (auto c = s_->concept_named(n)) return s_->concept_id_expr(*c, *args, begin, pos(), preserve_concept_value());
             if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
               Ex callee = s_->name_expr(n, begin, pos(), true);
               if (!callee.ok()) return callee;
@@ -5752,6 +5795,7 @@ public:
       return {NodeId::none, begin, pos()};
     case Tk::kw_dynamic_cast:
     case Tk::kw_static_cast:
+    case Tk::kw_const_cast:
     case Tk::kw_reinterpret_cast: {
       const Tk cast = kind();
       bump();
@@ -5764,6 +5808,7 @@ public:
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
       Ex r;
       if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to(e, *t, begin, pos());
+      else if (cast == Tk::kw_const_cast) r = s_->const_cast_to(e, *t, begin);
       else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
       else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
       if (writing_constraint_atom_ || (writing_pack_index_ && cast == Tk::kw_static_cast))
@@ -5802,7 +5847,6 @@ public:
       [[fallthrough]];
     case Tk::tilde:
     case Tk::kw_typeid:
-    case Tk::kw_const_cast:
       s_->diag(begin, is(Tk::kw_typeid) && !s_->questions().rtti_enabled() ? Diag::rtti_disabled : Diag::not_supported,
                kind());
       bump();
@@ -6138,8 +6182,7 @@ public:
             const bool global = r_->tokens[begin_ + begin].kind == Tk::coloncolon;
             return written_concept_expression(*c, *args, begin, true, global);
           }
-          return s_->concept_id_expr(*c, *args, begin, pos(),
-                                     class_template_base && in_template_value_argument_ && !s_->unevaluated);
+          return s_->concept_id_expr(*c, *args, begin, pos(), preserve_concept_value());
         }
       }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).

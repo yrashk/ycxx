@@ -252,35 +252,24 @@ def check_builds(ycxx, scope, env, journal, host, other):
     assert journal_contents(journal) == '17\n17\n23\n'
 
 
-def check_rejections(ycxx, workspace, env, other):
+def check_cycle(ycxx, scope, journal, env, other):
+    definition = prepare(scope, journal)
+    # Keep the library cycle reachable only from the native host tool.
+    start = definition.index('cpp.executable "app"')
+    definition = definition[:start] + definition[start:].replace('    deps = ["left", "right"]\n', '', 1)
     sources = f'sources = ["{COMMON}"]'
-    for name, replacement, diagnostic in (
-        ('cycle', f'{sources}\n    deps = ["left"]', "dependency cycle at 'left'"),
-        ('generated-archive', f'{sources}\n    public_link_inputs = [artifact("blocked", "archive")]',
-         'public_link_inputs is not supported in host executable dependencies'),
-    ):
-        scope, journal = workspace / name, workspace / f'{name}-runs'
-        definition = prepare(scope, journal)
-        # Keep the invalid library reachable only from the host side of this variant.
-        start = definition.index('cpp.executable "app"')
-        definition = definition[:start] + definition[start:].replace('    deps = ["left", "right"]\n', '', 1)
-        assert definition.count(sources) == 1, definition
-        definition = definition.replace(sources, replacement) + '''\
-generate "blocked" {
-    tool = "/bin/false"
-    outputs = { source = "blocked.cc" header = "blocked.hh" archive = "blocked.a" }
-}
-'''
-        (scope / 'build.ycxx').write_text(definition, encoding='utf-8')
-        try:
-            summary, events = traced_build(ycxx, scope, env, f'reject {name} from a host library',
-                                           *target_args(other), succeeds=False)
-            assert any(diagnostic in item for item in summary['diagnostics']), summary
-            check_external_actions(events)
-            assert not action_keys(events, 'Link') and not RAN & tu_outcomes(events, SCANNER), events
-            assert not journal.exists() and not (scope / executable(other)).exists()
-        finally:
-            run_client(ycxx, scope, env, 'ctl', 'shutdown')
+    assert definition.count(sources) == 1, definition
+    definition = definition.replace(sources, f'{sources}\n    deps = ["left"]')
+    (scope / 'build.ycxx').write_text(definition, encoding='utf-8')
+    try:
+        summary, events = traced_build(ycxx, scope, env, 'reject a cycle in a host library',
+                                       *target_args(other), succeeds=False)
+        assert any("dependency cycle at 'left'" in item for item in summary['diagnostics']), summary
+        check_external_actions(events)
+        assert not action_keys(events, 'Link') and not RAN & tu_outcomes(events, SCANNER), events
+        assert not journal.exists() and not (scope / executable(other)).exists()
+    finally:
+        run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
 
 def main():
@@ -297,7 +286,7 @@ def main():
             check_builds(ycxx, scope, env, journal, host, other)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
-        check_rejections(ycxx, root, env, other)
+        check_cycle(ycxx, root / 'cycle', root / 'cycle-runs', env, other)
 
 
 if __name__ == '__main__':

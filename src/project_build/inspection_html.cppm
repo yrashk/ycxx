@@ -284,7 +284,34 @@ void append_changes(std::string& out, const std::vector<PlanChange>& changes, st
   out += "</ul></section>\n";
 }
 
-void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::size_t lines) {
+struct TargetInputs {
+  std::string id;
+  std::vector<const PlanDependencyEdge*> artifacts;
+  std::vector<const PlanValueDependencyEdge*> values;
+};
+
+using InspectionTargets = std::map<std::string_view, TargetInputs>;
+
+InspectionTargets index_targets(std::string_view selected, const DependencyGraphInspection& graph) {
+  InspectionTargets targets;
+  targets.try_emplace(selected);
+  for (const auto& edge : graph.edges) {
+    targets[edge.consumer].artifacts.push_back(&edge);
+    targets.try_emplace(edge.producer);
+  }
+  if (graph.value_edges) {
+    for (const auto& edge : *graph.value_edges) {
+      targets[edge.consumer].values.push_back(&edge);
+      targets.try_emplace(edge.producer);
+    }
+  }
+  std::size_t id = 0;
+  for (auto& target : targets | std::views::values) target.id = std::format("plan-target-{}", id++);
+  return targets;
+}
+
+void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::size_t lines,
+                  const InspectionTargets& targets) {
   out += R"(<section class="panel" aria-labelledby="facts"><h2 id="facts">Plan facts</h2>)";
   if (facts.empty()) {
     out += R"(<p class="empty">No plan facts.</p></section>)";
@@ -293,13 +320,14 @@ void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::siz
   out += R"(<table class="facts" aria-labelledby="facts">
   <thead><tr><th scope="col">Target · Kind</th><th scope="col">Value</th><th scope="col">Defined at</th></tr></thead><tbody>
 )";
-  constexpr std::string_view graph_kinds[] = {"rule", "source", "include", "output", "host-target", "native-target"};
+  constexpr std::string_view graph_kinds[] = {
+    "rule", "source", "include", "output", "host-target", "native-target", "link-input",
+  };
   for (const PlanFact& fact : facts) {
     out += "<tr";
-    if (std::ranges::contains(graph_kinds, std::string_view(fact.kind))) {
-      out += R"HTML( data-graph-target=")HTML";
-      escaped(out, fact.target);
-      out += R"HTML(" data-graph-kind=")HTML";
+    if (const auto target = targets.find(fact.target);
+        target != targets.end() && std::ranges::contains(graph_kinds, std::string_view(fact.kind))) {
+      std::format_to(std::back_inserter(out), R"HTML( data-graph-target="{}" data-graph-kind=")HTML", target->second.id);
       escaped(out, fact.kind);
       out += '"';
     }
@@ -467,33 +495,13 @@ void append_value_bindings(std::string& out, std::span<const PlanValueDependency
   out += "</tbody></table></section>\n";
 }
 
-void append_target_dependencies(std::string& out, std::string_view selected, const DependencyGraphInspection& graph,
+void append_target_dependencies(std::string& out, std::string_view selected, const InspectionTargets& targets, bool complete,
                                 std::size_t lines) {
-  struct TargetInputs {
-    std::size_t id = 0;
-    std::vector<const PlanDependencyEdge*> artifacts;
-    std::vector<const PlanValueDependencyEdge*> values;
-  };
-  std::map<std::string_view, TargetInputs> targets;
-  const auto selected_target = targets.try_emplace(selected).first;
-  for (const auto& edge : graph.edges) {
-    targets[edge.consumer].artifacts.push_back(&edge);
-    targets.try_emplace(edge.producer);
-  }
-  if (graph.value_edges) {
-    for (const auto& edge : *graph.value_edges) {
-      targets[edge.consumer].values.push_back(&edge);
-      targets.try_emplace(edge.producer);
-    }
-  }
-  std::size_t id = 0;
-  for (auto& target : targets | std::views::values) target.id = id++;
-
   out += R"(<section class="panel" aria-labelledby="target-dependencies"><h2 id="target-dependencies">Target dependencies</h2>)";
-  if (!graph.complete)
+  if (!complete)
     out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved target dependencies so far.</p>)";
   const auto append_input = [&](const auto& edge, std::string_view label, std::optional<std::string_view> detail) {
-    std::format_to(std::back_inserter(out), R"(<li><a href="#plan-target-{}"><code>)", targets.at(edge.producer).id);
+    std::format_to(std::back_inserter(out), R"(<li><a href="#{}"><code>)", targets.at(edge.producer).id);
     escaped(out, edge.producer);
     out += R"(</code></a><code class="origin">)";
     escaped(out, edge.usage);
@@ -504,12 +512,12 @@ void append_target_dependencies(std::string& out, std::string_view selected, con
     out += "</li>\n";
   };
   const auto append_target = [&](std::string_view name, const TargetInputs& target) {
-    std::format_to(std::back_inserter(out), R"(<article class="plan-target" id="plan-target-{}"><h3><code>)", target.id);
+    std::format_to(std::back_inserter(out), R"(<article class="plan-target" id="{}"><h3><code>)", target.id);
     escaped(out, name);
     out += "</code></h3>";
     if (target.artifacts.empty() && target.values.empty()) {
       out += R"(<p class="empty">)";
-      out += graph.complete ? "No resolved inputs." : "No resolved inputs yet.";
+      out += complete ? "No resolved inputs." : "No resolved inputs yet.";
       out += "</p>";
     } else {
       out += "<ul>";
@@ -519,7 +527,7 @@ void append_target_dependencies(std::string& out, std::string_view selected, con
     }
     out += "</article>\n";
   };
-  append_target(selected_target->first, selected_target->second);
+  append_target(selected, targets.at(selected));
   for (const auto& [name, target] : targets)
     if (name != selected) append_target(name, target);
   out += "</section>\n";
@@ -565,17 +573,43 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
 
   const factLabels = new Map([
     ["rule", "Rule"], ["host-target", "Host target"], ["native-target", "Native target"],
-    ["source", "Source"], ["include", "Include path"], ["output", "Output"],
+    ["source", "Source"], ["include", "Include path"], ["output", "Output"], ["link-input", "Link input"],
   ]);
   const facts = new Map();
   for (const row of document.querySelectorAll("tr[data-graph-target][data-graph-kind]")) {
-    const {graphTarget: name, graphKind: kind} = row.dataset;
+    const {graphTarget: id, graphKind: kind} = row.dataset;
     if (!factLabels.has(kind) || row.cells.length < 3) continue;
-    if (!facts.has(name)) facts.set(name, []);
-    facts.get(name).push({row, label: factLabels.get(kind)});
+    if (!facts.has(id)) facts.set(id, []);
+    facts.get(id).push({row, label: factLabels.get(kind)});
   }
 
-  const inputsOpen = new Set([root]);
+  // An incomplete plan may retain a dependency reached before its link to the root resolved.
+  function componentSeeds() {
+    const seeds = [root];
+    if (!panel.hasAttribute("data-partial")) return seeds;
+    const visited = new Set();
+    for (const candidate of targets.values()) {
+      if (visited.has(candidate)) continue;
+      const component = [candidate];
+      visited.add(candidate);
+      const visit = (target) => {
+        if (visited.has(target)) return;
+        visited.add(target);
+        component.push(target);
+      };
+      for (const target of component) {
+        for (const edge of target.inputs) visit(edge.producer);
+        for (const edge of target.consumers) visit(edge.consumer);
+      }
+      if (candidate === root) continue;
+      seeds.push(component.find((target) => target.inputs.length && !target.consumers.length)
+                 ?? component.find((target) => target.inputs.length) ?? candidate);
+    }
+    return seeds;
+  }
+
+  const seeds = componentSeeds();
+  const inputsOpen = new Set(seeds);
   const consumersOpen = new Set();
   const buttons = new Map();
   const nodeWidth = 174;
@@ -590,8 +624,8 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
 
   function nodeNeighborhood() {
     // A target gets its first breadth-first position, even when another branch shares it.
-    const depths = new Map([[root, 0]]);
-    const queue = [root];
+    const depths = new Map(seeds.map((target) => [target, 0]));
+    const queue = [...seeds];
     for (const target of queue) {
       const depth = depths.get(target);
       const visit = (neighbor, nextDepth) => {
@@ -637,7 +671,7 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
     details.replaceChildren();
     list("Dependencies", relations(selected.inputs, false));
     list("Dependents", relations(selected.consumers, true));
-    list("Plan facts", (facts.get(selected.name) ?? []).map(({row, label}) => {
+    list("Plan facts", (facts.get(selected.card.id) ?? []).map(({row, label}) => {
       const item = document.createElement("li");
       item.className = "graph-fact";
       const name = document.createElement("strong");
@@ -678,6 +712,7 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
     button.className = "graph-node";
     button.type = "button";
     button.title = target.name;
+    button.dataset.graphTarget = target.card.id;
     if (target === root) button.dataset.root = "true";
     const name = document.createElement("code");
     name.textContent = target.name;
@@ -800,7 +835,7 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
   expandConsumers.addEventListener("click", () => toggle(consumersOpen));
   reset.addEventListener("click", () => {
     inputsOpen.clear();
-    inputsOpen.add(root);
+    for (const seed of seeds) inputsOpen.add(seed);
     consumersOpen.clear();
     select(root);
     render();
@@ -818,7 +853,9 @@ constexpr std::string_view graph_script = R"YCXX_GRAPH(<script>
 )YCXX_GRAPH";
 
 void append_graph_explorer(std::string& out, bool complete) {
-  out += R"HTML(<section class="panel" id="target-graph" hidden aria-labelledby="target-graph-heading">
+  out += R"HTML(<section class="panel" id="target-graph" hidden aria-labelledby="target-graph-heading")HTML";
+  if (!complete) out += " data-partial";
+  out += R"HTML(>
 <h2 id="target-graph-heading">Graph</h2>
 )HTML";
   if (!complete) out += R"(<p class="dependency-notice">Incomplete plan. Showing resolved connections.</p>)";
@@ -1193,13 +1230,15 @@ std::string render_inspection_html(const PlanInspection& inspection,
   }
   if (dependency_changes) append_dependency_changes(out, *dependency_changes, lines);
   if (value_binding_changes) append_value_binding_changes(out, *value_binding_changes, lines);
+  InspectionTargets targets;
   if (inspection.dependency_graph) {
     const auto& graph = *inspection.dependency_graph;
-    append_target_dependencies(out, inspection.target, graph, lines);
+    targets = index_targets(inspection.target, graph);
+    append_target_dependencies(out, inspection.target, targets, graph.complete, lines);
     append_dependencies(out, graph, lines);
     if (graph.value_edges) append_value_bindings(out, *graph.value_edges, graph.complete, lines);
   }
-  append_facts(out, inspection.facts, lines);
+  append_facts(out, inspection.facts, lines, targets);
   out += "</div>";
   append_manifest(out, definition);
   out += "</div></main>";

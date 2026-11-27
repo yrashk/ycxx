@@ -90,6 +90,44 @@ def main():
             original = build_both('1D')
             run_peers()
 
+            # The cast in a namespace initializer is emitted in the merged startup function.
+            (scope / 'global-cast.cpp').write_text('#include "classes.hpp"\nextern B* input;\n'
+                                                  'D* result = dynamic_cast<D*>(input);\n')
+            for env in (cold, resident):
+                run([*target, '-fno-exceptions', '-c', 'global-cast.cpp', '-o', 'global-cast.o'], scope, env)
+                check_imports(readelf, scope, cold, 'global-cast.o', '1D')
+
+            # A later startup cast must not hide the preceding written cast's diagnostic.
+            (scope / 'repeated-cast.cpp').write_text(
+                '#include "classes.hpp"\nnamespace user {\n'
+                'D* cast(B* input) { return dynamic_cast<D*>(input); }\n'
+                'extern B* input;\nD* result = dynamic_cast<D*>(input);\n}\n'
+                'int D::f() { return 3; }\n')
+            for env in (cold, resident):
+                run([*target, '-fno-exceptions', '-c', 'repeated-cast.cpp', '-o', 'repeated-cast.o'],
+                    scope, env, error='repeated-cast.cpp:3:28: error: typed dynamic_cast')
+
+            # A whitespace edit moves the cast in the same watched namespace initializer.
+            namespace_cast = scope / 'namespace-cast.cpp'
+            namespace_target = [*target, '-fno-exceptions']
+            rejections = (('original', '4:13'), ('moved', '6:5'),
+                          ('later-original', '4:31'), ('later-moved', '6:5'))
+            for variant, location in rejections:
+                namespace_cast.write_bytes((fixture / f'namespace-cast-{variant}.cpp').read_bytes())
+                for env in (cold, resident):
+                    run([*namespace_target, '-fsyntax-only', namespace_cast.name], scope, env)
+                    run([*namespace_target, '-c', namespace_cast.name, '-o', 'namespace-rejected.o'],
+                        scope, env, error=f'{namespace_cast.name}:{location}: error: typed dynamic_cast')
+                    assert not (scope / 'namespace-rejected.o').exists()
+                assert daemon_pid() == pid, 'daemon PID changed during namespace initializer rejection'
+
+            namespace_cast.write_bytes((fixture / 'namespace-cast-borrowed.cpp').read_bytes())
+            run([*namespace_target, '-c', namespace_cast.name, '-o', 'namespace-cold.o'], scope, cold)
+            run([*namespace_target, '-c', namespace_cast.name, '-o', 'namespace-resident.o'], scope, resident)
+            assert (scope / 'namespace-cold.o').read_bytes() == (scope / 'namespace-resident.o').read_bytes()
+            check_imports(readelf, scope, cold, 'namespace-resident.o', '1D')
+            assert daemon_pid() == pid, 'daemon PID changed during namespace initializer recompilation'
+
             override = b'    int f() override;\n'
             assert inputs[header].count(override) == 1
             header.write_bytes(inputs[header].replace(override, b''))

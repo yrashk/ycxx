@@ -468,6 +468,23 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
       the persistent cache handed to the next daemon as red/green from a different start. (§7)
     - **Every answer carries its revision and per-root counters,** which the β tests check, with
       daemon and in-process outputs compared byte for byte. (§8)
+11. **Resident project builds.** The accepted [build design](docs/design/build.md) (#1252)
+    keys a workspace request root by the configured executable's output path. The root fetches
+    `pipeline::Build` in the workspace's resident compiler session. Native compilation reads
+    generated sources and headers through an immutable file view. Disk lookups, including
+    misses, still enter the compiler's normal dependencies.
+    - **Run declared tools between query epochs.** The root returns pending actions. The
+      coordinator runs them in private staging and admits a receipt at quiescence only after
+      all named outputs have been validated. Each generated path has its own content identity,
+      so an equal sibling output can cut off downstream work even when the action reruns.
+    - **Publish a successful generation transactionally.** The coordinator installs the
+      executable and its managed runtime assets from the completed request. Failures before
+      publication leave the previous generation available. If the asset switch fails, the
+      publisher attempts to restore the previous executable. Cached results can restore
+      missing outputs.
+    - The request trace includes the native compiler queries and coordinator events.
+      `ycxx build --watch` uses the daemon's watch loop and reobserves the project plan.
+      `ycxx show` resolves the plan and its provenance without executing build actions.
 
 ## 5. Development process
 
