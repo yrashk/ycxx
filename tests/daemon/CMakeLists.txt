@@ -130,6 +130,9 @@ add_test(NAME daemon.project_role_bound_library_headers
 add_test(NAME daemon.project_host_library_generated_sources
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_sources.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_role_bound_library_sources
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_role_bound_library_sources.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_host_generated_headers
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_headers.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.project_host_generated_sources
