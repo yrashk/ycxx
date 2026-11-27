@@ -611,7 +611,8 @@ written default member initializer are value-initialized.
   and ordinary aggregates with arithmetic fields. A braced argument to a known function can
   initialize a class temporary for a reference parameter, including `const std::initializer_list<int>&`
   with libycxx. A pointer or reference target type can select a free or static member overload.
-  Member defaults of classes and class templates can refer to members declared later in the class.
+  Member defaults of classes and class templates can refer to members declared later in the class,
+  except in member templates of classes that are not templates ([#1607](https://github.com/yrashk/ycxx/issues/1607)).
   Namespace function definitions can inherit C language linkage from a matching earlier
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),

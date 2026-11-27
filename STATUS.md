@@ -4757,17 +4757,24 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   forbid them (`defaults_allowed`, `defaults_trail`).
 - Omitted defaults of function templates replay with the selected bindings at the written
   declaration, for any parameter type. Explicit arguments bypass replay.
-- **Class templates (#356):** member defaults, member templates' included, wait for the complete
-  class in the template's definition and in each specialization (the `member_template_name`
-  gate in `ItemAnalysis`). The definition checks them unbound (`bind_member_default` with the
-  enclosing heads). A specialization keeps each as a pending `DefaultArg` marker
+- **Class templates (#356):** member defaults wait for the complete class in the template's
+  definition and in each specialization (the `member_template_name` gate in `ItemAnalysis`).
+  So do a templated class's member templates' defaults. An ordinary class's member templates'
+  defaults bind at their declaration, as its exception specifications do (#1607). Class
+  completion binds each default on first need (`bind_destructor_and_defaults`), so a default
+  that uses itself or a later one is diagnosed (`default_arg_recursive`,
+  `default_arg_not_yet_defined`). A call made before then says the same (`defaults_pending`).
+  The definition checks defaults unbound (`bind_member_default` with the enclosing heads). A specialization keeps each as a pending `DefaultArg` marker
   (`Program::pend_member_defaults`). `AtItem::replay_member_default` analyses it for the call that
   uses it ([temp.inst]/12), with the class's arguments bound and the definition's dependent calls
   completed by argument-dependent lookup at the point of instantiation. Member function templates
   replay in `replay_function_default` with the class's arguments at the enclosing levels. In a
-  template's definition, a call that selects a dependent default is itself dependent.
+  template's definition, a call that selects a dependent default is value-dependent (`call`).
+  A specialization does not replay a default its definition failed to analyse. Nested
+  replays count toward the instantiation limit ([temp.inst]/16).
 - Not yet: lambdas in deferred member defaults (#338); a nested class's defaults naming later
-  members of the enclosing class (#1602); defaults added by an out-of-class
+  members of the enclosing class (#1602); later members in an ordinary class's member template
+  defaults (#1607); defaults added by an out-of-class
   or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
 - Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #357 and #102), including
   `class-template-*` and `function-template-*` for #356.

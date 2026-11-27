@@ -1082,8 +1082,8 @@ int f(int a, int b = 2) { return a + b; }
 int main() { return f(1) == 3 ? 0 : 1; }
 '''
 status = 'partial'
-issues = [356, 354, 1602, 338]
-note = 'Member defaults of classes and class templates use complete-class lookup. Dependent defaults of function templates, member templates and class template members are instantiated when a call uses them. Lambdas in member defaults (#338), nested classes naming later members of the enclosing class (#1602), out-of-class additions and defaults on qualified namespace definitions remain'
+issues = [356, 354, 1602, 1607, 338]
+note = 'Member defaults of classes and class templates use complete-class lookup. Dependent defaults of function templates, member templates and class template members are instantiated when a call uses them. Lambdas in member defaults (#338), nested classes naming later members of the enclosing class (#1602), member templates of ordinary classes naming later members (#1607), out-of-class additions and defaults on qualified namespace definitions remain'
 
 [[feature]]
 id = 'dcl-variadic-fn'

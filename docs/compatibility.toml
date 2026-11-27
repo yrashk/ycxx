@@ -1488,6 +1488,31 @@ clang = "Accept the tested default on a named or abstract function pointer in an
 evidence = ["tests/own/block-try-catch/named-function-pointer-default.reject.cpp", "tests/own/block-try-catch/abstract-function-pointer-default.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 exception-declaration probes"]
 
 [[divergence]]
+id = "class-template-default-uses-later-default"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "pending", clang = "supported" }
+reference = "[class.mem.general], [dcl.fct.default], [temp.inst]/12, #356"
+prior = "Reject the class template's default argument with \"default arguments of templates are not supported yet\" or an undeclared later member."
+spec = "Reject a member default that calls a later member of the same class template and takes that member's default, with \"the selected default argument has not yet been defined\". A later member template's default is instantiated per call and is accepted. The draft does not settle when a later default becomes usable."
+gcc = "Accept the tested static member function and member template defaults that take a later member's default. ycxx rejects them, as in spec mode."
+clang = "Reject them, as spec mode does. Accept a later member template's default."
+probe = 'template<class U> struct S { static constexpr int f(int x = g()) { return x; } static constexpr int g(int y = sizeof(U)) { return y; } }; static_assert(S<long>::f() == 8);'
+limits = "Ordinary classes reject the same uses in every mode. An ordinary class's member template default cannot name a later member yet (#1607)."
+evidence = ["GCC 16.2 and upstream Clang 23.1.5 later-default probes from the #356 review"]
+
+[[divergence]]
+id = "default-argument-substitution-in-requires"
+status = "recorded"
+mode_status = { spec = "unverified", gcc = "supported", clang = "pending" }
+reference = "[temp.inst]/12, [temp.deduct.general], [expr.prim.req], #356"
+prior = "Reject every call that takes a dependent member default with \"default arguments of templates are not supported yet\"."
+spec = "Treat an ill-formed default argument instantiated by a call in a requires-expression as an unsatisfied requirement."
+gcc = "Same as spec for the tested `requires { S<T>::f(); }` whose member default `T::v` is ill-formed for `int`."
+clang = "Diagnose the ill-formed default argument as a hard error outside the immediate context. ycxx still yields false here."
+probe = 'template<class T> struct S { static int f(int x = T::v) { return x; } }; template<class T> concept C = requires { S<T>::f(); }; static_assert(!C<int>);'
+evidence = ["GCC 16.2 and upstream Clang 23.1.5 requires-expression probes from the #356 review"]
+
+[[divergence]]
 id = "equivalent-inherited-type-aliases"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
