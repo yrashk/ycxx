@@ -176,6 +176,7 @@ enum class Diag : std::uint32_t {
   default_arg_template_redeclared [[=message{Severity::error, "a redeclaration of a function template cannot add default arguments"}]],
   default_arg_not_allowed [[=message{Severity::error, "a default argument is not allowed here"}]],
   default_arg_not_yet_defined [[=message{Severity::error, "the selected default argument has not yet been defined"}]],
+  default_arg_recursive [[=message{Severity::error, "default argument would use itself"}]],
   default_arg_source_line_immediate [[=message{Severity::error, "an immediate invocation that observes the call-site line of a default argument is not supported yet"}]],
   default_arg_source_location_immediate [[=message{Severity::error, "an immediate invocation that observes the call-site location of a default argument is not supported yet"}]],
   source_location_default_member [[=message{Severity::error, "source location in a default member initializer is not supported yet"}]],
