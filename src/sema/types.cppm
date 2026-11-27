@@ -1330,41 +1330,42 @@ private:
   bool has_virtual_layouts_ = false;
 };
 
-// The C library functions builtins call (`lex::BuiltinFunction::library`, `World::string_function`),
+// The C library functions builtins call (`lex::BuiltinFunction::library`, `World::library_function`),
 // with the C library's signatures. The search functions return `char*` from a `const char*`, as in
 // C: the C++ library's const-correct overloads are its own functions ([cstring.syn]).
-enum class CType : u8 { int_, size, void_pointer, const_void_pointer, char_pointer, const_char_pointer };
+enum class CType : u8 { int_, size, void_pointer, const_void_pointer, char_pointer, const_char_pointer, float_ };
 // `constant`: what constant evaluation computes for the builtin's call (`ast::Call::builtin`); a
 // function without one is not a constant expression.
-struct StringFunction {
+struct LibraryFunction {
   std::string_view name;
   CType result;
   std::array<CType, 3> params;
   u8 arity = 3;
   ast::LibraryBuiltin constant = ast::LibraryBuiltin::none;
 };
-inline constexpr std::array string_functions{
-    StringFunction{"memchr", CType::void_pointer, {CType::const_void_pointer, CType::int_, CType::size}, 3,
-                   ast::LibraryBuiltin::memchr},
-    StringFunction{"memcmp", CType::int_, {CType::const_void_pointer, CType::const_void_pointer, CType::size}, 3,
-                   ast::LibraryBuiltin::memcmp},
-    StringFunction{"memcpy", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
-    StringFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
-    StringFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},
-    StringFunction{"strchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
-    StringFunction{"strcmp", CType::int_, {CType::const_char_pointer, CType::const_char_pointer}, 2},
-    StringFunction{"strpbrk", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
-    StringFunction{"strrchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
-    StringFunction{"strstr", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+inline constexpr std::array library_functions{
+    LibraryFunction{"acosf", CType::float_, {CType::float_}, 1},
+    LibraryFunction{"memchr", CType::void_pointer, {CType::const_void_pointer, CType::int_, CType::size}, 3,
+                    ast::LibraryBuiltin::memchr},
+    LibraryFunction{"memcmp", CType::int_, {CType::const_void_pointer, CType::const_void_pointer, CType::size}, 3,
+                    ast::LibraryBuiltin::memcmp},
+    LibraryFunction{"memcpy", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
+    LibraryFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
+    LibraryFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},
+    LibraryFunction{"strchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    LibraryFunction{"strcmp", CType::int_, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+    LibraryFunction{"strpbrk", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+    LibraryFunction{"strrchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    LibraryFunction{"strstr", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
 };
-constexpr const StringFunction* string_function_named(std::string_view name) {
-  for (const StringFunction& f : string_functions)
+constexpr const LibraryFunction* library_function_named(std::string_view name) {
+  for (const LibraryFunction& f : library_functions)
     if (f.name == name) return &f;
   return nullptr;
 }
 // Every library builtin has a signature.
 static_assert(std::ranges::all_of(lex::builtin_functions, [](const lex::BuiltinFunctionInfo& b) {
-  return b.function != lex::BuiltinFunction::library || string_function_named(lex::library_function_name(b));
+  return b.function != lex::BuiltinFunction::library || library_function_named(lex::library_function_name(b));
 }));
 
 // The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
@@ -1456,16 +1457,17 @@ struct World {
   }
 
   // The C library function a builtin calls (docs/EXTENSIONS.md), declared at global scope with
-  // C language linkage and the C library's signature (`string_functions`). Its exception
-  // specification is the target's `<string.h>`'s, so a written declaration or definition of the
-  // function is the same entity, with one symbol ([dcl.link]): glibc's `__THROW` is
-  // `noexcept(true)` in C++, the macOS SDK's declarations have none.
-  ast::DeclSema string_function(const StringFunction& f, ast::Compatibility mode) {
+  // C language linkage and the C library's signature (`library_functions`). Its exception
+  // specification matches the target's C header, so a matching written declaration or definition
+  // names the same entity ([dcl.link]). The glibc declarations use `__THROW` (`noexcept(true)` in
+  // C++). The corresponding macOS declarations have no exception specification.
+  ast::DeclSema library_function(const LibraryFunction& f, ast::Compatibility mode) {
     const auto c_type = [&](CType t) {
       const QualType void_type = types.builtin(Builtin::void_);
       const QualType char_type = types.builtin(Builtin::char_);
       switch (t) {
         case CType::int_: return types.builtin(Builtin::int_);
+        case CType::float_: return types.builtin(Builtin::float_);
         case CType::size: return types.builtin(target.size_type);
         case CType::void_pointer: return types.pointer(void_type);
         case CType::const_void_pointer: return types.pointer(types.add_cv(void_type, Cv::const_));

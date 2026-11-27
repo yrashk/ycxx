@@ -153,7 +153,7 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
 // `__builtin_nansl("")` is recognized separately from the quiet NaN builtins.
 // A `library` builtin `__builtin_f` is the C library's function `f`, and calls it; its signature is
-// sema's (`sema::string_functions`).
+// sema's (`sema::library_functions`).
 enum class BuiltinFunction : std::uint8_t {
   fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
   source_line, source_location, ctzg, nansl, ctz,
@@ -194,6 +194,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_strpbrk", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strrchr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strstr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_acosf", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
     BuiltinFunctionInfo{"__builtin_unreachable", BuiltinFunction::unreachable},
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},

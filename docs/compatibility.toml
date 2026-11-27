@@ -542,6 +542,34 @@ clang = "Same as spec."
 evidence = ["tests/daemon/warning_options.py", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "constexpr-builtin-acosf"
+status = "partial"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], GNU built-in library functions, #1615"
+prior = "The builtin spelling was undeclared."
+spec = "Call the implicit C library function at run time. An evaluated implicit call fails constant evaluation, and the dependent libycxx folding probe is false."
+gcc = "Same as spec in this slice."
+gcc_observed = "GCC 16.2 on x86-64 Linux accepts __builtin_acosf(0.5f) as a constant initializer and accepts the corresponding dependent folding probe."
+clang = "Same as spec."
+clang_observed = "Clang 23.1.6 on x86-64 Linux and arm64 Darwin rejects the constant initializer and reports false for the corresponding dependent folding probe."
+limits = "The GNU spelling is separate from the public constexpr std::acos overload, for which libycxx can select its software fallback. GCC-compatible folding remains pending."
+probe = 'constexpr float v = __builtin_acosf(0.5f);'
+evidence = ["https://github.com/yrashk/ycxx/issues/1615", "https://gcc.gnu.org/onlinedocs/gcc/Library-Builtins.html"]
+
+[[divergence]]
+id = "darwin-builtin-acosf-noexcept"
+status = "partial"
+mode_status = { spec = "supported", gcc = "unverified", clang = "pending" }
+reference = "[expr.unary.noexcept], [dcl.link], #1615"
+spec = "The implicit library call uses the exception specification of the declared C function. On arm64 Darwin it is potentially throwing."
+gcc = "Same as spec. GCC on arm64 Darwin has not been checked."
+clang = "Same as spec for the implicit declaration in this slice."
+clang_observed = "Clang 23.1.6 reports noexcept(__builtin_acosf(0.5f)) as true for arm64 Darwin."
+limits = "This discrepancy is specific to the GNU builtin spelling on arm64 Darwin. On x86-64 Linux both observed peers report true, matching the glibc C declaration."
+probe = 'static_assert(noexcept(__builtin_acosf(0.5f)));'
+evidence = ["https://github.com/yrashk/ycxx/issues/1615", "https://github.com/apple-oss-distributions/Libm/blob/17a5f9daa3f5679f7536b26f133b40cc078753c3/Source/ARM/math.h#L209"]
+
+[[divergence]]
 id = "constexpr-float-overflow"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

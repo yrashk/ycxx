@@ -2924,9 +2924,9 @@ operand has undefined behavior. The other fixed-width spellings remain in #248.
 `__builtin_strstr` are direct calls of the C library's function of the same name, as libycxx's
 `<cstring>`, its run-time string helpers (`include/ycxx/core/mem_builtins.hpp`) and the run-time
 paths of its containers use them. Each is one `lex::BuiltinFunction::library` entry, and its C
-signature is a row of `sema::string_functions`; the searches return `char*`, as Clang's and GCC's
+signature is a row of `sema::library_functions`; the searches return `char*`, as Clang's and GCC's
 do. Sema converts the arguments to the C signature and calls an implicit `extern "C"` declaration
-with the target's `<string.h>` exception specification (`World::string_function`), so a written
+with the target's `<string.h>` exception specification (`World::library_function`), so a written
 declaration or definition that matches the target's header is the same entity. One with another
 exception specification is a second entity (whether it should be is #1114), but in both object
 writers an entity the object does not define shares the symbol of its name: the definition of
@@ -2952,6 +2952,19 @@ other object is `Reason::byte_type`. In spec mode, `memchr` reads in order up to
 `memcmp` checks that both objects hold all `n` bytes before reading up to the first difference.
 GCC mode reads the full range for both, and Clang mode checks bytes as read. The `memchr-*`
 fixtures mark the oracle disagreements, and the compatibility test exercises the selected modes.
+
+## GNU float inverse cosine builtin (#1615)
+
+`__builtin_acosf(x)` uses the same implicit C library declaration with signature
+`float acosf(float)`. The argument converts to `float` once and the result is a
+`float` prvalue. Class arguments can use the existing exact non-explicit `operator float()`
+path. General conversion function resolution remains #219. Dependent calls are checked
+again at instantiation. The declaration has glibc's `noexcept` on Linux and the ordinary
+potentially throwing C type on Darwin.
+Native code references `acosf` for the link to resolve. The implicit runtime call is
+unavailable in constant evaluation, which lets the pinned libycxx carrier select its
+software fallback. The compatibility table records GCC folding and Clang's Darwin
+builtin-specific exception specification.
 
 ## Pack expansions in builtin arguments (#1099)
 

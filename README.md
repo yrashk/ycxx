@@ -910,6 +910,8 @@ written default member initializer are value-initialized.
   character arrays in constant expressions.
   [#248](https://github.com/yrashk/ycxx/issues/248) [#1093](https://github.com/yrashk/ycxx/issues/1093)
   [#1092](https://github.com/yrashk/ycxx/issues/1092) [#1170](https://github.com/yrashk/ycxx/issues/1170)
+  `__builtin_acosf` calls the C library's float inverse cosine at run time.
+  [#1615](https://github.com/yrashk/ycxx/issues/1615)
   `__builtin_LINE()` reports the presumed line, including the call site of an omitted ordinary
   function argument. [#327](https://github.com/yrashk/ycxx/issues/327)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
