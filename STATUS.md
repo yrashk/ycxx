@@ -1080,6 +1080,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Source inputs require `-fPIC` or `-fpic`. Strong functions can use direct local and hidden
   references and immutable data. The platform loader and rule worker can consume the image.
   [Design](docs/design/darwin-shared-output.md) · [#393](https://github.com/yrashk/ycxx/issues/393)
+- arm64 Darwin executable links accept explicit leaf `.dylib` paths. The linker
+  reads strong function exports and uses the provider's install name and version
+  fields for its load command. Library contents participate in the resident link key.
+  [Design](docs/design/darwin-dylib-input.md) · [#392](https://github.com/yrashk/ycxx/issues/392)
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
