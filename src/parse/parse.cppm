@@ -1710,14 +1710,19 @@ public:
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
 
-  bool is_immediate_function(EntityId f, u32 item) {
+  bool is_immediate_function(EntityId f, u32 item, bool checking_template_body = false) {
     const EntityId pattern = w_->entities.rec(f).templ;
     const bool instantiation = pattern != EntityId::none && !explicitly_specialized(f, item);
     const auto d = declaration(instantiation ? pattern : f, item);
     if (!d) return false;
     if (d->flags & sema::decl_flag::consteval_) return true;
     if (!instantiation || !(d->flags & sema::decl_flag::constexpr_)) return false;
+    const std::size_t first = instance_order_.size();
     const auto* specialization = instance(f, item);
+    // A template definition discards its queued demands. Keep the specializations
+    // made by this probe available for semantic use without adding native roots.
+    if (checking_template_body)
+      for (const Instance* in : std::span(instance_order_).subspan(first)) pattern_probe_instances_.insert(in->spec);
     return specialization && (specialization->decl.flags & sema::decl_flag::consteval_);
   }
 
@@ -2040,7 +2045,9 @@ public:
   }
   void mark_type_only_instances(std::size_t first_function, std::size_t first_variable, std::size_t first_member);
   std::span<const Instance* const> instances() const { return instance_order_; }
-  bool emits_instance(EntityId spec) const { return !type_only_instances_.contains(spec); }
+  bool emits_instance(EntityId spec) const {
+    return !type_only_instances_.contains(spec) && !pattern_probe_instances_.contains(spec);
+  }
   // Every specialization whose definition the unit requires, in order of first demand.
   std::span<const EntityId> required() const { return required_; }
   std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
@@ -2417,6 +2424,7 @@ private:
   std::deque<Instance> instances_;               // a deque: instances are referred to as they are added
   std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
   std::set<EntityId> type_only_instances_;  // specializations instantiated for type checking
+  std::set<EntityId> pattern_probe_instances_;  // checked for immediate status in an uninstantiated body
   std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
   std::set<u32> instantiating_;                  // specializations whose instantiation is running
   std::map<u32, u32> var_templates_;             // by variable template entity: its defining item
@@ -2842,7 +2850,7 @@ public:
     return p_->global(v, item, member_demand(item));
   }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
-  bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, point()); }
+  bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, point(), checking_template_body); }
   bool is_complete(EntityId c) override {
     // An enumerator initializer is read at its original class-member declaration, where the
     // enclosing class is incomplete ([class.mem.general]).
@@ -3116,6 +3124,7 @@ public:
     return found;
   }
   bool named_pending_member = false;
+  bool checking_template_body = false;
   // Past the closing brace of the class the item defines, that class is complete.
   bool own_class_complete = false;
   std::optional<u32> declaration_lookup_end;
@@ -12516,7 +12525,11 @@ public:
       const auto first_member = p_->member_initializers_.size();
       for (const auto& demand : s_.demands) {
         if (demand.variable_type) continue;
-        if (const auto* instance = p_->instance(demand.spec, q_.at_point.value_or(k_)); instance && instance->failed) {
+        const auto* instance = p_->instance(demand.spec, q_.at_point.value_or(k_));
+        if (!instance) continue;
+        // A cached pattern probe has no native root, but this fold demands its callees be checked.
+        if (p_->pattern_probe_instances_.contains(demand.spec)) p_->type_only_instances_.insert(demand.spec);
+        if (instance->failed) {
           hard.append_range(instance->body.diags);
           failed = true;
         }
@@ -12760,6 +12773,7 @@ public:
     if (p_->world().ins.seqs.size(is.decls) > 0) f = p_->completed_declaration(p_->world().ins.seqs.at(is.decls, 0));
     std::optional<ast::DeclSema> pattern = f;
     const bool function_template = pattern && p_->world().ins.seqs.size(pattern->template_params) > 0;
+    const bool keeps = !inst_ && (function_template || !p_->enclosing_heads(k_).empty());
     if (inst_) f = inst_->decl;
     Ex root;
     if (f && f->entity != EntityId::none && f->kind == ast::DeclKind::function &&
@@ -12819,6 +12833,7 @@ public:
         at_->from = p_->namespace_path(scope);
       }
       if (generic_) return generic_body();
+      at_->checking_template_body = keeps;
       p_->running_bodies_.push_back({f->entity, k_, inst_});
       struct Pop {
         Program* p;
@@ -12889,12 +12904,10 @@ public:
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
     // which calls were dependent ([temp.dep.candidate]) and its pack expansions (ast.md §6.4).
-    bool templated = function_template || !p_->enclosing_heads(k_).empty();
     std::vector<sema::Expansion> none;
     std::vector<u32> no_calls;
     if (at_->named_pending_member && !s_.has_error_since(0))
       s_.diag(0, sema::Diag::incomplete_type, s_.types().class_type(s_.current_class));
-    const bool keeps = templated && !inst_;
     // A body with generic lambdas keeps its expansions too: their specializations expand them.
     const bool keep_expansions = keeps || s_.has_generic_lambdas();
     const bool deduced = f && s_.return_deduced() && !keeps;
@@ -15510,7 +15523,7 @@ void Program::instantiate_all() {
           promoted_initializers.push_back(*i);
         }
       if (!defaulted_special_member(e) &&
-          (member_patterns_.contains(std::to_underlying(e)) || type_only_instances_.contains(e)))
+          (member_patterns_.contains(std::to_underlying(e)) || !emits_instance(e)))
         work.push_back({e, ast::Loc{at, 0}});
     }
   };
@@ -15691,9 +15704,9 @@ void Program::instantiate_all() {
         if (!initializer.type_only) require_value(member_init(initializer.member), id(initializer.item));
       }
       depth.resize(work.size(), 1);
-      if (i == work.size() && has_type_only_instances()) {
+      if (i == work.size() && (has_type_only_instances() || !pattern_probe_instances_.empty())) {
         // Other checked instances still follow the ordinary emission rules. Walk their
-        // definitions if they can promote an instance checked during deduction.
+        // definitions if they can promote an instance checked during deduction or a probe.
         for (; walked_instances < instance_order_.size(); ++walked_instances) {
           const Instance& in = *instance_order_[walked_instances];
           if (emits_instance(in.spec) && !seen.contains(std::to_underlying(in.spec)))
@@ -15713,6 +15726,7 @@ void Program::instantiate_all() {
     if (i == work.size()) break;
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
     type_only_instances_.erase(work[i].spec);
+    pattern_probe_instances_.erase(work[i].spec);
     required_.push_back(work[i].spec);
     if (depth[i] > limit) {
       if (!depth_reported_)
@@ -15771,13 +15785,14 @@ void Program::check_type_only_instances(const std::set<u32>& native) {
   std::size_t walked_variables = 0;
   std::size_t walked_members = 0;
   for (std::size_t i = 0; ; ++i) {
+    // A pattern's immediate-status probe alone has no demand for the body's callees.
     for (; walked_functions < instance_order_.size(); ++walked_functions) {
       const Instance& in = *instance_order_[walked_functions];
-      if (!emits_instance(in.spec)) work.push_back({{in.spec, {id(in.item), 0}}, 1});
+      if (type_only_instances_.contains(in.spec)) work.push_back({{in.spec, {id(in.item), 0}}, 1});
     }
     for (; walked_variables < var_instances_.size(); ++walked_variables) {
       const VarInstance& v = var_instances_[walked_variables];
-      if (!emits_instance(v.spec)) work.push_back({{v.spec, {id(v.item), 0}}, 1});
+      if (type_only_instances_.contains(v.spec)) work.push_back({{v.spec, {id(v.item), 0}}, 1});
     }
     for (; walked_members < member_initializers_.size(); ++walked_members) {
       const auto& initializer = member_initializers_[walked_members];

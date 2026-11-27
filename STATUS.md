@@ -4564,6 +4564,9 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   existing instantiation rules. Invoking the lambda or converting it to a callable function
   pointer still requires native object lifetime and ABI support.
   [[stmt.return]](https://eel.is/c++draft/stmt.return) · [#569](https://github.com/yrashk/ycxx/issues/569) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- An immediate-status probe in an uninstantiated function template body can check a specialization
+  without adding a native emission root. A later native demand reuses that specialization.
+  [#1614](https://github.com/yrashk/ycxx/issues/1614)
 
 ## Templates, ζ step 9: member function templates (#88, #314, 2026-11-19)
 

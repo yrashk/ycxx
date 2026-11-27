@@ -300,6 +300,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_consteval_private_inline
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_consteval_private_inline.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: checks native x86-64 ELF symbols and uses the Linux host linker.
+  # The same syntax fixtures and the scalar run fixture are in tests/own for Darwin.
+  add_test(NAME unit.linux_if_consteval_template_closure
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_if_consteval_template_closure.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF}
+            ${PROJECT_SOURCE_DIR}/tests/own/consteval/if-consteval-template-closure)
   add_test(NAME unit.linux_elf_comdat
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_comdat.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR})
