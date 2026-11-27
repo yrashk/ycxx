@@ -187,6 +187,7 @@ public:
     case TypeKind::builtin:
     case TypeKind::enum_:
     case TypeKind::other: return t;
+    case TypeKind::replay_member: return std::nullopt;
     case TypeKind::placeholder: return b.placeholder ? types().add_cv(*b.placeholder, cv) : t;
     case TypeKind::pointer: {
       auto p = substitute(r.inner, b);
@@ -1521,6 +1522,7 @@ public:
     }
     case TypeKind::pack_expansion: return deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::deferred_alias: return false;  // matched using the expanded type above
+    case TypeKind::replay_member:
     case TypeKind::other: return false;
     }
     return false;
@@ -2683,7 +2685,8 @@ public:
       return std::ranges::all_of(args, [&](const TemplateArg& a) { return structural_operand(a); });
     };
     switch (r.kind) {
-    case TypeKind::builtin: return false;  // Builtin::dependent
+    case TypeKind::builtin:  // Builtin::dependent
+    case TypeKind::replay_member: return false;
     case TypeKind::class_: return all_args(w_->entities.rec(r.entity).args);
     case TypeKind::deferred_alias: return structural_operand(r.inner) && all_args(ins().seqs.elements(r.args));
     case TypeKind::dep_spec:

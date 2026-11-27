@@ -2523,6 +2523,13 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   limited (`-ftemplate-depth`). Member functions, in the class or defined outside it
   (`template<class T> R X<T>::f() {…}`, constructors and destructors too), are instantiated only
   when an emitted body names them ([temp.inst]/4), found by walking the bodies' trees.
+- **Dependent member types:** a non-static data member that directly names a class template
+  specialization can use a dependent integral expression as its argument. This includes
+  arithmetic, a field read from a constexpr variable template specialization, and the name of
+  an earlier static constexpr member. The declaration pattern keeps the field's name and access.
+  Class replay forms the field type, evaluates the argument and checks the resulting layout
+  when a use needs the class to be complete ([temp.dep.constexpr], [temp.arg.nontype],
+  [class.mem.general]). [#1657](https://github.com/yrashk/ycxx/issues/1657)
 - **Deduction and substitution** through specializations: `const Box<T>&` from `Box<int>`,
   `Arr<N>` deducing `N` ([temp.deduct.type]/8); `substitute` rebuilds `X<T>` as `X<int>`.
 - **Mangling:** specializations as `<template-name> <template-args>` with both as substitution
