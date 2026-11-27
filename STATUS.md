@@ -983,8 +983,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - On Linux x86-64, a namespace-scope `asm((expression));` checks `size()` and `data()` in one
   constant evaluation and accepts a single `.hidden SYMBOL` directive with an optional final
   newline. The assembler sets `STV_HIDDEN` on the matching ordinary ELF symbol while preserving
-  its binding and relocations.
+  its binding and relocations. Spec and GCC modes can defer unrelated private constexpr
+  helpers used only in a checked consteval arm. A matching directive or native reference
+  keeps the definition. Clang mode retains the eager walk for these units.
   [Design](docs/design/linux-namespace-constant-asm.md) · [#974](https://github.com/yrashk/ycxx/issues/974)
+  · [#1436](https://github.com/yrashk/ycxx/issues/1436)
 - On Linux x86-64, ordinary external non-inline function declarations can inherit the
   nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
   The canonical declaration carries consistent visibility to its unannotated qualified

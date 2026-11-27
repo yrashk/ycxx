@@ -509,6 +509,18 @@ clang = "Diagnose conflicting labels."
 evidence = ["tests/own/decls/asm-label-conflict.reject.cpp", "tests/daemon/compatibility.py"]
 
 [[divergence]]
+id = "structured-hidden-private-constexpr-emission"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "partial" }
+reference = "[dcl.asm], [stmt.if], #974, #1174, #1436"
+prior = "Keep otherwise deferrable private constexpr helpers in every unit with a structured .hidden directive."
+spec = "Keep the function named by a supported ELF .hidden directive. Defer an unrelated eligible private constexpr helper when only a checked consteval arm calls it."
+gcc = "Same as spec."
+clang = "Retain the eager private constexpr emission walk in units with structured .hidden directives while preserving native reference order for closure names."
+limits = "The extension and the symbol's visibility are available in every mode. The deferral does not apply to unproven emitted names or raw linker names."
+evidence = ["tests/own/decls/structured-hidden-consteval-helper.run.cpp", "https://github.com/yrashk/ycxx/issues/1436#issuecomment-7182970445"]
+
+[[divergence]]
 id = "variable-template-closure-prefix"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
