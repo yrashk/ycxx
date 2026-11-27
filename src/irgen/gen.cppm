@@ -1949,9 +1949,12 @@ class Gen {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
         case ast::BuiltinOp::ctz:
         case ast::BuiltinOp::ctz_gcc_zero:
+        case ast::BuiltinOp::clz:
         case ast::BuiltinOp::clzll: {
-          const auto op = b.op == ast::BuiltinOp::clzll ? ir::Op::clz : ir::Op::ctz;
-          const auto flags = b.op == ast::BuiltinOp::ctz ? ir::Flags{0} : ir::bit(ir::Flag::count_zero_gcc);
+          const bool leading = b.op == ast::BuiltinOp::clz || b.op == ast::BuiltinOp::clzll;
+          const bool gcc_zero = b.op == ast::BuiltinOp::ctz_gcc_zero || b.op == ast::BuiltinOp::clzll;
+          const auto op = leading ? ir::Op::clz : ir::Op::ctz;
+          const auto flags = gcc_zero ? ir::bit(ir::Flag::count_zero_gcc) : ir::Flags{0};
           return pure(op, t, {rvalue(child(a, args[0]))}, {}, flags);
         }
         case ast::BuiltinOp::nansl: {

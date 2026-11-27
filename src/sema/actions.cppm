@@ -9682,10 +9682,11 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
-    if (b.function == ctz || b.function == clzll) {
+    if (b.function == ctz || b.function == clzll || b.function == clz) {
       if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return {NodeId::none, begin, end};
-      const QualType param = builtin(b.function == ctz ? Builtin::unsigned_int : Builtin::unsigned_long_long);
-      const auto op = b.function == ctz ? ast::BuiltinOp::ctz_gcc_zero : ast::BuiltinOp::clzll;
+      const QualType param = builtin(b.function == clzll ? Builtin::unsigned_long_long : Builtin::unsigned_int);
+      const auto op = b.function == clz ? ast::BuiltinOp::clz :
+                      b.function == clzll ? ast::BuiltinOp::clzll : ast::BuiltinOp::ctz_gcc_zero;
       Ex operand = args.front();
       if (!dependent(operand) && types().is_class(operand.type()))
         operand = exact_conversion_call(operand, param, operand.begin, /*allow_explicit=*/false).value_or(operand);
