@@ -672,13 +672,46 @@ pipeline::TuId register_project_unit(pipeline::Session& session, const std::stri
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
 
+HostInputOverlay host_overlay_for(const std::vector<std::string>& directories, const HostInputOverlay& staged) {
+  // An empty view still owns misses in the reserved host directory.
+  static const auto empty = std::make_shared<const pp::HostOverlay>(pp::HostOverlay::Files{});
+  if (!staged) return empty;
+  pp::HostOverlay::Files files;
+  for (const auto& [path, bytes] : staged->files())
+    if (std::ranges::contains(directories, native(fs::path(path).parent_path())))
+      files.emplace(path, bytes);
+  if (files.empty()) return empty;
+  if (files.size() == staged->files().size()) return staged;
+  return std::make_shared<const pp::HostOverlay>(std::move(files));
+}
+
 pipeline::RequestId register_host_executable(pipeline::Session& session, const std::string& cwd,
                                              const HostExecutablePlan& executable, const ast::Target* host_target,
                                              const HostInputOverlay& overlay) {
   pipeline::BuildKey build;
-  for (const auto& [index, source] : std::views::enumerate(executable.sources))
-    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk,
-        static_cast<std::size_t>(index) >= executable.first_own_source ? overlay : nullptr));
+  const auto generated_main_directory = [&](const SourcePlan& source) -> std::optional<std::string> {
+    if (overlay && overlay->files().contains(source.path)) return native(fs::path(source.path).parent_path());
+    return std::nullopt;
+  };
+  std::vector<std::string> own_generated_directories;
+  for (const auto& source : std::span(executable.sources).subspan(executable.first_own_source))
+    if (auto directory = generated_main_directory(source))
+      own_generated_directories.push_back(std::move(*directory));
+  std::map<std::vector<std::string>, HostInputOverlay> overlays;
+  for (const auto& [index, source] : std::views::enumerate(executable.sources)) {
+    const bool own_source = static_cast<std::size_t>(index) >= executable.first_own_source;
+    auto visible = overlay;
+    if (overlay || !own_source) {
+      // Visible siblings do not change the translation unit's include search.
+      auto directories = source.includes;
+      if (own_source) directories.append_range(own_generated_directories);
+      else if (auto directory = generated_main_directory(source)) directories.push_back(std::move(*directory));
+      auto [view, inserted] = overlays.try_emplace(std::move(directories));
+      if (inserted) view->second = host_overlay_for(view->first, overlay);
+      visible = view->second;
+    }
+    build.units.push_back(register_project_unit(session, cwd, source, host_target, pp::View::disk, std::move(visible)));
+  }
   build.program = session.program({.tus = build.units, .objects = {}, .identifier = executable.name});
   return session.request(std::move(build));
 }
