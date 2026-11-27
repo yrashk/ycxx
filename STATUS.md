@@ -2377,6 +2377,12 @@ template's tokens again with the arguments bound.
   ([temp.deduct.type]/8) and mangled as `A T_ _`; the reference tie-break of
   [temp.deduct.partial]/9. Reference binding reads an array's cv-qualifiers from its elements
   ([basic.type.qualifier]/3), for templates and other code.
+- A whole `sizeof(type-id)` bound with a dependent type operand stays dependent in a
+  class template's non-static array member. Completing a specialization replays the member's
+  declaration and checks
+  the ordinary layout and bound there. Merely naming a pointer to the specialization leaves
+  the operand unchecked until a completion demand ([dcl.array], [expr.sizeof], [temp.inst],
+  [#1191](https://github.com/yrashk/ycxx/issues/1191)).
 - Tests: `tests/own/templates/f1-*` (spec-only, plus ten from the review): 47 of 48 pass; the
   other calls through a function pointer (#24). 9 more draft examples pass ([temp.over], [temp.deduct.general],
   [temp.deduct.partial], [temp.arg.general], [temp.deduct.type]).
