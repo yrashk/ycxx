@@ -608,6 +608,21 @@ limits = "Runtime zero has undefined behavior."
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/builtin_clzll/oracle-clzll-zero-constexpr.cpp"]
 
 [[divergence]]
+id = "constexpr-clz-zero"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "GNU bit operation builtins: __builtin_clz, [expr.const], #1654"
+prior = "The GNU spelling was unavailable."
+spec = "A reached zero operand fails constant evaluation."
+gcc = "Same as spec in ycxx."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 accepts the literal zero probe and returns 32 on x86-64 Linux."
+clang_observed = "Clang 23.1.6 rejects the literal zero probe on x86-64 Linux and arm64 Darwin."
+limits = "The documented GNU domain excludes zero. The observed GCC fold is outside this slice."
+probe = 'static_assert(__builtin_clz(0u) == 32);'
+evidence = ["GCC 16.2.0 Linux x86-64 and upstream Clang 23.1.6 Linux x86-64 and arm64 Darwin strict C++26 syntax probes", "docs/EXTENSIONS.md"]
+
+[[divergence]]
 id = "constexpr-nan-operand"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

@@ -173,7 +173,9 @@ struct DeleteArray {
 };
 
 // Built-in functions handled during evaluation (docs/EXTENSIONS.md).
-enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable, add_overflow, mul_overflow, ctz, nansl, ctz_gcc_zero, clzll };
+enum class BuiltinOp : u8 {
+  fabs, strlen, trap, unreachable, add_overflow, mul_overflow, ctz, nansl, ctz_gcc_zero, clzll, clz,
+};
 struct BuiltinCall {
   ExprInfo info;
   BuiltinOp op;
