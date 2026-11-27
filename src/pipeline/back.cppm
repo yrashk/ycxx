@@ -2709,6 +2709,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   };
   std::map<EntityId, std::uint32_t> private_closure_numbers, next_private_closure_number;
   std::uint32_t next_constraint_closure_number = 0;
+  // The `$_N` of closures in a class or namespace that no function or variable owns (#1549).
+  std::map<EntityId, std::uint32_t> scope_closure_numbers;
   auto note_closure = [&](EntityId closure) {
     if (private_closure_numbers.contains(closure)) return;
     if (written_closure_numbers.contains(closure)) {
@@ -3005,8 +3007,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                (r.scope != EntityId::none || written != written_closure_numbers.end() || r.lambda_signature != Fp128{})) {
       // A closure in a class or namespace, with no variable to own it: TU-local, of a lambda in an
       // unevaluated operand of a declaration (#1549) or in a constraint.
-      const bool in_scope = r.scope == EntityId::none || w->entities.rec(r.scope).kind == sema::EntityKind::class_ ||
-                            w->entities.rec(r.scope).kind == sema::EntityKind::namespace_;
+      const bool in_scope = written == written_closure_numbers.end() &&
+                            (r.scope == EntityId::none || w->entities.rec(r.scope).kind == sema::EntityKind::class_ ||
+                             w->entities.rec(r.scope).kind == sema::EntityKind::namespace_);
       auto f = in_scope ? by_id.end() : by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
@@ -3040,10 +3043,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
       } else if (in_scope) {
         // Named `$_N` in its scope, as Clang names its TU-local closures; N is unique in the unit.
+        // A constraint's closure keeps its structural name in the signature it is written in.
         n.closure_in_scope = true;
         if (!n.private_closure_number) {
-          auto number = private_closure_numbers.find(c);
-          if (number == private_closure_numbers.end()) number = private_closure_numbers.emplace(c, next_constraint_closure_number++).first;
+          auto number = scope_closure_numbers.find(c);
+          if (number == scope_closure_numbers.end())
+            number = scope_closure_numbers.emplace(c, std::uint32_t(scope_closure_numbers.size())).first;
           n.private_closure_number = number->second;
         }
       }

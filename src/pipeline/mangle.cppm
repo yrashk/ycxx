@@ -456,6 +456,12 @@ class Mangler {
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
     if (n.closure) {
+      // In a local class: `Z <encoding> E N <prefix> E [<discriminator>]` (§5.1.6).
+      if (auto root = n.closure_in_scope ? local_root(e) : std::nullopt) {
+        auto l = local_encoding(*root->second.local);
+        if (!l) return l;
+        return prefix(e).transform([&](std::string p) { return "Z" + *l + "EN" + p + "E" + discriminator(root->second); });
+      }
       if (n.closure_variable != ast::EntityId::none || (n.closure_in_scope && n.scope != ast::EntityId::none))
         return prefix(e).transform([](std::string p) { return "N" + p + "E"; });
       if (n.closure_in_scope) {  // in the global namespace: an <unscoped-name>
@@ -573,7 +579,7 @@ class Mangler {
   std::optional<std::pair<ast::EntityId, ClassName>> local_root(ast::EntityId e) const {
     for (int depth = 0; e != ast::EntityId::none && classes_ && depth < 64; ++depth) {
       ClassName n = classes_(e);
-      if (!n.is_class || n.closure) return std::nullopt;
+      if (!n.is_class || (n.closure && !n.closure_in_scope)) return std::nullopt;
       if (n.local_class) {
         if (!n.local) return std::nullopt;
         return std::pair{e, std::move(n)};

@@ -106,6 +106,7 @@ struct AliasCallPattern {
   bool class_result = false;
   bool rank_checks = false;
   bool qualified_type_arguments = false;
+  bool closures = false;  // its type-id makes closure types, each specialization its own (#1549)
 };
 
 struct PresumedSource {
@@ -1370,6 +1371,7 @@ public:
       if (hard_error || !sat.value_or(true)) return std::nullopt;
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
+    if (pattern.closures) ++closure_alias_uses;
     if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks || pattern.qualified_type_arguments) {
       // Replay checks obligations that become concrete now. The enclosing alias, member or
       // signature retains checks whose arguments still depend on its own parameters.
@@ -5846,8 +5848,9 @@ public:
     cr.ordinal = ordinal;
     cr.static_closure = spec.static_;
     // In a template's definition, its own template-head (pushed already) aside.
-    cr.closure_pattern = declaration_part && (in_generic_definition() ||
-                                              (template_scopes.size() > (spec.head.empty() ? 0u : 1u) && !instantiating() && !satisfying_atom));
+    cr.closure_pattern = closure_patterns ||
+                         (declaration_part && (in_generic_definition() || (template_scopes.size() > (spec.head.empty() ? 0u : 1u) &&
+                                                                           !instantiating() && !satisfying_atom)));
     for (const ast::TemplateParamSema& h : spec.head)
       if (h.name != invented_name()) cr.closure_head.push_back(h);
     const u16 depth = spec.head.empty() ? 0 : spec.head.front().depth;
@@ -5996,6 +5999,12 @@ public:
   // The part being analysed is no function's body: its generic lambdas are instantiated in it
   // (`GenericClosure::part`).
   bool declaration_part = false;
+  // An alias template's type-id read again with dependent arguments: its closure types are
+  // patterns, which each specialization's replace (#1549).
+  bool closure_patterns = false;
+  // How many alias template specializations named here made closure types (#1549): an alias
+  // template naming one is read again for each of its own specializations ([temp.alias]/5).
+  u32 closure_alias_uses = 0;
   struct ClosureOwnerScope {
     Sema& sema;
     std::optional<ClosureOwner> saved;

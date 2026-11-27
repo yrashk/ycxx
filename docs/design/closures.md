@@ -109,9 +109,10 @@ How decisions 3, 4, 6 and 11 apply to a declaration part, an item outside functi
 6. **An unevaluated operand with no owner** (#1549): a lambda in `decltype` or `sizeof` of an
    alias-declaration, an alias template or a function's declarator belongs to the class or
    namespace around it, TU-local like a constraint's, with a discriminator of the item and the
-   template arguments bound. An alias template whose type-id makes closures is read again for each
-   specialization ([temp.alias]/5). Such a closure is named `$_N` in its scope, N unique in the
-   unit. *Rejected for now:* a class template member's closure with vague linkage and per-class
+   template arguments bound. An alias template whose type-id makes closures, or names an alias
+   template that does, is read again for each specialization ([temp.alias]/5); that read keeps its
+   closures for emission and constant evaluation. Such a closure is named `$_N` in its scope, N
+   unique in the unit, and what names it in a signature is TU-local. *Rejected for now:* a class template member's closure with vague linkage and per-class
    `Ul…E` names, as both compilers have it; it needs ordinals across the class's members
    ([basic.def.odr], #1593).
 

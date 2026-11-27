@@ -948,8 +948,8 @@ clauses = ['expr.prim.lambda.closure']
 std = 'C++20'
 detect = '\bdecltype\s*\(\s*\[[^\[\]]*\]'
 status = 'partial'
-note = 'not in a function template signature (#1269); a class template member closure is TU-local, not vague (#1593)'
-issues = [1269, 1593]
+note = 'not in a function template signature (#1269) or a default template argument (#1608); a class template member closure is TU-local, not vague (#1593)'
+issues = [1269, 1593, 1608]
 probe = '''
 using L = decltype([] { return 5; });
 int main() { L l; return l() == 5 ? 0 : 1; }
