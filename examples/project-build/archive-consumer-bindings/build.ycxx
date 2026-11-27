@@ -1,0 +1,60 @@
+generate "host_object" {
+    tool = "/usr/local/bin/ycxx"
+    args = ["cxx", "--target", host_triple(), "-ffreestanding", "-c", input("source"), "-o", output("object")]
+    environment = { YCXX_DAEMON = "off" }
+    inputs = { source = "host_score.cc" }
+    outputs = { object = "host_score.o" }
+}
+
+generate "target_object" {
+    tool = "/usr/local/bin/ycxx"
+    args = ["cxx", "--target", target_triple(), "-ffreestanding", "-c", input("source"), "-o", output("object")]
+    environment = { YCXX_DAEMON = "off" }
+    inputs = { source = "target_score.cc" }
+    outputs = { object = "target_score.o" }
+}
+
+generate "host_archive" {
+    tool = "/bin/sh"
+    args = [input("script"), "/usr/local/bin/llvm-ar", host_triple(), input("object"), output("archive")]
+    environment = { LD_LIBRARY_PATH = "" }
+    tool_inputs = { archiver = "/usr/local/bin/llvm-ar" }
+    inputs = { script = "pack-archive.sh" object = artifact("host_object", "object") }
+    outputs = { archive = "libhost_score.a" }
+}
+
+generate "target_archive" {
+    tool = "/bin/sh"
+    args = [input("script"), "/usr/local/bin/llvm-ar", target_triple(), input("object"), output("archive")]
+    environment = { LD_LIBRARY_PATH = "" }
+    tool_inputs = { archiver = "/usr/local/bin/llvm-ar" }
+    inputs = { script = "pack-archive.sh" object = artifact("target_object", "object") }
+    outputs = { archive = "libtarget_score.a" }
+}
+
+cpp.library "archive_bridge" {
+    sources = ["archive_bridge.cc"]
+    public_include_dirs = ["include"]
+    public_link_inputs = [{
+        host = artifact("host_archive", "archive")
+        target = artifact("target_archive", "archive")
+    }]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["archive_bridge"]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["archive_bridge"]
+    generated_headers = [artifact("config", "header")]
+}

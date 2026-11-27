@@ -342,6 +342,26 @@ struct CxxTraversal {
   std::size_t next_order = 0;
 };
 
+struct ArchiveOperand {
+  const ArtifactRef& ref;
+  SourceLocation location;
+  std::optional<std::string_view> binding = std::nullopt;
+};
+
+ArchiveOperand archive_operand(const Value& value, bool public_input, bool for_host) {
+  if (const auto* choices = public_input ? std::get_if<Record>(&value.data) : nullptr) {
+    const auto* host = field(*choices, "host");
+    const auto* target = field(*choices, "target");
+    if (choices->size() != 2 || !host || !target)
+      fail(value.location, "public_link_inputs binding requires exactly 'host' and 'target' fields");
+    const auto& host_ref = as<ArtifactRef>(*host, "an artifact reference for 'host' in public_link_inputs");
+    const auto& target_ref = as<ArtifactRef>(*target, "an artifact reference for 'target' in public_link_inputs");
+    return for_host ? ArchiveOperand{host_ref, host->location, "host"}
+                    : ArchiveOperand{target_ref, target->location, "target"};
+  }
+  return {as<ArtifactRef>(value, "an artifact reference"), value.location};
+}
+
 std::string artifact_origin(const ArtifactRef& ref) {
   return std::format("artifact({:?}, {:?})", ref.target, ref.output);
 }
@@ -1421,15 +1441,16 @@ class Planner {
     if (const auto* inputs = public_inputs ? public_inputs : private_inputs) {
       const auto field_name = public_inputs ? "public_link_inputs" : "link_inputs";
       for (const auto& value : as<List>(*inputs, "a list of linker archive inputs")) {
-        if (traversal.host && kind != Primitive::host_executable)
-          fail(value.location, std::format("{} is not supported in host executable dependencies", field_name));
-        const auto& ref = as<ArtifactRef>(value, "an artifact reference");
-        const auto origin = inspection_ ? std::format("declared in {} as {}", field_name, artifact_origin(ref))
-                                        : std::string{};
-        const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", value.location)
-                                              : artifact(ref, value.location);
-        artifact_dependency(decl, requested, field_name, value.location);
-        target.link_inputs.push_back({requested, origin, value.location});
+        const auto [ref, location, binding] = archive_operand(value, public_inputs != nullptr, traversal.host != nullptr);
+        const auto requested = traversal.host ? resolve_host_artifact(ref, *traversal.host, "archive", location)
+                                              : artifact(ref, location);
+        if (binding ? emit_generated_facts : emit_facts)
+          artifact_dependency(decl, requested, field_name, location, binding);
+        std::string origin;
+        if (inspection_)
+          origin = binding ? std::format("declared in {} as {} = {}", field_name, *binding, artifact_origin(ref))
+                           : std::format("declared in {} as {}", field_name, artifact_origin(ref));
+        target.link_inputs.push_back({requested, std::move(origin), location});
       }
     }
     const auto include = [&](std::string path, std::string_view origin, SourceLocation location, bool generated = false) {
