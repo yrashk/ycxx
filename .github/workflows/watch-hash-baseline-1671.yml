@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           submodules: true
           persist-credentials: false
       - name: Verify the exact current-main baseline and capture instrumentation diff
@@ -31,7 +31,7 @@ jobs:
           output="$RUNNER_TEMP/ycxx-hash-baseline-1671"
           mkdir -p "$output/watch"
           test "$(uname -m)" = arm64
-          test "$(git rev-parse HEAD^)" = "$BASELINE"
+          test "$(git merge-base HEAD "$BASELINE")" = "$BASELINE"
           test "$(git rev-parse "$BASELINE^{tree}")" = "$BASELINE_TREE"
           test "$(git -C deps/libycxx rev-parse HEAD)" = "$(git rev-parse "$BASELINE:deps/libycxx")"
           test "$(git diff --name-only "$BASELINE" -- src)" = src/project_build/plan.cppm
@@ -39,7 +39,7 @@ jobs:
           grep -F 'deadline = time.monotonic() + 25' tests/daemon/project_build_watch.py
           git diff "$BASELINE" -- src/project_build/plan.cppm | tee "$output/instrumentation.diff"
           {
-            git rev-parse HEAD HEAD^ 'HEAD^{tree}' "$BASELINE^{tree}"
+            git rev-parse HEAD "$BASELINE" 'HEAD^{tree}' "$BASELINE^{tree}"
             git -C deps/libycxx rev-parse HEAD
             printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
             sw_vers
@@ -55,8 +55,10 @@ jobs:
         shell: bash
         run: |
           output="$RUNNER_TEMP/ycxx-hash-baseline-1671"
+          export YCXX_CI_CMAKE_BIN="$(dirname "$(command -v cmake)")"
           source deps/libycxx/tools/toolchain/activate.sh
           unset YCXX_ROOT
+          test "$(cmake --version | head -n 1)" = 'cmake version 4.4.5'
           {
             "$YCXX_GXX" --version
             "$YCXX_CLANGXX" --version
@@ -71,8 +73,10 @@ jobs:
       - name: Measure the original 25-second staged-witness deadline
         shell: bash
         run: |
+          export YCXX_CI_CMAKE_BIN="$(dirname "$(command -v cmake)")"
           source deps/libycxx/tools/toolchain/activate.sh
           unset YCXX_ROOT
+          test "$(ctest --version | head -n 1)" = 'ctest version 4.4.5'
           output="$RUNNER_TEMP/ycxx-hash-baseline-1671"
           harness="$GITHUB_WORKSPACE/.github/evidence/watch-hash-baseline-1671"
           test "$(command -v clang++)" = "$YCXX_CLANGXX"
