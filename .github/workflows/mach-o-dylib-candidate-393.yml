@@ -13,8 +13,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     env:
-      CANDIDATE: 6dc233742eb6c23dc4581d1d0d5d7f92ca37831f
-      CANDIDATE_TREE: 430a7c5033c5899a9a31f85c6d29147d22d06546
+      CANDIDATE: ab3e82c29bcfd808bea5291f47321b563234718e
+      CANDIDATE_TREE: a3681f700604ec7225f4294f0f999a3d7eed6962
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,6 +86,11 @@ jobs:
           test -d "$YCXX_DARWIN_SHARED_RECEIPTS"
           find "$YCXX_DARWIN_SHARED_RECEIPTS" -type f -print | tee "$output/receipt-files.txt"
           test -s "$output/receipt-files.txt"
+          test -s "$YCXX_DARWIN_SHARED_RECEIPTS/worker-plan.ycxx"
+          cmp "$YCXX_DARWIN_SHARED_RECEIPTS/provider-cold.dylib" "$YCXX_DARWIN_SHARED_RECEIPTS/provider-daemon.dylib"
+          (cd "$YCXX_DARWIN_SHARED_RECEIPTS" && shasum -a 256 provider-cold.dylib provider-daemon.dylib worker-provider.dylib)
+          cat "$YCXX_DARWIN_SHARED_RECEIPTS/worker-plan.ycxx"
+          printf '\n'
       - name: Upload native receipts and gate logs
         if: always()
         uses: actions/upload-artifact@v4
