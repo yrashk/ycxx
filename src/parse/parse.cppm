@@ -178,9 +178,11 @@ public:
   // ------------------------------------------------------------ namespaces ([basic.namespace])
   //
   // A namespace is named by its path, `a::b`, the global one by "". Each item belongs to the
-  // namespace whose definition encloses it (`ns_of`), and, for lookup, to that namespace with
-  // its inline and unnamed components dropped (`eff_ns`): their members are found in the
-  // enclosing namespace ([namespace.def]/7, [namespace.unnamed]).
+  // namespace whose definition encloses it (`ns_of`), and, for lookup, also to each namespace
+  // that encloses that one through inline and unnamed namespaces only, the outermost of which is
+  // `eff_ns`: their members are found in the enclosing namespace ([namespace.def.general]/7,
+  // [namespace.unnamed]). Inline-ness belongs to the namespace, not to a definition: an extension
+  // without `inline` of an inline namespace is still inline ([namespace.def.general]/7).
 
   const std::string& ns_of(u32 k) const { return ns_of_[k]; }
   bool in_class(u32 k) const { return in_class_[k]; }
@@ -247,6 +249,7 @@ public:
     std::vector<bool> in_class;         // by item
     std::map<std::string, std::vector<InlineNamespace>> inline_namespaces;  // by enclosing namespace
     std::map<std::string, std::vector<InlineNamespace>> unnamed_namespaces;  // implicit using-directives
+    std::map<std::string, u32> first_definitions;  // by named namespace: the item that first defines it
     std::vector<Directive> directives;  // their targets unresolved
     bool says_virtual = false;          // the unit's tokens hold `virtual`
     std::vector<bool> qualified;        // by item: its first declarator's name is qualified
@@ -283,14 +286,12 @@ public:
     x.in_class.assign(its.size(), false);
     x.inner_of.assign(its.size(), "");
     x.namespace_visibility.assign(its.size(), ast::GnuVisibility::none);
-    std::vector<std::string> inner_eff(its.size());
     for (u32 k = 0; k < its.size(); ++k) {  // preorder: a parent comes first
       u32 p = its[k].parent;
       if (p != items::none) {
         x.in_class[k] = x.in_class[p] || its[p].kind == ItemKind::class_def || its[p].kind == ItemKind::enum_def;
         bool ns = its[p].kind == ItemKind::namespace_def;
         x.ns_of[k] = ns ? x.inner_of[p] : x.ns_of[p];
-        x.eff_ns[k] = ns ? inner_eff[p] : x.eff_ns[p];
         x.namespace_visibility[k] = x.namespace_visibility[p];
       }
       // A local class's names are in a level of its own, inside its function's namespace: no
@@ -301,7 +302,6 @@ public:
         // Named by its id, not its position: an edit elsewhere changes no item's level.
         const std::string level = std::format("(local {:016x}{:016x})", its[k].id.hi, its[k].id.lo);
         x.ns_of[k] = x.ns_of[p].empty() ? level : x.ns_of[p] + "::" + level;
-        x.eff_ns[k] = x.eff_ns[p].empty() ? level : x.eff_ns[p] + "::" + level;
       }
       if (its[k].kind != ItemKind::namespace_def) continue;
       // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
@@ -341,11 +341,11 @@ public:
       bool anonymous = names.empty();
       if (anonymous) names.push_back({"(anonymous)", true});
       x.inner_of[k] = x.ns_of[k];
-      inner_eff[k] = x.eff_ns[k];
       for (const auto& [n, inl] : names) {
         const std::string parent = x.inner_of[k];
-        if (!anonymous) x.name_scopes[k].push_back({parent, inner_eff[k]});
+        if (!anonymous) x.name_scopes[k].push_back({parent, ""});  // its lookup scope is set below
         x.inner_of[k] += (x.inner_of[k].empty() ? "" : "::") + n;
+        if (!anonymous) x.first_definitions.try_emplace(x.inner_of[k], k);
         // An unnamed namespace is transparent to ordinary lookup even without `inline`.
         // Only explicitly inline namespaces form the set used by ADL.
         if (anonymous ? is_inline : inl) {
@@ -357,9 +357,24 @@ public:
           if (!std::ranges::contains(children, x.inner_of[k], &InlineNamespace::path))
             children.push_back({x.inner_of[k], k});
         }
-        if (!inl) inner_eff[k] += (inner_eff[k].empty() ? "" : "::") + n;
       }
     }
+    // Once every namespace's inline-ness is known: an item's lookup scope is its namespace with the
+    // inline and unnamed namespaces it is directly in dropped.
+    auto home = [&](std::string path) {
+      while (!path.empty()) {
+        const std::string parent = parent_of(path);
+        auto children = x.inline_namespaces.find(parent);
+        if (!path.ends_with("(anonymous)") &&
+            (children == x.inline_namespaces.end() || !std::ranges::contains(children->second, path, &InlineNamespace::path)))
+          break;
+        path = parent;
+      }
+      return path;
+    };
+    for (u32 k = 0; k < its.size(); ++k) x.eff_ns[k] = home(x.ns_of[k]);
+    for (auto& [k, scopes] : x.name_scopes)
+      for (auto& [ns, eff] : scopes) eff = home(ns);
     for (u32 k = 0; k < its.size(); ++k) {
       if (x.in_class[k] || its[k].kind != ItemKind::declaration) continue;
       lex::Tk a = r.tokens[its[k].begin].kind;
@@ -372,8 +387,11 @@ public:
     for (const auto& [k, scopes] : x.name_scopes) x.name_scoped[k] = &scopes;
     for (const auto& [name, entries] : x.by_name)
       for (auto [j, k] : entries) {
-        x.by_scope[{name, name_ns(x, j, k)}].push_back({j, k});
-        x.by_lookup_scope[{name, name_eff_ns(x, j, k)}].push_back({j, k});
+        const std::string& ns = name_ns(x, j, k);
+        x.by_scope[{name, ns}].push_back({j, k});
+        // Each namespace from its lookup scope to its own, exclusive: prefixes of `ns`.
+        for (std::size_t n = name_eff_ns(x, j, k).size(); n < ns.size(); n = ns.find("::", n == 0 ? 0 : n + 2))
+          x.by_lookup_scope[{name, std::string_view(ns).substr(0, n)}].push_back({j, k});
         x.by_item_scope[{name, x.ns_of[j]}].push_back({j, k});
         if (x.qualified[j]) x.qualified_by_name[name].push_back({j, k});
       }
@@ -772,15 +790,20 @@ public:
     const auto* scopes = x.name_scoped[item];
     return scopes && name < scopes->size() ? (*scopes)[name].second : x.eff_ns[item];
   }
+  // Whether lookup in namespace `path` finds a member of `ns`, whose lookup scope is `eff`: `path`
+  // is `ns` or encloses it through inline and unnamed namespaces only.
+  static bool looks_into(const std::string& eff, const std::string& path, const std::string& ns) {
+    return path == ns || (encloses(eff, path) && encloses(path, ns));
+  }
   static bool passes(const Index& x, Probe kind, const std::string& path, u32 j, u32 k) {
     switch (kind) {
-      case Probe::declared_in: return name_ns(x, j, k) == path || name_eff_ns(x, j, k) == path;
+      case Probe::declared_in: return looks_into(name_eff_ns(x, j, k), path, name_ns(x, j, k));
       case Probe::declared_in_inhabit: return name_ns(x, j, k) == path;
       case Probe::namespace_members: return !x.in_class[j] && x.ns_of[j] == path;
       case Probe::class_members: return x.in_class[j] && x.ns_of[j] == path;
       case Probe::same_namespace: return x.ns_of[j] == path;
       case Probe::declares:
-        return path == "*" || name_ns(x, j, k) == path || name_eff_ns(x, j, k) == path ||
+        return path == "*" || looks_into(name_eff_ns(x, j, k), path, name_ns(x, j, k)) ||
                (x.qualified[j] && encloses(name_ns(x, j, k), path));
     }
     return true;
@@ -1062,6 +1085,15 @@ public:
     if (inlines == inline_namespaces_.end()) return false;
     auto child = std::ranges::find(inlines->second, path, &InlineNamespace::path);
     return child != inlines->second.end() && child->item < limit;
+  }
+  // Whether `item` is the first to define namespace `path` as inline although an earlier definition
+  // did not ([namespace.def.general]/3: only an original namespace definition can make it inline).
+  bool reopened_as_inline(const std::string& path, u32 item) const {
+    auto first = ix_->first_definitions.find(path);
+    auto inlines = inline_namespaces_.find(parent_of(path));
+    if (first == ix_->first_definitions.end() || first->second >= item || inlines == inline_namespaces_.end()) return false;
+    auto child = std::ranges::find(inlines->second, path, &InlineNamespace::path);
+    return child != inlines->second.end() && child->item == item;
   }
   static bool encloses(std::string_view outer, std::string_view inner) {
     return outer.empty() || inner == outer ||
@@ -8253,6 +8285,10 @@ private:
             return bad();
           }
       path += (path.empty() ? "" : "::") + n.name;
+      if (p_->reopened_as_inline(path, k_)) {
+        s_.diag(n.offset, Diag::namespace_reopened_inline, p_->world().ins.names.intern(n.name));
+        return bad();
+      }
       ast::DeclSema sem = class_decl(p_->namespace_entity(path), true);
       sem.kind = ast::DeclKind::namespace_;
       sem.type = s_.builtin(sema::Builtin::void_);
