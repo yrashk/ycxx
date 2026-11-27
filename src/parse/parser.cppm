@@ -3747,9 +3747,11 @@ public:
       }
       for (std::size_t i = 0; i < *n; ++i) {
         i_ = begin_ + begin;
+        s_->begin_pattern();
         s_->push_frame(e.packs, u32(i));
         out.push_back(read());
         s_->pop_frame();
+        s_->end_element(e.packs);
       }
       i_ = begin_ + e.end;
       expect(Tk::ellipsis);

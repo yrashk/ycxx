@@ -390,6 +390,7 @@ enum class Diag : std::uint32_t {
   not_a_pack [[=message{Severity::error, "'{0:n}' is not a parameter pack"}]],
   unexpanded_pack [[=message{Severity::error, "the parameter pack '{0:n}' is used without '...'"}]],
   expansion_without_pack [[=message{Severity::error, "the pattern of a pack expansion names no parameter pack"}]],
+  mem_initializer_expansion_not_base_pack [[=message{Severity::error, "a mem-initializer followed by '...' must name a pack of base classes"}]],
   empty_fold [[=message{Severity::error, "a fold over an empty pack needs an initial value for this operator"}]],
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
   pack_index_range [[=message{Severity::error, "pack index {0} is out of range for a pack of {1} elements"}]],

@@ -12554,21 +12554,26 @@ private:
     QualType ct = s_.types().class_type(s_.current_class);
     bool seen_initializer = false;
     bool reported_mixed = false;
-    ps_.bump();
-    do {
+    bool names_base_pack = false;  // whether the last mem-initializer-id is a pack of base classes
+    // One mem-initializer: false when the list cannot be read further.
+    const auto one = [&]() -> bool {
       if (!ps_.is(Tk::identifier)) {
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
         if (r.delegation) r.delegation.emplace();
-        return r;
+        return false;
       }
       const bool had_initializer = std::exchange(seen_initializer, true);
       u32 at = ps_.pos();
       NameId n = ps_.name_of(ps_.tok());
+      names_base_pack = false;
       ps_.bump();
       u32 field = 0;
       while (field < rec.fields.size() && rec.fields[field].name != n) ++field;
       std::optional<QualType> type;
       auto destination = sema::ConstructorDestination::object;
+      // A dependent mem-initializer-id, such as a base that is a template parameter or a pack's
+      // element ([temp.dep.type]), names its base only in an instantiation, which checks it.
+      bool dependent_target = false;
       if (field < rec.fields.size()) {
         type = rec.fields[field].type;
       } else {
@@ -12586,26 +12591,30 @@ private:
             if (const auto* record = p_->classes_.find(cls); rec.bases.size() == 1 && record && record->polymorphic)
               destination = sema::ConstructorDestination::polymorphic_base;
           }
+        } else if (named && s_.types().is_dependent(*named)) {
+          type = *named;
+          dependent_target = true;
         }
+        if (const ast::TemplateParamSema* p = s_.template_param(n); named && p && p->pack) names_base_pack = true;
       }
       const bool delegates = destination == sema::ConstructorDestination::delegation;
       if (r.delegation || (delegates && had_initializer)) {
         if (!std::exchange(reported_mixed, true)) s_.diag(at, Diag::delegating_initializer_not_alone);
         r.delegation.emplace();
         skip_mem_initializer();
-        continue;
+        return true;
       }
       if (!type) {
         s_.diag(at, Diag::no_member, n, ct);
         skip_mem_initializer();
-        continue;
+        return true;
       }
       if (delegates) {
         r.delegation.emplace();
         if (!s_.template_scopes.empty() || inst_) {
           s_.diag(at, Diag::not_supported, Tk::colon);
           skip_mem_initializer();
-          continue;
+          return true;
         }
       }
       QualType ft = *type;
@@ -12617,13 +12626,23 @@ private:
                    : s_.construct_from_list(ft, *list, sema::Construction::direct_list, destination);
       } else {
         u32 open = ps_.pos();
-        if (!ps_.expect(Tk::l_paren)) return r;
+        if (!ps_.expect(Tk::l_paren)) return false;
         std::vector<Ex> args;
+        // Each initializer-clause of the expression-list may be a pack expansion
+        // ([class.base.init]/1, [temp.variadic]/5), as a call's arguments are. An expansion whose
+        // packs are not bound yet leaves the number of arguments unknown, and a dependent type
+        // leaves the kind of initialization unknown: the initializer stays dependent, and the
+        // instantiation checks the expanded arguments.
+        bool unexpanded = false;
         if (!ps_.is(Tk::r_paren))
-          do args.push_back(ps_.assignment_expression());
+          do
+            for (const Ex& x : ps_.expandable([&] { return ps_.assignment_expression(); }, nullptr, &unexpanded))
+              args.push_back(x);
           while (ps_.accept(Tk::comma));
-        if (!ps_.expect(Tk::r_paren)) return r;
-        if (destination != sema::ConstructorDestination::object) {
+        if (!ps_.expect(Tk::r_paren)) return false;
+        if (unexpanded || s_.types().is_dependent(ft)) {
+          if (std::ranges::all_of(args, [](const Ex& a) { return a.ok(); })) init = s_.dependent_node(args, open, ps_.pos());
+        } else if (destination != sema::ConstructorDestination::object) {
           init = s_.construct(ft, std::move(args), open, ps_.pos(), sema::Construction::direct, destination);
         } else if (s_.types().is_class(ft)) {
           init = s_.has_user_ctors(ft) || args.size() != 1 ? s_.construct(ft, std::move(args), open, ps_.pos())
@@ -12636,15 +12655,55 @@ private:
           init = s_.convert(args[0], ft, open);  // a reference binds ([dcl.init.ref])
         }
       }
+      if (dependent_target) return true;
       if (delegates) r.delegation = init;
       else {
         if (r.subobjects.contains(field)) s_.diag(at, Diag::redeclared_member, n);  // [class.base.init]/3
         r.subobjects[field] = init;
       }
+      return true;
+    };
+    ps_.bump();
+    do {
+      // A mem-initializer followed by `...` is a pack expansion ([class.base.init]/15,
+      // [temp.variadic]/5): `Bs(args)...` initializes each base of the pack. The definition
+      // records its packs; an instantiation reads it once for each element, with the packs bound
+      // to that element, as an expandable operand is read.
+      const u32 begin = ps_.pos();
+      const u32 start = ps_.index();
+      if (const sema::Expansion* x = s_.expansion_at(begin)) {
+        const sema::Expansion e = *x;
+        if (auto n = s_.expansion_length(e, begin)) {
+          for (std::size_t i = 0; i < *n; ++i) {
+            ps_.seek(start);
+            s_.begin_pattern();
+            s_.push_frame(e.packs, u32(i));
+            const bool ok = one();
+            s_.pop_frame();
+            s_.end_element(e.packs);
+            if (!ok) return r;
+          }
+          ps_.seek(start + (e.end - begin));
+          if (!ps_.expect(Tk::ellipsis)) return r;
+          continue;
+        }
+      }
+      s_.begin_pattern();
+      const bool ok = one();
+      const u32 ellipsis = ps_.pos();
+      const bool expanded = ok && ps_.is(Tk::ellipsis);
+      const auto packs = s_.end_pattern(expanded, begin, ellipsis);
+      if (!ok) return r;
+      if (expanded) {
+        ps_.bump();
+        // [class.base.init]: the expansion initializes the bases a pack expansion in the
+        // base-specifier-list specifies, so its mem-initializer-id names that pack of bases.
+        if (packs.empty()) s_.diag(ellipsis, Diag::expansion_without_pack);
+        else if (!names_base_pack) s_.diag(begin, Diag::mem_initializer_expansion_not_base_pack);
+      }
     } while (ps_.accept(Tk::comma));
     return r;
   }
-
   // A delegating initializer precedes the body. Other constructors initialize their direct bases in declaration
   // order, from their mem-initializers (keyed after the members) or default-initialized (a
   // `MemberInit` of field `~0u`); then every member in declaration order, from its
