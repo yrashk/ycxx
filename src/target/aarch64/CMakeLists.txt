@@ -1,5 +1,5 @@
 # ycxx.target.aarch64: the AArch64 target description, selection, allocation and emission (#28).
-add_library(ycxxc_aarch64 STATIC)
+add_library(ycxxc_aarch64 ${YCXXC_COMPONENT_TYPE})
 target_sources(ycxxc_aarch64 PUBLIC FILE_SET CXX_MODULES FILES
   isa.cppm
   abi.cppm

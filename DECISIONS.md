@@ -23,6 +23,12 @@ reasoning; do not leave decisions only in issue threads.
      direct function imports use eager GOT relocations. Provider discovery uses GNU hash when
      available and otherwise uses SysV hash. Target CRT, versioned imports, provider dependencies
      and normal hosted process startup follow under #390.
+   - arm64 macOS [leaf shared output](docs/design/darwin-shared-output.md) builds a signed
+     dylib from freestanding position-independent objects. Its install name enters the
+     link query. It exports strong functions and resolves direct local references (#393).
+   - arm64 macOS [explicit dylib inputs](docs/design/darwin-dylib-input.md) let signed executables
+     import strong functions from leaf libraries. Ordered content snapshots enter the link key.
+     The native linker uses their recorded install names and version fields (#392).
    - Linux x86-64 [archive inputs](docs/design/linux-static-archives.md) start with explicit
      indexed GNU archives in static executable links. The linker extracts only members needed
      by outstanding symbols and preserves archive operand order (#388).
@@ -172,9 +178,11 @@ reasoning; do not leave decisions only in issue threads.
 
 ## 3. Implementation language and bootstrap
 
-1. **C++26 with libycxx.** ycxx is written in C++26 and uses libycxx (submodule
-   `deps/libycxx`) as its standard library, with `import std;`. libycxx's preprocessor policy
-   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's own sources too.
+1. **C++26 with a selectable standard library.** The default build uses the pinned libycxx
+   submodule and `import std;`. A system build imports the bootstrap GCC installation's
+   libstdc++ module and builds libycxx's portable execution provider against that same library.
+   The bootstrap compiler and the source language stay the same. libycxx's preprocessor policy
+   (`deps/libycxx/DECISIONS.md` §1) applies to ycxx's sources in both configurations.
 2. **Modern C++, as far as the bootstrap compiler allows.** ycxx exercises C++20–26 as heavily
    as the bootstrap compiler supports. The test is: *how would this be written in fully
    implemented C++26?* Write it that way, unless the bootstrap compiler cannot.
@@ -438,6 +446,11 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      [closures.md](docs/design/closures.md), decided by Fable).
      An internal namespace variable can own a captureless closure. Its declarator anchors the
      identity before type deduction, and the declaration part carries its members (#338).
+   - **Local classes** ([class.local]) are items: the splitter cuts a class-specifier in a block
+     out of its function or declaration, the block's analysis gives it an entity local to the
+     function, numbered per name in token order, and records the block's names for its members;
+     the class is then analysed as any class (#117, [local-classes.md](docs/design/local-classes.md),
+     decided by Fable). This amends the AST design's §4.4 for local class definitions only.
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
     - **One daemon per project root and ycxx binary.** The root is found at the first `.ycxx`,
@@ -461,6 +474,23 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
       the persistent cache handed to the next daemon as red/green from a different start. (§7)
     - **Every answer carries its revision and per-root counters,** which the β tests check, with
       daemon and in-process outputs compared byte for byte. (§8)
+11. **Resident project builds.** The accepted [build design](docs/design/build.md) (#1252)
+    keys a workspace request root by the configured executable's output path. The root fetches
+    `pipeline::Build` in the workspace's resident compiler session. Native compilation reads
+    generated sources and headers through an immutable file view. Disk lookups, including
+    misses, still enter the compiler's normal dependencies.
+    - **Run declared tools between query epochs.** The root returns pending actions. The
+      coordinator runs them in private staging and admits a receipt at quiescence only after
+      all named outputs have been validated. Each generated path has its own content identity,
+      so an equal sibling output can cut off downstream work even when the action reruns.
+    - **Publish a successful generation transactionally.** The coordinator installs the
+      executable and its managed runtime assets from the completed request. Failures before
+      publication leave the previous generation available. If the asset switch fails, the
+      publisher attempts to restore the previous executable. Cached results can restore
+      missing outputs.
+    - The request trace includes the native compiler queries and coordinator events.
+      `ycxx build --watch` uses the daemon's watch loop and reobserves the project plan.
+      `ycxx show` resolves the plan and its provenance without executing build actions.
 
 ## 5. Development process
 

@@ -10,6 +10,9 @@ import sys
 import tempfile
 import textwrap
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "daemon"))
+from runtime_dir import runtime_root
+
 
 compiler, include = sys.argv[1:]
 with tempfile.TemporaryDirectory() as directory:
@@ -168,7 +171,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     daemon_env = {key: value for key, value in os.environ.items() if key not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
     daemon_env.update(YCXX_ROOT=str(root), YCXX_THREADS="2")
-    with tempfile.TemporaryDirectory(prefix="yg-", dir="/tmp") as sockets:
+    with tempfile.TemporaryDirectory(prefix="yg-", dir=runtime_root("yg-")) as sockets:
         env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
         args = [*base, "--daemon=require", "-fsyntax-only", rules, caller]
         try:
@@ -260,7 +263,7 @@ with tempfile.TemporaryDirectory() as directory:
                 assert not rejected.exists()
 
         # A resident link must recheck the proof when a provider is rebuilt in place.
-        with tempfile.TemporaryDirectory(prefix="yg-link-", dir="/tmp") as sockets:
+        with tempfile.TemporaryDirectory(prefix="yg-link-", dir=runtime_root("yg-link-")) as sockets:
             link_env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
             resident = ["--daemon=require" if flag == "--no-daemon" else flag for flag in target]
             provider_object = root / "provider.o"
@@ -376,7 +379,7 @@ with tempfile.TemporaryDirectory() as directory:
         trap_signals = (-signal.SIGILL, -signal.SIGTRAP) if mac_host else (-signal.SIGILL,)
         for target, can_run in targets:
             resident = ["--daemon=require" if flag == "--no-daemon" else flag for flag in target]
-            with tempfile.TemporaryDirectory(prefix="yg-guard-", dir="/tmp") as sockets:
+            with tempfile.TemporaryDirectory(prefix="yg-guard-", dir=runtime_root("yg-guard-")) as sockets:
                 env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
                 try:
                     previous = None

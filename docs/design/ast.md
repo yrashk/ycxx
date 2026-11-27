@@ -372,6 +372,9 @@ Block-scope declarations, lambdas, local classes and bindings are plain data of 
 Those that can be named from outside the body get an `EntityId` (§4.3); tooling locates them by
 `Loc`.
 
+Amended (#117): a local class's definition is an item of its own, owned by the item whose body
+holds it; its id is that of any item, not the body's ([local-classes.md](local-classes.md)).
+
 *Reason:* a `DeclId` inside a body would need the `BodyId` to be unambiguous (one item has as many
 bodies as there are expansions of its macros, §B1.2), and with the `BodyId` it would change on
 every body edit.
@@ -915,6 +918,9 @@ longer be shared.
 ### 7.6 Pack indexing and binding packs
 
 `T...[I]` is `TPackIndex` while dependent and otherwise the selected element, with no sugar.
+The node stores the index value used in substitution. GCC and Clang modes also retain the
+written constant name, enum value, or supported operator expression when it affects dependent
+type identity and mangling.
 `e...[I]` is `PackIndex{Child pack; Child index}`, `VDepPackIndex` in canonical positions, and is
 replaced at substitution by the selected element's node ([expr.prim.pack.index]). A structured
 binding pack (P1061) with a dependent initializer is a pack `LocalRec` used through

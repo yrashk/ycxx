@@ -78,7 +78,7 @@ std::vector<std::uint64_t> sample_imms(Op op, std::uint32_t nsucc) {
       case Imm::pred: w.push_back(std::to_underlying(Pred::sle)); break;
       case Imm::storage: w.push_back(std::to_underlying(Storage::temporary)); break;
       case Imm::init: w.push_back(std::to_underlying(Init::erroneous)); break;
-      case Imm::order: w.push_back(std::to_underlying(MemOrder::acq_rel)); break;
+      case Imm::order: w.push_back(std::to_underlying(MemOrder::seq_cst)); break;
       case Imm::rmw: w.push_back(std::to_underlying(Rmw::xor_)); break;
       case Imm::consts:
         w.push_back(nsucc - 1);

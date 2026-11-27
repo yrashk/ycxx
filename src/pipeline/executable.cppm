@@ -1,9 +1,9 @@
 // Linking a program (#43) through ycxx's linkers. x86-64 Linux produces an ELF executable
 // or a leaf shared library (#391).
-// arm64 macOS links the objects and libSystem into a signed Mach-O executable. Imports are checked
-// against the export list of the SDK's `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what
-// `xcrun --show-sdk-path` prints, else the Command Line Tools' SDK. The SDK is located and its
-// export list read once per process.
+// arm64 macOS produces a signed Mach-O executable or a freestanding leaf dylib (#393).
+// Executable imports use the SDK's `usr/lib/libSystem.B.tbd` and explicit leaf dylibs (#392).
+// The SDK is `$SDKROOT`, else what `xcrun --show-sdk-path` prints, else the Command Line Tools'
+// SDK. The SDK is located and its export list read once per process.
 //
 // `link(P)` is the engine query over a program's translation units and disk inputs. Static
 // archive links follow operand order: GNU archives in x86-64 Linux links, Darwin archives in
@@ -16,6 +16,7 @@ export module ycxx.pipeline:executable;
 import std;
 import ycxx.ast;
 import ycxx.engine;
+import ycxx.hash;
 export import ycxx.link;
 export import ycxx.link.elf;
 import :back;
@@ -31,10 +32,17 @@ const std::optional<std::filesystem::path>& sdk_path();
 // accepted (the loader then reports a missing one).
 const link::dylib& libsystem();
 
+struct DarwinDylibInput {
+  std::string path;
+  link::dylib library;
+  Fp128 contents;
+};
+
 // The executable's bytes, or the linker's errors. `identifier` names the Mach-O code signature.
 // Linux uses the pipeline's startup with `main`, or a static executable can define `_start`.
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(
-    std::span<const obj::object> objects, std::string identifier, const link::elf::dynamic_options* dynamic = nullptr);
+    std::span<const obj::object> objects, std::string identifier, const link::elf::dynamic_options* dynamic = nullptr,
+    std::span<const DarwinDylibInput> darwin_dylibs = {});
 
 // Writes bytes to `path`, replacing a regular file or a symbolic link, and makes a new file
 // executable when `executable` is set; an error message on failure.
@@ -64,7 +72,8 @@ struct ArchiveLinkInputs {
 // Ordinarily, translation units precede disk objects. Archive links carry a positional manifest
 // of all operands and the archive snapshots. Linux dynamic links carry their target interpreter
 // and ordered shared inputs. `identifier` names the Mach-O code signature. A shared SONAME
-// requests Linux shared output with no executable startup.
+// requests Linux shared output with no executable startup. A dylib install name requests leaf
+// Darwin shared output. Darwin executable links carry the ordered dylib snapshots.
 struct ProgramInputs {
   std::vector<TuId> tus;
   std::vector<obj::object> objects;
@@ -74,10 +83,13 @@ struct ProgramInputs {
   bool check_policies = false;
   std::optional<std::string> shared_soname = std::nullopt;
   OptimizationMode optimization = OptimizationMode::none;
+  std::optional<std::string> dylib_install_name = std::nullopt;
+  std::vector<DarwinDylibInput> darwin_dylibs = {};
 };
 
 EffectVerification effect_link_verification(const ProgramInputs& in) {
-  if (in.dynamic || in.shared_soname) return EffectVerification::unavailable;
+  if (in.dynamic || in.shared_soname || in.dylib_install_name || !in.darwin_dylibs.empty())
+    return EffectVerification::unavailable;
   if (const auto& archive = in.archive_link;
       archive && (archive->target != obj::target::aarch64_macos ||
                   std::ranges::contains(archive->operands, LinkOperand::Kind::archive, &LinkOperand::kind)))
@@ -284,6 +296,8 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_linux_ex
 
 }  // namespace
 
+constexpr std::string_view cxxabi_install_name = "/usr/lib/libc++abi.dylib";
+
 // /usr/lib/libc++abi.dylib, the C++ ABI runtime (`__cxa_guard_acquire`, Itanium C++ ABI §3.3.3),
 // with its exports from the SDK's stub; none without one.
 const std::optional<link::dylib>& libcxxabi() {
@@ -292,7 +306,7 @@ const std::optional<link::dylib>& libcxxabi() {
       std::ifstream in(*sdk / "usr/lib/libc++abi.tbd", std::ios::binary);
       if (in) {
         std::string text{std::istreambuf_iterator<char>(in), {}};
-        return link::dylib{"/usr/lib/libc++abi.dylib", link::tbd_exports(text), 0x08981b00, 0x00010000};  // 2200.27, 1.0
+        return link::dylib{std::string(cxxabi_install_name), link::tbd_exports(text), 0x08981b00, 0x00010000};  // 2200.27, 1.0
       }
     }
     return std::nullopt;
@@ -301,7 +315,8 @@ const std::optional<link::dylib>& libcxxabi() {
 }
 
 std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executable(
-    std::span<const obj::object> objects, std::string identifier, const link::elf::dynamic_options* dynamic) {
+    std::span<const obj::object> objects, std::string identifier, const link::elf::dynamic_options* dynamic,
+    std::span<const DarwinDylibInput> darwin_dylibs) {
   const auto target = objects.empty() ? (dynamic ? obj::target::x86_64_linux : obj::target::aarch64_macos)
                                       : objects.front().arch;
   for (const auto& object : objects) {
@@ -312,6 +327,8 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
           std::format("{}: cannot mix arm64 Mach-O and x86-64 Linux objects", object.name)}});
   }
   if (target == obj::target::x86_64_linux) {
+    if (!darwin_dylibs.empty())
+      return std::unexpected(std::vector<link::error>{{"Mach-O dylib inputs require an arm64 Darwin executable link"}});
     if (std::ranges::none_of(objects, [](const obj::object& o) { return !o.comdat_groups.empty(); }))
       return link_linux_executable(objects, dynamic);
     std::vector<obj::object> selected(objects.begin(), objects.end());
@@ -323,12 +340,27 @@ std::expected<std::vector<std::uint8_t>, std::vector<link::error>> link_executab
 
   link::options opts;
   opts.dylibs = {libsystem()};
+  if (!darwin_dylibs.empty()) {
+    // The SDK-less fallback accepts all names in ordinary executable links. With explicit
+    // providers it must leave their exports and missing names to normal symbol resolution.
+    if (!opts.dylibs.front().exports) opts.dylibs.front().exports.emplace();
+    opts.dylibs.reserve(darwin_dylibs.size() + 2);
+    std::set<std::string_view> install_names{opts.dylibs.front().install_name, cxxabi_install_name};
+    for (const auto& input : darwin_dylibs) {
+      if (!install_names.insert(input.library.install_name).second)
+        return std::unexpected(std::vector<link::error>{{std::format(
+            "{}: duplicate Mach-O dylib install name '{}'", input.path, input.library.install_name)}});
+      opts.dylibs.push_back(input.library);
+    }
+  }
   // libc++abi when the objects need a name only it exports.
   const auto& abi = libcxxabi();
-  const auto& sys = libsystem().exports;
-  if (abi && sys && std::ranges::any_of(objects, [&](const obj::object& o) {
+  if (abi && opts.dylibs.front().exports && std::ranges::any_of(objects, [&](const obj::object& o) {
         return std::ranges::any_of(o.symbols, [&](const obj::symbol& s) {
-          return !s.defined() && !sys->contains(s.name_view()) && abi->exports->contains(s.name_view());
+          return !s.defined() && abi->exports->contains(s.name_view()) &&
+                 std::ranges::none_of(opts.dylibs, [&](const link::dylib& lib) {
+                   return !lib.exports || lib.exports->contains(s.name_view());
+                 });
         });
       }))
     opts.dylibs.push_back(*abi);
@@ -345,22 +377,22 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
   std::error_code ec;
   auto st = std::filesystem::symlink_status(path, ec);
   if (st.type() == std::filesystem::file_type::directory)
-    return std::format("cannot write '{}': it is a directory", path.display_string());
+    return std::format("cannot write '{}': it is a directory", path.native());
   bool regular = st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink ||
                  st.type() == std::filesystem::file_type::not_found;
   if (st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink)
     std::filesystem::remove(path, ec);
   {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return std::format("cannot open '{}' for writing", path.display_string());
+    if (!f) return std::format("cannot open '{}' for writing", path.native());
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     f.close();
-    if (!f) return std::format("cannot write '{}'", path.display_string());
+    if (!f) return std::format("cannot write '{}'", path.native());
   }
   if (executable && regular) {
     using enum std::filesystem::perms;
     std::filesystem::permissions(path, owner_exec | group_exec | others_exec, std::filesystem::perm_options::add, ec);
-    if (ec) return std::format("cannot make '{}' executable: {}", path.display_string(), ec.message());
+    if (ec) return std::format("cannot make '{}' executable: {}", path.native(), ec.message());
   }
   return std::nullopt;
 }
@@ -368,8 +400,12 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
 engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   const ProgramInputs& in = cx.fetch<ProgramIn>(p);
   Linked out;
-  if (in.shared_soname && (in.dynamic || in.archive_link)) {
+  if (in.shared_soname && (in.dynamic || in.archive_link || !in.darwin_dylibs.empty())) {
     out.errors.push_back("shared ELF output requires source or ordinary object inputs");
+    co_return out;
+  }
+  if (in.dylib_install_name && (in.dynamic || in.archive_link || in.shared_soname || !in.darwin_dylibs.empty())) {
+    out.errors.push_back("Mach-O shared output requires source or ordinary object inputs");
     co_return out;
   }
   const auto effects = effect_link_verification(in);
@@ -453,11 +489,17 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     else out.errors.push_back(std::move(image.error()));
     co_return out;
   }
+  if (in.dylib_install_name) {
+    auto image = link::link(objects, {.identifier = in.identifier, .dylibs = {}, .install_name = in.dylib_install_name});
+    if (image) out.image = std::move(*image);
+    else for (const link::error& error : image.error()) out.errors.push_back(error.message);
+    co_return out;
+  }
   if (auto selection = link::elf::select_comdat_groups(objects, in.dynamic.has_value()); !selection) {
     out.errors.push_back(std::move(selection.error()));
     co_return out;
   }
-  auto image = link_executable(objects, in.identifier, in.dynamic ? &*in.dynamic : nullptr);
+  auto image = link_executable(objects, in.identifier, in.dynamic ? &*in.dynamic : nullptr, in.darwin_dylibs);
   if (!image) {
     for (const link::error& e : image.error()) out.errors.push_back(e.message);
     co_return out;

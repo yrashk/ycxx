@@ -53,13 +53,15 @@ export enum class Storage : std::uint8_t { automatic, temporary, dynamic, except
 // Initial state of an allocation's bytes ([dcl.init.general], P2795).
 export enum class Init : std::uint8_t { erroneous, indeterminate, zero };
 
-// What a `builtin` op computes; its u32 immediate. These are evaluated only in constant mode, on a
-// `consteval_br`'s consteval edge, whose runtime edge calls the C library function instead.
+// What a `builtin` op computes; its u32 immediate. The C library builtins use this op on the
+// constant edge of `consteval_br` and call the corresponding library function on the runtime edge.
 //   - `memchr` (!state, s, c, n) -> (!state, pointer): the first of the n bytes at `s` equal to
 //     `c` converted to unsigned char, or null; the bytes are read in order up to the match.
 //   - `memcmp` (!state, a, b, n) -> (!state, int): the sign of the first difference between the
 //     n bytes at `a` and at `b`, as unsigned char, or 0; both must hold n bytes.
-export enum class BuiltinFn : std::uint8_t { memchr, memcmp };
+//   - `nansl` (!state) -> (!state, long double): the reached operation diagnoses unavailable
+//     signaling NaN value support.
+export enum class BuiltinFn : std::uint8_t { memchr, memcmp, nansl };
 
 // The semantic call forms represented by call_virtual. A qualified ordinary member call is
 // a direct call, including during constant evaluation.
@@ -67,6 +69,22 @@ export enum class VirtualCallKind : std::uint8_t { ordinary, immediate, qualifie
 
 export enum class MemOrder : std::uint8_t { relaxed, consume, acquire, release, acq_rel, seq_cst };
 export enum class Rmw : std::uint8_t { xchg, add, sub, and_, or_, xor_, max, min };
+
+export constexpr bool atomic_load_order(MemOrder order) {
+  return order == MemOrder::relaxed || order == MemOrder::consume ||
+         order == MemOrder::acquire || order == MemOrder::seq_cst;
+}
+
+export constexpr bool atomic_store_order(MemOrder order) {
+  return order == MemOrder::relaxed || order == MemOrder::release || order == MemOrder::seq_cst;
+}
+
+// A compare-exchange failure is a load. It cannot be stronger than the read side of success.
+export constexpr bool atomic_failure_order(MemOrder success, MemOrder failure) {
+  if (success == MemOrder::release) success = MemOrder::relaxed;
+  if (success == MemOrder::acq_rel) success = MemOrder::acquire;
+  return atomic_load_order(failure) && failure <= success;
+}
 
 // One step of a typed access path ([basic.lval], [class.mem]): the i-th non-static data member,
 // direct base, virtual base, or array element with a constant index. Union members are fields.
@@ -87,6 +105,10 @@ export enum class Flag : std::uint8_t {
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
   unknown_reference, // the record is the unknown referent of a parameter
+  count_zero_gcc,    // GCC mode returns the operand width for zero in constant evaluation
+  switch_bypassed_lifetime,  // switch dispatch entered the scope of a vacuously initialized local
+  observes_context,  // consteval_br of `if consteval`: its edge is the program's observation
+  initializing_store,  // a compiler-generated scalar initializer for a local record array
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -182,7 +204,7 @@ export enum class Op : std::uint16_t {
   and_ [[=pure({V, V}, {V}).with({commutative})]],
   or_ [[=pure({V, V}, {V}).with({commutative})]],
   xor_ [[=pure({V, V}, {V}).with({commutative})]],
-  ctz [[=pure({V}, {V})]],  // trailing zero bits of an integer; undefined for zero
+  ctz [[=pure({V}, {V}).accepts({count_zero_gcc})]],  // trailing zero bits of an integer
   icmp [[=pure({V, V}, {V}).imms({pred})]],
   select [[=pure({V, V, V}, {V})]],
 
@@ -217,19 +239,22 @@ export enum class Op : std::uint16_t {
   // Memory and object lifetime ([basic.life], [basic.stc], [class.union]).
   alloc [[=state({S}, {S, V}).imms({type, storage, init})]],
   dealloc [[=state({S, V}, {S}).imms({storage})]],
-  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({outside_lifetime, outside_unknown, unknown_reference})]],
+  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({
+    outside_lifetime, outside_unknown, unknown_reference, switch_bypassed_lifetime
+  })]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
-  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body})]],
+  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body, initializing_store})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src
-  atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_})]],
-  atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_})]],
-  atomic__rmw [[=state({S, V, V}, {S, V}).imms({type, rmw, order}).accepts({volatile_})]],
-  atomic__cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({type, order, order}).accepts({volatile_})]],
-  fence [[=state({S}, {S}).imms({order})]],
+  atomic__load [[=state({S, V}, {S, V}).imms({type, order}).accepts({volatile_}).with({nonconstant})]],
+  atomic__store [[=state({S, V, V}, {S}).imms({type, order}).accepts({volatile_}).with({nonconstant})]],
+  atomic__rmw [[=state({S, V, V}, {S, V}).imms({type, rmw, order}).accepts({volatile_}).with({nonconstant})]],
+  // Address, expected value, desired value. The data results are the prior value and success.
+  atomic__cmpxchg [[=state({S, V, V, V}, {S, V, V}).imms({type, order, order}).accepts({volatile_}).with({nonconstant})]],
+  fence [[=state({S}, {S}).imms({order}).with({nonconstant})]],
 
   // Dynamic dispatch and RTTI. The vptr is a typed field holding `vtable_addr(C)`.
   vfunc [[=state({S, V}, {V}).imms({entity, u32})]],  // the function in a class's vtable slot
@@ -247,7 +272,7 @@ export enum class Op : std::uint16_t {
   // `variadic` records the callee type even when the ellipsis matches zero arguments.
   call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr, variadic})]],
   call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr, variadic})]],
-  builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],  // a `BuiltinFn`, in constant evaluation only
+  builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],  // a `BuiltinFn` handled by constant evaluation
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 
   // Constant evaluation ([expr.const]): `true` in constant mode, `false` in runtime mode.
@@ -287,7 +312,7 @@ export enum class Op : std::uint16_t {
   // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
   // ([expr.const]) from falling off the end.
   unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
-  consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
+  consteval_br [[=control({}, {}, 2).accepts({observes_context})]],  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
   invoke_ind [[=control({S, V, Vs}, {S, Vs}, 2).imms({u32}).accepts({not_constexpr})]],
@@ -323,6 +348,8 @@ export enum class Op : std::uint16_t {
   // A virtual member invocation for constant evaluation: receiver, converted arguments,
   // selected function, and VirtualCallKind ([expr.call], [expr.const.core]).
   call_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
+
+  clz [[=pure({V}, {V}).accepts({count_zero_gcc})]],  // leading zero bits of an integer
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

@@ -16,6 +16,7 @@ import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.ast.target;
+import ycxx.hash;
 
 export namespace ycxx::compile {
 
@@ -149,11 +150,15 @@ namespace {
 
 // `pedantic` selects no warning: ycxx accepts the extensions it implements (docs/EXTENSIONS.md)
 // silently. Tests pass `-Wno-pedantic` so that the oracles accept them under `-pedantic-errors`.
-enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, pedantic, count };
+enum class WarningFlag : std::uint8_t {
+  all, extra, multichar, attributes, sized_deallocation, constant_conversion, enum_too_large,
+  bit_field_width, overflow, literal_range, pedantic, count
+};
 
 struct WarningSelection {
   WarningFlag flag;
   bool enabled;
+  bool as_error;
 };
 
 std::optional<WarningSelection> warning_option(std::string_view arg) {
@@ -161,12 +166,21 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
   arg.remove_prefix(2);
   const bool enabled = !arg.starts_with("no-");
   if (!enabled) arg.remove_prefix(3);
+  const bool as_error = arg.starts_with("error=");
+  if (as_error) arg.remove_prefix(6);
   constexpr std::pair<std::string_view, WarningFlag> names[] = {
       {"all", WarningFlag::all}, {"extra", WarningFlag::extra}, {"multichar", WarningFlag::multichar},
       {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation},
+      {"constant-conversion", WarningFlag::constant_conversion},
+      {"enum-too-large", WarningFlag::enum_too_large},
+      {"bitfield-width", WarningFlag::bit_field_width},
+      {"overflow", WarningFlag::overflow},
+      {"literal-range", WarningFlag::literal_range},
       {"pedantic", WarningFlag::pedantic}};
   for (const auto& [name, flag] : names)
-    if (arg == name) return WarningSelection{flag, enabled};
+    if (arg == name && (!as_error || flag == WarningFlag::enum_too_large || flag == WarningFlag::overflow ||
+                        flag == WarningFlag::literal_range || flag == WarningFlag::bit_field_width))
+      return WarningSelection{flag, enabled, as_error};
   return std::nullopt;
 }
 
@@ -174,11 +188,33 @@ std::optional<WarningSelection> warning_option(std::string_view arg) {
 // same preprocessing and semantic results.
 class WarningOptions {
  public:
-  void select(WarningSelection selection) { flags_[std::to_underlying(selection.flag)] = selection.enabled; }
+  void select(WarningSelection selection) {
+    const auto index = std::to_underlying(selection.flag);
+    if (selection.as_error) errors_[index] = selection.enabled;
+    if (!selection.as_error || selection.enabled) flags_[index] = selection.enabled;
+  }
   void compatibility(ast::Compatibility mode) { multichar_in_all_ = mode != ast::Compatibility::gcc; }
+  void suppress_warnings() { suppress_warnings_ = true; }
+  void warnings_as_errors(bool enabled) { warnings_as_errors_ = enabled; }
+  void pedantic_errors() { pedantic_errors_ = true; }
+
+  bool is_error(bool error, lex::Warning warning) const {
+    if (error) return true;
+    const auto promoted = [&](WarningFlag flag, bool forced = false) {
+      return errors_[std::to_underlying(flag)].value_or(forced || warnings_as_errors_);
+    };
+    switch (warning) {
+      case lex::Warning::enum_too_large: return promoted(WarningFlag::enum_too_large, pedantic_errors_);
+      case lex::Warning::bit_field_width: return promoted(WarningFlag::bit_field_width);
+      case lex::Warning::overflow: return promoted(WarningFlag::overflow);
+      case lex::Warning::literal_range: return promoted(WarningFlag::literal_range);
+      default: return warnings_as_errors_;
+    }
+  }
 
   bool emits(bool error, lex::Warning warning) const {
     if (error) return true;
+    if (suppress_warnings_) return false;
     const auto selected = [this](WarningFlag flag) { return flags_[std::to_underlying(flag)]; };
     // The last selection of a flag wins. A specific warning overrides its group in either order.
     switch (warning) {
@@ -188,13 +224,22 @@ class WarningOptions {
       case lex::Warning::attributes: return selected(WarningFlag::attributes).value_or(true);
       case lex::Warning::sized_deallocation:
         return selected(WarningFlag::sized_deallocation).value_or(selected(WarningFlag::extra).value_or(false));
+      case lex::Warning::constant_conversion: return selected(WarningFlag::constant_conversion).value_or(true);
+      case lex::Warning::enum_too_large: return selected(WarningFlag::enum_too_large).value_or(true);
+      case lex::Warning::bit_field_width: return selected(WarningFlag::bit_field_width).value_or(true);
+      case lex::Warning::overflow: return selected(WarningFlag::overflow).value_or(true);
+      case lex::Warning::literal_range: return selected(WarningFlag::literal_range).value_or(true);
     }
     std::unreachable();
   }
 
  private:
   std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> flags_{};
+  std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> errors_{};
+  bool suppress_warnings_ = false;
+  bool warnings_as_errors_ = false;
   bool multichar_in_all_ = true;
+  bool pedantic_errors_ = false;
 };
 
 // What the c++-compatible command line asks for.
@@ -208,7 +253,8 @@ struct Options {
   bool check_policies = false;
   pipeline::OptimizationMode optimization = pipeline::OptimizationMode::none;
   bool shared = false;
-  std::optional<std::string> output, interpreter, soname;
+  bool dynamiclib = false;
+  std::optional<std::string> output, interpreter, soname, install_name;
   bool dependencies = false;  // `-MD`
   std::optional<std::string> dependency_path;  // `-MF`
   std::vector<std::string> dependency_targets;  // `-MT`, in command-line order
@@ -217,6 +263,7 @@ struct Options {
   std::vector<std::string> archives;
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
+  std::vector<std::string> dylibs;  // explicit Mach-O dylib inputs in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
 };
 
@@ -243,6 +290,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   Options o;
   o.pp.target = pp::native_target;
   std::vector<std::string_view> other_inputs;
+  std::string_view clang_bit_field_warning;
   using Kind = pipeline::LinkOperand::Kind;
   const auto add_operand = [&](Kind kind, std::vector<std::string>& paths, std::string_view path) {
     o.operands.push_back({kind, paths.size()});
@@ -275,6 +323,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     } else if (a == "-nostdlib") o.nostdlib = true;
     else if (a == "-nostdlib++") o.nostdlibxx = true;
     else if (a == "-shared") o.shared = true;
+    else if (a == "-dynamiclib") o.dynamiclib = true;
     else if (a == "-Wl,-soname" || a == "-Wl,--soname")
       return std::unexpected("a SONAME is required after '-Wl,-soname,'");
     else if (a.starts_with("-Wl,-soname,") || a.starts_with("-Wl,--soname,")) {
@@ -283,6 +332,14 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       const auto name = a.substr(prefix.size());
       if (name.contains(',')) return std::unexpected("the SONAME option takes one name");
       o.soname = name;
+    } else if (a == "-Wl,-install_name") {
+      return std::unexpected("an install name is required after '-Wl,-install_name,'");
+    } else if (a.starts_with("-Wl,-install_name,")) {
+      if (o.install_name) return std::unexpected("duplicate install-name option");
+      constexpr std::string_view prefix = "-Wl,-install_name,";
+      const auto name = a.substr(prefix.size());
+      if (name.contains(',')) return std::unexpected("the install-name option takes one name");
+      o.install_name = name;
     } else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
       if (a == "--dynamic-linker" && (i + 1 == args.size() || args[i + 1].starts_with('-')))
         return std::unexpected("argument to '--dynamic-linker' is missing");
@@ -319,28 +376,47 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     }
     // Reflection and contracts are part of C++26, and ycxx's diagnostics are always plain:
     // what other compilers need these flags for is always on here.
-    else if (a == "-pedantic-errors" || a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
+    else if (a == "-pedantic-errors") o.warnings.pedantic_errors();
+    else if (a == "-w") o.warnings.suppress_warnings();
+    else if (a == "-Werror" || a == "-Wno-error") o.warnings.warnings_as_errors(a == "-Werror");
+    else if (a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
              a == "-fno-color-diagnostics")
       continue;
-    else if (auto warning = warning_option(a)) o.warnings.select(*warning);
+    else if (auto warning = warning_option(a)) {
+      if (warning->flag == WarningFlag::bit_field_width && (warning->as_error || warning->enabled)) clang_bit_field_warning = a;
+      o.warnings.select(*warning);
+    }
     else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
     else if (a.ends_with(".o")) add_operand(Kind::object, o.objects, a);
     else if (a.ends_with(".a")) add_operand(Kind::archive, o.archives, a);
     else if (is_source(a)) add_operand(Kind::source, o.sources, a);
     else other_inputs.push_back(a);
   }
+  if (o.pp.compatibility == ast::Compatibility::gcc && !clang_bit_field_warning.empty())
+    return std::unexpected(std::format("unsupported option '{}'", clang_bit_field_warning));
   o.warnings.compatibility(o.pp.compatibility);
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
   if (o.query != Options::Query::none) return o;
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
-  if (o.shared && !linux_link) return std::unexpected("'-shared' requires an x86-64 Linux link");
+  if (o.dynamiclib && !darwin_link) return std::unexpected("'-dynamiclib' requires an arm64 Darwin link");
+  o.shared = o.shared || o.dynamiclib;
+  if (o.shared && !linux_link && !darwin_link)
+    return std::unexpected("'-shared' requires an x86-64 Linux or arm64 Darwin link");
   if (o.soname && !o.shared) return std::unexpected("the SONAME option requires '-shared'");
+  if (o.soname && !linux_link) return std::unexpected("the SONAME option requires x86-64 Linux shared output");
+  const bool darwin_shared = darwin_link && o.shared;
+  if (o.install_name && !darwin_shared)
+    return std::unexpected("the install-name option requires arm64 Darwin shared output");
   if (o.interpreter && (!linux_link || o.shared))
     return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");
   for (std::string_view path : other_inputs) {
-    if (is_shared_object(path) || o.interpreter) o.libraries.emplace_back(path);
+    if (darwin_link && !o.shared && path.ends_with(".dylib")) o.dylibs.emplace_back(path);
+    else if (is_shared_object(path) || o.interpreter || (o.shared && path.ends_with(".dylib")))
+      o.libraries.emplace_back(path);
+    else if (path.ends_with(".dylib"))
+      return std::unexpected("Mach-O dylib inputs require an arm64 Darwin executable link");
     else return std::unexpected(std::format("'{}': unknown kind of input file", path));
   }
   if (o.shared) {
@@ -350,10 +426,10 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     if (!o.sources.empty() && o.pp.pic == 0)
       return std::unexpected("'-shared' source compilation requires '-fPIC' or '-fpic'");
     if (o.check_policies) return std::unexpected("'-shared' does not support '-fcheck-policies'");
-    if (!o.soname)
-      o.soname = std::filesystem::path(o.output.value_or("a.out")).filename().native_encoded_string();
-    if (o.soname->empty() || o.soname->contains('/') || o.soname->contains('\0'))
-      return std::unexpected("invalid ELF shared object SONAME");
+    auto& name = darwin_shared ? o.install_name : o.soname;
+    if (!name) name = std::filesystem::path(o.output.value_or("a.out")).filename().native();
+    if (name->empty() || name->contains('\0') || (!darwin_shared && name->contains('/')))
+      return std::unexpected(darwin_shared ? "invalid Mach-O dylib install name" : "invalid ELF shared object SONAME");
   }
   if (!o.archives.empty()) {
     if (!linux_link && !darwin_link) return std::unexpected("archive inputs require an executable link");
@@ -370,13 +446,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       return std::unexpected("Linux dynamic linking requires an absolute '--dynamic-linker' path");
     if (o.libraries.empty()) return std::unexpected("Linux dynamic linking requires an explicit shared object");
   }
-  if (o.pp.target != &ast::x86_64_linux && o.nostdlib)
+  if (o.pp.target != &ast::x86_64_linux && !darwin_shared && o.nostdlib)
     return std::unexpected("unsupported option '-nostdlib'");
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
   // An executable for arm64 macOS links libycxx's runtime after the operands (#842).
-  if (darwin_link && !o.nostdlibxx) {
+  if (darwin_link && !darwin_shared && !o.nostdlibxx) {
     for (const auto& archive : pipeline::darwin_runtime().archives)
       add_operand(Kind::darwin_runtime_archive, o.archives, archive);
     o.undefined = pipeline::darwin_runtime().undefined;
@@ -401,7 +477,7 @@ std::vector<std::string_view> views(std::span<const std::string> argv) {
 // A path of the request, as the daemon or this process opens it: relative to the request's `cwd`.
 std::string in_cwd(const Request& r, const std::string& path) {
   if (path.starts_with('/') || r.cwd.empty()) return path;
-  return (std::filesystem::path(r.cwd) / path).native_encoded_string();
+  return (std::filesystem::path(r.cwd) / path).native();
 }
 
 pp::Config preprocessing_config(pp::Config config, const Request& r) {
@@ -454,10 +530,12 @@ class Renderer {
  public:
   Renderer(std::string& err, std::string_view path, const WarningOptions& warnings)
       : err_(&err), path_(path), warnings_(warnings) {}
-  void diagnostic(const pipeline::Message& m) {
-    if (!warnings_.emits(m.error, m.warning)) return;
+  bool diagnostic(const pipeline::Message& m) {
+    if (!warnings_.emits(m.error, m.warning)) return false;
+    const bool error = warnings_.is_error(m.error, m.warning);
     std::format_to(std::back_inserter(*err_), "{}: {}: {}\n", m.where.empty() ? path_ : std::string_view(m.where),
-                   m.error ? "error" : "warning", m.text);
+                   error ? "error" : "warning", m.text);
+    return error;
   }
   void file_level(std::string_view message) { std::format_to(std::back_inserter(*err_), "{}: error: {}\n", path_, message); }
 
@@ -483,9 +561,10 @@ bool preprocess_unit(Done& d, const pp::Config& config, const WarningOptions& wa
   bool errors = false;
   for (const pp::Message& m : messages) {
     if (!warnings.emits(m.error, m.warning)) continue;
-    std::format_to(std::back_inserter(d.err), "{}:{}:{}: {}: {}\n", m.file, m.line, m.column, m.error ? "error" : "warning",
+    const bool error = warnings.is_error(m.error, m.warning);
+    std::format_to(std::back_inserter(d.err), "{}:{}:{}: {}: {}\n", m.file, m.line, m.column, error ? "error" : "warning",
                    m.text);
-    errors = errors || m.error;
+    errors = errors || error;
   }
   return !errors;
 }
@@ -566,7 +645,7 @@ namespace {
 std::string absolute_in(const Request& r, std::string_view path) {
   std::filesystem::path p(path);
   if (p.is_relative() && !r.cwd.empty()) p = std::filesystem::path(r.cwd) / p;
-  return p.lexically_normal().generic_native_encoded_string();
+  return p.lexically_normal().generic_string<char>();
 }
 
 // Quote a file name in a make rule. A semicolon is read during both recipe splitting and
@@ -592,7 +671,7 @@ std::expected<DependencyFile, std::string> make_dependencies(
   DependencyFile out;
   out.path = opts.dependency_path
                  ? *opts.dependency_path
-                 : std::filesystem::path(object).replace_extension(".d").native_encoded_string();
+                 : std::filesystem::path(object).replace_extension(".d").native();
   const auto bad_path = std::unexpected("a dependency path cannot contain a newline");
   if (opts.dependency_targets.empty()) {
     const auto trailing = append_make_path(out.rule, object, true);
@@ -650,7 +729,7 @@ std::expected<std::filesystem::path, std::string> stage_dependencies(
   const auto type = std::filesystem::symlink_status(path, ec).type();
   if (type != file_type::regular && type != file_type::symlink && type != file_type::not_found)
     return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
-  auto staging = (path.parent_path() / ".ycxx-dep-XXXXXX").native_encoded_string();
+  auto staging = (path.parent_path() / ".ycxx-dep-XXXXXX").native();
   const int fd = ::mkstemp(staging.data());
   if (fd < 0) return std::unexpected(std::format("cannot open dependency file '{}' for writing", dep.path));
   if (std::FILE* stream = ::fdopen(fd, "wb")) {
@@ -673,7 +752,7 @@ std::expected<std::optional<struct stat>, std::string> write_paired_object(
     return std::nullopt;
   }
 
-  auto name = (path.parent_path() / ".ycxx-obj-XXXXXX").native_encoded_string();
+  auto name = (path.parent_path() / ".ycxx-obj-XXXXXX").native();
   if (!::mkdtemp(name.data())) return std::unexpected(std::format("cannot stage object file '{}'", output.path));
   const std::filesystem::path directory(name);
   const auto staged = directory / "object";
@@ -794,7 +873,7 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
                args[i].starts_with("-fclass-call-abi=") || args[i].starts_with("-fcompat=") || args[i] == "-fcompat" ||
-               warning_option(args[i]) ||
+               warning_option(args[i]) || args[i] == "-w" || args[i] == "-Werror" || args[i] == "-Wno-error" ||
                args[i] == "-fcheck-policies") {
       out.emplace_back(args[i]);
     }
@@ -876,7 +955,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
                                                     : pipeline::Until::link;
   key.want_dependencies = opts->dependencies;
   for (const std::string& s : opts->sources)
-    key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native_encoded_string()}));
+    key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native()}));
   std::filesystem::path out = opts->output.value_or("a.out");
   // An unusable link input is reported after the units' diagnostics, and only when they compiled.
   std::optional<std::string> bad_input;
@@ -934,6 +1013,23 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         dynamic->libraries.push_back(std::move(*library));
       }
     }
+    std::vector<pipeline::DarwinDylibInput> darwin_dylibs;
+    if (!bad_input) {
+      for (const std::string& path : opts->dylibs) {
+        auto text = read_disk(in_cwd(r, path));
+        if (!text) {
+          bad_input = std::format("cannot read '{}'", path);
+          break;
+        }
+        const std::span bytes(reinterpret_cast<const std::uint8_t*>(text->data()), text->size());
+        auto library = link::read_dylib(bytes, path);
+        if (!library) {
+          bad_input = std::move(library.error());
+          break;
+        }
+        darwin_dylibs.push_back({path, std::move(*library), fingerprint128(bytes)});
+      }
+    }
     std::optional<pipeline::ArchiveLinkInputs> archive_link;
     if (!archives.empty())
       archive_link.emplace(pipeline::ArchiveLinkInputs{
@@ -941,8 +1037,9 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
           std::move(archives), std::move(opts->undefined)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
-        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic),
-         std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization});
+        {key.units, std::move(objects), out.filename().native(), std::move(dynamic),
+         std::move(archive_link), key.check_policies, std::move(opts->soname), key.optimization,
+         std::move(opts->install_name), std::move(darwin_dylibs)});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
@@ -965,8 +1062,9 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       continue;
     }
     Renderer render(d.err, path, opts->warnings);
-    for (const pipeline::Message& m : u.messages) render.diagnostic(m);
-    if (u.front_failed) {
+    bool has_errors = u.front_failed;
+    for (const pipeline::Message& m : u.messages) has_errors |= render.diagnostic(m);
+    if (has_errors) {
       failed = true;
       continue;
     }
@@ -978,7 +1076,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     }
     if (until == pipeline::Until::object) {
       Output output;
-      output.path = opts->output ? *opts->output : object_name(path).native_encoded_string();
+      output.path = opts->output ? *opts->output : object_name(path).native();
       if (opts->dependencies) {
         auto dep = make_dependencies(r, *opts, output.path, u.dependencies);
         if (!dep) {
@@ -1014,7 +1112,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     d.exit_status = 1;
     return d;
   }
-  d.outputs.push_back({out.native_encoded_string(), image.image, !opts->shared});
+  d.outputs.push_back({out.native(), image.image, !opts->shared});
   return d;
 }
 
@@ -1026,7 +1124,7 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
   config.view = units.view;
   pp::configure(config, host);
   const std::string& s = opts->sources.front();
-  const pipeline::TuId tu = session.unit({s, r.cwd, config, object_name(s).native_encoded_string()});
+  const pipeline::TuId tu = session.unit({s, r.cwd, config, object_name(s).native()});
   auto found = session.run<pipeline::DefinitionAt>({tu, pp::path_id(file), offset});
   return found ? *found : std::nullopt;
 }

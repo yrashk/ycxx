@@ -168,7 +168,8 @@ const char* name() {{ return "m{0}"; }}
 }
 
 void one_module_edit() {
-  pl::Session s;
+  engine::Pool pool(4);
+  pl::Session s(pool);
   build(s, modules(5, false));
   check(s.get<pl::Link>(program).errors.empty(), "the modules link");
   auto executed = [&](const std::string& text) {
@@ -238,6 +239,29 @@ void one_module_edit() {
         std::format("a changed signature analyses its callers' groups ({} analysed)", after_signature.first - before_signature.first));
 }
 
+void one_virtual_module_edit() {
+  auto source = [](int value) {
+    auto text = modules(value, false);
+    const std::string_view member = "  int get()";
+    for (std::size_t at = 0; (at = text.find(member, at)) != std::string::npos; at += member.size() + 8)
+      text.insert(at + 2, "virtual ");
+    return text;
+  };
+  engine::Pool pool(4, 7);
+  pl::Session session(pool);
+  build(session, source(5));
+  const auto& initial = session.get<pl::Link>(program);
+  check(initial.errors.empty() && !initial.image.empty(), "ordinary virtual groups link");
+  const auto before = session.group_counts();
+  const auto edited = source(6);
+  build(session, edited);
+  const auto& rebuilt = session.get<pl::Link>(program);
+  check(rebuilt.errors.empty() && rebuilt.image == cold(edited), "virtual edit matches an inline cold build");
+  const auto after = session.group_counts();
+  check(after.first - before.first == 1 && after.second - before.second == 12,
+        "one virtual namespace edit reuses all other groups");
+}
+
 // A warning the preprocessor reports holds its byte offset: a comment before it moves it, and
 // only whether there is an error reaches the analysis (#947).
 void moved_warning() {
@@ -288,7 +312,7 @@ void headers() {
   write(dir / "a" / "v.h", "#define V 1\n");
   write(dir / "b" / "v.h", "#define V 2\n");
   auto build_in = [&](pl::Session& s, const fs::path& cwd) {
-    s.set_source(tu, "m.cpp", main_text, "m.o", cwd.native_encoded_string());
+    s.set_source(tu, "m.cpp", main_text, "m.o", cwd.native());
     s.set_program(program, {{tu}, {}, "m"});
     return s.get<pl::Link>(program).image;
   };
@@ -304,7 +328,7 @@ void headers() {
   build_in(s, dir / "a");
   check(s.db().stats().executed == 0, "rebuilt with no edit: nothing executes");
 
-  const pp::PathId h = pp::path_id((dir / "a" / "v.h").lexically_normal().generic_native_encoded_string());
+  const pp::PathId h = pp::path_id((dir / "a" / "v.h").lexically_normal().generic_string<char>());
   write(dir / "a" / "v.h", "#define V 3\n");
   check(s.db().set<pp::FileContent>(h, std::string("#define V 3\n")), "the header's input changes");
   s.db().reset_stats();
@@ -314,6 +338,43 @@ void headers() {
   // The same argument vector and text in another directory: its own header.
   std::vector<std::uint8_t> b = build_in(s, dir / "b");
   check(b == cold_in(dir / "b") && b != a3, "the same text in another directory reads its own header");
+  fs::remove_all(dir);
+}
+
+void template_heavy_header_groups() {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / std::format("ycxx-template-headers-{}", std::random_device{}());
+  fs::create_directories(dir);
+  std::string templates = "template<int> struct Tag;\n";
+  for (int i = 0; i < 32; ++i)
+    templates += std::format("template<> struct Tag<{}> {{ static constexpr int value = {}; }};\n", i, i + 1);
+  std::ofstream(dir / "templates.h") << templates;
+  std::ofstream(dir / "tail.h") << "inline int extra() { return 6; }\n";
+  auto link = [&](pl::Session& s, int value) {
+    const auto text = std::format(
+        "#include \"templates.h\"\n"
+        "int first() {{ return Tag<0>::value; }}\n"
+        "int second() {{ return 2; }}\n"
+        "#include \"tail.h\"\n"
+        "int tail() {{ return first() + extra(); }}\n"
+        "int main() {{ return tail() + second() - {}; }}\n", value);
+    s.set_source(tu, "m.cpp", text, "m.o", dir.native());
+    s.set_program(program, {{tu}, {}, "m"});
+    const auto& linked = s.get<pl::Link>(program);
+    check(linked.errors.empty() && !linked.image.empty(), "a unit with template-heavy headers links");
+    return linked.image;
+  };
+  engine::Pool pool(4, 7);
+  pl::Session warm(pool);
+  const auto first = link(warm, 9);
+  const auto before = warm.group_counts();
+  check(before.first == 4, "two headers and two small source runs have four groups");
+  const auto edited = link(warm, 10);
+  const auto after = warm.group_counts();
+  check(after.first - before.first == 1 && after.second - before.second == 3,
+        "editing a small source run reuses the headers and the other source run");
+  pl::Session cold;
+  check(edited != first && edited == link(cold, 10), "a pooled edit matches the inline cold build");
   fs::remove_all(dir);
 }
 
@@ -328,9 +389,9 @@ void editor_view() {
   const std::string main_text = "#include \"v.h\"\nint main() { return V - 1; }\n";
   write(dir / "m.cpp", main_text);
   write(dir / "v.h", "#define V 1\n");
-  auto id = [&](std::string_view name) { return pp::path_id((dir / name).lexically_normal().generic_native_encoded_string()); };
+  auto id = [&](std::string_view name) { return pp::path_id((dir / name).lexically_normal().generic_string<char>()); };
   auto build_in = [&](pl::Session& s) {
-    s.set_source(tu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
+    s.set_source(tu, "m.cpp", main_text, "m.o", dir.native());
     s.set_program(program, {{tu}, {}, "m"});
     return s.get<pl::Link>(program).image;
   };
@@ -338,7 +399,7 @@ void editor_view() {
   pp::Config editor_config;
   editor_config.view = pp::View::editor;
   auto check_editor = [&](pl::Session& s) {
-    s.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
+    s.set_source(editor, "m.cpp", "", "m.o", dir.native(), editor_config);
     return !s.get<pl::TuFront>(editor).has_errors();
   };
 
@@ -510,7 +571,7 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
       } else {
         text += std::format("int f{0}() {{ S s({0}); Part t; return s.get() + t.id + {1}; }}\n", i, i == 3 ? edit : 0);
       }
-      s.set_source({i}, std::format("u{}.cpp", i), text, std::format("u{}.o", i), dir.native_encoded_string());
+      s.set_source({i}, std::format("u{}.cpp", i), text, std::format("u{}.o", i), dir.native());
       tus.push_back({i});
     }
     s.set_program(program, {tus, {}, "pooled"});
@@ -541,7 +602,7 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
     engine::Pool pool(threads);
     pl::Session s(pool);
     for (std::uint32_t i = 0; i < 2; ++i)
-      s.set_source({i}, std::format("l{}.cpp", i), "#include \"late.h\"\n", std::format("l{}.o", i), dir.native_encoded_string());
+      s.set_source({i}, std::format("l{}.cpp", i), "#include \"late.h\"\n", std::format("l{}.o", i), dir.native());
     s.set_program(program, {{{0}, {1}}, {}, "late"});
     s.get<pl::Link>(program);
     check(s.get<pl::TuFront>({0}).has_errors() && s.get<pl::TuFront>({1}).has_errors(),
@@ -558,7 +619,7 @@ int S::get() const { return x + p.id + q.id + (k == Kind::b ? 2 : 0) + on; }
       engine::Pool pool(threads, 7);
       pl::Session s(pool);
       for (std::uint32_t i = 0; i < 2; ++i)
-        s.set_source({i}, std::format("n{}.cpp", i), texts[i ^ swapped], std::format("n{}.o", i), dir.native_encoded_string());
+        s.set_source({i}, std::format("n{}.cpp", i), texts[i ^ swapped], std::format("n{}.o", i), dir.native());
       s.set_program(program, {{{0}, {1}}, {}, "named"});
       const pl::Linked& l = s.get<pl::Link>(program);
       check(!s.get<pl::TuFront>({0}).has_errors() && !s.get<pl::TuFront>({1}).has_errors() && l.errors.empty(),
@@ -805,9 +866,8 @@ void too_deep() {
   check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
 }
 
-// [temp.inst]/16's limit is reported once per unit, where the whole unit's analysis first reaches
-// it, whether the unit is analysed a group at a time or whole (a `virtual` makes it whole, #947),
-// cold or after edits; here the other messages are the same both ways (#993).
+// [temp.inst]/16's limit is reported once per unit at the first source-ordered demand,
+// cold or after edits, including a unit with an unsupported virtual layout (#993).
 void depth_limit_once() {
   pp::Config config;
   config.template_depth = 7;
@@ -817,7 +877,7 @@ void depth_limit_once() {
                             "int first = First<1>::value;\n";
   const std::string second = "template<int N> struct Second { static constexpr int value = Second<N+1>::value; };\n"
                              "int second = Second<1>::value;\n";
-  const std::string whole = "struct Whole { virtual void f() {} };\n";
+  const std::string unsupported = "namespace { struct Virtual { virtual void f() {} }; }\n";
   auto messages = [&](pl::Session& s, const std::string& text) {
     s.set_source(tu, "depth.cpp", text, "depth.o", {}, config);
     std::vector<std::string> texts;
@@ -831,12 +891,13 @@ void depth_limit_once() {
   auto depth = [](const std::vector<std::string>& texts) {
     return std::ranges::count_if(texts, [](const std::string& t) { return t.contains("nest more than 7 deep"); });
   };
-  const auto grouped = cold_messages(first + second), whole_unit = cold_messages(first + second + whole);
+  const auto grouped = cold_messages(first + second), with_virtual = cold_messages(first + second + unsupported);
   check(depth(grouped) == 1, "grouped: the depth limit is reported once");
-  check(depth(whole_unit) == 1, "whole: the depth limit is reported once");
-  check(grouped == whole_unit, "grouped and whole analysis say the same messages");
-  pl::Session s;
-  check(messages(s, first + second) == grouped, "a session's first build equals cold");
+  check(depth(with_virtual) == 1, "with virtual: the depth limit is reported once");
+  check(grouped == with_virtual, "an unrelated virtual layout leaves the messages unchanged");
+  engine::Pool pool(4, 7);
+  pl::Session s(pool);
+  check(messages(s, first + second) == grouped, "a pooled session's first build equals cold");
   // Both families' groups reused: the first reports it, as cold.
   auto before = s.group_counts();
   const auto third = messages(s, first + second + "int third = 3;\n");
@@ -858,10 +919,10 @@ void depth_limit_once() {
       if (m.text.contains("nest more than")) return m.where.substr(m.where.find(':'));
     return std::string{};
   };
-  pl::Session grouped_late, whole_late;
-  const auto g = messages(grouped_late, late + second), w = messages(whole_late, whole + late + second);
+  pl::Session grouped_late, virtual_late;
+  const auto g = messages(grouped_late, late + second), w = messages(virtual_late, unsupported + late + second);
   check(depth(g) == 1 && depth(w) == 1, "a limit reached at the end and one in an item: once");
-  check(at(grouped_late) == ":3:33" && at(whole_late) == ":4:33", "the item's is reported, both ways");
+  check(at(grouped_late) == ":3:33" && at(virtual_late) == ":4:33", "the item's is reported, both ways");
 }
 
 // A BSD archive with a ranlib index for a single Mach-O object. The test runs on either host.
@@ -967,9 +1028,11 @@ void implicit_runtime_policies() {
 int main() {
   incremental();
   one_module_edit();
+  one_virtual_module_edit();
   moved_warning();
   two_units();
   headers();
+  template_heavy_header_groups();
   editor_view();
   generated_view();
   pooled();
