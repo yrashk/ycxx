@@ -91,6 +91,10 @@ struct RuleToolchain {
   std::optional<std::string> path;
 };
 
+// Successful content reads shared by compiler aliases and packages in one validation pass.
+// Start a new pass after an effect and for each watch poll.
+using RuleCompilerFingerprints = std::map<std::string, Fp128>;
+
 struct RulePackageAction {
   Action action;
   std::string tool_fingerprint;
@@ -124,7 +128,8 @@ std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rule
 std::expected<RulePackageRef, std::string> capability_package(std::string_view package);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
-    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr);
+    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr,
+    RuleCompilerFingerprints* compiler_fingerprints = nullptr);
 // Reobserve the reachable producers of a rule's generated planning inputs.
 // Include paths observed before an incomplete plan.
 std::expected<RuleInputPlan, std::string> plan_rule_inputs(
@@ -267,14 +272,19 @@ RulePackageRef resolve_capability_package(std::string_view text, SourceLocation 
   return workspace_package(text, at);
 }
 
-std::string read_file(const fs::path& path, SourceLocation at) {
+template<class ReadBlock>
+void read_file_blocks(const fs::path& path, SourceLocation at, ReadBlock read_block) {
   std::ifstream in(path, std::ios::binary);
   if (!in) fail(at, std::format("cannot open '{}'", path_text(path)));
-  std::string contents;
   std::array<char, 16384> buffer;
   while (in.read(buffer.data(), buffer.size()) || in.gcount() != 0)
-    contents.append(buffer.data(), static_cast<std::size_t>(in.gcount()));
+    read_block(std::string_view{buffer.data(), static_cast<std::size_t>(in.gcount())});
   if (!in.eof() || in.bad()) fail(at, std::format("cannot read '{}'", path_text(path)));
+}
+
+std::string read_file(const fs::path& path, SourceLocation at) {
+  std::string contents;
+  read_file_blocks(path, at, [&](std::string_view block) { contents.append(block); });
   return contents;
 }
 
@@ -670,7 +680,7 @@ class Planner {
 
   RulePackagePlan package(std::string_view target, std::string_view sdk_header,
                           const fs::path& invoking_directory, const RuleToolchain& toolchain,
-                          std::span<const EmbeddedInput> embedded = {}) {
+                          std::span<const EmbeddedInput> embedded, RuleCompilerFingerprints& compiler_fingerprints) {
     const auto declaration = declarations_.find(target);
     if (declaration == declarations_.end()) fail({}, std::format("unknown target '{}'", target));
     const auto& decl = *declaration->second;
@@ -734,7 +744,7 @@ class Planner {
         fingerprint = std::format("ycxx:{:016x}", toolchain.executable_build);
       } else {
         try {
-          fingerprint = fingerprint_tool(action.tool, tool.location);
+          fingerprint = fingerprint_tool(action.tool, tool.location, &compiler_fingerprints);
         } catch (const PlanningError&) {
           // An executable without a readable identity is unavailable for a tracked action.
           continue;
@@ -834,7 +844,8 @@ class Planner {
     watch_->paths.insert(path_text(normalized));
   }
 
-  const ExecutableObservation& observe_tool(std::string_view spelling, SourceLocation at) {
+  const ExecutableObservation& observe_tool(std::string_view spelling, SourceLocation at,
+                                           RuleCompilerFingerprints* compiler_fingerprints = nullptr) {
     if (const auto known = tools_.find(spelling); known != tools_.end())
       return known->second;
     std::error_code ec;
@@ -843,14 +854,25 @@ class Planner {
     observe(tool_path);
     const auto status = regular_file(tool_path, at);
     if (!executable(status.permissions())) fail(at, std::format("tool '{}' is not executable", spelling));
-    const auto fp = Hasher{}.bytes(read_file(tool_path, at)).finish();
+    auto canonical = path_text(tool_path);
+    const auto fp = [&] {
+      if (!compiler_fingerprints) return Hasher{}.bytes(read_file(tool_path, at)).finish();
+      if (const auto cached = compiler_fingerprints->find(canonical); cached != compiler_fingerprints->end()) {
+        if (!std::ifstream(tool_path, std::ios::binary)) fail(at, std::format("cannot open '{}'", canonical));
+        return cached->second;
+      }
+      Hasher contents;
+      read_file_blocks(tool_path, at, [&](std::string_view block) { contents.bytes(block); });
+      return compiler_fingerprints->emplace(canonical, contents.finish()).first->second;
+    }();
     if (watch_) watch_->values.push_back(fp);
-    return tools_.emplace(std::string(spelling), ExecutableObservation{path_text(tool_path), fp}).first->second;
+    return tools_.emplace(std::string(spelling), ExecutableObservation{std::move(canonical), fp}).first->second;
   }
 
-  std::string fingerprint_tool(std::string_view spelling, SourceLocation at) {
+  std::string fingerprint_tool(std::string_view spelling, SourceLocation at,
+                               RuleCompilerFingerprints* compiler_fingerprints = nullptr) {
     observe(spelling);
-    return tool_digest(observe_tool(spelling, at).contents);
+    return tool_digest(observe_tool(spelling, at, compiler_fingerprints).contents);
   }
 
   std::vector<HelperToolIdentity> observe_helper_tools(const TargetDecl& decl, const Value& field) {
@@ -1692,17 +1714,21 @@ std::expected<RulePackageRef, std::string> capability_package(std::string_view p
 
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const fs::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
-    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths) {
+    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths,
+    RuleCompilerFingerprints* compiler_fingerprints) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
   WatchObservations observed;
+  RuleCompilerFingerprints local_fingerprints;
+  auto& fingerprints = compiler_fingerprints ? *compiler_fingerprints : local_fingerprints;
   try {
     const auto lower = [&](const fs::path& directory, std::string_view target, std::string_view text,
                            std::span<const EmbeddedInput> inputs) {
       auto manifest = parse_manifest(text);
       if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
-      auto result = Planner(directory, *manifest, &observed, nullptr).package(target, sdk_header, root, toolchain, inputs);
+      auto result = Planner(directory, *manifest, &observed, nullptr).package(
+          target, sdk_header, root, toolchain, inputs, fingerprints);
       result.observed_paths.assign(observed.paths.begin(), observed.paths.end());
       return result;
     };

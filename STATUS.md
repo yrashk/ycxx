@@ -3780,6 +3780,9 @@ bundled and workspace packages use the same worker. `cxx()` in a package recipe
 tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
 selects one compiler. Package compilation and worker execution appear in the
 build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Rule packages share a resolved compiler's content fingerprint within one validation
+pass. Discovery still follows each candidate's invocation path. Watch polls and
+effect admission checks start fresh passes. [#1671](https://github.com/yrashk/ycxx/issues/1671)
 Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
 when inserting a prefix into a temporary string.
 
