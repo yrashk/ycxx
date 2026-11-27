@@ -1,0 +1,91 @@
+name: "Offline HTML Graph evidence for #1611"
+
+on:
+  push:
+    branches: [codex/ycxx-1611-evidence-602ad188]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: ubuntu-24.04
+    container: gcc:16
+    timeout-minutes: 35
+    env:
+      PREVIEW: 602ad188b1ac5be66d34e946096106a43dea3027
+      PREVIEW_TREE: e9375ca9690fb1cae51f0fd40017cda4a600c4e4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Copy the harness outside the checkout
+        shell: bash
+        run: cp -R .github/evidence/graph-target-identity "$RUNNER_TEMP/ycxx-1611-harness"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PREVIEW }}
+          submodules: true
+          persist-credentials: false
+      - name: Verify exact preview
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+          test "$(git rev-parse HEAD)" = "$PREVIEW"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PREVIEW_TREE"
+          mkdir -p "$RUNNER_TEMP/ycxx-1611-evidence"
+          printf 'preview %s\ntree %s\n' "$PREVIEW" "$PREVIEW_TREE" > "$RUNNER_TEMP/ycxx-1611-evidence/git.txt"
+      - name: Provision the preview's CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build exact preview
+        shell: bash
+        run: tools/build -j 4 --no-tests 2>&1 | tee "$RUNNER_TEMP/ycxx-1611-evidence/build.log"
+      - name: Install capture tools
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq chromium fonts-dejavu-core python3-venv >/dev/null
+          python3 -m venv "$RUNNER_TEMP/ycxx-1611-venv"
+          "$RUNNER_TEMP/ycxx-1611-venv/bin/pip" install playwright==1.56.0
+      - name: Generate actual reports and open them offline
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/ycxx-1611-evidence"
+          harness="$RUNNER_TEMP/ycxx-1611-harness"
+          python3 -B "$harness/generate-reports.py" --driver build/bin/ycxx --repo . --out "$evidence/reports" 2>&1 | tee "$evidence/reports.log"
+          "$RUNNER_TEMP/ycxx-1611-venv/bin/python" -B "$harness/capture.py" --reports "$evidence/reports" --out "$evidence/capture" --chromium "$(command -v chromium)" 2>&1 | tee "$evidence/capture.log"
+      - name: Verify archived reports and export screenshot previews
+        shell: bash
+        run: |
+          python3 -B - "$RUNNER_TEMP/ycxx-1611-evidence" <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          capture = root / "capture"
+          status = json.loads((capture / "verification.json").read_text())
+          assert set(status) == {"identity", "partial", "partial_static"}
+          assert all(v["network_requests"] == 0 and not v["browser_errors"] for v in status.values())
+          for name in ("identity", "partial"):
+              assert (capture / (name + ".html")).read_bytes() == (root / "reports" / (name + ".html")).read_bytes()
+          print("YCXX_VERIFICATION " + json.dumps(status, separators=(",", ":")))
+          for name in ("identity-raw", "identity-literal", "partial-component"):
+              png = (capture / (name + ".png")).read_bytes()
+              assert png.startswith(b"\x89PNG\r\n\x1a\n")
+              encoded = base64.b64encode(png).decode()
+              for i in range(0, len(encoded), 2048):
+                  print(f"YCXX_IMAGE {name} {i // 2048} {encoded[i:i + 2048]}")
+          PY
+      - name: Upload actual HTML and browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-1611-graph-602ad188
+          path: ${{ runner.temp }}/ycxx-1611-evidence/
+          if-no-files-found: error
+          retention-days: 7
