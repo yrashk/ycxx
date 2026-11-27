@@ -62,6 +62,10 @@ struct Allowance {
 enum class AliasSubstitution { ordinary, type_default, signature };
 
 class Templates {
+  // `substitute_constraint`'s results for the bindings it is substituting now.
+  const Bindings* constraint_bindings_ = nullptr;
+  std::map<u32, std::optional<ConstId>> constraint_memo_;
+
 public:
   // `classes` is the unit's class records (#115), which a dependent name's lookup reads.
   Templates(World& w, const Classes& classes) : w_(&w), classes_(&classes) {}
@@ -940,6 +944,23 @@ public:
   // ill-formed.
   std::optional<ConstId> substitute_constraint(ConstId c, const Bindings& b) {
     if (c == ConstId::none) return c;
+    // A normal form shares its subformulas: the atoms of a concept that two others name are one
+    // value. Each is substituted once for each bindings (#1653).
+    if (constraint_bindings_ != &b) {
+      auto saved = std::exchange(constraint_memo_, {});
+      const Bindings* outer = std::exchange(constraint_bindings_, &b);
+      auto r = substitute_constraint(c, b);
+      constraint_memo_ = std::move(saved);
+      constraint_bindings_ = outer;
+      return r;
+    }
+    if (auto it = constraint_memo_.find(std::to_underlying(c)); it != constraint_memo_.end()) return it->second;
+    auto r = substitute_constraint_once(c, b);
+    constraint_memo_.emplace(std::to_underlying(c), r);
+    return r;
+  }
+  // The substitution itself, of one subformula.
+  std::optional<ConstId> substitute_constraint_once(ConstId c, const Bindings& b) {
     if (ins().values.is<ast::VConceptParameter>(c)) {
       auto ref = ins().values.get<ast::VConceptParameter>(c);
       const auto parameter = substitute_arg(ref.parameter, b);
