@@ -1568,7 +1568,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   value result, checking the implicit object's cv qualifiers and value category. Ordinary
   in-class conversion functions may declare `&` and `&&` qualifiers. Among viable exact-result
   candidates with the same cv qualifiers, an rvalue prefers the `&&` candidate.
-  General conversion selection remains tracked in #339.
+  Ordinary in-class conversion functions accept bare `explicit` in either order with
+  `constexpr`. The exact-result named `static_cast` can call them and copy-initialization
+  excludes them (#1468). General conversion selection remains tracked in #339.
 - Bodies of member functions are complete-class contexts: class member lookup comes before
   namespace lookup, and their class is complete there. `This` and implicit member access
   (`Member` on `this`), bound member functions (a `Member` of type `bound_member` that only a call
@@ -3802,6 +3804,14 @@ Each traversal keeps its own first-use include order and generated file
 paths. Plan facts preserve both role-specific sequences and the authored
 sites, including inherited directories whose positions differ.
 [Generated header roles example](examples/project-build/role-bound-library-headers/README.md)
+
+A `cpp.library.sources` position can select explicit `host` and
+`target` artifact references (#1647). A native host tool and selected
+app can compile different generated implementations from the same library
+declaration, even when their triples match. Each implementation retains
+its producer's quoted sibling lookup and authored position. Inspection
+shows its logical source path, role, and artifact reference location.
+[Generated source roles example](examples/project-build/role-bound-library-sources/README.md)
 
 A witness can also use `tool = input("name")` to run a staged executable
 artifact (#1515). The staged-witness example classifies the generated

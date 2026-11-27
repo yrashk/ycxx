@@ -122,7 +122,8 @@ a Make-based C library as one build action and links its archive into the app.
 Native host tools can link ordered generated archives through `link_inputs`
 and inherit `public_link_inputs` from libraries, including when the selected
 app targets another platform. A shared library can choose explicit
-`host` and `target` archives or generated headers at the same position.
+`host` and `target` archives, generated headers, or generated sources
+at the same position.
 Generators and witnesses can track helper executables by path and run
 generated executables selected as named artifact inputs.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
@@ -505,7 +506,9 @@ from a nonthrowing built-in conditional, including a checked copy from a same-cl
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
 conversion function for an exact non-class value type, including ordinary `&`- and
-`&&`-qualified conversion functions. [#339](https://github.com/yrashk/ycxx/issues/339)
+`&&`-qualified conversion functions. Ordinary in-class conversion functions accept bare
+`explicit` in either order with `constexpr`.
+[#339](https://github.com/yrashk/ycxx/issues/339) [#1468](https://github.com/yrashk/ycxx/issues/1468)
 
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)

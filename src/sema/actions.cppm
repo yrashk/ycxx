@@ -10877,9 +10877,18 @@ public:
     if (!record || !record->bases.empty()) return std::nullopt;
     auto candidates = member_functions(cls, name);
     const bool lvalue = object.cat() == ValueCategory::lvalue;
+    // [over.match.conv]: explicit results must match these value types up to qualification.
+    // Keep the existing conservative handling of pointer qualification and reference results
+    // that name the target type.
+    const bool scalar_value_target = types().is_arithmetic(target) || types().is_enum(target) ||
+                                     types().is(target, Builtin::nullptr_t);
     std::erase_if(candidates, [&](const MemberDeclRec* candidate) {
       if (!allow_explicit && candidate->is_explicit) return true;
       const TypeRec fn = types().rec(candidate->type);
+      if (scalar_value_target && candidate->is_explicit) {
+        const QualType result = types().is_reference(fn.inner) ? types().referee(fn.inner) : fn.inner;
+        if (!same_unqualified(result, target)) return true;
+      }
       if (!cv_within(Types::cv(object.type()), fn.fn_cv)) return true;
       if (fn.fn_ref == ast::RefQual::rvalue) return lvalue;
       return fn.fn_ref == ast::RefQual::lvalue && !lvalue && fn.fn_cv != Cv::const_;
