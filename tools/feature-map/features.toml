@@ -2061,7 +2061,7 @@ clauses = ['temp.res', 'temp.res.general', 'temp.local', 'temp.dep', 'temp.dep.g
 std = 'C++98'
 core = true
 status = 'partial'
-issues = [263, 241, 209]
+issues = [263, 241, 209, 1590]
 probe = '''
 template<class T> struct H { using type = int; };
 template<class T> typename H<T>::type g(T) { return 0; }
@@ -2069,7 +2069,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open. In a class template or its partial specialization, its injected-class-name followed by template arguments names that specialization ([temp.local]/1, #1567); the injected-class-name of a base specialization used without arguments in a derived class remains (#1590).'
 
 [[feature]]
 id = 'temp-ttp'
