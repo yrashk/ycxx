@@ -100,6 +100,8 @@ In the HTML report, **Target dependencies** lets you follow producers and
 open their use sites in `build.ycxx`.
 The **Graph** view lets you expand a target's dependencies and dependents
 and inspect each connection's declaration in the same standalone report.
+In an incomplete plan, you can also explore resolved components that are
+disconnected from the selected target.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
