@@ -971,6 +971,19 @@ clang_observed = "Rejects both accesses."
 evidence = ["tests/own/casts/const-cast-constexpr.accept.cpp", "tests/own/casts/const-cast-constexpr-volatile.reject.cpp"]
 
 [[divergence]]
+id = "constexpr-const-record-array-member-write"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[dcl.type.cv]/4, [expr.const.core], #1659"
+prior = "Constant evaluation did not reach these writes through automatic record-array elements."
+spec = "Reject the cast write to a non-mutable member of an actually const record array element."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts the write to the inherited-const member, and rejects the control with a declared const field."
+clang_observed = "Clang 23.1.6 rejects both writes on Linux x86-64 and Darwin arm64."
+evidence = ["tests/own/consteval/flat-record-array/constexpr-array-const-object-member.reject.cpp", "tests/own/consteval/flat-record-array/constexpr-array-declared-const-member.reject.cpp"]
+
+[[divergence]]
 id = "constexpr-by-value-class-parameter-cv"
 status = "recorded"
 mode_status = { spec = "supported", gcc = "pending", clang = "pending" }
