@@ -1,0 +1,46 @@
+name: Analyze watch timing evidence for 1577
+
+on:
+  push:
+    branches: [codex/ycxx-watch-timing-1577-analysis]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ycxx-1577-arm64-historical-efb9b9b1
+          path: evidence
+          run-id: 46026266380
+          github-token: ${{ github.token }}
+
+      - name: Verify and analyze the original capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fx 'revision efb9b9b17a2a01c4ad5aa6f0a9625652979f0229' evidence/provenance.txt
+          grep -Fx 'tree a6630483bfa83d44590f82b989810e2598fa1dc3' evidence/provenance.txt
+          grep -Fx 'sdk 4183795d39b9672553d784cf2898ed8aa27dbf57' evidence/provenance.txt
+          grep -Fx 'harness c9fd4af7a676ce8ef03b58270b4485450f4e60ca' evidence/provenance.txt
+          cmp evidence/serial/binary.txt evidence/parallel/binary.txt
+          for phase in serial parallel; do
+            printf '%s CTest results\n' "$phase"
+            grep -E 'tests passed|Total Test time|^( *[0-9]+/[0-9]+.*(project_|[Ff]ailed))' "evidence/$phase/ctest.log"
+          done
+          python3 .github/evidence/watch-timing-1577/report.py evidence
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-1577-watch-timing-analysis
+          path: evidence/milestones-corrected.json
+          retention-days: 30
