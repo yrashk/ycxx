@@ -1,0 +1,32 @@
+generate "scanner_object" {
+    tool = "/usr/local/bin/ycxx"
+    args = ["cxx", "-ffreestanding", "-c", input("source"), "-o", output("object")]
+    environment = { YCXX_DAEMON = "off" }
+    inputs = { source = "archive_score.cc" }
+    outputs = { object = "archive_score.o" }
+}
+
+generate "scanner_archive" {
+    tool = "/usr/bin/ar"
+    args = ["rcs", output("archive"), input("object")]
+    environment = { ZERO_AR_DATE = "1" }
+    inputs = { object = artifact("scanner_object", "object") }
+    outputs = { archive = "libscanner.a" }
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    link_inputs = [artifact("scanner_archive", "archive")]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

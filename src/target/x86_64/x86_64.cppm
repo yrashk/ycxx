@@ -4,6 +4,7 @@ export module ycxx.target.x86_64;
 
 import :encode;
 import std;
+import ycxx.execution;
 import ycxx.ir;
 import ycxx.ir.l2;
 import ycxx.ir.lower;
@@ -44,6 +45,25 @@ export struct MachineCode {
   bool operator==(const MachineCode&) const = default;
 };
 
+export struct DivisionPair {
+  ir::NodeId first;
+  ir::NodeId second;
+  bool operator==(const DivisionPair&) const = default;
+};
+
+export struct DivisionSite {
+  ir::NodeId node;
+  bool quotient;
+  std::uint32_t saved_bytes;  // if this is the later node of a pair
+  bool operator==(const DivisionSite&) const = default;
+};
+
+// In verified L2, the earlier node can produce both results of the same unsigned division.
+export bool compatible_division_pair(const l2::Function& body, DivisionPair pair);
+// Each group has identical operands and contains both quotients and remainders in block order.
+export std::expected<std::vector<std::vector<DivisionSite>>, std::string>
+group_divisions(const l2::Function& body, ycxx::exec::inplace_stop_token stop);
+
 // Compile well-formed L2 with INTEGER ABI values and direct scalar SSE values.
 // The producer checks original signatures and ellipsis types and flattens INTEGER records.
 // L2 can erase the distinction between scalar and class arguments or results. Pass
@@ -52,7 +72,8 @@ export struct MachineCode {
 // symbols in `got_symbols` so their addresses load through the ELF GOT.
 export std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                                 std::span<const ir::EntityId> direct_symbols = {},
-                                                                std::span<const ir::EntityId> got_symbols = {});
+                                                                std::span<const ir::EntityId> got_symbols = {},
+                                                                std::span<const DivisionPair> division_pairs = {});
 
 export struct EhFrameCies {
   std::optional<std::uint32_t> ordinary, handler;
@@ -142,7 +163,34 @@ bool supports_float(Op op) {
 
 bool is_invoke(Op op) { return op == Op::invoke || op == Op::invoke_cleanup; }
 
-std::expected<Frame, std::string> layout(const l2::Function& body) {
+enum class OperandKind { value, constant, load };
+using DivisionOperand = std::tuple<Type, OperandKind, std::uint64_t, std::uint64_t, std::uint64_t>;
+
+DivisionOperand division_operand(const l2::Function& body, ValueId id) {
+  const auto& value = body.value(id);
+  const DivisionOperand identity{value.type, OperandKind::value, raw(id), 0, 0};
+  if (value.param) return identity;
+  const NodeId node{value.def};
+  const auto& def = body.node(node);
+  if (def.flags != 0) return identity;
+  if (def.op == Op::const_)
+    return {value.type, OperandKind::constant, body.imms_of(node).front(), 0, 0};
+  if (def.op != Op::load) return identity;
+  // Ordinary loads must have the same state, address and alias information. The emitter
+  // still evaluates both loads in their original positions.
+  const auto operands = body.operands_of(node);
+  return {value.type, OperandKind::load, raw(operands[0]), raw(operands[1]), body.imms_of(node).front()};
+}
+
+bool unsigned_division(const l2::Function& body, NodeId id) {
+  const auto& node = body.node(id);
+  if (node.flags || (node.op != Op::udiv && node.op != Op::urem)) return false;
+  const auto type = body.type(body.result(id));
+  return type == Type::i32 || type == Type::i64;
+}
+
+template <bool Poll = false>
+std::expected<Frame, std::string> layout(const l2::Function& body, ycxx::exec::inplace_stop_token stop = {}) {
   // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
   // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
   constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
@@ -159,6 +207,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   frame.slots.resize(body.values.size());
   frame.objects.resize(body.nodes.size());
   for (std::size_t i = 0; i < body.values.size(); ++i) {
+    if constexpr (Poll)
+      if ((i % 256 == 0) && stop.stop_requested()) return std::unexpected("model cancelled");
     Type t = body.values[i].type;
     if (t == Type::state) continue;
     frame.size += 8;
@@ -168,6 +218,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 
   std::uint64_t scratch_words = 0;
   for (BlockId b : body.block_ids()) {
+    if constexpr (Poll)
+      if (stop.stop_requested()) return std::unexpected("model cancelled");
     const ir::Block& block = body.block(b);
     if (!block.nnodes) return std::unexpected("a block needs a terminator");
     auto params = body.params_of(b);
@@ -178,6 +230,8 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
     if (raw(b) != 0) scratch_words = std::max(scratch_words, std::uint64_t(block.nparams - 1));
 
     for (NodeId n : body.nodes_of(b)) {
+      if constexpr (Poll)
+        if ((raw(n) % 256 == 0) && stop.stop_requested()) return std::unexpected("model cancelled");
       const l2::Node& nd = body.node(n);
       auto imms = body.imms_of(n);
       auto operands = body.operands_of(n);
@@ -236,9 +290,10 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 class Emitter {
  public:
   Emitter(const l2::Function& body, const Frame& frame, std::span<const ir::EntityId> direct_symbols,
-          std::span<const ir::EntityId> got_symbols)
+          std::span<const ir::EntityId> got_symbols,
+          std::span<const std::optional<NodeId>> division_peers)
       : body_(body), frame_(frame), direct_symbols_(direct_symbols), got_symbols_(got_symbols),
-        block_offsets_(body.blocks.size()) {}
+        division_peers_(division_peers), block_offsets_(body.blocks.size()) {}
 
   std::expected<MachineCode, std::string> run() {
     for (std::uint32_t n = 0; n < body_.nodes.size(); ++n)
@@ -286,6 +341,7 @@ class Emitter {
   const Frame& frame_;
   std::span<const ir::EntityId> direct_symbols_;
   std::span<const ir::EntityId> got_symbols_;
+  std::span<const std::optional<NodeId>> division_peers_;
   MachineCode out_;
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
@@ -620,12 +676,20 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       e_.move(rax, rdx);
       break;
     case Op::sdiv: case Op::udiv: case Op::srem: case Op::urem: {
+      const auto peer = division_peers_.empty() ? std::nullopt : division_peers_[raw(n)];
+      if (peer && raw(*peer) < raw(n)) return {};
       Type type = body_.type(body_.result(n));
       if (type != Type::i32 && type != Type::i64)
         return at_node(n, op, "operation is outside the x86-64 integer subset");
       read(ops[0]);
       read(ops[1], rcx);
       e_.divide(rcx, op == Op::sdiv || op == Op::srem, type == Type::i64);
+      if (peer) {
+        // Unsigned 32-bit DIV zero-extends EAX and EDX. Store the later result in its own
+        // home now, so intervening instructions may overwrite both scratch registers.
+        const auto result = body_.result(*peer);
+        e_.store(rbp, frame_.slots[raw(result)], op == Op::udiv ? rdx : rax, 8);
+      }
       if (op == Op::srem || op == Op::urem) e_.move(rax, rdx);
       break;
     }
@@ -637,6 +701,15 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[0]);
       e_.reg({0x0f, 0xbc}, rax, rax, body_.type(ops[0]) == Type::i64);  // BSF (Intel SDM vol. 2)
       break;
+    case Op::clz: {
+      const Type type = body_.type(ops[0]);
+      read(ops[0]);
+      e_.reg({0x0f, 0xbd}, rax, rax, type == Type::i64);  // BSR (Intel SDM vol. 2)
+      // For a 32- or 64-bit operand, XOR with the maximum bit index subtracts the BSR index.
+      e_.reg({0x83}, 6, rax, false);  // xor eax, imm8
+      e_.immediate(l2::bits(type) - 1, 1);
+      break;
+    }
     case Op::fadd: float_two(0x58); return {};
     case Op::fsub: float_two(0x5c); return {};
     case Op::fmul: float_two(0x59); return {};
@@ -789,6 +862,67 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[2]);
       e_.store(rcx, 0, rax, l2::bytes(body_.type(ops[2])));
       return {};
+    case Op::atomic_load:
+      // Aligned 32-bit loads are indivisible. TSO provides acquire ordering, and
+      // the locked sequentially consistent stores prevent reordering across those stores.
+      read(ops[1], rcx);
+      e_.load(rax, rcx, 0, 4);
+      write(body_.result(n, 1));
+      return {};
+    case Op::atomic_store:
+      read(ops[1], rcx);
+      read(ops[2]);
+      if (ir::MemOrder(imms[0]) == ir::MemOrder::seq_cst) e_.exchange32(rcx, rax);
+      else e_.store(rcx, 0, rax, 4);
+      return {};
+    case Op::atomic_rmw: {
+      read(ops[1], rcx);
+      switch (ir::Rmw(imms[0])) {
+        case ir::Rmw::xchg:
+          read(ops[2]);
+          e_.exchange32(rcx, rax);
+          break;
+        case ir::Rmw::add:
+        case ir::Rmw::sub:
+          read(ops[2]);
+          if (ir::Rmw(imms[0]) == ir::Rmw::sub) e_.reg({0xf7}, 3, rax, false);  // neg eax
+          e_.atomic_add32(rcx, rax);
+          break;
+        case ir::Rmw::and_:
+        case ir::Rmw::or_:
+        case ir::Rmw::xor_: {
+          const auto rmw = ir::Rmw(imms[0]);
+          const std::uint8_t opcode = rmw == ir::Rmw::and_ ? 0x21 : rmw == ir::Rmw::or_ ? 0x09 : 0x31;
+          read(ops[2], rdi);
+          e_.load(rax, rcx, 0, 4);
+          const auto retry = e_.offset();
+          e_.reg({0x89}, rax, rdx, false);  // mov edx, eax
+          e_.reg({opcode}, rdi, rdx, false);
+          e_.compare_exchange32(rcx, rdx);
+          e_.emit({0x0f, 0x85});  // jne retry, with the newly observed value in EAX
+          if (!e_.patch_relative(e_.displacement(), retry))
+            return at_node(n, op, "atomic retry branch displacement out of range");
+          break;
+        }
+        default: return at_node(n, op, "unsupported atomic read-modify-write operation");
+      }
+      write(body_.result(n, 1));
+      return {};
+    }
+    case Op::atomic_cmpxchg:
+      read(ops[1], rcx);
+      read(ops[2]);
+      read(ops[3], rdx);
+      e_.compare_exchange32(rcx, rdx);
+      write(body_.result(n, 1));  // the i32 write preserves ZF
+      e_.emit({0x0f, 0x94, 0xc0});  // sete al
+      write(body_.result(n, 2));
+      return {};
+    case Op::fence:
+      // TSO already orders the acquire and release cases. The state dependency is
+      // needed at every order, including when the fence has no machine instruction.
+      if (ir::MemOrder(imms[0]) == ir::MemOrder::seq_cst) e_.emit({0x0f, 0xae, 0xf0});  // mfence
+      return {};
     case Op::va_start:
       va_start(ops[1]);
       return {};
@@ -840,15 +974,90 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
 
 }  // namespace
 
+bool compatible_division_pair(const l2::Function& body, DivisionPair pair) {
+  if (raw(pair.first) >= raw(pair.second) || raw(pair.second) >= body.nodes.size()) return false;
+  if (!unsigned_division(body, pair.first) || !unsigned_division(body, pair.second)) return false;
+  const auto& first = body.node(pair.first);
+  const auto& second = body.node(pair.second);
+  if (first.block != second.block || first.op == second.op) return false;
+  const auto lhs = body.operands_of(pair.first);
+  const auto rhs = body.operands_of(pair.second);
+  return division_operand(body, lhs[0]) == division_operand(body, rhs[0]) &&
+         division_operand(body, lhs[1]) == division_operand(body, rhs[1]);
+}
+
+std::expected<std::vector<std::vector<DivisionSite>>, std::string>
+group_divisions(const l2::Function& body, ycxx::exec::inplace_stop_token stop) {
+  using Operands = std::pair<DivisionOperand, DivisionOperand>;
+  std::vector<std::vector<DivisionSite>> groups;
+  for (const auto block : body.block_ids()) {
+    if (stop.stop_requested()) return std::unexpected("model cancelled");
+    std::map<Operands, std::vector<DivisionSite>> sites;
+    for (const auto id : body.nodes_of(block)) {
+      if ((raw(id) % 256 == 0) && stop.stop_requested()) return std::unexpected("model cancelled");
+      if (!unsigned_division(body, id)) continue;
+      const auto operands = body.operands_of(id);
+      const auto divisor = division_operand(body, operands[1]);
+      // The existing shift/mask path remains the policy for constant power-of-two divisors.
+      if (std::get<1>(divisor) == OperandKind::constant) {
+        auto value = std::get<2>(divisor);
+        if (body.type(operands[1]) == Type::i32) value = std::uint32_t(value);
+        if (std::has_single_bit(value)) continue;
+      }
+      sites[{division_operand(body, operands[0]), divisor}].push_back({id, body.node(id).op == Op::udiv, 0});
+    }
+    for (auto& [operand, group] : sites) {
+      if (stop.stop_requested()) return std::unexpected("model cancelled");
+      if (std::ranges::any_of(group, [&](const DivisionSite& s) { return s.quotient != group.front().quotient; }))
+        groups.push_back(std::move(group));
+    }
+  }
+  if (groups.empty()) return groups;
+  if (stop.stop_requested()) return std::unexpected("model cancelled");
+  std::ranges::sort(groups, {}, [](const auto& group) { return group.front().node; });
+  if (stop.stop_requested()) return std::unexpected("model cancelled");
+  const auto frame = layout<true>(body, stop);
+  if (!frame) return std::unexpected(frame.error());
+  std::vector<std::uint8_t> bytes;
+  Encoder encoder(bytes);
+  for (auto& group : groups) {
+    for (auto& site : group) {
+      if (stop.stop_requested()) return std::unexpected("model cancelled");
+      const auto operands = body.operands_of(site.node);
+      const bool wide = body.type(body.result(site.node)) == Type::i64;
+      bytes.clear();
+      encoder.load(rax, rbp, frame->slots[raw(operands[0])], 8);
+      encoder.load(rcx, rbp, frame->slots[raw(operands[1])], 8);
+      encoder.divide(rcx, false, wide);
+      if (!site.quotient) encoder.move(rax, rdx);
+      if (!wide) encoder.reg({0x89}, rax, rax, false);
+      // The later result still gets the same store to its home, just earlier in the block.
+      site.saved_bytes = std::uint32_t(bytes.size());
+    }
+  }
+  return groups;
+}
+
 std::expected<MachineCode, std::string> compile_function(const l2::Function& body,
                                                          std::span<const ir::EntityId> direct_symbols,
-                                                         std::span<const ir::EntityId> got_symbols) {
+                                                         std::span<const ir::EntityId> got_symbols,
+                                                         std::span<const DivisionPair> division_pairs) {
   if (auto valid = l2::verify(body); !valid) return std::unexpected(valid.error());
   if (std::ranges::contains(body.values, Type::i128, &l2::Value::type))
     return std::unexpected("an i128 value was not legalized");
+  std::vector<std::optional<NodeId>> division_peers;
+  if (!division_pairs.empty()) division_peers.resize(body.nodes.size());
+  for (const auto pair : division_pairs) {
+    if (!compatible_division_pair(body, pair)) return std::unexpected("invalid unsigned division pair");
+    auto& first = division_peers[raw(pair.first)];
+    auto& second = division_peers[raw(pair.second)];
+    if (first || second) return std::unexpected("overlapping unsigned division pairs");
+    first = pair.second;
+    second = pair.first;
+  }
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
-  return Emitter(body, *frame, direct_symbols, got_symbols).run();
+  return Emitter(body, *frame, direct_symbols, got_symbols, division_peers).run();
 }
 
 std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,

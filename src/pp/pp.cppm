@@ -13,7 +13,7 @@
 //   :cond    #if expressions ([cpp.cond])
 //
 // `pp(file)` is an engine query over the main file's text and its `Source` (its name, working
-// directory and configuration). Every file it includes is read as a `FileContent` input, provided
+// directory and configuration). Every disk file it includes is read as a `FileContent` input, provided
 // on first read (daemon design §5.1, #93), so editing a header invalidates the `pp` cells that read
 // it. The region cache of the process's session for the configuration still shares regions between
 // units, where their traces verify; contextual queries (#16) will replace it.
@@ -35,6 +35,7 @@ namespace {
 // Preserve the bit values of earlier source configurations.
 constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08, small_pic_bit = 0x10;
 constexpr std::uint8_t compatibility_shift = 5, compatibility_mask = 0x60;
+constexpr std::uint8_t host_overlay_bit = 0x80;
 }
 
 export namespace ycxx::pp {
@@ -148,8 +149,13 @@ struct Source {
   std::string cwd;
   Config config;
 };
+// A null pointer leaves the path to the file table. A disengaged value is a miss
+// in the immutable host overlay. An engaged empty string is an empty file.
+const std::optional<std::string>* host_overlay_content(const Config& config, std::string_view cwd,
+                                                       std::string_view name);
 // Read a path in the source's view. A build view reserves a virtual directory for
-// generated contents under the workspace's selected build state directory.
+// generated contents under the workspace's selected build state directory. A disk
+// view with a host overlay serves its reserved directory from the configuration.
 const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name);
 const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name);
 
@@ -173,7 +179,16 @@ void serialize_into(engine::Sink& out, const Source& s) {
   if (!s.config.rtti_enabled) modes |= no_rtti_bit;
   if (s.config.pic == 2) modes |= pic_bit;
   if (s.config.pic == 1) modes |= small_pic_bit;
+  if (s.config.host_overlay) modes |= host_overlay_bit;
   engine::serialize(out, modes);
+  if (s.config.host_overlay) {
+    const auto& files = s.config.host_overlay->files();
+    engine::serialize(out, static_cast<std::uint64_t>(files.size()));
+    for (const auto& [path, contents] : files) {
+      engine::serialize(out, path);
+      engine::serialize(out, *contents);
+    }
+  }
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -194,8 +209,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
   const auto compatibility = (modes & compatibility_mask) >> compatibility_shift;
-  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit | small_pic_bit | compatibility_mask)) != 0 ||
-      compatibility > std::to_underlying(ast::Compatibility::clang) ||
+  if (compatibility > std::to_underlying(ast::Compatibility::clang) ||
       (modes & (pic_bit | small_pic_bit)) == (pic_bit | small_pic_bit))
     in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
@@ -203,6 +217,16 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
   s.config.pic = (modes & pic_bit) != 0 ? 2 : (modes & small_pic_bit) != 0 ? 1 : 0;
   s.config.compatibility = static_cast<ast::Compatibility>(compatibility);
+  if (modes & host_overlay_bit) {
+    HostOverlay::Files files;
+    const auto count = in.length();
+    for (std::size_t i = 0; i < count && !in.failed(); ++i) {
+      auto path = engine::deserialize<std::string>(in);
+      auto contents = engine::deserialize<std::string>(in);
+      if (!files.emplace(std::move(path), std::move(contents)).second) in.fail();
+    }
+    if (!in.failed()) s.config.host_overlay = std::make_shared<const HostOverlay>(std::move(files));
+  }
   return s;
 }
 
@@ -269,20 +293,32 @@ Paths& paths() {
   return p;
 }
 
-PathId source_path(const Source& source, std::string_view name) {
+std::string normalized_source_path(std::string_view cwd, std::string_view name) {
   std::filesystem::path path(name);
-  if (path.is_relative() && !source.cwd.empty()) path = std::filesystem::path(source.cwd) / path;
-  return path_id(path.lexically_normal().generic_native_encoded_string());
+  if (path.is_relative() && !cwd.empty()) path = std::filesystem::path(cwd) / path;
+  return path.lexically_normal().generic_string<char>();
 }
 
-bool is_generated_path(const Source& source, PathId id) {
+bool is_generated_path(const Source& source, std::string_view path) {
   const auto view = source.config.view;
   if (view != View::build && view != View::explicit_target_build) return false;
   auto state = std::filesystem::path(source.cwd) / ".ycxx";
   if (view == View::explicit_target_build) state = state / "targets" / source.config.target->triple;
   const auto root = (state / "virtual").lexically_normal();
-  const std::string prefix = root.generic_native_encoded_string() + '/';
-  return path_of(id).starts_with(prefix);
+  const std::string prefix = root.generic_string<char>() + '/';
+  return path.starts_with(prefix);
+}
+
+const std::optional<std::string>* host_overlay_at(const Config& config, std::string_view cwd, std::string_view path) {
+  if (config.view != View::disk || !config.host_overlay) return nullptr;
+  const auto root = (std::filesystem::path(cwd) / ".ycxx/host/virtual").lexically_normal();
+  const auto prefix = root.generic_string<char>();
+  if (!path.starts_with(prefix) || (path.size() > prefix.size() && path[prefix.size()] != '/'))
+    return nullptr;
+  const auto& files = config.host_overlay->files();
+  const auto found = files.find(path);
+  static const std::optional<std::string> absent;
+  return found == files.end() ? &absent : &found->second;
 }
 
 // Each attempted include records the input that answered it, including misses.
@@ -435,19 +471,29 @@ engine::provided<std::optional<std::string>> no_buffer(PathId) { return {std::nu
 
 engine::provided<std::optional<std::string>> no_generated_file(PathId) { return {std::nullopt, engine::Durability::low}; }
 
+const std::optional<std::string>* host_overlay_content(const Config& config, std::string_view cwd,
+                                                       std::string_view name) {
+  if (!config.host_overlay) return nullptr;
+  return host_overlay_at(config, cwd, normalized_source_path(cwd, name));
+}
+
 const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name) {
-  const PathId id = source_path(source, name);
+  const auto path = normalized_source_path(source.cwd, name);
+  if (const auto* overlay = host_overlay_at(source.config, source.cwd, path)) return *overlay;
+  const PathId id = path_id(path);
   if (source.config.view == View::editor)
     if (const auto& open = cx.fetch<Buffer>(id)) return open;
-  if (is_generated_path(source, id)) return cx.fetch<GeneratedFile>(id);
+  if (is_generated_path(source, path)) return cx.fetch<GeneratedFile>(id);
   return cx.fetch<FileContent>(id);
 }
 
 const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name) {
-  const PathId id = source_path(source, name);
+  const auto path = normalized_source_path(source.cwd, name);
+  if (const auto* overlay = host_overlay_at(source.config, source.cwd, path)) return *overlay ? &**overlay : nullptr;
+  const PathId id = path_id(path);
   if (source.config.view == View::editor)
     if (const auto* open = db.peek<Buffer>(id); open && *open) return &**open;
-  const auto* content = is_generated_path(source, id) ? db.peek<GeneratedFile>(id) : db.peek<FileContent>(id);
+  const auto* content = is_generated_path(source, path) ? db.peek<GeneratedFile>(id) : db.peek<FileContent>(id);
   return content && *content ? &**content : nullptr;
 }
 
@@ -577,7 +623,7 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
   auto normal = [&](std::string_view d) {
     std::filesystem::path p(d);
     if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
-    std::string s = p.lexically_normal().generic_native_encoded_string();
+    std::string s = p.lexically_normal().generic_string<char>();
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };

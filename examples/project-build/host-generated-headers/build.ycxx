@@ -1,0 +1,23 @@
+generate "scanner_config" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("header")]
+    inputs = { script = "generate-scanner-header.sh" score = "score.txt" }
+    outputs = { header = "scanner_config.hh" }
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    generated_headers = [artifact("scanner_config", "header")]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

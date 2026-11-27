@@ -1,0 +1,18 @@
+// ACTION: syntax
+--- main.cpp
+#include "part.hpp"
+struct Record { Record(const Record&) = default; Record& operator=(const Record&) = default; Part part; }; void use(const Record& a, Record& b) { Record c(a); b = a; }
+--- part.hpp
+struct Part { Part(const Part&); Part& operator=(const Part&); };
+=== edit
+--- part.hpp
+struct Part { Part(const Part&) = delete; Part& operator=(const Part&); };
+--- main.cpp
+#include "part.hpp"
+struct Record { Record(const Record&) = default; Record& operator=(const Record&) = default; Part part; }; void use(const Record& a, Record& b) { Record c(a); b = a; } //! error
+=== edit
+--- part.hpp
+struct Part { Part(const Part&) = default; Part& operator=(const Part&) = default; };
+--- main.cpp
+#include "part.hpp"
+struct Record { Record(const Record&) = default; Record& operator=(const Record&) = default; Part part; }; void use(const Record& a, Record& b) { Record c(a); b = a; }

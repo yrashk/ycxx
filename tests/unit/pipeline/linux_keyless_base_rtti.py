@@ -11,6 +11,9 @@ from linux_compile import run
 from linux_owned_derived_vtable import BASE, BASE_NAME, DERIVED, DERIVED_NAME, SI_RUNTIME, Elf, check_base
 from linux_peer_derived_default_construction import native_compilers
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 HELPER = '__dynamic_cast'
 TABLES = {'_ZTV1B', '_ZTV1D'}
@@ -110,7 +113,7 @@ def main():
     ycxx, host = sys.argv[1:]
     fixtures = Path(__file__).resolve().with_suffix('')
     with tempfile.TemporaryDirectory(prefix='ycxx-keyless-rtti-', dir='.') as temp, \
-            tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+            tempfile.TemporaryDirectory(prefix='yd-', dir=runtime_root('yd-')) as runtime:
         scope = Path(temp).resolve()
         (scope / '.ycxx').touch()
         env = {key: value for key, value in os.environ.items()

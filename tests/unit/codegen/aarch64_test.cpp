@@ -329,7 +329,7 @@ void run(const std::filesystem::path& dir, const std::string& name, std::vector<
   }
   std::filesystem::permissions(exe, std::filesystem::perms::owner_all);
   const auto out = dir / (name + ".out");
-  int rc = shell(std::format("'{}' > '{}'", exe.native_encoded_string(), out.native_encoded_string()));
+  int rc = shell(std::format("'{}' > '{}'", exe.native(), out.native()));
   check(rc == exit_code, std::format("{}: exits with {} (got {})", name, exit_code, rc));
   std::string got = slurp(out);
   check(got == output, std::format("{}: prints {:?} (got {:?})", name, output, got));
@@ -770,7 +770,7 @@ void test_harness(const std::filesystem::path& dir, std::string_view cc) {
   c += "  if (fails == 0) printf(\"ok\\n\");\n  return fails ? 1 : 0;\n}\n";
   const auto src = dir / "harness.c", o = dir / "harness.o";
   std::ofstream(src) << c;
-  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native_encoded_string(), o.native_encoded_string())) != 0) {
+  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native(), o.native())) != 0) {
     check(false, "the host compiler compiles harness.c");
     return;
   }
@@ -789,6 +789,39 @@ void test_harness(const std::filesystem::path& dir, std::string_view cc) {
   run(dir, "harness", {std::move(*c_obj), std::move(*mine)}, 0, "ok\n");
 }
 
+// One object defines an entity once (#157): a second definition would leave references on one of the
+// two. Entities that share a spelling are different definitions.
+void test_definitions() {
+  const std::vector<std::uint8_t> ret{0xC0, 0x03, 0x5F, 0xD6};
+  const auto function = [&](std::uint32_t e) { return a64::CompiledFunction{ir::EntityId(e), {ret, {}, {}, {}, {}}}; };
+  const auto variable = [](std::uint32_t e) {
+    return a64::DataDef{ir::EntityId(e), a64::DataKind::data, {1, 0, 0, 0}, 0, 4, {}};
+  };
+  const auto assemble = [](std::vector<a64::CompiledFunction> functions, std::vector<a64::DataDef> data,
+                           std::vector<a64::Symbol> symbols) {
+    return a64::assemble("definitions.o", functions, data, symbols);
+  };
+  const std::vector<a64::Symbol> names{{ir::EntityId(1), "_a"}, {ir::EntityId(2), "_b"}};
+  check(assemble({function(1), function(2)}, {}, names).has_value(), "two functions assemble");
+  const auto twice = assemble({function(1), function(2), function(1)}, {}, names);
+  check(!twice && twice.error().entity == ir::EntityId(1) && twice.error().message.contains("defined twice"),
+        "a function defined twice is an error");
+  check(!assemble({}, {variable(2), variable(1), variable(2)}, names), "a variable defined twice is an error");
+  check(!assemble({function(1)}, {variable(1)}, names), "a function and a variable of one entity are an error");
+  // An asm label gives two entities one spelling (#694); local symbols may share a name.
+  const auto labelled = assemble({function(1), function(2)}, {}, {{ir::EntityId(1), "_same"}, {ir::EntityId(2), "_same"}});
+  check(labelled.has_value() && std::ranges::count(labelled->symbols, std::string("_same"), &obj::symbol::name) == 2,
+        "two entities with one spelling assemble");
+  const auto local = assemble({function(1), function(2)}, {},
+                              {{ir::EntityId(1), "_l", obj::binding::local}, {ir::EntityId(2), "_l", obj::binding::local}});
+  check(local.has_value() && local->symbols.size() == 2 && local->symbols[0].offset != local->symbols[1].offset,
+        "two local symbols with one name assemble");
+  // The rule both object formats apply.
+  check(!a64::repeated_definition({ir::EntityId(3), ir::EntityId(1), ir::EntityId(2)}), "distinct definitions");
+  const auto repeated = a64::repeated_definition({ir::EntityId(3), ir::EntityId(1), ir::EntityId(3)});
+  check(repeated && repeated->entity == ir::EntityId(3), "a repeated definition is found whatever the order");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -803,6 +836,7 @@ int main(int argc, char** argv) {
   test_patterns();
   test_selection();
   test_determinism();
+  test_definitions();
   if (run_dir) {
     test_programs(*run_dir);
     if (cc) test_harness(*run_dir, *cc);

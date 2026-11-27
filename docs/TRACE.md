@@ -17,7 +17,7 @@ One object per cell a request settled, in the collector's batches: whole subtree
 | `parent` | integer | the event of the frame that asked for the cell; 0 for a request's own cell |
 | `depth` | integer | in the request's tree |
 | `kind`, `key` | string | the cell: its query kind and its key as text (`Tu`, `a.cpp`) |
-| `outcome` | string | `executed`, `cutoff`, `verified`, `reused`, `durable`, `input`, `recomputed`, `waited` or `failed` |
+| `outcome` | string | `executed`, `cutoff`, `verified`, `reused`, `durable`, `input`, `recomputed`, `waited`, `failed` or `stopped` |
 | `start_ns`, `duration_ns` | integer | since the trace began; 0 for an instant |
 | `worker`, `end_worker` | integer | the pool worker it started and ended on; -1 the requesting thread |
 | `request` | string | with `ctl trace`: which request |
@@ -26,7 +26,7 @@ One object per cell a request settled, in the collector's batches: whole subtree
 | `error_at` | integer | the event under this one where its errors start |
 | `repeat` | integer | identical instants in a row under one parent, given once |
 | `alloc_bytes`, `allocs` | integer | bytes the cell's frame allocated while it ran, and how many allocations: its query and the engine's work for it, not what it demanded; 0 for an instant; for `input`, what its provider allocated |
-| `peak_bytes` | integer | the high-water mark of the frame's own net bytes (allocated minus freed) during the run |
+| `peak_bytes` | integer | the high-water mark of the frame's own net bytes (allocated minus freed) during the run, using an upper estimate from individual worker peaks for work the frame runs in parallel |
 | `retained_bytes` | integer | what the cell retains: the net bytes its runs left alive (its value, dependency lists, and what it interned first), or an input's size; may be below zero when a frame freed what another allocated |
 | `incl_alloc_bytes` | integer | `alloc_bytes` summed over the subtree, this event included |
 | `incl_retained_bytes` | integer | `retained_bytes` summed over the subtree, counted once per cell where it settles (`executed`, `cutoff`, `verified`, `durable`, `input`), never below zero |
@@ -35,6 +35,8 @@ One object per cell a request settled, in the collector's batches: whole subtree
 Memory that one cell's run allocated and others use (an interned tree, a header's region) counts
 for that cell only. Memory no frame allocated (the engine's tables, the session's state) counts
 for no cell.
+
+A `stopped` query was cancelled before it could publish. It carries no value or retained bytes.
 
 ## Source spans
 

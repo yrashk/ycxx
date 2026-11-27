@@ -1,9 +1,9 @@
 // Linking a program (#43) through ycxx's linkers. x86-64 Linux produces an ELF executable
 // or a leaf shared library (#391).
-// arm64 macOS links the objects and libSystem into a signed Mach-O executable. Imports are checked
-// against the export list of the SDK's `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what
-// `xcrun --show-sdk-path` prints, else the Command Line Tools' SDK. The SDK is located and its
-// export list read once per process.
+// arm64 macOS produces a signed Mach-O executable or a freestanding leaf dylib (#393).
+// Executable imports are checked against the export list of the SDK's `usr/lib/libSystem.B.tbd`.
+// The SDK is `$SDKROOT`, else what `xcrun --show-sdk-path` prints, else the Command Line Tools'
+// SDK. The SDK is located and its export list read once per process.
 //
 // `link(P)` is the engine query over a program's translation units and disk inputs. Static
 // archive links follow operand order: GNU archives in x86-64 Linux links, Darwin archives in
@@ -64,7 +64,8 @@ struct ArchiveLinkInputs {
 // Ordinarily, translation units precede disk objects. Archive links carry a positional manifest
 // of all operands and the archive snapshots. Linux dynamic links carry their target interpreter
 // and ordered shared inputs. `identifier` names the Mach-O code signature. A shared SONAME
-// requests Linux shared output with no executable startup.
+// requests Linux shared output with no executable startup. A dylib install name requests leaf
+// Darwin shared output.
 struct ProgramInputs {
   std::vector<TuId> tus;
   std::vector<obj::object> objects;
@@ -73,10 +74,12 @@ struct ProgramInputs {
   std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
   bool check_policies = false;
   std::optional<std::string> shared_soname = std::nullopt;
+  OptimizationMode optimization = OptimizationMode::none;
+  std::optional<std::string> dylib_install_name = std::nullopt;
 };
 
 EffectVerification effect_link_verification(const ProgramInputs& in) {
-  if (in.dynamic || in.shared_soname) return EffectVerification::unavailable;
+  if (in.dynamic || in.shared_soname || in.dylib_install_name) return EffectVerification::unavailable;
   if (const auto& archive = in.archive_link;
       archive && (archive->target != obj::target::aarch64_macos ||
                   std::ranges::contains(archive->operands, LinkOperand::Kind::archive, &LinkOperand::kind)))
@@ -344,22 +347,22 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
   std::error_code ec;
   auto st = std::filesystem::symlink_status(path, ec);
   if (st.type() == std::filesystem::file_type::directory)
-    return std::format("cannot write '{}': it is a directory", path.display_string());
+    return std::format("cannot write '{}': it is a directory", path.native());
   bool regular = st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink ||
                  st.type() == std::filesystem::file_type::not_found;
   if (st.type() == std::filesystem::file_type::regular || st.type() == std::filesystem::file_type::symlink)
     std::filesystem::remove(path, ec);
   {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return std::format("cannot open '{}' for writing", path.display_string());
+    if (!f) return std::format("cannot open '{}' for writing", path.native());
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     f.close();
-    if (!f) return std::format("cannot write '{}'", path.display_string());
+    if (!f) return std::format("cannot write '{}'", path.native());
   }
   if (executable && regular) {
     using enum std::filesystem::perms;
     std::filesystem::permissions(path, owner_exec | group_exec | others_exec, std::filesystem::perm_options::add, ec);
-    if (ec) return std::format("cannot make '{}' executable: {}", path.display_string(), ec.message());
+    if (ec) return std::format("cannot make '{}' executable: {}", path.native(), ec.message());
   }
   return std::nullopt;
 }
@@ -371,12 +374,18 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     out.errors.push_back("shared ELF output requires source or ordinary object inputs");
     co_return out;
   }
+  if (in.dylib_install_name && (in.dynamic || in.archive_link || in.shared_soname)) {
+    out.errors.push_back("Mach-O shared output requires source or ordinary object inputs");
+    co_return out;
+  }
   const auto effects = effect_link_verification(in);
   if (in.check_policies && effects == EffectVerification::unavailable) {
     out.errors.push_back("checked ownership links require explicit objects and source inputs");
     co_return out;
   }
-  const auto compile_keys = in.tus | std::views::transform([&](TuId tu) { return Tu::Key{tu, in.check_policies}; });
+  const auto compile_keys = in.tus | std::views::transform([&](TuId tu) {
+    return Tu::Key{tu, in.check_policies, in.optimization};
+  });
   const auto tus = co_await cx.par_map<Tu>(compile_keys);
   for (std::size_t i = 0; i < in.tus.size(); ++i) {
     if (!tus[i].get().object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));
@@ -448,6 +457,12 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     auto image = link::elf::link_shared(objects, *in.shared_soname);
     if (image) out.image = std::move(*image);
     else out.errors.push_back(std::move(image.error()));
+    co_return out;
+  }
+  if (in.dylib_install_name) {
+    auto image = link::link(objects, {.identifier = in.identifier, .dylibs = {}, .install_name = in.dylib_install_name});
+    if (image) out.image = std::move(*image);
+    else for (const link::error& error : image.error()) out.errors.push_back(error.message);
     co_return out;
   }
   if (auto selection = link::elf::select_comdat_groups(objects, in.dynamic.has_value()); !selection) {

@@ -48,7 +48,7 @@ void add(std::vector<std::string>& paths, fs::path path) {
   if (std::ranges::none_of(path, [](const fs::path& component) { return component == ".."; }))
     path = path.lexically_normal();
   while (path != path.root_path() && path.filename().empty()) path = path.parent_path();
-  paths.push_back(path.native_encoded_string());
+  paths.push_back(path.native());
 }
 
 std::string_view trim(std::string_view text) {
@@ -161,7 +161,7 @@ void sample(Hasher& h, const fs::path& path, Depth depth, bool root, std::set<Di
 
   std::vector<std::string> children;
   for (fs::directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec))
-    children.push_back(it->path().filename().native_encoded_string());
+    children.push_back(it->path().filename().native());
   std::ranges::sort(children);
   hash_append(h, ec.value());
   hash_append(h, children.size());
