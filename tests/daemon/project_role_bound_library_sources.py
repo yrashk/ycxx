@@ -33,13 +33,13 @@ EMIT = r'''
 IFS=' ' read -r value < "$1" || exit 1
 case "$value" in 17|23|29|41) ;; *) exit 1 ;; esac
 /bin/cat "$2" > "$4" || exit 1
-printf 'inline constexpr int private_score = %s;\n' "$value" > "$5" || exit 1
+printf 'static constexpr int private_score = %s;\n' "$value" > "$5" || exit 1
 printf '%s\n' "$value" >> "$3"
 '''
 PAIR = r'''
 printf '#include "detail.hh"\nint implementation_score() { return private_score + 16; }\n' > "$1" || exit 1
 printf '#include "detail.hh"\nint implementation_score() { return private_score + 28; }\n' > "$2" || exit 1
-printf 'inline constexpr int private_score = 1;\n' > "$3" || exit 1
+printf 'static constexpr int private_score = 1;\n' > "$3" || exit 1
 printf 'pair\n' >> "$4"
 '''
 
@@ -321,8 +321,10 @@ def check_inactive_duplicate(ycxx, scope, env, host, other):
     choice = binding(roles)
     definition = definition.replace(choice, f'{reference(HOST)},\n               {choice}')
     (scope / 'build.ycxx').write_text(definition, encoding='utf-8')
-    (scope / f'{HOST[0]}.in').write_text('#include "detail.hh"\nint auxiliary_score() { return private_score; }\n',
-                                        encoding='utf-8')
+    for (producer, _, _), score, symbol in ((HOST, 17, 'auxiliary_score'), (TARGET, 29, 'implementation_score')):
+        (scope / f'{producer}.in').write_text(
+            f'#include "detail.hh"\nstatic_assert(private_score == {score});\n'
+            f'int {symbol}() {{ return private_score; }}\n', encoding='utf-8')
     _, events = build(ycxx, scope, env, host, host, 'accept distinct target sources despite an inactive host duplicate')
     check_external_actions(events, HOST[0], TARGET[0], PLAIN[0])
     assert not journal.exists() and Counter(journal_contents(generated).splitlines()) == Counter(('17', '29'))
