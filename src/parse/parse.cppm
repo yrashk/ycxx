@@ -5179,7 +5179,8 @@ private:
   // and a mapping that cannot be formed leaves it unsatisfied ([temp.constr.atomic]/3).
   // Each member-declarator has its own ([class.mem.general]). A non-templated function's is
   // diagnosed, then read and dropped, so the member is still declared.
-  bool member_requires_clause(const std::vector<parse::Param>& params) {
+  // `object`: the type of `this` in it, for a non-static member function ([expr.prim.this]/2).
+  bool member_requires_clause(const std::vector<parse::Param>& params, std::optional<QualType> object = std::nullopt) {
     if (!member_template_) {
       trailing_requires_ = ConstId::none;
       trailing_constraint_ = {};
@@ -5191,7 +5192,12 @@ private:
     const bool substitute = inst_ && !member_template_;
     sema::Bindings bound;
     if (substitute) bound = std::exchange(s_.template_args, sema::Bindings{});
+    const auto saved_this = std::exchange(s_.this_type, object);
+    const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout,
+                                            p_->items().items[it_->parent].template_depth != 0);
     trailing_requires_clause(params);
+    ps_.defer_member_constraint_layout = saved_layout;
+    s_.this_type = saved_this;
     if (substitute) {
       s_.template_args = bound;
       const auto normal = s_.templates().substitute_constraint(trailing_requires_, bound);
@@ -8782,7 +8788,11 @@ private:
     bool fn = types.is_function(d.type);
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
     if (!defaults_allowed(d.params, fn, d.name)) return false;
-    if (fn && !member_requires_clause(d.params)) return false;
+    if (fn) {
+      const auto cv = types.rec(d.type).fn_cv;
+      const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, cv)));
+      if (!member_requires_clause(d.params, object)) return false;
+    }
     bool is_def = it_->kind == ItemKind::function;
     const bool assignment = fn && s_.ins().names.spelling(d.name) == "operator=";
     const bool defaulted = assignment && p_->defaulted_body(k_);
@@ -8856,17 +8866,6 @@ private:
       if (spec.is_static && r.fn_cv != sema::Cv::none) {
         s_.diag(d.name_at, Diag::cv_on_non_member);  // [class.static.mfct]/2
         return false;
-      }
-      if (member_template_ && ps_.is(Tk::kw_requires)) {
-        const auto before = s_.diag_count();
-        const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, r.fn_cv)));
-        const auto saved = std::exchange(s_.this_type, object);
-        const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout,
-                                                p_->items().items[it_->parent].template_depth != 0);
-        trailing_requires_clause(d.params);
-        ps_.defer_member_constraint_layout = saved_layout;
-        s_.this_type = saved;
-        if (s_.has_error_since(before)) return false;
       }
       if (ps_.is(Tk::equal)) {
         if (!is_virtual || is_def || assignment || ps_.kind(1) == Tk::kw_default || ps_.kind(1) == Tk::kw_delete) {
