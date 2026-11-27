@@ -2613,6 +2613,7 @@ public:
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
     return p_->publish_class(c, std::move(r), item_, context);
   }
+  EntityId enclosing_namespace() override { return p_->namespace_entity(p_->ns_of(item_)); }
   const sema::EnumRec* defining_enum(EntityId e) override { return p_->defining_enum(e); }
   bool require_enum_definition(EntityId e) override {
     const bool ready = p_->require_enum_definition(e, point());
@@ -3664,6 +3665,7 @@ public:
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
   ast::Compatibility compatibility() const override { return p_->compatibility(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
+  EntityId enclosing_namespace() override { return at_.enclosing_namespace(); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
     return at_.replay_alias_calls(caller, alias, args);
@@ -4188,6 +4190,7 @@ private:
         const auto checks = ps_.deferred_argument_checks();
         const auto ranks = ps_.deferred_rank_checks();
         const auto type_arguments = ps_.deferred_alias_type_arguments();
+        const std::size_t closures = s_.closures.size();
         ps_.namespace_alias_type = true;
         auto t = [&] {
           const Parser::GccSignatureScope spelling{ps_};
@@ -4202,7 +4205,8 @@ private:
         if (ps_.deferred_immediate_calls() != calls) {
           pattern.kind = ps_.deferred_argument_checks() == checks ? Kind::retained : Kind::may_erase;
           pattern.class_result = ps_.deferred_class_immediate_calls() != class_calls;
-        } else if (!pattern.rank_checks && !s_.templates().structural_operand(*t)) {
+        } else if ((!pattern.rank_checks && !s_.templates().structural_operand(*t)) || s_.closures.size() != closures) {
+          // [temp.alias]/5: a lambda's closure type is each specialization's own, read again.
           pattern.kind = Kind::unrepresented;
         }
         if (pattern.kind != Kind::none || pattern.rank_checks || pattern.qualified_type_arguments)

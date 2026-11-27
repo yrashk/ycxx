@@ -3002,8 +3002,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
             fname, fe.type, fe.scope, fe.special != Special::none, fe.template_type ? std::optional(spec_of(fe)) : std::nullopt});
       }
     } else if (r.kind == sema::EntityKind::class_ && n.name.empty() && !n.unnamed_type_ordinal &&
-               (r.scope != EntityId::none || written != written_closure_numbers.end())) {
-      auto f = by_id.find(ir::raw(r.scope));
+               (r.scope != EntityId::none || written != written_closure_numbers.end() || r.lambda_signature != Fp128{})) {
+      // A closure in a class or namespace, with no variable to own it: TU-local, of a lambda in an
+      // unevaluated operand of a declaration (#1549) or in a constraint.
+      const bool in_scope = r.scope == EntityId::none || w->entities.rec(r.scope).kind == sema::EntityKind::class_ ||
+                            w->entities.rec(r.scope).kind == sema::EntityKind::namespace_;
+      auto f = in_scope ? by_id.end() : by_id.find(ir::raw(r.scope));
       n.closure = true;
       n.closure_type = r.type;
       n.closure_number = written == written_closure_numbers.end() ? r.ordinal : written->second;
@@ -3034,6 +3038,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         }
       } else if (r.scope != EntityId::none && w->entities.rec(r.scope).kind == sema::EntityKind::variable) {
         n.closure_variable = r.scope;  // no symbol of the unit: an identity reserved for its closures (#338)
+      } else if (in_scope) {
+        // Named `$_N` in its scope, as Clang names its TU-local closures; N is unique in the unit.
+        n.closure_in_scope = true;
+        if (!n.private_closure_number) {
+          auto number = private_closure_numbers.find(c);
+          if (number == private_closure_numbers.end()) number = private_closure_numbers.emplace(c, next_constraint_closure_number++).first;
+          n.private_closure_number = number->second;
+        }
       }
     }
     return n;

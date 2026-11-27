@@ -339,6 +339,9 @@ public:
   virtual const ClassRec& publish_class(EntityId c, ClassRec r, Sema& context) = 0;
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
+  // The namespace the item being analysed is in: what owns the closure types of lambdas in its
+  // unevaluated operands outside every class and declaration that owns them (#1549).
+  virtual EntityId enclosing_namespace() { return EntityId::none; }
   virtual ~Questions() = default;
 };
 
@@ -5784,6 +5787,11 @@ public:
     // closures of the declaration being analysed (docs/design/closures.md, decision 3).
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
     const ClosureOwner* owner = scope == EntityId::none && closure_owner ? &*closure_owner : nullptr;
+    // A lambda in an unevaluated operand outside every function body and every declaration that
+    // owns its closures (a `decltype` in an alias-declaration or a function's declarator,
+    // [expr.prim.lambda.general]/3): a closure type no definition can name elsewhere.
+    std::optional<ClosureOwner> unevaluated_owner;
+    if (scope == EntityId::none && !owner && unevaluated > 0) owner = &unevaluated_owner.emplace(unevaluated_closure_owner());
     // [expr.prim.lambda.capture]/3: only a block scope or a default member initializer gives a
     // capture-default something to capture.
     if (owner && spec.default_capture) {
@@ -5969,6 +5977,22 @@ public:
     Fp128 discriminator{};
   };
   std::optional<ClosureOwner> closure_owner;
+  // The owner of a closure type of a lambda in an unevaluated operand of a declaration part that
+  // no `closure_owner` covers (#1549): TU-local, in the class or namespace around it, like a
+  // constraint's (docs/design/closures.md, "Closures of declarations" 2). Its discriminator tells
+  // the item's closures from other items' and each substitution's from the others'
+  // ([expr.prim.lambda.closure]/1, [temp.alias]/5): the template arguments bound.
+  ClosureOwner unevaluated_closure_owner() {
+    // The global namespace is `EntityId::none`.
+    const EntityId around = current_class != EntityId::none ? current_class : q_->enclosing_namespace();
+    Fp128 d = ast::mix(ast::seed("ycxx.sema.unevaluated-closure"), ins().items.fp(item_));
+    d = ast::mix(d, u64(loc_base_));
+    for (const auto& level : template_args.levels) {
+      d = ast::mix(d, u64(level.size()));
+      for (const auto& a : level) d = a ? w_->entities.mix_arg(ast::mix(d, u64(1)), *a) : ast::mix(d, u64(0));
+    }
+    return ClosureOwner{around, ast::Linkage::internal, d};
+  }
   // The part being analysed is no function's body: its generic lambdas are instantiated in it
   // (`GenericClosure::part`).
   bool declaration_part = false;
