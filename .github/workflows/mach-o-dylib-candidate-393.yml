@@ -1,0 +1,96 @@
+name: Arm64 Darwin shared-output candidate
+
+on:
+  push:
+    branches: [codex/ycxx-arm64-dylib-evidence-393]
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-shared:
+    if: github.repository == 'yrashk/ycxx'
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      CANDIDATE: 6dc233742eb6c23dc4581d1d0d5d7f92ca37831f
+      CANDIDATE_TREE: 430a7c5033c5899a9a31f85c6d29147d22d06546
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify the exact merge candidate
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-darwin-shared-candidate-393"
+          mkdir -p "$output"
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git -C deps/libycxx rev-parse HEAD)" = "$(git rev-parse "$CANDIDATE:deps/libycxx")"
+          git diff --exit-code HEAD --
+          {
+            git show --no-patch --format='%H %T %P' HEAD
+            git -C deps/libycxx rev-parse HEAD
+            printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            uname -a
+            sw_vers
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --find cc
+          } | tee "$output/provenance.txt"
+      - name: Provision the candidate's CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the commit using the pinned CI CMake
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-darwin-shared-candidate-393"
+          unset YCXX_ROOT
+          cmake --version | tee -a "$output/provenance.txt"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$output/build.log"
+          shasum -a 256 build/bin/ycxx | tee -a "$output/provenance.txt"
+          git diff --exit-code HEAD --
+      - name: Test Mach-O dylib bytes, platform loading, and linker regressions
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/ycxx-darwin-shared-candidate-393"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export YCXX_DARWIN_SHARED_RECEIPTS="$output/darwin-shared-receipts"
+          unset YCXX_ROOT
+          suite='^(unit\.(darwin_shared_output|macho_obj|link|darwin_local_unwind|darwin_cleanup_free_unwind)|daemon\.project_rule_package)$'
+          ctest --test-dir build --show-only=json-v1 -R "$suite" > "$output/roster.json"
+          python3 -B - "$output/roster.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          records = json.loads(Path(sys.argv[1]).read_text())['tests']
+          found = {record['name'] for record in records}
+          expected = {
+              'unit.darwin_shared_output', 'unit.macho_obj', 'unit.link',
+              'unit.darwin_local_unwind', 'unit.darwin_cleanup_free_unwind',
+              'daemon.project_rule_package',
+          }
+          assert found == expected, (found, expected)
+          PY
+          set +e
+          ctest --test-dir build --output-on-failure --no-tests=error -j 2 -R "$suite" 2>&1 | tee "$output/ctest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$output/ctest-exit.txt"
+          if test -d build/Testing; then cp -R build/Testing "$output/Testing"; fi
+          test "$status" = 0
+          test -d "$YCXX_DARWIN_SHARED_RECEIPTS"
+          find "$YCXX_DARWIN_SHARED_RECEIPTS" -type f -print | tee "$output/receipt-files.txt"
+          test -s "$output/receipt-files.txt"
+      - name: Upload native receipts and gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-393-arm64-darwin-shared-candidate
+          path: ${{ runner.temp }}/ycxx-darwin-shared-candidate-393/
+          if-no-files-found: error
+          retention-days: 14
