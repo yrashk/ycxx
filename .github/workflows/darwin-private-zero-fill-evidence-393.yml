@@ -1,0 +1,163 @@
+name: Arm64 Darwin private zero-fill evidence
+
+on:
+  push:
+    branches: [codex/ycxx-arm64-dylib-zerofill-evidence-393]
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-private-zero-fill:
+    if: github.repository == 'yrashk/ycxx'
+    # by design: verifies execution by the native arm64 Darwin loader and the installed provider
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      CANDIDATE: 51babbcba5e93317f80ca5e935fa05e04c448c45
+      CANDIDATE_TREE: 364efa777cab304e8c74bd93b5996bbfc2733ff6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify the exact merge candidate and select the macOS SDK
+        shell: bash
+        run: |
+          RECEIPTS="$RUNNER_TEMP/ycxx-darwin-private-zero-fill-393"
+          mkdir -p "$RECEIPTS"
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git -C deps/libycxx rev-parse HEAD)" = "$(git rev-parse "$CANDIDATE:deps/libycxx")"
+          git diff --exit-code HEAD --
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          test -d "$sdk"
+          printf 'SDKROOT=%s\nRECEIPTS=%s\n' "$sdk" "$RECEIPTS" >> "$GITHUB_ENV"
+          {
+            git show --no-patch --format='candidate %H tree %T parents %P' HEAD
+            printf 'libycxx %s\n' "$(git -C deps/libycxx rev-parse HEAD)"
+            printf 'workflow source %s\n' "$GITHUB_SHA"
+            printf 'image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            printf 'SDKROOT=%s\n' "$sdk"
+            uname -a
+            sw_vers
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            /usr/bin/cc --version
+          } | tee "$RECEIPTS/provenance.txt"
+      - name: Provision the candidate's CI toolchain
+        uses: ./.github/actions/setup
+      - name: Build the exact merge candidate
+        id: build
+        shell: bash
+        run: |
+          unset YCXX_ROOT
+          cmake --version | tee -a "$RECEIPTS/provenance.txt"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DYCXXC_INSTALL=ON 2>&1 | tee "$RECEIPTS/configure.log"
+          tools/build -j 3 --no-smoke 2>&1 | tee "$RECEIPTS/build.log"
+          shasum -a 256 build/bin/ycxx | tee -a "$RECEIPTS/provenance.txt"
+          git diff --exit-code HEAD --
+      - name: Test the native loader, dylib input and output, and Mach-O regressions
+        shell: bash
+        env:
+          YCXX_DARWIN_SHARED_RECEIPTS: ${{ runner.temp }}/ycxx-darwin-private-zero-fill-393/darwin-shared-receipts
+          YCXX_DARWIN_DYLIB_INPUT_RECEIPTS: ${{ runner.temp }}/ycxx-darwin-private-zero-fill-393/darwin-dylib-input-receipts
+        run: |
+          unset YCXX_ROOT
+          suite='^unit\.(darwin_shared_output|darwin_dylib_input|link|macho_obj|darwin_runtime)$'
+          ctest --test-dir build --show-only=json-v1 -R "$suite" > "$RECEIPTS/roster.json"
+          python3 -B - "$RECEIPTS/roster.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          expected = {'unit.' + name for name in (
+              'darwin_shared_output', 'darwin_dylib_input', 'link', 'macho_obj', 'darwin_runtime',
+          )}
+          actual = [row['name'] for row in json.loads(Path(sys.argv[1]).read_text())['tests']]
+          assert len(actual) == len(expected) and set(actual) == expected, actual
+          PY
+          set +e
+          ctest --test-dir build --output-on-failure --no-tests=error -j 1 -R "$suite" 2>&1 | tee "$RECEIPTS/ctest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$RECEIPTS/ctest-exit.txt"
+          if test -d build/Testing; then cp -R build/Testing "$RECEIPTS/Testing"; fi
+          test "$status" = 0
+      - name: Verify raw zero-fill, loader, worker and dylib-input receipts
+        shell: bash
+        run: |
+          for receipt in commands.jsonl provider-native.dylib provider-platform.dylib client-runtime; do
+            test -s "$RECEIPTS/darwin-dylib-input-receipts/$receipt"
+          done
+          cd "$RECEIPTS/darwin-shared-receipts"
+          for receipt in commands.jsonl provider-cold.dylib provider-daemon.dylib provider-edited.dylib worker-provider.dylib \
+                         worker-plan.ycxx native-client branch-to-zero-fill.o; do
+            test -s "$receipt"
+          done
+          cmp provider-cold.dylib provider-daemon.dylib
+          shasum -a 256 provider-cold.dylib provider-daemon.dylib provider-edited.dylib worker-provider.dylib native-client | tee "$RECEIPTS/provider-digests.txt"
+          python3 -B - <<'PY' | tee "$RECEIPTS/shared-evidence.log"
+          import json
+          import shlex
+          from pathlib import Path
+
+          for name in ('provider-cold', 'provider-edited', 'worker-provider'):
+              metadata = json.loads(Path(name + '.json').read_text())
+              zero_fill = metadata['zero_fill']
+              data = metadata['segments']['__DATA']
+              assert zero_fill and data['file_size'] == 0, (name, zero_fill, data)
+              print(name, json.dumps({'zero_fill': zero_fill, '__DATA': data}, sort_keys=True))
+
+          journal = [json.loads(line) for line in Path('commands.jsonl').read_text().splitlines()]
+          loaders = [row for row in journal if row['argv'][0] == './loader' and row['status'] == 0]
+          workers = [row for row in journal if '--internal-rule-worker' in row['argv'] and row['status'] == 0]
+          signatures = [row for row in journal if Path(row['argv'][0]).name == 'codesign'
+                        and '--verify' in row['argv'] and '--strict' in row['argv'] and row['status'] == 0]
+          clients = [row for row in journal if row['argv'][0] == './native-client' and row['status'] == 17]
+          rejected = [row for row in journal if 'branch-to-zero-fill.o' in row['argv'] and row['status'] == 1]
+          assert loaders and workers and signatures and clients and rejected, journal
+          for row in loaders + workers + signatures + clients + rejected:
+              print(shlex.join(row['argv']), f"exit={row['status']}")
+          for row in rejected:
+              diagnostic = Path(row['stderr']).read_text().strip()
+              assert 'BRANCH26 target is in non-executable zero-fill storage' in diagnostic
+              print(diagnostic)
+          print('Worker output:', Path('worker-plan.ycxx').read_text().strip())
+          PY
+      - name: Get the installed-provider witness from the exact scratch workflow ref
+        id: witness-source
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .scratch-receipt-workflow
+          sparse-checkout: .github/scripts/darwin-private-zero-fill-installed-witness.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Build a project with the installed bundled native provider
+        if: ${{ !cancelled() && steps.witness-source.outcome == 'success' }}
+        shell: bash
+        run: |
+          script="$GITHUB_WORKSPACE/.scratch-receipt-workflow/.github/scripts/darwin-private-zero-fill-installed-witness.sh"
+          mkdir -p "$RECEIPTS/installed-provider"
+          shasum -a 256 "$script" | tee "$RECEIPTS/witness-script-digest.txt"
+          cp "$script" "$RECEIPTS/installed-witness.sh"
+          unset YCXX_ROOT
+          set +e
+          bash "$script" "$GITHUB_WORKSPACE/build/bin/ycxx" "$RECEIPTS/installed-provider" 2>&1 | tee "$RECEIPTS/installed-witness.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$RECEIPTS/installed-witness-exit.txt"
+          test "$status" = 0
+      - name: Upload native receipts and gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycxx-393-arm64-darwin-private-zero-fill
+          path: ${{ runner.temp }}/ycxx-darwin-private-zero-fill-393/
+          if-no-files-found: error
+          retention-days: 14
