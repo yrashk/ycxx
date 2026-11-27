@@ -505,7 +505,9 @@ from a nonthrowing built-in conditional, including a checked copy from a same-cl
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
 conversion function for an exact non-class value type, including ordinary `&`- and
-`&&`-qualified conversion functions. [#339](https://github.com/yrashk/ycxx/issues/339)
+`&&`-qualified conversion functions. Ordinary in-class conversion functions accept bare
+`explicit` in either order with `constexpr`.
+[#339](https://github.com/yrashk/ycxx/issues/339) [#1468](https://github.com/yrashk/ycxx/issues/1468)
 
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)

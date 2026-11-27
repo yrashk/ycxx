@@ -58,6 +58,7 @@ struct DeclSpec {
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   DeclAttributes attributes;
   std::optional<u32> virtual_at;
+  std::optional<u32> explicit_at;
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
@@ -761,6 +762,15 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_explicit:
+        if (!class_member || !allow_conversion_id || kind(1) == Tk::l_paren) goto done;
+        if (d.explicit_at) {
+          s_->diag(pos(), Diag::duplicate_specifier, k);
+          d.ok = false;
+        } else {
+          d.explicit_at = pos();
+        }
+        break;
       case Tk::kw_mutable:
         if (!class_member) {
           s_->diag(pos(), Diag::mutable_placement);
@@ -1058,7 +1068,7 @@ public:
     }
     // [dcl.typedef]/1: `typedef` is combined only with type-specifiers.
     if (d.is_typedef && (d.is_static || d.is_extern || d.is_inline || d.is_constexpr || d.is_consteval || d.is_constinit ||
-                         d.virtual_at)) {
+                         d.virtual_at || d.explicit_at)) {
       s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_typedef);
       d.ok = false;
     }

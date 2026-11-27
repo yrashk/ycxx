@@ -355,7 +355,7 @@ enum class Diag : std::uint32_t {
   virtual_call [[=message{Severity::error, "a call to a virtual member function is not supported yet"}]],
   virtual_immediate_call [[=message{Severity::error, "an evaluated call to a consteval virtual member function is not supported yet"}]],
   qualified_constructor [[=message{Severity::error, "a constructor cannot have a cv- or ref-qualifier"}]],
-  explicit_constructor_placement [[=message{Severity::error, "'explicit' is only allowed on a constructor declaration within its class"}]],
+  explicit_placement [[=message{Severity::error, "'explicit' is only allowed on a constructor or conversion function declaration within its class"}]],
   copy_list_explicit_constructor [[=message{Severity::error, "copy-list-initialization of '{0:t}' selects an explicit constructor"}]],
   constructor_namespace [[=message{Severity::error, "constructor definition is outside a namespace enclosing its class"}]],
   member_class_namespace [[=message{Severity::error, "definition of class '{0:n}' is outside a namespace enclosing its class"}]],
