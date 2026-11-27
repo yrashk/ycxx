@@ -14,7 +14,7 @@ from project_host_library_generated_headers import HOST_VIRTUAL
 from project_host_static_archive_inputs import link_outcomes
 from project_inspection import (
     check_dependency_graph, check_dependency_html, check_target_dependencies_html, check_target_graph_html,
-    dependency_edge, fact, manifest_location, scope_state,
+    dependency_edge, fact, graph_target_ids, manifest_location, scope_state,
 )
 from project_module_graph import PlanHTML
 from project_native_host_tool import GENERATED_HEADER, NOTE, REFERENCE, SCANNER
@@ -146,6 +146,7 @@ def check_positions(plan, report, selected):
     }
     parsed = PlanHTML(report)
     graph_rows = parsed.section('facts', 'Plan facts').descendants
+    ids = graph_target_ids(plan)
     for owner, roles, parents in (
         ('common', ('host', 'target'), ()),
         ('left', ('host', 'target'), ('common',)),
@@ -167,7 +168,7 @@ def check_positions(plan, report, selected):
         assert len(facts) == len(found) and found == wanted, (owner, found, wanted)
         view = {}
         for row in graph_rows:
-            if (row.attrs.get('data-graph-kind'), row.attrs.get('data-graph-target')) != ('include', owner):
+            if (row.attrs.get('data-graph-kind'), row.attrs.get('data-graph-target')) != ('include', ids[owner]):
                 continue
             label, = (cell.visible() for cell in row.descendants if cell.attrs.get('class') == 'fact-name')
             value, = (cell.visible() for cell in row.descendants if cell.attrs.get('class') == 'fact-value')
