@@ -5180,7 +5180,9 @@ private:
   // Each member-declarator has its own ([class.mem.general]). A non-templated function's is
   // diagnosed, then read and dropped, so the member is still declared.
   // `object`: the type of `this` in it, for a non-static member function ([expr.prim.this]/2).
-  bool member_requires_clause(const std::vector<parse::Param>& params, std::optional<QualType> object = std::nullopt) {
+  // `defer_layout`: in a class template's definition, its class's layout is not known yet.
+  bool member_requires_clause(const std::vector<parse::Param>& params, std::optional<QualType> object = std::nullopt,
+                              bool defer_layout = false) {
     if (!member_template_) {
       trailing_requires_ = ConstId::none;
       trailing_constraint_ = {};
@@ -5193,8 +5195,7 @@ private:
     sema::Bindings bound;
     if (substitute) bound = std::exchange(s_.template_args, sema::Bindings{});
     const auto saved_this = std::exchange(s_.this_type, object);
-    const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout,
-                                            p_->items().items[it_->parent].template_depth != 0);
+    const bool saved_layout = std::exchange(ps_.defer_member_constraint_layout, defer_layout);
     trailing_requires_clause(params);
     ps_.defer_member_constraint_layout = saved_layout;
     s_.this_type = saved_this;
@@ -8791,7 +8792,7 @@ private:
     if (fn) {
       const auto cv = types.rec(d.type).fn_cv;
       const auto object = spec.is_static ? std::nullopt : std::optional(types.pointer(types.add_cv(c.type, cv)));
-      if (!member_requires_clause(d.params, object)) return false;
+      if (!member_requires_clause(d.params, object, p_->items().items[it_->parent].template_depth != 0)) return false;
     }
     bool is_def = it_->kind == ItemKind::function;
     const bool assignment = fn && s_.ins().names.spelling(d.name) == "operator=";
