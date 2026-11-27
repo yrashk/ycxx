@@ -773,6 +773,10 @@ written default member initializer are value-initialized.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
+- dependent concept-ids as template arguments, such as `typename conditional_t<C<I>, A, B>::type`
+  in alias templates, member aliases and function signatures, and dependent comparisons such as
+  `(sizeof(I) > 4)` in namespace alias templates and member aliases of class templates
+  [#1548](https://github.com/yrashk/ycxx/issues/1548);
 - dependent non-type template arguments from parameterless namespace `consteval` function
   templates with explicit type arguments, including fixed namespace-qualified calls. An
   unqualified call to a single ordinary external `consteval` function can also use direct

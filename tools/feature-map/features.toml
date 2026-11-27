@@ -2111,7 +2111,7 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\btemplate\s*<[^;{]*>\s*using\s+\w+\s*='
 status = 'done'
-note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630).'
+note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630). Dependent concept-ids and comparisons can select the type, as in `typename conditional_t<C<I>, A, B>::type` (#1548).'
 
 [[feature]]
 id = 'temp-var'

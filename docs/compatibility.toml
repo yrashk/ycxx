@@ -166,6 +166,21 @@ probe = 'namespace Outer { namespace Inner { template<class T> constexpr bool va
 evidence = ["tests/daemon/compatibility.py", "tests/own/abi/dependent-template-args.run.cpp", "Black-box GCC 16.2 and Clang 23.1.6 symbol probes with namespace aliases, earlier declarations and uninstantiated template bodies on ELF and Mach-O"]
 
 [[divergence]]
+id = "dependent-concept-symbol"
+status = "partial"
+mode_status = { spec = "pending", gcc = "supported", clang = "pending" }
+reference = "Itanium C++ ABI §5.1.6.2, [temp.names]/8, [temp.dep.constexpr]/2, #1548, #1589"
+prior = "A value-dependent concept-id as a template argument of a declaration was rejected."
+spec = "Uses GCC's unqualified concept name and the written arguments (DECISIONS §1.7) until #1589 decides the spec form."
+gcc = "Use the unqualified concept name and the arguments, X <source-name> <template-args> E."
+clang = "Uses GCC's form. Clang's form is pending in #1589."
+gcc_observed = "Writes the bare concept name for every spelling: qualified, `::`-qualified, through a namespace alias, inline namespaces and unqualified inside the namespace."
+clang_observed = "Writes sr, the enclosing non-inline namespaces and E before the name for any concept outside the global namespace, whatever the spelling, with no gs for a leading `::`. A concept in the global namespace has the bare name, as in GCC."
+limits = "Covers concept-ids in dependent class template arguments of function template signatures. Concepts in the global namespace agree in every mode."
+probe = 'namespace a::b { template<class T> concept V = sizeof(T) >= 4; } template<bool> struct Box {}; template<class T> void f(Box<a::b::V<T>>) {}'
+evidence = ["tests/own/abi/dependent-concept-args.run.cpp", "Black-box GCC 16 and Clang 23.1.5 symbol probes on Mach-O (#1589)"]
+
+[[divergence]]
 id = "dependent-variable-template-redeclaration"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }

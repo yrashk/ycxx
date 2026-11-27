@@ -2444,6 +2444,34 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Concept-ids and comparisons as dependent template arguments (#1548)
+
+- A concept-id with dependent arguments read as an evaluated template argument is a
+  `VDepConcept` value in every declaration context, unqualified or namespace-qualified, and under
+  `!` ([temp.names]/8, [temp.dep.constexpr]/2). Substitution evaluates it once the arguments are
+  known (`Templates::substitute_concept_value`). `typename cond<C<I>, …>::type` in an alias
+  template, a member alias or a function signature works, as libycxx's `iter_difference_t` needs.
+- In a function signature it is `X <expression> E` (Itanium C++ ABI §5.1.6), GCC's form in every
+  mode. Clang qualifies a concept outside the global namespace (`dependent-concept-symbol` in
+  `docs/compatibility.toml`, #1589).
+- A dependent value with no `VDep*` form, such as `(sizeof(I) > 4)` or `I == 0`, gets
+  `template_value`'s placeholder in a namespace alias template and in an ordinary member alias of
+  a class template, as in a class base. The alias is parsed again with its arguments bound
+  (`AliasCallPattern::Kind::unrepresented`, `AtItem::replay_alias_calls`), the member alias with
+  its class. Named with dependent arguments, such an alias is a `TDeferredAlias`: its identity is
+  the alias and its arguments, not the shared placeholder, so `gt<T> f(T)` and `lt<T> f(T)` are
+  different templates. Substituting concrete arguments replays the alias, also for a function
+  specialization's parameter types; deduction binds a bare parameter to the deferred alias itself,
+  which keeps partial ordering of a partial specialization like `P<T, gt<T>>` exact. Two
+  different aliases with token-identical comparisons stay distinct, though [temp.over.link]/5 makes
+  them equivalent (#209). A signature through such an alias has no symbol yet. Member alias
+  templates and function signatures that write the comparison directly still reject it (#209).
+- `C<I> && D<I>` of concept-ids is a `VDepOp` conjunction, as for variable templates; `||` waits for
+  the replay. A conjunction in a signature has no symbol yet (#209).
+- Tests: `tests/own/templates/concept-id-alias-argument.{accept,reject}.cpp`,
+  `tests/own/templates/dependent-comparison-alias-{argument,identity}.accept.cpp`,
+  `tests/own/abi/dependent-concept-args.run.cpp` (linked with a Clang peer).
+
 ## Enumeration-typed template parameters (#774)
 
 - A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or

@@ -1385,6 +1385,14 @@ public:
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
       if (pattern.kind == AliasCallPattern::Kind::may_erase) return std::nullopt;
+      // The expansion holds a placeholder for an operand it cannot represent, which every such
+      // alias shares. The alias-id keeps its identity ([temp.alias]/2) and is read again once its
+      // arguments are known.
+      if (pattern.kind == AliasCallPattern::Kind::unrepresented) {
+        auto expanded = templates_for_use(at).substitute(tmpl.type, bindings);
+        if (!expanded) return std::nullopt;
+        return types().deferred_alias(tmpl.entity, args, *expanded, substituting_default);
+      }
     }
     if (compatibility() == ast::Compatibility::gcc) {
       // A dependent alias still carries the written transformations of its concrete
