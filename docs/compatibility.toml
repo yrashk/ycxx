@@ -102,6 +102,18 @@ limits = "Covers uniform private or protected access, mixed access, default memb
 evidence = ["tests/daemon/compatibility.py", "tests/own/inherit/layout.accept.cpp"]
 
 [[divergence]]
+id = "class-tail-padding-ineligible-assignment"
+status = "partial"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[special]/6, Itanium C++ ABI §1.1 and §2.4, #1417, #1670"
+spec = "A satisfied, more-constrained defaulted copy assignment makes the user-provided fallback ineligible. The layout reserves the tail padding of the 8-byte base and gives the derived class size 12."
+gcc = "Same as spec for the tested layout."
+clang = "Uses the spec layout for this case. Matching the Linux x86-64 Clang layout remains pending."
+gcc_observed = "GCC 16.2 on Linux x86-64 gives the 8-byte base a 12-byte derived class."
+clang_observed = "Clang 23.1.6 gives the 8-byte base an 8-byte derived class on Linux x86-64 and a 12-byte derived class on Darwin arm64. Hosted Clang 23.1.7 also fails the 12-byte assertion on Linux x86-64."
+evidence = ["tests/own/member-requires/ineligible-assignment-layout.run.cpp", "https://github.com/yrashk/ycxx/issues/1670", "https://github.com/yrashk/ycxx/actions/runs/46035259077/job/140628967381"]
+
+[[divergence]]
 id = "over-width-bit-field-allocation"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
