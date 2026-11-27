@@ -37,5 +37,10 @@ if [ ! -f "$dir/build.ninja" ]; then
 fi
 cmake --build "$dir" ${jobs:+-j "$jobs"} ${target:+--target "$target"}
 if [ "$smoke" = 1 ]; then
-  ctest --test-dir "$dir" --output-on-failure ${jobs:+-j "$jobs"}
+  # CMake records the effective setting, which a normal variable can override.
+  if ! grep -Fxq 1 "$dir/ycxx-ctests-enabled" 2>/dev/null; then
+    echo "build: Enable CTests in $dir before running them. Reconfigure with -DYCXXC_BUILD_TESTS=ON and check any project override." >&2
+    exit 1
+  fi
+  ctest --test-dir "$dir" --no-tests=error --output-on-failure ${jobs:+-j "$jobs"}
 fi
