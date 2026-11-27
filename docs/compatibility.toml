@@ -1645,7 +1645,7 @@ evidence = ["tests/own/templates/t8-make-integer-seq.run.cpp", "tests/own/templa
 id = "gnu-checked-overflow-result-type"
 status = "recorded"
 mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
-reference = "GNU Integer Overflow Builtins (https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html), #1636"
+reference = "GNU Integer Overflow Builtins (https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html), #1636, #1640"
 prior = "Require matching signed target-intmax_t operands and result."
 spec = "Reject boolean and enumerated result pointers for these builtins, following the documented GNU operand rules."
 gcc = "Same as spec."
