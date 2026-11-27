@@ -862,8 +862,8 @@ std = 'C++11'
 ftm = '__cpp_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*(?:\(|\{|<|mutable\b|->|constexpr\b|noexcept\b)'
 status = 'partial'
-note = 'not in default member initializers, default arguments or static_assert'
-issues = [338]
+note = 'Captureless lambdas can read enclosing scalar and record constants in non-odr-uses, including dependent forms (#1447). Default member initializers, default arguments and static_assert contexts remain partial (#338). Explicit record copy captures in constant evaluation remain open (#1694).'
+issues = [338, 1694]
 probe = '''
 int main() { int k = 2; int s = 0; [&] { ++s; }(); return ([k](int x) { return x + k; }(1) == 3 && s == 1) ? 0 : 1; }
 '''

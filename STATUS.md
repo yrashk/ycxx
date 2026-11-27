@@ -1796,8 +1796,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   owner's, so same-shaped classes of different functions stay distinct.
 - Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations
   and using-directives, namespace aliases, `using enum`s, static locals, and constants for their
-  values. An automatic variable is usable
-  only unevaluated ([basic.def.odr]). Lookup reaches the block after the local class and before
+  values. Unevaluated uses of enclosing automatic variables preserve the declaration's type.
+  Non-odr-uses may read enclosing scalar and record constants, including references usable in
+  constant expressions. Creating an odr-use of an enclosing automatic object still requires a
+  diagnostic ([basic.def.odr], [class.local], #1447). Lookup reaches the block after the local class and before
   the function's class ([basic.lookup.unqual]), including a class still being defined around a
   lambda in a static member's initializer. Access is the function's ([class.local]/1).
 - In a template's definition a local class is dependent; each specialization of the function,
@@ -1818,8 +1820,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ([#1443](https://github.com/yrashk/ycxx/issues/1443)), local classes with virtual functions
   ([#1155](https://github.com/yrashk/ycxx/issues/1155)), constant evaluation of local
   aggregates with class or array members ([#1140](https://github.com/yrashk/ycxx/issues/1140)),
-  which uses of an enclosing constant are odr-uses, shared with lambdas
-  ([#1447](https://github.com/yrashk/ycxx/issues/1447)), and the discriminators where Clang and
+  and the discriminators where Clang and
   GCC disagree ([#1448](https://github.com/yrashk/ycxx/issues/1448)).
   [[class.local]](https://eel.is/c++draft/class.local) · [#117](https://github.com/yrashk/ycxx/issues/117)
 
@@ -4769,8 +4770,11 @@ checked against Clang 23 and GCC 16 probes).
 - **Analysis** (`Sema::open_lambda`, `close_lambda`, the `LambdaFrame` stack): the body is
   parsed inside the enclosing part with its own locals; a name that resolves to an enclosing
   function's local or an init-capture is captured by every lambda between, by copy or by
-  reference, explicitly or by the capture-default, outermost first; a constant usable in
-  constant expressions is its value, not a capture. `this` and `*this`, init-captures, `mutable`,
+  reference, explicitly or by the capture-default, outermost first. A captureless lambda may
+  read an enclosing scalar or record constant in a non-odr-use. The analysis preserves the
+  declaration and initializer context during template replay. Taking the address of an
+  enclosing automatic object still requires capture. [#1447](https://github.com/yrashk/ycxx/issues/1447)
+  `this` and `*this`, init-captures, `mutable`,
   trailing return types and deduced return types (step 1). Captures are `Member`s of `This` in
   the body, and the lambda-expression is a `Lambda` node of `MemberInit`s. `BodySema::closures`
   keeps each `ClosureDef`.
@@ -4786,7 +4790,8 @@ checked against Clang 23 and GCC 16 probes).
 - Not yet: further lambda declaration contexts ([#338](https://github.com/yrashk/ycxx/issues/338));
   the conversion function's own symbol, conversions in
   contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
-  non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
+  non-trivially-copyable classes captured by copy (#353); constant evaluation of explicit copy
+  captures of a record (#1694); weak definitions of closure members in
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
   Clang captures it only when it is odr-used (a layout difference for such closures, #355).
 

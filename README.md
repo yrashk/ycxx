@@ -871,11 +871,15 @@ written default member initializer are value-initialized.
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
 - lambdas in the initializers of namespace-scope variables, static data members (of class
-  templates too) and variable templates, and in constraints; constexpr lambdas, except captures by
-  reference ([#338](https://github.com/yrashk/ycxx/issues/338)); lambdas in `decltype` and other
-  unevaluated operands of alias-declarations, alias templates, member aliases of class templates
+  templates too) and variable templates, and in constraints. Constexpr lambdas can read a
+  scalar or record constant from the enclosing function in a non-odr-use. Constant evaluation of
+  reference captures and explicit record copy captures remains limited. Lambdas in `decltype` and
+  other unevaluated operands of alias-declarations, alias templates, member aliases of class
+  templates
   and function declarators, except a function template's
-  ([#1269](https://github.com/yrashk/ycxx/issues/1269));
+  ([#1269](https://github.com/yrashk/ycxx/issues/1269)).
+  [#1447](https://github.com/yrashk/ycxx/issues/1447) · [#338](https://github.com/yrashk/ycxx/issues/338) ·
+  [#1694](https://github.com/yrashk/ycxx/issues/1694)
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
@@ -1104,10 +1108,11 @@ requires the member class to be complete.
 **Local classes.** A class can be defined in a function body, a lambda, or a member function of
 a class template: named or unnamed, with declarators after it, constructors, a destructor that runs
 when the block exits, member functions and default member initializers. Its members use the
-block's types and constants, and the function's access. Each specialization of a templated
-function has its own local class. Block-scope enumerations and local classes with virtual
-functions are not supported yet.
-[#117](https://github.com/yrashk/ycxx/issues/117) · [#1442](https://github.com/yrashk/ycxx/issues/1442) ·
+block's types and constants, and the function's access. They can read scalar or record
+constants in non-odr-uses. Each specialization of a templated function has its own local
+class. Block-scope enumerations and local classes with virtual functions are not supported yet.
+[#117](https://github.com/yrashk/ycxx/issues/117) · [#1447](https://github.com/yrashk/ycxx/issues/1447) ·
+[#1442](https://github.com/yrashk/ycxx/issues/1442) ·
 [#1155](https://github.com/yrashk/ycxx/issues/1155)
 
 **Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
