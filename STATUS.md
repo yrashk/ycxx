@@ -1676,8 +1676,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   - A class is POD for layout by the `-fcompat` mode's definition, where defaulted and deleted
     constructors are not user-provided: C++11's in Clang mode on arm64 macOS, C++03's otherwise
     (public members, no bases).
-  - Not yet: local classes, defaulting outside the class, a virtual assignment operator, member
-    pointers in assignment.
+  - Outside the class (#1541, #1565): a non-template, non-union class with no bases or virtual
+    functions, defined in an enclosing namespace, can default its default, copy and move
+    constructors and its destructor when its members are scalars or arrays of them (a const one
+    with an initializer, for the default constructor), and its copy and move assignment when
+    they are scalars, none const, volatile or `[[no_unique_address]]`. Such a definition is
+    user-provided and keeps the first declaration's exception specification. An array member
+    in the assignment case gets a diagnostic about the signature instead.
+  - Not yet: local classes, defaulting outside the class for classes with bases, class members
+    or virtual functions, a virtual assignment operator, member pointers in assignment.
   [Design](docs/design/defaulted-special-members.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
 - An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
   available implicit move constructor for scalar fields and class fields with proven nonthrowing
