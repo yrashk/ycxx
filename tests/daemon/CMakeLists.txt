@@ -130,6 +130,9 @@ add_test(NAME daemon.project_role_bound_library_headers
 add_test(NAME daemon.project_host_library_generated_sources
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_library_generated_sources.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_role_bound_library_sources
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_role_bound_library_sources.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_host_generated_headers
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_host_generated_headers.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.project_host_generated_sources
@@ -154,6 +157,8 @@ add_test(NAME daemon.project_runtime_assets
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_runtime_assets.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_inspection COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_inspection.py $<TARGET_FILE:ycxxc>)
+add_test(NAME daemon.project_graph_target_identity
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_graph_target_identity.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_rule_package COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_rule_package.py $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
 

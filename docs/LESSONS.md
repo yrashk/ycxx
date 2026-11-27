@@ -675,6 +675,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **Small semantic groups can repeat large headers.** On #978, the seven main-file groups of one
+  standard-library fixture each analysed thousands of the same header items. The largest
+  costs were in semantic analysis and the END worklist, and collecting the dependency trace
+  took under a tenth of a second per group in the isolated profile.
+  - Compare CPU time as well as wall time, and time item analysis, END and tracing
+    separately. Test the largest header fixtures together, as the Linux test driver does.
+    A small source run can share the specialization work in one group and run concurrently
+    with the headers.
+
 - **A point is not an item.** `Program::is_complete(c, item)` and its kin also get points past
   the item table (`end()`, an instantiation point). On #117 a helper that walked `items[k].parent`
   from such a point read past the table, and the `<iostream>` run segfaulted with no diagnostic

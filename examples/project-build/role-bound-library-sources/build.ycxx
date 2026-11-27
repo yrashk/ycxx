@@ -1,0 +1,42 @@
+generate "host_impl" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("source"), output("sibling")]
+    inputs = { script = "generate-impl.sh" score = "host_score.txt" }
+    outputs = { source = "impl.cc" sibling = "detail.hh" }
+}
+
+generate "app_impl" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("source"), output("sibling")]
+    inputs = { script = "generate-impl.sh" score = "target_score.txt" }
+    outputs = { source = "impl.cc" sibling = "detail.hh" }
+}
+
+cpp.library "bridge" {
+    sources = [
+        "bridge.cc",
+        {
+            host = artifact("host_impl", "source")
+            target = artifact("app_impl", "source")
+        }
+    ]
+    public_include_dirs = ["include"]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["bridge"]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["bridge"]
+    generated_headers = [artifact("config", "header")]
+}

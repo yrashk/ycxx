@@ -58,6 +58,7 @@ struct DeclSpec {
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   DeclAttributes attributes;
   std::optional<u32> virtual_at;
+  std::optional<u32> explicit_at;
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
   bool elaborated = false;
@@ -761,6 +762,15 @@ public:
         once(d.is_extern, k);
         break;
       case Tk::kw_inline: once(d.is_inline, k); break;
+      case Tk::kw_explicit:
+        if (!class_member || !allow_conversion_id || kind(1) == Tk::l_paren) goto done;
+        if (d.explicit_at) {
+          s_->diag(pos(), Diag::duplicate_specifier, k);
+          d.ok = false;
+        } else {
+          d.explicit_at = pos();
+        }
+        break;
       case Tk::kw_mutable:
         if (!class_member) {
           s_->diag(pos(), Diag::mutable_placement);
@@ -1058,7 +1068,7 @@ public:
     }
     // [dcl.typedef]/1: `typedef` is combined only with type-specifiers.
     if (d.is_typedef && (d.is_static || d.is_extern || d.is_inline || d.is_constexpr || d.is_consteval || d.is_constinit ||
-                         d.virtual_at)) {
+                         d.virtual_at || d.explicit_at)) {
       s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_typedef);
       d.ok = false;
     }
@@ -1177,11 +1187,13 @@ public:
   };
 
   enum class NamedExceptionSpec { ordinary, class_member, defaulted_assignment, member_template };
+  enum class MemberArrayBounds { none, sizeof_type, nested_layout };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
                         NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary, bool defer_ref_check = false,
-                        bool reject_parameter_defaults = false, bool replay_member_array_bounds = false) {
+                        bool reject_parameter_defaults = false,
+                        MemberArrayBounds member_array_bounds = MemberArrayBounds::none) {
     Declarator d;
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
@@ -1192,7 +1204,7 @@ public:
                                  (s_->templated() && !typedef_ &&
                                   (named_exception == NamedExceptionSpec::class_member ||
                                    named_exception == NamedExceptionSpec::ordinary));
-    Level top = level(abstract, d.ok, conversion, defer_exception, replay_member_array_bounds);
+    Level top = level(abstract, d.ok, conversion, defer_exception, member_array_bounds);
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -1720,7 +1732,7 @@ public:
   }
 
   Level level(bool abstract, bool& ok, bool conversion = false, bool defer_exception = false,
-              bool replay_member_array_bounds = false) {
+              MemberArrayBounds member_array_bounds = MemberArrayBounds::none) {
     Level l;
     pointer_operators(l, ok);
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
@@ -1793,7 +1805,7 @@ public:
       // instead of naming the entity declared ([dcl.ambig.res]).
       bump();
       l.inner = std::make_unique<Level>(level(abstract, ok, /*conversion=*/false, /*defer_exception=*/false,
-                                             replay_member_array_bounds));
+                                             member_array_bounds));
       ok = expect(Tk::r_paren) && ok;
     } else if (!abstract) {
       s_->diag(pos(), Diag::expected_unqualified_id);
@@ -1862,17 +1874,26 @@ public:
           continue;
         }
         Suffix s;
-        // [dcl.array]: a converted constant expression of integral type. A nested class
-        // specialization reads this member's declared type when the class must be complete.
-        const auto replay = replay_member_array_bounds && names_array_member(l)
+        // [dcl.array]: retain a direct member's dependent sizeof(type-id) until the
+        // class specialization replays its member declaration with the arguments bound.
+        const bool array_member = member_array_bounds != MemberArrayBounds::none && names_array_member(l);
+        const auto replay = array_member && member_array_bounds == MemberArrayBounds::nested_layout
             ? TemplateArgumentReplay::member_array_bound : TemplateArgumentReplay::none;
         const TemplateArgumentReplayScope bound(*this, replay);
+        const auto saved_layout = layout_argument_at_;
+        if (array_member) {
+          u32 offset = 0;
+          while (kind(offset) == Tk::l_paren) ++offset;
+          if (kind(offset) == Tk::kw_sizeof) layout_argument_at_ = pos() + offset;
+        }
         Ex e = s_->promote(constant_expression());
+        layout_argument_at_ = saved_layout;
         sema::Evaluated ev = sema::Evaluator(*s_, questions()).evaluate(e);
         auto v = ev.value;
         if (ev.dependent) {
           s.dependent_bound = template_value(e, s_->types().canonical(e.type()));
-          if (s.dependent_bound && s_->ins().values.is<ast::VDepOp>(*s.dependent_bound)) {
+          if (s.dependent_bound && s_->ins().values.is<ast::VDepOp>(*s.dependent_bound) &&
+              (!array_member || s_->ins().values.get<ast::VDepOp>(*s.dependent_bound).op != ast::DepOp::sizeof_type)) {
             s_->diag(e.begin, Diag::not_supported, Tk::l_square);
             s.dependent_bound.reset();
           }

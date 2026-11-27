@@ -462,6 +462,7 @@ public:
   }
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
+  const std::set<EntityId>& unapplied_declaration_attributes() const { return unapplied_declaration_attributes_; }
   bool class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 item, bool friend_declaration) const;
   bool peer_root_vtable_visible(EntityId cls) const;
   bool plain_class_template_type(EntityId cls) const;
@@ -1409,6 +1410,20 @@ public:
       if (Program::passes(*ix_, Probe::declares, path, j, k) && !after_running_member(j)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
+  }
+  // Native ABI checks run after semantic analysis. Materialize late declarations
+  // of the class and slots through the same recorded name queries as ordinary lookup.
+  void ensure_virtual_abi_declarations(EntityId cls) {
+    ensure_declared(cls, end());
+    const auto* record = classes_.find(cls);
+    if (!record) return;
+    for (const auto& member : record->members)
+      if (member.is_virtual) ensure_declared(member.entity, end());
+    for (const auto& base : record->bases) ensure_virtual_abi_declarations(base.cls);
+  }
+  std::optional<ItemId> class_definition_item(EntityId cls) const {
+    const auto found = class_items_.find(std::to_underlying(cls));
+    return found == class_items_.end() ? std::nullopt : std::optional(id(found->second));
   }
   std::optional<ast::DeclSema> declaration(EntityId e, u32 item) {
     ensure_declared(e, item);
@@ -6571,7 +6586,9 @@ private:
       alignment = read_alignment(annotations, /*field=*/true);
       if (!alignment) return bad();
     }
-    if (!ps_.conversion_id_ahead() && !Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
+    const bool bare_explicit = ps_.is(Tk::kw_explicit) && ps_.kind(1) != Tk::l_paren;
+    if (!bare_explicit && !ps_.conversion_id_ahead() &&
+        !Parser::starts_decl_specifier(ps_.kind()) && !ps_.starts_declaration()) {
       s_.diag(ps_.pos(), lex::is_keyword(ps_.kind()) || ps_.is(Tk::l_square) || ps_.is(Tk::coloncolon) || ps_.is(Tk::tilde)
                              ? Diag::not_supported
                              : Diag::expected_declaration,
@@ -6646,6 +6663,10 @@ private:
     }
     // A member typedef ([class.mem], [dcl.typedef]): each declarator a type nested in the class.
     if (spec.is_typedef) {
+      if (spec.explicit_at) {
+        s_.diag(*spec.explicit_at, Diag::explicit_placement);
+        return bad();
+      }
       if (alignment) {
         s_.diag(alignment->at, Diag::attributes_not_allowed);
         return bad();
@@ -6675,7 +6696,17 @@ private:
     const bool shared_overlap = layout_attribute(p_->region(), it_->begin, ps_.index(),
                                                  LayoutAttributes::leading_affecting_layout, applied, "no_unique_address");
     do {
-      bool conversion = ps_.conversion_id_ahead();
+      const bool conversion = ps_.conversion_id_ahead();
+      if (spec.explicit_at) {
+        if (!conversion) {
+          s_.diag(*spec.explicit_at, Diag::explicit_placement);
+          return bad();
+        }
+        if (member_template_ || !s_.template_scopes.empty() || inst_) {
+          s_.diag(*spec.explicit_at, Diag::not_supported, Tk::kw_explicit);
+          return bad();
+        }
+      }
       if (conversion && spec.has_type) {
         s_.diag(spec.begin, Diag::conversion_decl_type);
         return bad();
@@ -6692,12 +6723,14 @@ private:
       auto exception = class_member;
       if (p_->defaulted_body(k_)) exception = defaulted_assignment;
       else if (member_template_) exception = member_template;
-      const bool replay_array_bounds = !spec.is_static && !member_template_ && !conversion &&
-                                       s_.templated() && p_->named_nested_class(it_->parent);
+      auto array_bounds = Parser::MemberArrayBounds::none;
+      if (!spec.is_static && !member_template_ && !conversion && s_.templated())
+        array_bounds = p_->named_nested_class(it_->parent) ? Parser::MemberArrayBounds::nested_layout
+                                                         : Parser::MemberArrayBounds::sizeof_type;
       parse::Declarator d = [&] {
         const Parser::GccSignatureScope spelling{ps_, member_template_};
         return ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, replay_array_bounds);
+                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, array_bounds);
       }();
       if (d.ok && d.function && member_template_ && s_.compatibility() == ast::Compatibility::gcc)
         d.type = ps_.retain_gcc_signature_transforms(d.type);
@@ -6828,6 +6861,8 @@ private:
           s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
           return bad();
         }
+        if (spec.explicit_at && it_->kind == ItemKind::function &&
+            !finish_member_definition_declarator()) return bad();
         if (!member_function_or_static(spec, d, c, is_virtual, final_at.has_value(), overridden)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;
@@ -7735,7 +7770,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, m->name);
       return bad();
     }
-    if ((flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && !finish_constructor_declarator()) return bad();
+    if ((flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && !finish_member_definition_declarator()) return bad();
     if (specialized_destructor && !m->is_virtual) {
       if (!check_destructor_specialization(*cr, *m, fs, name_at, definition)) return bad();
     } else if (mem->flags & sema::decl_flag::definition) {
@@ -7788,7 +7823,7 @@ private:
           return bad();
         }
       }
-      if (!finish_constructor_declarator()) return bad();
+      if (!finish_member_definition_declarator()) return bad();
     }
     if (m->is_virtual) {
       if (const auto prior = p_->declaration(m->entity, k_); prior && (prior->flags & sema::decl_flag::definition)) {
@@ -7896,7 +7931,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, member.name);
       return false;
     }
-    if (definition) return finish_constructor_declarator();
+    if (definition) return finish_member_definition_declarator();
     ps_.skip_attributes();
     return ps_.expect(Tk::semi);
   }
@@ -8071,7 +8106,7 @@ private:
       }
       if (kind == Tk::kw_explicit) {
         if (!explicit_at) {
-          s_.diag(ps_.pos(), Diag::explicit_constructor_placement);
+          s_.diag(ps_.pos(), Diag::explicit_placement);
           return std::nullopt;
         }
         if (*explicit_at) {
@@ -8128,7 +8163,7 @@ private:
   }
 
   // The declarator's tokens end at the body.
-  bool finish_constructor_declarator() {
+  bool finish_member_definition_declarator() {
     ps_.skip_attributes();
     if (ps_.at_end()) return true;
     s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -8339,7 +8374,7 @@ private:
     if (ordinary_defaulting) {
       // [dcl.fct.def.default]: a first in-class defaulted special member. What its class makes of
       // it is decided when the class is complete (`defaulted_constructors`).
-      if (!finish_constructor_declarator()) return bad();
+      if (!finish_member_definition_declarator()) return bad();
       auto copy_reference = [&] {
         if (fs.params.size() != 1 || fs.variadic) return false;
         const parse::Param& p = fs.params.front();
@@ -8360,7 +8395,7 @@ private:
       // implicitly constexpr ([dcl.fct.def.default]).
       flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
     } else if (ctor && (flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && it_->has_body() &&
-               !finish_constructor_declarator()) {
+               !finish_member_definition_declarator()) {
       return bad();
     }
     if (ctor && !member_virt_specifiers(false)) return bad();
@@ -8790,9 +8825,9 @@ private:
         return false;
       }
       // A trailing requires-clause must affect overload viability ([over.match.viable], #1417).
-      if (deleted && types.rec(*parameter).rvalue_ref && !finish_constructor_declarator()) return false;
+      if (deleted && types.rec(*parameter).rvalue_ref && !finish_member_definition_declarator()) return false;
       if (defaulted) {
-        if (!finish_constructor_declarator()) return false;  // a requires-clause
+        if (!finish_member_definition_declarator()) return false;  // a requires-clause
         // [dcl.fct.def.default]: another parameter or return type is ill-formed. Other differences
         // from the implicit declaration make the operator deleted (`defaulted_assignments`).
         const auto f = types.rec(d.type);
@@ -8812,6 +8847,7 @@ private:
     sem.linkage = ast::Linkage::external;
     sem.is_virtual = is_virtual;
     sem.is_final = is_final;
+    sem.is_explicit = spec.explicit_at.has_value();
     u16 flags = sema::decl_flag::member;
     if (spec.is_static) flags |= sema::decl_flag::static_;
     if (spec.is_constexpr || defaulted || (comparison && !spec.is_consteval)) flags |= sema::decl_flag::constexpr_;

@@ -26,7 +26,7 @@ One object per cell a request settled, in the collector's batches: whole subtree
 | `error_at` | integer | the event under this one where its errors start |
 | `repeat` | integer | identical instants in a row under one parent, given once |
 | `alloc_bytes`, `allocs` | integer | bytes the cell's frame allocated while it ran, and how many allocations: its query and the engine's work for it, not what it demanded; 0 for an instant; for `input`, what its provider allocated |
-| `peak_bytes` | integer | the high-water mark of the frame's own net bytes (allocated minus freed) during the run |
+| `peak_bytes` | integer | the high-water mark of the frame's own net bytes (allocated minus freed) during the run, using an upper estimate from individual worker peaks for work the frame runs in parallel |
 | `retained_bytes` | integer | what the cell retains: the net bytes its runs left alive (its value, dependency lists, and what it interned first), or an input's size; may be below zero when a frame freed what another allocated |
 | `incl_alloc_bytes` | integer | `alloc_bytes` summed over the subtree, this event included |
 | `incl_retained_bytes` | integer | `retained_bytes` summed over the subtree, counted once per cell where it settles (`executed`, `cutoff`, `verified`, `durable`, `input`), never below zero |
