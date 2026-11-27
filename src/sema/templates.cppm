@@ -62,6 +62,10 @@ struct Allowance {
 enum class AliasSubstitution { ordinary, type_default, signature };
 
 class Templates {
+  // `substitute_constraint`'s results for the bindings it is substituting now.
+  const Bindings* constraint_bindings_ = nullptr;
+  std::map<u32, std::optional<ConstId>> constraint_memo_;
+
 public:
   // `classes` is the unit's class records (#115), which a dependent name's lookup reads.
   Templates(World& w, const Classes& classes) : w_(&w), classes_(&classes) {}
@@ -289,7 +293,13 @@ public:
       const auto use = r.alias_type_default ? AliasSubstitution::type_default : AliasSubstitution::signature;
       const bool check_now = !dependent ||
           (use == AliasSubstitution::signature && !std::ranges::all_of(*args, is_dependent));
-      if (check_now && !apply_template(r.entity, *args, use)) return std::nullopt;
+      std::optional<QualType> applied;
+      if (check_now && !(applied = apply_template(r.entity, *args, use))) return std::nullopt;
+      // An expansion with a placeholder for an unrepresented operand is no substitution
+      // pattern: the alias read again with the bound arguments gives the type.
+      // Without a replay (no `alias_type`), the expansion stays dependent: no type.
+      if (!dependent && !structural_operand(r.inner))
+        return types().is_dependent(*applied) ? std::nullopt : std::optional(types().add_cv(*applied, cv));
       auto result = substitute(r.inner, b);
       if (!result) return std::nullopt;
       return types().add_cv(dependent ? types().deferred_alias(r.entity, *args, *result, r.alias_type_default) : *result, cv);
@@ -594,10 +604,12 @@ public:
     return w_->values.integer(types().builtin(Builtin::bool_), result);
   }
 
+  // `!…!v` over a dependent variable-template-id or concept-id ([temp.dep.constexpr]/2).
   std::optional<ConstId> negated_variable_value(ConstId v, std::size_t negations)
     pre(negations != 0)
   {
-    if (!ins().values.is<ast::VDepVariable>(v) || !structural_value(v)) return std::nullopt;
+    if (!(ins().values.is<ast::VDepVariable>(v) || ins().values.is<ast::VDepConcept>(v)) || !structural_value(v))
+      return std::nullopt;
     for (std::size_t i = 0; i < negations; ++i) v = logical_not_value(v);
     return v;
   }
@@ -940,6 +952,23 @@ public:
   // ill-formed.
   std::optional<ConstId> substitute_constraint(ConstId c, const Bindings& b) {
     if (c == ConstId::none) return c;
+    // A normal form shares its subformulas: the atoms of a concept that two others name are one
+    // value. Each is substituted once for each bindings (#1653).
+    if (constraint_bindings_ != &b) {
+      auto saved = std::exchange(constraint_memo_, {});
+      const Bindings* outer = std::exchange(constraint_bindings_, &b);
+      auto r = substitute_constraint(c, b);
+      constraint_memo_ = std::move(saved);
+      constraint_bindings_ = outer;
+      return r;
+    }
+    if (auto it = constraint_memo_.find(std::to_underlying(c)); it != constraint_memo_.end()) return it->second;
+    auto r = substitute_constraint_once(c, b);
+    constraint_memo_.emplace(std::to_underlying(c), r);
+    return r;
+  }
+  // The substitution itself, of one subformula.
+  std::optional<ConstId> substitute_constraint_once(ConstId c, const Bindings& b) {
     if (ins().values.is<ast::VConceptParameter>(c)) {
       auto ref = ins().values.get<ast::VConceptParameter>(c);
       const auto parameter = substitute_arg(ref.parameter, b);
@@ -1401,7 +1430,10 @@ public:
     Cv cp = Types::cv(pc), ca = Types::cv(ac);
     TypeRec pr = types().rec(pc);
     if (pr.kind == TypeKind::deferred_alias) return deduce(types().add_cv(pr.inner, cp), a, depth, out, allow);
-    if (TypeRec ar = types().rec(ac); ar.kind == TypeKind::deferred_alias)
+    // A bare parameter takes a deferred alias as it is, which keeps the alias's identity when
+    // partial ordering substitutes the deduced arguments back ([temp.alias]/2, [temp.func.order]).
+    if (TypeRec ar = types().rec(ac);
+        ar.kind == TypeKind::deferred_alias && !(pr.kind == TypeKind::template_param && pr.depth == depth))
       return deduce(p, types().add_cv(ar.inner, ca), depth, out, allow);
     // `typename Q::n` and dependent decltype operands are non-deduced contexts
     // ([temp.deduct.type]/5), as is a built-in's result.

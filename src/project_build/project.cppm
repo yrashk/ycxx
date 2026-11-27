@@ -949,15 +949,17 @@ Fp128 probe_snapshot_key(const RulePackagePlan& plan, const RulePackageAction& s
   return fingerprint(std::tuple{package_key(plan), probe_identity(plan, selected, worker_build)});
 }
 
-bool current_probe_profile(const fs::path& cwd, const RuleToolchain& toolchain, const RuleProbeSnapshot& probe) {
-  const auto plan = plan_rule_package(cwd, probe.package, rule_sdk_header(), toolchain);
+bool current_probe_profile(const fs::path& cwd, const RuleToolchain& toolchain, const RuleProbeSnapshot& probe,
+                           RuleCompilerFingerprints& fingerprints) {
+  const auto plan = plan_rule_package(cwd, probe.package, rule_sdk_header(), toolchain, nullptr, &fingerprints);
   return plan && std::ranges::any_of(plan->candidates, [&](const auto& candidate) {
     return candidate.cxx && probe_snapshot_key(*plan, candidate, toolchain.executable_build) == probe.profile;
   });
 }
 
-bool current_projection(const fs::path& cwd, const RuleToolchain& toolchain, const RuleProbeSnapshot& probe) {
-  return current_probe_profile(cwd, toolchain, probe) &&
+bool current_projection(const fs::path& cwd, const RuleToolchain& toolchain, const RuleProbeSnapshot& probe,
+                        RuleCompilerFingerprints& fingerprints) {
+  return current_probe_profile(cwd, toolchain, probe, fingerprints) &&
          fingerprint_toolchain_probe_inputs(probe.inputs) == probe.stamp;
 }
 
@@ -1027,7 +1029,8 @@ using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePack
 using ResolveRuleArguments = std::function<std::expected<ProjectedRuleArguments, std::string>(
     const RuleDemand&, RuleSnapshot&)>;
 
-bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared);
+bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared,
+                   RuleCompilerFingerprints* compiler_fingerprints = nullptr);
 
 Fp128 witness_stamp(const RuleWitnessPlan& plan) {
   if (plan.producers.generators.empty() && plan.producers.host_executables.empty() && !plan.schema)
@@ -1349,12 +1352,13 @@ std::expected<void, std::string> prepare_project(
     auto package = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain);
     if (!package) return std::unexpected(package.error());
     const auto library_key = package_key(*package);
-    const auto current_package = [&] {
-      const auto current = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain);
+    const auto current_package = [&](RuleCompilerFingerprints& fingerprints) {
+      const auto current = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain, nullptr, &fingerprints);
       return current && package_key(*current) == library_key;
     };
     auto built = run_package(demand.package, *package, library_key, [&] {
-      return current_package() && current_rules(cwd, toolchain, prepared);
+      RuleCompilerFingerprints fingerprints;
+      return current_package(fingerprints) && current_rules(cwd, toolchain, prepared, &fingerprints);
     });
     if (!built) return std::unexpected(built.error());
     use_compiler(demand.package, *package, package->candidates[built->compiler]);
@@ -1389,11 +1393,12 @@ std::expected<void, std::string> prepare_project(
       return binding.value.has_value();
     });
     const auto current_invocation = [&] {
-      if (!current_rules(cwd, toolchain, prepared)) return false;
+      RuleCompilerFingerprints fingerprints;
+      if (!current_rules(cwd, toolchain, prepared, &fingerprints)) return false;
       const auto current = rule_invocation(cwd, demand);
       if (!current || observation_key(*current, toolchain.executable_build) != invocation_key ||
-          !current_package() || !std::ranges::all_of(arguments->profiles, [&](const auto& profile) {
-            return current_projection(cwd, toolchain, profile);
+          !current_package(fingerprints) || !std::ranges::all_of(arguments->profiles, [&](const auto& profile) {
+            return current_projection(cwd, toolchain, profile, fingerprints);
           })) return false;
       if (!planning_stamp) return true;
       const auto current_inputs = plan_rule_inputs(cwd, demand, prepared.rules.expansions, native_triple);
@@ -1612,17 +1617,18 @@ using ObservedPackageStamps = std::map<std::pair<RulePackageRef::Kind, std::stri
 
 bool current_rule_inputs(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record,
                          std::span<const RuleExpansion> upstream, ObservedPackageStamps& packages,
-                         ObservedHostFiles& files, std::string_view native_triple) {
+                         ObservedHostFiles& files, RuleCompilerFingerprints& fingerprints,
+                         std::string_view native_triple) {
   const auto& ref = record.demand.package;
   const auto [cached, inserted] = packages.try_emplace({ref.kind, ref.target});
   if (inserted)
-    if (const auto package = plan_rule_package(cwd, ref, rule_sdk_header(), toolchain))
+    if (const auto package = plan_rule_package(cwd, ref, rule_sdk_header(), toolchain, nullptr, &fingerprints))
       cached->second = package_key(*package);
   if (cached->second != record.package) return false;
   const auto observed = rule_invocation(cwd, record.demand);
   if (!observed || observation_key(*observed, toolchain.executable_build) != record.invocation ||
       !std::ranges::all_of(record.projections, [&](const auto& profile) {
-        return current_projection(cwd, toolchain, profile);
+        return current_projection(cwd, toolchain, profile, fingerprints);
       })) return false;
   if (record.planning) {
     const auto planning = plan_rule_inputs(cwd, record.demand, upstream, native_triple);
@@ -1635,8 +1641,9 @@ bool current_rule_inputs(const fs::path& cwd, const RuleToolchain& toolchain, co
 
 bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record,
                   const RuleExpansion& expansion, std::span<const RuleExpansion> upstream,
-                  ObservedPackageStamps& packages, ObservedHostFiles& files, std::string_view native_triple) {
-  if (!current_rule_inputs(cwd, toolchain, record, upstream, packages, files, native_triple)) return false;
+                  ObservedPackageStamps& packages, ObservedHostFiles& files, RuleCompilerFingerprints& fingerprints,
+                  std::string_view native_triple) {
+  if (!current_rule_inputs(cwd, toolchain, record, upstream, packages, files, fingerprints, native_triple)) return false;
   if (!record.witness) return true;
   const auto witness = plan_rule_witness(cwd, expansion, upstream, native_triple);
   const auto* recipe = witness ? std::get_if<RuleWitnessPlan>(&*witness) : nullptr;
@@ -1645,20 +1652,24 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
   return !record.host_files || current_host_files(*record.host_files, &files);
 }
 
-bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared) {
+bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared,
+                   RuleCompilerFingerprints* compiler_fingerprints) {
   if (manifest_stamp(cwd) != prepared.manifest) return false;
   ObservedPackageStamps packages;
   ObservedHostFiles files;
+  RuleCompilerFingerprints local_fingerprints;
+  auto& fingerprints = compiler_fingerprints ? *compiler_fingerprints : local_fingerprints;
   for (std::size_t i = 0; i < prepared.rules.observations.size(); ++i)
     if (!current_rule(cwd, toolchain, prepared.rules.observations[i], prepared.rules.expansions[i],
-                      std::span(prepared.rules.expansions).first(i), packages, files, prepared.native_triple))
+                      std::span(prepared.rules.expansions).first(i), packages, files, fingerprints, prepared.native_triple))
       return false;
   // An upstream action can belong to a witness demand whose planning inputs
   // changed while the demand was deferred.
   return std::ranges::all_of(prepared.deferred_host_planning, [&](const auto& entry) {
     const auto& deferred = entry.second;
     return current_rule_inputs(cwd, toolchain, deferred.observation,
-        std::span(prepared.rules.expansions).first(deferred.upstream_count), packages, files, prepared.native_triple);
+        std::span(prepared.rules.expansions).first(deferred.upstream_count), packages, files, fingerprints,
+        prepared.native_triple);
   });
 }
 
@@ -1684,12 +1695,13 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     Fp128 configuration;
   };
   std::map<std::pair<RulePackageRef::Kind, std::string>, PackageObservation> packages;
+  RuleCompilerFingerprints fingerprints;
   const auto observe_package = [&](const RulePackageRef& reference) {
     const auto key = std::pair{reference.kind, reference.target};
     auto package = packages.find(key);
     if (package == packages.end()) {
       std::vector<std::string> failed_paths;
-      const auto plan = plan_rule_package(cwd, reference, rule_sdk_header(), toolchain, &failed_paths);
+      const auto plan = plan_rule_package(cwd, reference, rule_sdk_header(), toolchain, &failed_paths, &fingerprints);
       paths.append_range(plan ? plan->observed_paths : failed_paths);
       const auto stamp = plan ? package_key(*plan) : fingerprint128(plan.error());
       const auto config = plan ? fingerprint(std::tuple{
@@ -1716,7 +1728,7 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     return std::pair{package.package, invocation_stamp};
   };
   const auto observe_probe = [&](const RuleProbeSnapshot& probe) {
-    const auto matches = current_probe_profile(cwd, toolchain, probe);
+    const auto matches = current_probe_profile(cwd, toolchain, probe, fingerprints);
     const auto stamp = matches ? fingerprint_toolchain_probe_inputs(probe.inputs) : Fp128{};
     observations.push_back(fingerprint(std::tie(matches, stamp)));
     if (matches) {
@@ -1813,12 +1825,13 @@ std::expected<PlanInspection, std::string> inspect_built_project(
   const auto native_triple = explicit_triple(selected_target);
   auto snapshot = read_rule_snapshot(cwd, target, native_triple);
   std::vector<RuleExpansion> current;
+  RuleCompilerFingerprints fingerprints;
   if (snapshot) {
     ObservedPackageStamps packages;
     ObservedHostFiles files;
     for (std::size_t i = 0; i < snapshot->observations.size(); ++i) {
       if (current_rule(cwd, toolchain, snapshot->observations[i], snapshot->expansions[i], current,
-                       packages, files, native_triple))
+                       packages, files, fingerprints, native_triple))
         current.push_back(std::move(snapshot->expansions[i]));
     }
   }
@@ -1843,7 +1856,7 @@ std::expected<PlanInspection, std::string> inspect_built_project(
           return fact.kind == "capability-input" && fact.target == record.demand.target;
         });
       });
-      if ((expanded || projected) && current_projection(cwd, toolchain, probe))
+      if ((expanded || projected) && current_projection(cwd, toolchain, probe, fingerprints))
         inspection->facts.append_range(std::move(probe.facts));
     }
   return inspection;
@@ -2143,7 +2156,8 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
 
     RuleProbeSnapshot captured{package, probe_snapshot_key(plan, selected, worker_build_),
                                std::move(matrix->inputs), matrix->stamp, std::move(matrix->facts)};
-    if (!current_probe_profile(cwd, toolchain, captured)) {
+    RuleCompilerFingerprints fingerprints;
+    if (!current_probe_profile(cwd, toolchain, captured, fingerprints)) {
       superseded = true;
       return std::unexpected(std::format("toolchain profile '{}' changed during measurement", package.target));
     }

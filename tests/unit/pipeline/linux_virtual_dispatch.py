@@ -50,6 +50,25 @@ def main():
         scope = Path(temp)
         (scope / '.ycxx').touch()
         compilers = native_compilers(host, scope, env)
+        # A standalone key definition owns the table without any constructor installing it.
+        producer = scope / 'keyed-producer.cpp'
+        producer.write_text('struct Base { virtual int first() { return 1; } virtual int key(); };\n'
+                            'int Base::key() { return 10; }\n')
+        obj = scope / 'keyed-producer.o'
+        run([ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26', '-fno-exceptions', '-c', producer, '-o', obj], scope, env)
+        symbols = run([readelf, '-Ws', obj], scope, env)
+        for name in ('_ZTV4Base', '_ZTI4Base'):
+            assert re.search(rf'\bOBJECT\s+GLOBAL\s+DEFAULT\s+\d+\s+{name}$', symbols, re.M), symbols
+        check_tables(readelf, scope, env, obj)
+        # A late redeclaration can invalidate an earlier group's constructor layout.
+        uncertain = scope / 'late-alignment.cpp'
+        uncertain.write_text('struct A { virtual int f() { return 3; } int x; };\n'
+                             'int use() { A a; return a.f(); }\n'
+                             'struct __attribute__((aligned(32))) A;\n')
+        result = subprocess.run([ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26', '-fno-exceptions',
+                                 '-c', uncertain, '-o', scope / 'late-alignment.o'],
+                                cwd=scope, env=env, capture_output=True, text=True, timeout=30)
+        assert result.returncode and 'native output for a translation unit with virtual member functions' in result.stderr, result
         for test in tests:
             text = test.read_text()
             expected = int((directives(text, 'EXIT') or ['0'])[0])

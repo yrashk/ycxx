@@ -1,0 +1,40 @@
+generate "host_config" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("header")]
+    inputs = { script = "generate-config.sh" score = "host_score.txt" }
+    outputs = { header = "config.hh" }
+}
+
+generate "target_config" {
+    tool = "/bin/sh"
+    args = [input("script"), input("score"), output("header")]
+    inputs = { script = "generate-config.sh" score = "target_score.txt" }
+    outputs = { header = "config.hh" }
+}
+
+cpp.library "bridge" {
+    sources = ["bridge.cc"]
+    public_include_dirs = ["include"]
+    generated_headers = [{
+        host = artifact("host_config", "header")
+        target = artifact("target_config", "header")
+    }]
+}
+
+cpp.host_executable "scanner" {
+    sources = ["scanner.cc"]
+    deps = ["bridge"]
+}
+
+generate "config" {
+    tool = "/bin/sh"
+    args = [input("driver"), input("scanner"), output("header")]
+    inputs = { driver = "generate-score.sh" scanner = artifact("scanner", "executable") }
+    outputs = { header = "generated_config.hh" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["bridge"]
+    generated_headers = [artifact("config", "header")]
+}

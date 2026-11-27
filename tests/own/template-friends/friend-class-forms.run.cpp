@@ -40,9 +40,8 @@ class Cell {
 
 public:
     Cell(T x) : v(x) {}
-    // Qualified until the injected-class-name with arguments parses here (#1177).
     template <class U>
-    T from(const lib::Cell<U>& o) const { return T(o.v); }
+    T from(const Cell<U>& o) const { return T(o.v); }
 };
 
 template <class T> class Box;

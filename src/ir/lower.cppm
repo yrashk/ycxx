@@ -702,11 +702,15 @@ class Lowering {
         out(n, 0, emit1(Op2::neg, *t, {in(n, 0)}, {}, nd.flags));
         return {};
       }
-      case Op::ctz: {
+      case Op::ctz:
+      case Op::clz: {
         auto t = result_type();
         if (!t) return fail(t.error());
         // GCC's zero result is a constant-evaluation extension. Runtime zero is undefined.
-        out(n, 0, emit1(Op2::ctz, *t, {in(n, 0)}));
+        const auto operand = in(n, 0);
+        const auto op = nd.op == Op::clz ? Op2::clz : Op2::ctz;
+        const auto count = emit1(op, b_.peek().type(operand), {operand});
+        out(n, 0, resize(count, *t, false));
         return {};
       }
       case Op::icmp: out(n, 0, emit1(Op2::icmp, T::i1, {in(n, 0), in(n, 1)}, {imms[0]})); return {};

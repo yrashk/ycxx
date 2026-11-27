@@ -152,11 +152,15 @@ using std::uint32_t;
 using ast::NodeId;
 using ir::ValueId;
 
+// Only the destination walked by the local initializer carries this information.
+enum class ArrayRecordInit : std::uint8_t { none, array, element, field };
+
 // An lvalue designates an addressable object or a bit-field projected from its record pointer.
 struct Place {
   ValueId ptr{};
   ast::QualType type{};
   std::optional<std::uint32_t> bit_field{};
+  ArrayRecordInit array_record_init = ArrayRecordInit::none;
 };
 
 // A node of the tree and its item-relative token offset (the red view's position, ast.md §3.5).
@@ -265,6 +269,10 @@ class Gen {
     }
     std::uint64_t imms[] = {word(ty(p.type)), 0};
     stateful(ir::Op::store, {}, ops, imms, access_flags(p.type) | flags);
+  }
+  void store_initializer(const Place& p, ValueId value) {
+    const ir::Flags flags = p.array_record_init == ArrayRecordInit::field ? ir::bit(ir::Flag::initializing_store) : 0;
+    store(p, value, flags);
   }
   // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
   Place initializing_place(Place p) {
@@ -856,7 +864,11 @@ class Gen {
     if (has_init && !peer_root) {
       selecting_initializer_ = selection;
       full_expression([&] {
-        initialize(initializing_place(p), initializer, zeroed, selection);
+        Place destination = initializing_place(p);
+        if (v.destructor == ast::EntityId::none && cls(p.type) == TypeClass::array &&
+            cls(facts_.element(p.type)) == TypeClass::record)
+          destination.array_record_init = ArrayRecordInit::array;
+        initialize(destination, initializer, zeroed, selection);
         if (selection) begin_lifetime(p);
         return 0;
       });
@@ -1025,7 +1037,13 @@ class Gen {
     if (step == ir::Step::field && facts_.bit_field_width(facts_.class_entity(p.type), index) != 0)
       return {p.ptr, t, index};
     std::uint64_t path[] = {1, ir::encode({step, index})};
-    return {pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
+    Place result{pure(ir::Op::ptr_member, facts_.pointer_to(t), {p.ptr}, {word(ty(t)), path[0], path[1]}), t};
+    if (p.array_record_init == ArrayRecordInit::array && step == ir::Step::elem)
+      result.array_record_init = ArrayRecordInit::element;
+    if (p.array_record_init == ArrayRecordInit::element && step == ir::Step::field &&
+        (cls(t) == TypeClass::bool_ || cls(t) == TypeClass::integer))
+      result.array_record_init = ArrayRecordInit::field;
+    return result;
   }
 
   // The enclosing object recovered by undoing a checked nonvirtual base path ([expr.static.cast]).
@@ -1103,7 +1121,8 @@ class Gen {
   void initialize_constant(const Place& p, ast::ConstId value) {
     const TypeClass kind = cls(p.type);
     if (kind != TypeClass::array && kind != TypeClass::record) {
-      store(p, constant(p.type, value));
+      store_initializer(p, constant(p.type, value));
+      if (p.array_record_init == ArrayRecordInit::field) begin_lifetime(p);
       return;
     }
     if (!in_.values.is<ast::VAggregate>(value)) throw Unsupported{"an aggregate constant of the wrong kind"};
@@ -1269,16 +1288,27 @@ class Gen {
     }
     if (is<ast::DefaultInit>(e)) return;
     if (is<ast::ValueInit>(e)) {
-      if (zeroed) return;
+      if (zeroed) {
+        // An omitted flat record can be represented as one ValueInit rather than a list.
+        // Commit each field's lifetime before the next array element is evaluated.
+        if (p.array_record_init == ArrayRecordInit::element) {
+          const auto owner = facts_.class_entity(p.type);
+          for (uint32_t i = 0; auto type = facts_.field_type(owner, i); ++i)
+            if (cls(*type) == TypeClass::bool_ || cls(*type) == TypeClass::integer)
+              begin_lifetime(subobject(p, ir::Step::field, i, *type));
+        }
+        return;
+      }
       if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) zero_fill(p);
-      else store(p, zero(p.type));
+      else store_initializer(p, zero(p.type));
       return;
     }
     if (cls(p.type) == TypeClass::record || cls(p.type) == TypeClass::array) {
       copy(p, class_source(e));
       return;
     }
-    store(p, rvalue(e));
+    // Lower the complete operand before attaching initialization authority to the store.
+    store_initializer(p, rvalue(e));
   }
 
   // An argument: a glvalue binds a reference parameter, so it passes its object's address.
@@ -1918,9 +1948,11 @@ class Gen {
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
         case ast::BuiltinOp::ctz:
-        case ast::BuiltinOp::ctz_gcc_zero: {
-          const auto flags = b.op == ast::BuiltinOp::ctz_gcc_zero ? ir::bit(ir::Flag::ctz_gcc_zero) : ir::Flags{0};
-          return pure(ir::Op::ctz, t, {rvalue(child(a, args[0]))}, {}, flags);
+        case ast::BuiltinOp::ctz_gcc_zero:
+        case ast::BuiltinOp::clzll: {
+          const auto op = b.op == ast::BuiltinOp::clzll ? ir::Op::clz : ir::Op::ctz;
+          const auto flags = b.op == ast::BuiltinOp::ctz ? ir::Flags{0} : ir::bit(ir::Flag::count_zero_gcc);
+          return pure(op, t, {rvalue(child(a, args[0]))}, {}, flags);
         }
         case ast::BuiltinOp::nansl: {
           const ir::Ty result[] = {vty(t)};
@@ -1935,8 +1967,21 @@ class Gen {
         case ast::BuiltinOp::mul_overflow: {
           const At left = child(a, args[0]);
           const ValueId operands[] = {rvalue(left), rvalue(child(a, args[1]))};
-          const ValueId destination = rvalue(child(a, args[2]));
+          const At output = child(a, args[2]);
+          const ValueId destination = rvalue(output);
           const ast::QualType integer = info(left).type;
+          if (ast::builtin_of(in_, integer) == ast::Builtin::unsigned_int128) {
+            // Sema widened the operands to hold the exact unsigned result.
+            const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::add : ir::Op::mul;
+            const ValueId exact = pure(op, integer, {operands[0], operands[1]});
+            const ast::QualType object = facts_.pointee(info(output).type);
+            const ast::QualType narrowed_type = ast::without_cv(ty(object));
+            const ValueId narrowed = arithmetic(integer, narrowed_type, exact);
+            const ValueId restored = arithmetic(narrowed_type, integer, narrowed);
+            const ValueId overflow = pure(ir::Op::icmp, t, {exact, restored}, {word(ir::Pred::ne)});
+            store({destination, object}, narrowed, ir::bit(ir::Flag::call_body));
+            return overflow;
+          }
           const ir::Ty results[] = {vty(integer), vty(t)};
           const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::sadd_overflow : ir::Op::smul_overflow;
           const ir::NodeId checked = emit(op, results, operands);

@@ -37,6 +37,8 @@ add_test(NAME unit.dependent_fabsl
 # Both targets' objects, on every host: the string builtins' C symbols appear once (#248).
 add_test(NAME unit.string_builtin_symbols
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/string_builtin_symbols.py $<TARGET_FILE:ycxxc>)
+add_test(NAME unit.checked_unsigned_overflow
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/checked_unsigned_overflow.py $<TARGET_FILE:ycxxc>)
 # PARITY: by design: all hosts check the emitted and linked arm64 Mach-O records.
 # Only an arm64 macOS host can run the Mach-O exception propagation test.
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
@@ -48,6 +50,14 @@ add_test(NAME unit.darwin_cleanup_free_unwind
 add_test(NAME unit.darwin_local_unwind
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_local_unwind.py
           $<TARGET_FILE:ycxxc> ${darwin_unwind_host})
+# PARITY: by design: all hosts check Mach-O dylib bytes. The platform linker,
+# signature verification, and the arm64 Darwin loader run on native macOS.
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
+  set(darwin_shared_host /usr/bin/cc /usr/bin/codesign)
+endif()
+add_test(NAME unit.darwin_shared_output
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_shared_output.py
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/resources/rules ${darwin_shared_host})
 # PARITY: by design: runs what it links with the host's linker; the Linux block registers its own
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
   # The Mach-O counterpart of unit.linux_inline (#124).
