@@ -27,8 +27,8 @@ int main() {
   if (v != static_cast<int>(sizeof(int)) || live != 0 || made != 3) return 4;
   R mine(7);
   if (peek<char>(mine) != 1007 || made != 4) return 5;
-  int both = peek<char>() + peek<short>();
-  if (both != 2000 + 10 + 10 * static_cast<int>(sizeof(short)) && both != 1000 + 2000 + 10 + 10 * static_cast<int>(sizeof(short)) - 1000) return 6;
+  int two = (peek<char>(), peek<short>(), live);
+  if (two != 3) return 6;
   if (live != 1 || made != 6) return 7;
   return 0;
 }
