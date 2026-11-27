@@ -37,6 +37,7 @@ cells than a fresh daemon does for that state from scratch.
 import os, shutil, signal, subprocess, tempfile, time
 from pathlib import Path
 
+from ..daemon.runtime_dir import runtime_root
 from . import kinds
 
 
@@ -159,7 +160,8 @@ class Daemon:
 
     def __init__(self, exe, scope):
         self.exe = exe
-        self.runtime = Path(tempfile.mkdtemp(prefix='yi', dir='/tmp'))
+        prefix = 'yi'
+        self.runtime = Path(tempfile.mkdtemp(prefix=prefix, dir=runtime_root(prefix)))
         os.chmod(self.runtime, 0o700)
         self.scope = scope
         scope.mkdir(parents=True, exist_ok=True)

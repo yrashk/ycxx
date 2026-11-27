@@ -1073,7 +1073,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   local and hidden definitions use position-independent relocations. Source inputs require
   `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
   imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
-  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
+- On arm64 macOS, `-shared` or `-dynamiclib` with `-nostdlib` writes a signed leaf `MH_DYLIB`.
+  The install name is the output basename unless overridden by `-Wl,-install_name,<name>`.
+  Source inputs require `-fPIC` or `-fpic`. Strong functions can use direct local and hidden
+  references and immutable data. The platform loader and rule worker can consume the image.
+  [Design](docs/design/darwin-shared-output.md) · [#393](https://github.com/yrashk/ycxx/issues/393)
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -1948,9 +1952,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
 - **Scopes:** a namespace is named by its path (`a::b`; `(anonymous)` for an unnamed one);
-  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, that
-  namespace with inline and unnamed components dropped, so their members are found in the
-  enclosing one ([namespace.def]/7, [namespace.unnamed]). Namespace entities (`EntityKind::
+  `Program` gives each item the namespace whose definitions enclose it, and, for lookup, every
+  namespace that encloses that one through inline and unnamed namespaces only, so their members
+  are found in the enclosing ones ([namespace.def.general]/7, [namespace.unnamed]). A namespace
+  inside an inline one keeps its own inline set (`std::__y1::ranges::__cpo::begin` is
+  `std::ranges::begin`), an extension without `inline` of an inline namespace is still inline, and
+  making a namespace inline when it is reopened is an error. [#153](https://github.com/yrashk/ycxx/issues/153)
+  Namespace entities (`EntityKind::
   namespace_`) are the scope of their members' entities, so `geo::value` and `::value` are two;
   members of an unnamed namespace have internal linkage.
 - **Lookup:** unqualified lookup ([basic.lookup.unqual]) walks the enclosing namespaces from the
@@ -3787,6 +3795,9 @@ bundled and workspace packages use the same worker. `cxx()` in a package recipe
 tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
 selects one compiler. Package compilation and worker execution appear in the
 build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Rule packages share a resolved compiler's content fingerprint within one validation
+pass. Discovery still follows each candidate's invocation path. Watch polls and
+effect admission checks start fresh passes. [#1671](https://github.com/yrashk/ycxx/issues/1671)
 Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
 when inserting a prefix into a temporary string.
 
@@ -3796,6 +3807,10 @@ inconclusive evidence across target reporting, dialects, headers, language and
 library features, objects, executable links, and shared-library compile, link and
 load. The resident engine reuses typed receipts for unchanged inputs. Read-only
 inspection shows the admitted observations and their provenance. [#1289](https://github.com/yrashk/ycxx/issues/1289)
+On arm64 macOS, the native `link.host-shared` probe uses the freestanding Mach-O
+dylib recipe. `link.host-shared.load` calls the rule entry point through the
+worker. The [native leaf example](examples/project-build/native-leaf-rule/README.md)
+pins ycxx for both its package and these measurements. [#1678](https://github.com/yrashk/ycxx/issues/1678)
 
 The optional `builtin:capabilities` rule package consumes declared
 `probe(package, id)` bindings and emits a named C++ header artifact. The worker
@@ -4578,8 +4593,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), static data member templates (trailing requires-clauses on member templates
-  came with #1417),
+  templates (#339), static data member templates (done since: see "Static data member templates";
+  trailing requires-clauses on member templates came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
 
@@ -4656,6 +4671,33 @@ static argument tracked in #1301 and #209.
   still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
+
+## Static data member templates (#340, 2026-11-27)
+
+- **Declared** in a class or class template as `template<…> static T v = …;` ([temp.mem],
+  [class.static.data]): a `variable_template` entity scoped in the class, its head one level inside
+  the class's, kept among the class's static members with `is_template`. Its in-class initializer is
+  a pattern; a class template specialization declares its own member template and skips the
+  initializer ([temp.inst]/3). A non-static one is diagnosed ([temp.pre]/2).
+- **Instantiated** per specialization used (`Program::variable_instance`, [temp.inst]/7): the member
+  item is analysed again with the class's arguments and the member template's bound, through the
+  static data member path, so `inline` non-constexpr ones have storage and `constexpr` ones are
+  usable in constant expressions. `static constexpr auto` deduces per specialization; lambdas in
+  initializers are owned by the specialization.
+- **Named** unqualified in the class and in derived classes (initializers, member function bodies,
+  default arguments, requires-clauses, `if constexpr`), as `C::v<args>`, `T::template v<args>`,
+  `object.v<args>` and `p->v<args>`. One of the current instantiation is value-dependent. Access and
+  constraints are checked.
+- **Defined outside** a non-template class: `template<class T> const int N::w = …;`.
+- **Emitted** with Clang's names (`_ZN1SIiE7counterIcEE`), strong, as other variable template
+  specializations are until #124.
+- Tests: `tests/own/templates/member-variable-template-*` (24; 17 by the spec-only author, a PEER
+  test links Clang's uses, two XFAIL for the gaps below).
+  `<iostream>` on macOS arm64: errors 2,468 → 2,423 at `07e6d567`; `basic_string.hpp` 156 → 111.
+  Its remaining `__sv_like` errors are `__is_convertible` gaps (#1399, #218).
+- Not yet: partial and explicit specializations (#1594); defining one of a class template outside
+  the class (#256). Found on the way: #1595 (an undefined specialization's constant use reports an
+  internal error).
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 

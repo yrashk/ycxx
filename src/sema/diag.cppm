@@ -185,6 +185,7 @@ enum class Diag : std::uint32_t {
   conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
   expected_namespace_name [[=message{Severity::error, "expected a namespace name"}]],
   nested_namespace_inline [[=message{Severity::error, "a nested namespace definition cannot be 'inline'"}]],
+  namespace_reopened_inline [[=message{Severity::error, "namespace '{0:n}' was first defined without 'inline' and cannot be made inline when reopened"}]],
   nested_namespace_attributes [[=message{Severity::error, "a nested namespace definition takes no attributes"}]],
   overload_not_supported [[=message{Severity::error, "overloading '{0:n}' is not supported yet"}]],
   linkage_conflict [[=message{Severity::error, "'{0:n}' was declared with a different language linkage"}]],
@@ -334,6 +335,10 @@ enum class Diag : std::uint32_t {
   virtual_placement [[=message{Severity::error, "'virtual' is only allowed on the first declaration of a non-static member function"}]],
   virtual_constructor [[=message{Severity::error, "a constructor cannot be 'virtual'"}]],
   virtual_member_template [[=message{Severity::error, "a member function template cannot be 'virtual'"}]],
+  // [temp.pre]/2, [class.mem.general]: a variable template in a class is a static data member.
+  data_member_template [[=message{Severity::error, "non-static data member '{0:n}' cannot be declared as a template"}]],
+  // [temp.names]/1: a variable template is named with its template arguments.
+  variable_template_without_arguments [[=message{Severity::error, "use of variable template '{0:n}' requires template arguments"}]],
   virtual_union_member [[=message{Severity::error, "a union cannot have a virtual member function"}]],
   virtual_placeholder_return [[=message{Severity::error, "a virtual function cannot have a deduced return type"}]],
   pure_specifier [[=message{Severity::error, "a pure-specifier must be '= 0'"}]],

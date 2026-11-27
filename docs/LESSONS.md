@@ -697,6 +697,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **A replay skips what the template's analysis measured; it does not re-scan tokens.** On #340,
+  a class template specialization skipped a static data member template's initializer by
+  balancing `()[]{}` up to `;` or `,`, so `P<N, 1>::value` ended at the comma (a review P0). The
+  splitter cannot tell `<` from less-than either.
+  - Do: record the extent in the pattern's analysis (`Program::set_static_initializer`) and
+    `seek` to it in the replay, as lazy static members do.
 - **Small semantic groups can repeat large headers.** On #978, the seven main-file groups of one
   standard-library fixture each analysed thousands of the same header items. The largest
   costs were in semantic analysis and the END worklist, and collecting the dependency trace

@@ -10,6 +10,9 @@ import tempfile
 from linux_compile import run
 from linux_peer_derived_default_construction import native_compilers
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 def check_consumer(readelf, scope, env):
     metadata = run([readelf, '-Ws', 'consumer.o'], scope, env)
@@ -67,7 +70,7 @@ def main():
     ycxx, host, readelf = sys.argv[1:]
     fixtures = Path(__file__).resolve().with_suffix('')
     with tempfile.TemporaryDirectory(prefix='ycxx-cast-void-') as temp, \
-            tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+            tempfile.TemporaryDirectory(prefix='yd-', dir=runtime_root('yd-')) as runtime:
         scope = Path(temp)
         (scope / '.ycxx').touch()
         for source in ('base.hpp', 'consumer.cpp'):
