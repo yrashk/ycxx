@@ -1,67 +1,46 @@
-name: Offline HTML Graph evidence for #1611
+name: "Verify and preview the #1611 artifact"
 
 on:
   push:
     branches: [codex/ycxx-1611-evidence-d19c1b27]
 
 permissions:
-  contents: read
+  actions: read
 
 jobs:
-  capture:
+  view:
     if: github.repository == 'yrashk/ycxx'
     runs-on: ubuntu-24.04
-    container: gcc:16
-    timeout-minutes: 35
-    env:
-      PREVIEW: d19c1b27791941e8a3554e0d07f3c009760a0bf3
-      PREVIEW_TREE: b9d929e0ba3aaac6eee66a25faaee1f856700b54
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Copy the harness outside the checkout
-        shell: bash
-        run: cp -R .github/evidence/graph-target-identity "$RUNNER_TEMP/ycxx-1611-harness"
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.PREVIEW }}
-          submodules: true
-          persist-credentials: false
-      - name: Verify exact preview
-        shell: bash
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
-          test "$(git rev-parse HEAD)" = "$PREVIEW"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$PREVIEW_TREE"
-          mkdir -p "$RUNNER_TEMP/ycxx-1611-evidence"
-          printf 'preview %s\ntree %s\n' "$PREVIEW" "$PREVIEW_TREE" > "$RUNNER_TEMP/ycxx-1611-evidence/git.txt"
-      - name: Provision the preview's CI toolchain
-        uses: ./.github/actions/setup
-      - name: Build exact preview
-        shell: bash
-        run: tools/build -j 4 --no-tests 2>&1 | tee "$RUNNER_TEMP/ycxx-1611-evidence/build.log"
-      - name: Install capture tools
-        shell: bash
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq chromium fonts-dejavu-core python3-venv >/dev/null
-          python3 -m venv "$RUNNER_TEMP/ycxx-1611-venv"
-          "$RUNNER_TEMP/ycxx-1611-venv/bin/pip" install playwright==1.56.0
-      - name: Generate actual reports and open them offline
-        shell: bash
-        run: |
-          evidence="$RUNNER_TEMP/ycxx-1611-evidence"
-          harness="$RUNNER_TEMP/ycxx-1611-harness"
-          python3 -B "$harness/generate-reports.py" --driver build/bin/ycxx --repo . --out "$evidence/reports" 2>&1 | tee "$evidence/reports.log"
-          "$RUNNER_TEMP/ycxx-1611-venv/bin/python" -B "$harness/capture.py" --reports "$evidence/reports" --out "$evidence/capture" --chromium "$(command -v chromium)" 2>&1 | tee "$evidence/capture.log"
-      - name: Upload actual HTML and browser evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: ycxx-1611-graph-d19c1b27
-          path: ${{ runner.temp }}/ycxx-1611-evidence/
-          if-no-files-found: error
-          retention-days: 7
+          run-id: 45979970530
+          github-token: ${{ github.token }}
+          path: evidence
+      - name: Verify the capture and export display previews
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+
+          root = Path("evidence")
+          capture = root / "capture"
+          expected_git = "preview d19c1b27791941e8a3554e0d07f3c009760a0bf3\ntree b9d929e0ba3aaac6eee66a25faaee1f856700b54\n"
+          assert (root / "git.txt").read_text() == expected_git
+          status = json.loads((capture / "verification.json").read_text())
+          assert set(status) == {"identity", "partial", "partial_static"}
+          assert all(v["network_requests"] == 0 and not v["browser_errors"] for v in status.values())
+          for name in ("identity", "partial"):
+              assert (capture / (name + ".html")).read_bytes() == (root / "reports" / (name + ".html")).read_bytes()
+          print("YCXX_VERIFICATION " + json.dumps(status, separators=(",", ":")))
+          for name in ("identity-raw", "identity-literal", "partial-component"):
+              png = (capture / (name + ".png")).read_bytes()
+              assert png.startswith(b"\x89PNG\r\n\x1a\n")
+              encoded = base64.b64encode(png).decode()
+              for i in range(0, len(encoded), 2048):
+                  print(f"YCXX_IMAGE {name} {i // 2048} {encoded[i:i + 2048]}")
+          PY
