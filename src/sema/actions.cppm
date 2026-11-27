@@ -1513,18 +1513,23 @@ public:
   // forming a specialization while an argument's integral expression still needs evaluation.
   Ex replayed_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
                                    std::span<const Ex> deferred, u32 begin, u32 end) {
+    if (!check_replayed_template_arguments(tmpl, args, begin)) return {NodeId::none, begin, end};
+    return dependent_node(deferred, begin, end, std::nullopt, ValueCategory::lvalue, expr_flag::type_dependent);
+  }
+  // Check the arguments that can be checked before replay. Deferred values never form bindings.
+  bool check_replayed_template_arguments(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     const NameId name = w_->entities.rec(tmpl.entity).name;
     const auto params = ins().seqs.elements(tmpl.template_params);
-    Templates t = templates();
-    if (!check_template_expansions(t, params, args, begin)) return {NodeId::none, begin, end};
+    Templates t = tmpl.kind == ast::DeclKind::class_ ? templates_for_use(at) : templates();
+    if (!check_template_expansions(t, params, args, at)) return false;
     std::vector<std::optional<TemplateArg>> out(params.size());
     const auto omitted = std::span(params).subspan(std::min(args.size(), params.size()));
     if (!t.explicit_into(params, args, out, /*defer_values=*/true) ||
         std::ranges::any_of(omitted, [](const auto& p) { return !p.pack && !p.has_default; })) {
-      diag(begin, Diag::template_args_mismatch, name);
-      return {NodeId::none, begin, end};
+      diag(at, Diag::template_args_mismatch, name);
+      return false;
     }
-    return dependent_node(deferred, begin, end, std::nullopt, ValueCategory::lvalue, expr_flag::type_dependent);
+    return true;
   }
   // The specialization of variable template `templ` for `args` ([temp.spec.general]).
   EntityId variable_specialization(EntityId templ, std::span<const TemplateArg> args, Fp128 constraints = {}) {
@@ -4072,6 +4077,7 @@ public:
   }
 
   QualType field_access_type(const FieldRec& field, QualType object) {
+    observe_replayed_member_type(field.type);
     if (types().is_reference(field.type)) return types().referee(field.type);
     Cv cv = Types::cv(object);
     if (field.mutable_) cv = Types::is_volatile(object) ? Cv::volatile_ : Cv::none;
@@ -6037,6 +6043,15 @@ public:
   // Inside an unevaluated operand (`sizeof`, `decltype`, [expr.context]/1).
   u32 unevaluated = 0;
   u32 decltype_unevaluated = 0;  // the depth of the innermost decltype operand, or zero
+  // Operators on a dependent field can lose its type before decltype sees the result.
+  struct DecltypeReplayScope {
+    Sema& sema;
+    bool* saved;
+    DecltypeReplayScope(Sema& s, bool& used)
+        : sema(s), saved(std::exchange(s.decltype_replay_observer_, &used)) {}
+    DecltypeReplayScope(const DecltypeReplayScope&) = delete;
+    ~DecltypeReplayScope() { sema.decltype_replay_observer_ = saved; }
+  };
   bool checking_virtual_body = false;
 
   // Ends the body of the innermost lambda (`body`, from `body_begin`, the lambda's tokens ending
@@ -7385,6 +7400,7 @@ public:
 
   // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
   Ex unevaluated_data_member(EntityId member, QualType type, u8 bit_width, u32 begin, u32 end) {
+    observe_replayed_member_type(type);
     ExprInfo info{types().referee(type), ValueCategory::lvalue, 0, bit_width};
     Ex e = node(ast::DeclRef{info, member}, begin, end, info);
     declared_types_[std::to_underlying(e.id)] = type;
@@ -7443,6 +7459,10 @@ public:
           return fail;
         }
         QualType t = types().member_pointer(types().class_type(c), field.type);
+        if (types().has_replayed_member_type(field.type)) {
+          observe_replayed_member_type(field.type);
+          return dependent_node({}, *address_at, end, t, ValueCategory::prvalue, expr_flag::unrepresented_value);
+        }
         ConstId value = ins().intern_value(ast::VMemberPtr{types().canonical(t), f->index});
         return literal(t, value, ValueCategory::prvalue, *address_at, end);
       }
@@ -14796,6 +14816,12 @@ public:
   }
 
 private:
+  bool* decltype_replay_observer_ = nullptr;
+  void observe_replayed_member_type(QualType type) {
+    if (decltype_replay_observer_ && types().has_replayed_member_type(type))
+      *decltype_replay_observer_ = true;
+  }
+
   bool in_class_assertion() const {
     return current_class != EntityId::none && current_class == class_prefix_owner_ && !static_initializer_name_;
   }

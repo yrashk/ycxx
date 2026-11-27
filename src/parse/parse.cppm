@@ -6842,7 +6842,10 @@ private:
     }
     DeclSpec spec = [&] {
       const Parser::GccSignatureScope spelling{ps_, member_template_};
-      return ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
+      const bool replay_member_type = it_->kind == ItemKind::declaration && !member_template_ && !inst_ &&
+                                      !s_.instantiating() && !s_.template_scopes.empty();
+      return ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true,
+                                 /*allow_constrained_auto=*/false, replay_member_type);
     }();
     spec.annotations = std::move(annotations);
     ps_.declare_class = std::move(declare_class);
@@ -6863,6 +6866,10 @@ private:
       return bad();
     }
     if (!spec.ok) return bad();
+    if (spec.replayed_member_type_at && (spec.is_static || spec.is_typedef)) {
+      s_.diag(*spec.replayed_member_type_at, Diag::not_supported, Tk::kw_template);
+      return bad();
+    }
     if (spec.elaborated && ps_.is(Tk::semi)) {
       s_.diag(spec.begin, Diag::not_supported, Tk::kw_struct);  // a member class declaration
       return bad();
@@ -6936,7 +6943,8 @@ private:
       parse::Declarator d = [&] {
         const Parser::GccSignatureScope spelling{ps_, member_template_};
         return ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
-                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, array_bounds);
+                              /*defer_ref_check=*/true, /*reject_parameter_defaults=*/false, array_bounds,
+                              spec.replayed_member_type_at);
       }();
       if (d.ok && d.function && member_template_ && s_.compatibility() == ast::Compatibility::gcc)
         d.type = ps_.retain_gcc_signature_transforms(d.type);

@@ -332,7 +332,6 @@ draft/temp/temp.dep.general-1.accept.cpp 'template' not supported yet
 draft/temp/temp.dep.namespace-1.accept.cpp preprocessing directives are not supported yet
 draft/temp/temp.dep.splice-1.accept.cpp 'template' not supported yet
 draft/temp/temp.dep.splice-2.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.dep.type-1.accept.cpp 'template' not supported yet
 draft/temp/temp.dep.type-2.accept.cpp 'template' not supported yet
 draft/temp/temp.dep.type-3.accept.cpp 'template' not supported yet
 draft/temp/temp.dep.type-4.reject.cpp errors elsewhere: 'struct' not supported yet

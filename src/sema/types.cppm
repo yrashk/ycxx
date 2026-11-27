@@ -56,7 +56,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 enum class TypeKind : u8 {
   builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
-  placeholder, dep_spec, builtin_spec, member_pointer, pack_index, deferred_alias, other
+  placeholder, dep_spec, builtin_spec, member_pointer, pack_index, deferred_alias, replay_member, other
 };
 
 // The canonical form of a type, read out by value.
@@ -267,6 +267,8 @@ public:
       r.args = a.args;
       r.inner = a.result;
       r.alias_type_default = a.type_default;
+    } else if (t.is<ast::TReplayMemberType>(c)) {
+      r.kind = TypeKind::replay_member;
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
@@ -300,6 +302,7 @@ public:
     case TypeKind::transform:
     case TypeKind::dep_spec:
     case TypeKind::deferred_alias:
+    case TypeKind::replay_member:
     case TypeKind::builtin_spec: return true;
     case TypeKind::builtin: return r.builtin == Builtin::dependent;
     case TypeKind::array:
@@ -310,6 +313,20 @@ public:
     case TypeKind::function:
       return is_dependent(r.inner) || std::ranges::any_of(r.params, [&](QualType p) { return is_dependent(p); });
     case TypeKind::class_: return class_dependent && class_dependent(r.entity);
+    default: return false;
+    }
+  }
+  bool has_replayed_member_type(QualType q) const {
+    const TypeRec r = rec(q);
+    switch (r.kind) {
+    case TypeKind::replay_member: return true;
+    case TypeKind::array:
+    case TypeKind::pointer:
+    case TypeKind::reference: return has_replayed_member_type(r.inner);
+    case TypeKind::member_pointer: return has_replayed_member_type(r.member_owner) || has_replayed_member_type(r.inner);
+    case TypeKind::function:
+      return has_replayed_member_type(r.inner) ||
+             std::ranges::any_of(r.params, [&](QualType p) { return has_replayed_member_type(p); });
     default: return false;
     }
   }
@@ -465,6 +482,7 @@ private:
                                                           : std::format("template-parameter-{}-{}", r.depth, r.index);
       return cvs + name + "<…>" + (inner.empty() ? "" : " " + inner);
     }
+    case TypeKind::replay_member: return "<dependent member type>";
     case TypeKind::other: return "<type>";
     }
     return {};
