@@ -690,7 +690,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
       [#992](https://github.com/yrashk/ycxx/issues/992)
     - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
       earlier items that can declare an entity before a side table is read, `settle` completes a
-      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
+      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens. A question
+      about one specialization reads only the explicit and partial specializations that declare
+      its name, and a group's END reads those from its first item on (#1704).
     - A group's analysis is reused between revisions while what it read gives the same answers
       (`GroupTrace`, kept per session): the items it read (`ItemsView`) and their position-free
       content, its by-name questions (`Program::NameProbe`, filtered by the shared
@@ -3129,6 +3131,17 @@ and Darwin arm64 emits BRK. The builtin registry also exposes it through
 the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as above. A
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
+
+## Allocation builtins (#1681)
+
+`__builtin_operator_new(args)` and `__builtin_operator_delete(args)` are lowered in sema to the
+call `::operator new(args)` or `::operator delete(args)` would be: the global overload set (the
+implicit usual declarations plus written ones) and ordinary overload resolution. The selected
+function must be a replaceable one (`World::replaceable_allocation_function`: the usual forms and
+their `std::nothrow_t` forms); anything else is diagnosed. Dependent calls are checked when the
+instantiation is reparsed. The result is an ordinary `ast::Call`, so native code calls the
+symbol and a program's replacement is used. The calls are not elided or merged. Constant
+evaluation of them waits for constexpr dynamic allocation (#321).
 
 ## Function spelling for type ordering (#1361)
 
@@ -5586,10 +5599,11 @@ declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
 
-## Scalar and pointer decay-copy expressions (#286)
+## Decay-copy expressions (#286)
 
-- Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
-  including bit-field reads and array and function decay. Grouped declarations
+- Single-expression `auto(x)` and `auto{x}` perform scalar, pointer and class decay-copy,
+  including bit-field reads and array and function decay. A class operand is copied or moved
+  by direct-initialization; a prvalue of the class initializes the result with no copy. Grouped declarations
   still take precedence where the statement can be a declaration.
 - Function-template bodies replay decay-copy of supported dependent operands with the
   template arguments bound. A value-dependent operand with known type gives the conversion
@@ -5597,9 +5611,14 @@ the body. A non-generic lambda body uses its own evaluation context.
 - Concrete decay-copy works in a non-type template argument with `auto{expr}` or with
   `auto(expr)` when the initializer starts with an integer literal. The argument must be
   a converted constant expression. Function and function-pointer type-ids keep precedence.
-- General class objects, member pointers, operands whose type dependence is unresolved, and
-  other direct parenthesized template argument spellings remain open, as do dependent
-  template arguments, requirements, and exception specifications.
+- A dependent operand gives a dependent prvalue in any templated context: requires-expressions
+  and compound requirements (as libycxx's ranges CPOs write them), noexcept operators and
+  specifiers, trailing return types and base specifiers. Substitution analyses the copy, so a
+  deleted copy constructor makes a requirement unsatisfied.
+- In a constraint, a decay-copy is written as a conversion to the `auto` placeholder, which
+  mangles as `cv Da e` and `tl Da e E` as Clang and GCC do (`tests/own/abi/decay-copy-constraints.run.cpp`).
+- Member pointers, other direct parenthesized template argument spellings such as
+  `Tag<auto(n)>`, and dependent template arguments remain open.
 
 ## Comparisons: `<=>`, defaulted `==` and `<=>`, rewritten candidates (#295)
 

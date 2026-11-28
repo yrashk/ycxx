@@ -9666,6 +9666,24 @@ public:
     return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
+  // `__builtin_operator_new(args)` and `__builtin_operator_delete(args)` (docs/EXTENSIONS.md): the
+  // call of the global `operator new` or `operator delete` that overload resolution selects for
+  // `args`, as `::operator new(args)` would be ([over.match.call]). Only the replaceable functions
+  // qualify ([new.delete.single]), not placement or other written overloads. A dependent call is
+  // checked when its instantiation is reparsed.
+  Ex builtin_allocation_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end, u32 paren_at) {
+    const bool allocating = b.function == lex::BuiltinFunction::operator_new;
+    const auto name = allocation_name(allocating ? AllocationFunction::allocate : AllocationFunction::deallocate);
+    Ex r = call(allocation_name_expr(name, begin, begin), std::move(args), end, paren_at);
+    if (!r.ok() || dependent(r)) return r;
+    if (const auto selected = as<ast::Call>(r); selected && selected->function != EntityId::none) {
+      const auto& f = w_->entities.rec(selected->function);
+      if (f.scope == EntityId::none && w_->replaceable_allocation_function(name, f.type)) return r;
+    }
+    diag(begin, Diag::builtin_allocation_not_replaceable, ins().names.intern(b.name));
+    return {NodeId::none, begin, end};
+  }
+
   ast::LibraryBuiltin written_library_builtin(EntityId function, const TypeRec& signature) {
     using enum ast::LibraryBuiltin;
     if (compatibility() != ast::Compatibility::gcc || function == EntityId::none || signature.variadic) return none;
@@ -10158,6 +10176,8 @@ public:
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_constant_probe(args.front(), begin, end);
     }
+    if (b.function == operator_new || b.function == operator_delete)
+      return builtin_allocation_call(b, std::move(args), begin, end, paren_at);
     if (b.function == library)
       return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
     if (b.function == add_overflow || b.function == mul_overflow) {
@@ -10201,6 +10221,8 @@ public:
       case ctzg:
       case clzll:
       case library:
+      case operator_new:
+      case operator_delete:
       case constant_p:
       case add_overflow:
       case mul_overflow:
@@ -11081,25 +11103,33 @@ public:
     return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, Types::unqualified(t));
   }
 
-  // [expr.type.conv], [dcl.type.auto.deduct]: scalar decay-copy.
+  // [expr.type.conv]/1, [dcl.type.auto.deduct]: decay-copy, `auto(e)` or `auto{e}`. The result
+  // is a prvalue of the decayed type of `e`, copy-initialized from `e`.
   Ex decay_copy(Ex operand, u32 begin, u32 end, bool replay_body) {
     if (!operand.ok()) return operand;
     const auto supported = [&](QualType type) {
-      return types().is_scalar(type) && !types().is_member_pointer(type);
+      return (types().is_scalar(type) && !types().is_member_pointer(type)) || types().is_class(type);
     };
     if (dependent(operand)) {
-      if (replay_body) {
-        // [temp.dep.expr]: a value-dependent operand can still determine the prvalue type.
-        // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
-        std::optional<QualType> type;
-        if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
-        if (type ? supported(*type) : has_proven_dependent_type(operand)) {
-          // The tokens will be replayed. This node supplies no canonical template argument value.
-          u8 flags = expr_flag::unrepresented_value | expr_flag::deferred_decay_copy;
-          if (!type) flags |= expr_flag::type_dependent;
-          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, flags);
-        }
+      // [temp.dep.expr]: a value-dependent operand can still determine the prvalue type.
+      // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
+      std::optional<QualType> type;
+      if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
+      if (!type || supported(*type)) {
+        // Instantiation analyses the concrete copy: a function template body or a
+        // requires-expression is replayed with its arguments ([temp.inst], [temp.constr.atomic]).
+        // This node supplies no canonical template argument value.
+        u8 flags = expr_flag::unrepresented_value;
+        if (replay_body) flags |= expr_flag::deferred_decay_copy;
+        if (!type) flags |= expr_flag::type_dependent;
+        return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, flags);
       }
+    } else if (QualType decayed = ast::adjust_parameter(ins(), types().canonical(operand.type())); types().is_class(decayed)) {
+      // [expr.type.conv]/2: one parenthesized expression is the cast `(T)e`, a direct-initialization
+      // ([expr.static.cast]/4); a braced one with an element of the class itself initializes from
+      // it ([dcl.init.list]/3.2). A prvalue of the class initializes the result itself
+      // ([dcl.init.general]/16.6.1).
+      return functional_cast(decayed, {operand}, begin, end);
     } else {
       if (types().is_array(operand.type()) && !operand.glvalue())
         operand = materialize(operand, operand.type(), false);

@@ -1841,3 +1841,27 @@ gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future 
 clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
 limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "builtin-operator-new-constant-evaluation"
+status = "recorded"
+mode_status = { spec = "unavailable", gcc = "unavailable", clang = "unavailable" }
+reference = "[expr.const.core], [allocator.members], [new.delete.single], #1681, #321"
+prior = "__builtin_operator_new and __builtin_operator_delete were undeclared identifiers."
+spec = "A call outside constant evaluation calls the selected replaceable global function. In constant evaluation the draft allows allocation only through new-expressions and std::allocator<T>::allocate, so a direct untyped __builtin_operator_new is not a constant expression."
+gcc = "Accept untyped __builtin_operator_new storage in constant evaluation when std::construct_at begins each object's lifetime and __builtin_operator_delete releases it before the evaluation ends."
+clang = "Same as spec: reject untyped storage from a direct call, accepting the builtins only as the typed allocation of std::allocator<T>::allocate."
+limits = "ycxx has no dynamic allocation in constant evaluation (#321), so a constant evaluation that reaches either builtin fails in every mode. Run-time calls are supported in every mode."
+probe = '''
+constexpr void* operator new(decltype(sizeof 0), void* p) noexcept { return p; }
+namespace std { template <class T, class... A> constexpr T* construct_at(T* p, A... a) { return ::new (static_cast<void*>(p)) T(a...); } }
+constexpr int f() {
+  int* p = static_cast<int*>(__builtin_operator_new(sizeof(int)));
+  std::construct_at(p, 42);
+  int r = *p;
+  __builtin_operator_delete(p);
+  return r;
+}
+static_assert(f() == 42);
+'''
+evidence = ["tests/own/builtins/builtin-operator-new-constant.reject.cpp", "tests/own/builtins/builtin-operator-new.run.cpp", "tests/own/builtins/builtin-operator-new-selection.reject.cpp", "docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/321", "GCC 16.2.0 accepts the probe and upstream Clang 23.1.5 rejects it (strict C++26, arm64 Darwin); both agree with <memory>'s std::construct_at in place of the probe's"]

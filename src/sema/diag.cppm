@@ -433,6 +433,7 @@ enum class Diag : std::uint32_t {
   builtin_overflow_unsigned_operand [[=message{Severity::error, "checked unsigned integer builtin requires a standard unsigned integer operand up to 64 bits, got '{0:t}'"}]],
   builtin_overflow_unsigned_result [[=message{Severity::error, "checked integer builtin requires a pointer to a writable standard unsigned integer up to 64 bits, got '{0:t}'"}]],
   builtin_ctzg_operand [[=message{Severity::error, "the supported form of '__builtin_ctzg' requires an 'unsigned int' operand but got '{0:t}'"}]],
+  builtin_allocation_not_replaceable [[=message{Severity::error, "call to '{0:n}' does not select a replaceable global allocation function"}]],
   builtin_ctzg_fallback [[=message{Severity::error, "'__builtin_ctzg' with a fallback argument is not supported yet"}]],
   builtin_atomic_target [[=message{Severity::error, "GNU atomics are not supported on this target"}]],
   builtin_atomic_pointer [[=message{Severity::error, "this GNU atomic requires a pointer to a naturally aligned 32-bit int or unsigned int"}]],
