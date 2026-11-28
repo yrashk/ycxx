@@ -9,13 +9,12 @@ namespace std {
 }
 namespace other { struct nothrow_t {}; }
 void* operator new(Count, void*) noexcept;
-void* operator new(Count, int);
 void* operator new(Count, const other::nothrow_t&) noexcept;
 void* operator new(Count, const std::nothrow_t&) noexcept;
 void operator delete(void*, const std::nothrow_t&) noexcept;
 
-alignas(8) unsigned char buffer[8];
-void* placed = __builtin_operator_new(sizeof buffer, static_cast<void*>(buffer)); //! error
+void* storage;
+void* placed = __builtin_operator_new(8, storage); //! error
 void* tagged = __builtin_operator_new(4, 1); //! error
 void* foreign = __builtin_operator_new(4, other::nothrow_t{}); //! error
 void* none = __builtin_operator_new(); //! error

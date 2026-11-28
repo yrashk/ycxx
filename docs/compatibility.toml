@@ -1853,8 +1853,8 @@ gcc = "Accept untyped __builtin_operator_new storage in constant evaluation when
 clang = "Same as spec: reject untyped storage from a direct call, accepting the builtins only as the typed allocation of std::allocator<T>::allocate."
 limits = "ycxx has no dynamic allocation in constant evaluation (#321), so a constant evaluation that reaches either builtin fails in every mode. Run-time calls are supported in every mode."
 probe = '''
-namespace std { template <class T, class... A> constexpr T* construct_at(T* p, A... a) { return ::new (static_cast<void*>(p)) T(a...); } }
 constexpr void* operator new(decltype(sizeof 0), void* p) noexcept { return p; }
+namespace std { template <class T, class... A> constexpr T* construct_at(T* p, A... a) { return ::new (static_cast<void*>(p)) T(a...); } }
 constexpr int f() {
   int* p = static_cast<int*>(__builtin_operator_new(sizeof(int)));
   std::construct_at(p, 42);
@@ -1864,4 +1864,4 @@ constexpr int f() {
 }
 static_assert(f() == 42);
 '''
-evidence = ["tests/own/builtins/builtin-operator-new.run.cpp", "tests/own/builtins/builtin-operator-new-selection.reject.cpp", "docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/321", "GCC 16.2.0 accepts the probe and upstream Clang 23.1.5 rejects it (strict C++26, arm64 Darwin); both agree with <memory>'s std::construct_at in place of the probe's"]
+evidence = ["tests/own/builtins/builtin-operator-new-constant.reject.cpp", "tests/own/builtins/builtin-operator-new.run.cpp", "tests/own/builtins/builtin-operator-new-selection.reject.cpp", "docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/321", "GCC 16.2.0 accepts the probe and upstream Clang 23.1.5 rejects it (strict C++26, arm64 Darwin); both agree with <memory>'s std::construct_at in place of the probe's"]
