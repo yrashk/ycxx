@@ -5786,9 +5786,13 @@ public:
     case Tk::kw_requires: return requires_expression();
     case Tk::kw_auto:
       if (kind(1) == Tk::l_paren || kind(1) == Tk::l_brace) {
+        const Tk open = kind(1);
         bump();
         Ex operand = single_auto_initializer();
         Ex result = s_->decay_copy(operand, begin, pos(), dependent_decay_copy_body && in_params_ == 0);
+        // Written as the functional cast to the placeholder it is ([expr.type.conv]/1).
+        if (writing_constraint_atom_)
+          record_written_operator(result, open, {written_type(s_->types().placeholder(false)), written_atom(operand)});
         return {result.id, begin, pos(), result.info};
       }
       s_->diag(begin, Diag::expected_expression);
