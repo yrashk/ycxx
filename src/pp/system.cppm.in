@@ -1,17 +1,148 @@
 // The system include directories of this build (configured by CMake): libycxx's headers, the
 // ones libycxx's build generated, the compiler resource headers, and the target's C library
-// headers. Native Linux builds can use the host include directories, and Darwin targets use a
-// selected SDK.
+// headers. Installed and relocated SDKs resolve their resource and target include trees relative
+// to the loaded preprocessor library or executable, or from paths registered by the installed
+// CMake package (#1510). Native Linux builds can use the host include directories, and Darwin
+// targets use a selected SDK.
 export module ycxx.pp:system;
 
 import std;
 import ycxx.ast.target;
+import :system_os;
 
 namespace ycxx::pp {
 namespace {
-constexpr std::string_view common_resource_include = "@YCXX_COMMON_RESOURCE_INCLUDE@";
+
+namespace fs = std::filesystem;
+
+constexpr std::string_view build_libycxx_include = "@YCXX_LIBYCXX_INCLUDE@";
+constexpr std::string_view build_libycxx_generated_include = "@YCXX_LIBYCXX_GENERATED_INCLUDE@";
+constexpr std::string_view build_linux_resource_include = "@YCXX_LINUX_RESOURCE_INCLUDE@";
+constexpr std::string_view build_common_resource_include = "@YCXX_COMMON_RESOURCE_INCLUDE@";
+constexpr std::string_view libdir_to_datadir = "@YCXX_PP_LIBDIR_TO_DATADIR@";
+constexpr std::string_view bindir_to_datadir = "@YCXX_PP_BINDIR_TO_DATADIR@";
+constexpr std::string_view install_datadir = "@YCXX_PP_INSTALL_DATADIR@";
+
+std::string normalize_dir(const fs::path& p) {
+  std::string s = p.lexically_normal().generic_string<char>();
+  while (s.size() > 1 && s.ends_with('/')) s.pop_back();
+  return s;
+}
+
+bool is_valid_resource_root(const fs::path& resources_dir) {
+  std::error_code ec;
+  return fs::is_regular_file(resources_dir / "common/include/stdarg.h", ec) &&
+         fs::is_regular_file(resources_dir / "linux/include/stddef.h", ec);
+}
+
+struct RegisteredSdkPaths {
+  std::mutex mutex;
+  std::string resource_dir;
+  std::string target_include_dir;
+};
+
+RegisteredSdkPaths& registered_sdk_paths() {
+  static RegisteredSdkPaths state;
+  return state;
+}
+
+const void* pp_image_address() noexcept {
+  static const int anchor = 0;
+  return &anchor;
+}
+
+struct DefaultPaths {
+  std::string linux_resource;
+  std::string common_resource;
+  std::vector<std::string> target_includes;
+};
+
+std::optional<DefaultPaths> from_installed_data_dir(const fs::path& data_dir) {
+  const fs::path resources = data_dir / "resources";
+  if (!is_valid_resource_root(resources)) return std::nullopt;
+  DefaultPaths out;
+  out.linux_resource = normalize_dir(resources / "linux/include");
+  out.common_resource = normalize_dir(resources / "common/include");
+  const fs::path target_inc = data_dir / "target/include";
+  std::error_code ec;
+  if (fs::is_directory(target_inc, ec)) out.target_includes.push_back(normalize_dir(target_inc));
+  return out;
+}
+
+std::optional<DefaultPaths> probe_relative_to(const std::optional<std::string>& image, std::string_view rel_datadir) {
+  if (!image || image->empty() || rel_datadir.empty()) return std::nullopt;
+  const fs::path base = fs::path(*image).parent_path();
+  if (base.empty()) return std::nullopt;
+  return from_installed_data_dir(base / fs::path(rel_datadir) / "ycxx");
+}
+
+DefaultPaths resolve_default_paths() {
+  const auto exe = detail::executable_path();
+  const auto img = detail::image_path_of(pp_image_address());
+  if (img && (!exe || *img != *exe)) {
+    if (auto found = probe_relative_to(img, libdir_to_datadir)) return *found;
+  }
+  if (auto found = probe_relative_to(exe, bindir_to_datadir)) return *found;
+
+  std::string reg_resources;
+  std::string reg_target;
+  {
+    auto& reg = registered_sdk_paths();
+    std::scoped_lock lock(reg.mutex);
+    reg_resources = reg.resource_dir;
+    reg_target = reg.target_include_dir;
+  }
+  if (!reg_resources.empty() && is_valid_resource_root(fs::path(reg_resources))) {
+    DefaultPaths out;
+    out.linux_resource = normalize_dir(fs::path(reg_resources) / "linux/include");
+    out.common_resource = normalize_dir(fs::path(reg_resources) / "common/include");
+    if (!reg_target.empty()) {
+      std::error_code ec;
+      if (fs::is_directory(fs::path(reg_target), ec)) out.target_includes.push_back(normalize_dir(fs::path(reg_target)));
+    }
+    return out;
+  }
+
+  if (!install_datadir.empty()) {
+    if (auto found = from_installed_data_dir(fs::path(install_datadir) / "ycxx")) return *found;
+  }
+
+  if (!reg_resources.empty()) {
+    // Keep the registered installed paths as the diagnostic fallback when an installed SDK's
+    // resource directory was removed, rather than pointing at the producer's build checkout.
+    DefaultPaths out;
+    out.linux_resource = normalize_dir(fs::path(reg_resources) / "linux/include");
+    out.common_resource = normalize_dir(fs::path(reg_resources) / "common/include");
+    if (!reg_target.empty()) out.target_includes.push_back(normalize_dir(fs::path(reg_target)));
+    return out;
+  }
+
+  return DefaultPaths{
+      std::string(build_linux_resource_include),
+      std::string(build_common_resource_include),
+      {std::string(build_libycxx_include), std::string(build_libycxx_generated_include)},
+  };
+}
+
+const DefaultPaths& default_paths() {
+  static const DefaultPaths paths = resolve_default_paths();
+  return paths;
+}
+
+bool uses_linux_resource_dir(const ast::Target& target) {
+  // The Linux resource directory includes the AMD64 definition of max_align_t.
+  return target.operating_system == ast::OperatingSystem::linux_ && target.architecture == ast::Architecture::x86_64;
+}
+
 }  // namespace
 }  // namespace ycxx::pp
+
+extern "C" void ycxx_pp_register_sdk_paths(const char* resource_dir, const char* target_include_dir) noexcept {
+  auto& reg = ycxx::pp::registered_sdk_paths();
+  std::scoped_lock lock(reg.mutex);
+  if (resource_dir && *resource_dir) reg.resource_dir = resource_dir;
+  if (target_include_dir && *target_include_dir) reg.target_include_dir = target_include_dir;
+}
 
 export namespace ycxx::pp {
 
@@ -24,22 +155,35 @@ inline constexpr const ast::Target* native_target = @YCXXC_NATIVE_TARGET@;
 
 // The primary compiler resource directory for a supported target.
 std::string_view resource_include_dir(const ast::Target& target) {
-  // The Linux resource directory includes the AMD64 definition of max_align_t.
-  if (target.operating_system == ast::OperatingSystem::linux_ && target.architecture == ast::Architecture::x86_64)
-    return "@YCXX_LINUX_RESOURCE_INCLUDE@";
-  return common_resource_include;
+  const DefaultPaths& paths = default_paths();
+  return uses_linux_resource_dir(target) ? std::string_view(paths.linux_resource) : std::string_view(paths.common_resource);
+}
+
+// The primary compiler resource directory under an explicit resource root (such as `ycxx_RESOURCE_DIR`).
+std::string resource_include_dir(const ast::Target& target, std::string_view resource_dir) {
+  if (resource_dir.empty()) return std::string(resource_include_dir(target));
+  return normalize_dir(fs::path(resource_dir) / (uses_linux_resource_dir(target) ? "linux/include" : "common/include"));
 }
 
 // `sdkroot` is the request's absolute Darwin SDK override. An empty value uses the configured SDK.
-std::vector<std::string> system_dirs(const ast::Target& target, std::string_view sdkroot = {}, bool include_libycxx = true) {
+// Non-empty `resource_dir` and `target_include_dir` override the default compiler resource root
+// and target libycxx include directory.
+std::vector<std::string> system_dirs(const ast::Target& target, std::string_view sdkroot = {}, bool include_libycxx = true,
+                                     std::string_view resource_dir = {}, std::string_view target_include_dir = {}) {
+  const DefaultPaths& defaults = default_paths();
   std::vector<std::string> dirs;
   if (include_libycxx) {
-    dirs.emplace_back("@YCXX_LIBYCXX_INCLUDE@");
-    dirs.emplace_back("@YCXX_LIBYCXX_GENERATED_INCLUDE@");
+    if (!target_include_dir.empty()) {
+      dirs.push_back(normalize_dir(fs::path(target_include_dir)));
+    } else {
+      for (const std::string& inc : defaults.target_includes) dirs.push_back(inc);
+    }
   }
-  const auto resource = resource_include_dir(target);
-  dirs.emplace_back(resource);
-  if (resource != common_resource_include) dirs.emplace_back(common_resource_include);
+  const std::string primary_resource = resource_include_dir(target, resource_dir);
+  const std::string common_resource =
+      resource_dir.empty() ? defaults.common_resource : normalize_dir(fs::path(resource_dir) / "common/include");
+  dirs.push_back(primary_resource);
+  if (primary_resource != common_resource) dirs.push_back(common_resource);
   if (target.operating_system == ast::OperatingSystem::linux_) {
     // Use the host C library only for the configured native target.
     if (const auto* host = native_target; host && host->triple == target.triple) {
@@ -48,7 +192,6 @@ std::vector<std::string> system_dirs(const ast::Target& target, std::string_view
       dirs.push_back("/usr/include");
     }
   } else if (target.operating_system == ast::OperatingSystem::darwin) {
-    namespace fs = std::filesystem;
     auto sdk = fs::path(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot).lexically_normal();
     std::error_code ec;
     // Keep missing include candidates so the daemon can observe headers created later.

@@ -157,6 +157,8 @@ struct Config {
   // Setup options consumed by with_system_dirs. Queries use the effective directory lists.
   bool nostdinc = false;
   bool nostdincxx = false;
+  std::string resource_dir;
+  std::string target_include_dir;
   // An opted-in disk view reserves .ycxx/host/virtual for these exact bytes.
   std::shared_ptr<const HostOverlay> host_overlay;
   ast::CallTriviality calls() const {

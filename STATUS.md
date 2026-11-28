@@ -10,7 +10,12 @@ What is true of the code today. Work in progress and its owners are tracked in
 - The bootstrap build can use libycxx or GCC's system libstdc++. The system build uses
   libycxx's portable execution provider for senders, scopes and the scheduler.
 - The CMake SDK exports typed C++ module interfaces. The engine and compiler samples exercise
-  build-tree and installed-package consumption. See [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
+  build-tree and installed-package consumption. `pp::resource_include_dir`, `pp::system_dirs`,
+  `pp::all_system_dirs`, and `pp::with_system_dirs` resolve installed resource and target
+  include directories in relocated prefixes (relative to the loaded preprocessor library or
+  executable, or from paths registered by `ycxxConfig.cmake`), while keeping explicit
+  `pp::Config::resource_dir` / `target_include_dir` and manual `angle_dirs` overrides working
+  (#1510). See [the embedding instructions](docs/BUILDING.md#linking-ycxx-into-a-c-application).
 
 ## Bootstrapping (2026-11-17)
 
