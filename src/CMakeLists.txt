@@ -62,6 +62,18 @@ add_executable(ycxxc main.cpp)
 set_target_properties(ycxxc PROPERTIES OUTPUT_NAME ycxx RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 target_link_libraries(ycxxc PRIVATE ycxxc_lib ycxxc_new)
 
+# Mach-O executables export their weak definitions. dyld then resolves each one by name at every
+# launch: ~41k template and inline instantiations, ~135 ms per Debug ycxx process (#1729). The
+# tests launch ycxx thousands of times. An ELF executable exports none of them. So export only main
+# and the allocation table, which a later-loaded image coalesces to (deps/libycxx/cmake/
+# ycxx-link.cmake; ELF exports it with --export-dynamic-symbol). Other images bind to the
+# executable's definitions in the shared-component, system-library and sanitizer builds, which
+# keep the default exports.
+if(APPLE AND NOT YCXXC_BUILD_SHARED_LIBS AND YCXXC_STDLIB STREQUAL "libycxx" AND NOT YCXXC_SANITIZE)
+  target_link_options(ycxxc PRIVATE
+    "LINKER:-exported_symbol,_main" "LINKER:-exported_symbol,___ycxx_allocation_functions")
+endif()
+
 if(YCXXC_STDLIB STREQUAL "system")
   # Rule workers start this executable with a sanitized environment, even when GCC is installed
   # outside the system loader's search directories.

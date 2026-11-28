@@ -21,6 +21,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   - CMake builds `build/bin/ycxx` with GCC 16.2 against libycxx's `import std;`.
   - The preprocessor policy is enforced by `tools/check-policy`.
   - CI runs PR, `main` and nightly tiers on Linux x86_64 and macOS arm64.
+  - On macOS, the static libycxx build of `ycxx` exports only `main` and the allocation table.
+    As a result, dyld does no per-launch weak-symbol binding (#1729).
   - `ycxx --version` works. The fronts (`daemon`, `cxx`, `lsp`, `ctl`) are stubs that exit 2.
 - The bootstrap smoke test (`tests/bootstrap`) passes for modules, reflection, contracts,
   coroutines, `std::execution` and the other C++26 features ycxx relies on.
