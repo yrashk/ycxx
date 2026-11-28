@@ -796,6 +796,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **When a test is many times slower on one OS, profile one process launch before tuning
+  the schedule.** Hosted macOS ran `daemon.compatibility` in 1,500 s, against 126 s on Linux.
+  Two scheduling studies (#1230, #1525) moved its start without changing that runtime. The cause
+  turned out to be a fixed tax on every launch. The Mach-O `ycxx` exported about 41k weak C++
+  definitions, and dyld resolved each one by name at launch, about 135 ms per process. The test
+  launches ycxx 5,438 times.
+  - Do: time a trivial invocation (`ycxx --version`) on both hosts. Count the launches by
+    wrapping `subprocess.run`. On macOS, profile the launch (`xcrun xctrace record --template
+    'Time Profiler' --launch -- <exe>`) and count weak binds
+    (`dyld_info -fixups <exe> | grep -c weak-def-coalesce`).
+  - Do: a freshly linked program's first launch on macOS also waits on the system's assessment of
+    it (about 3 s locally, then about 12 ms). Expect that cost per new executable a test runs.
+  - Learned on #1729.
+
 - **Map a header chain past its first wall with an overlay, and check both gates.** Every
   header on `<iostream>`'s path stopped at one line of `move.hpp`, which showed nothing behind it.
   - Do: copy only the blocking libycxx file into a scratch directory, stub the construct there,
