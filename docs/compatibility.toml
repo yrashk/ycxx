@@ -1902,3 +1902,17 @@ constexpr int f() {
 static_assert(f() == 42);
 '''
 evidence = ["tests/own/builtins/builtin-operator-new-constant.reject.cpp", "tests/own/builtins/builtin-operator-new.run.cpp", "tests/own/builtins/builtin-operator-new-selection.reject.cpp", "docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/321", "GCC 16.2.0 accepts the probe and upstream Clang 23.1.5 rejects it (strict C++26, arm64 Darwin); both agree with <memory>'s std::construct_at in place of the probe's"]
+
+[[divergence]]
+id = "has-builtin-macro-operand"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "docs/EXTENSIONS.md, Clang feature-checking macros, GCC __has_builtin, #1626"
+prior = "Evaluate __has_builtin only in #if/#elif constant-expression scanning without macro-expanding the operand."
+spec = "Expand the built-in __has_builtin(name) macro in phase 4 across ordinary preprocessing tokens, #if conditions, and #embed/__has_embed parameters by reading unexpanded parentheses and operand tokens."
+gcc = "Read macro-expanded tokens for the '(' delimiter, operand, and ')' delimiter before checking for a single identifier or keyword token, without #if-only defined operator recognition."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 macro-expands tokens following __has_builtin in both #if conditions and ordinary C++ expressions, so macro-supplied parentheses or aliases naming __builtin_memcmp yield 1 and a macro redefining __builtin_strlen to an unknown identifier yields 0."
+clang_observed = "Clang 23.1.5 reads unexpanded parentheses and operand tokens in both #if conditions and ordinary C++ expressions, so macro-supplied parentheses are rejected, a macro alias yields 0, and a macro-redefined __builtin_strlen still yields 1."
+probe = '#define ALIAS __builtin_memcmp\n#define __builtin_strlen shadowed_strlen\nconstexpr int a = __has_builtin(ALIAS);\nconstexpr int b = __has_builtin(__builtin_strlen);'
+evidence = ["tests/daemon/compatibility.py", "tests/unit/pp/pp_test.cpp", "tests/own/pp/has-builtin-expr.accept.cpp", "tests/own/pp/has-builtin-expr.pp.cpp", "tests/own/pp/has-builtin-malformed.reject.cpp"]
