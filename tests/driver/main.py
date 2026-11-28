@@ -7,11 +7,12 @@ from . import discover, kinds, report, state, toolchain, transcript
 
 REPO = Path(__file__).resolve().parents[2]
 TESTS = REPO / 'tests'
-STAGES = ('policy', 'build', 'failed', 'affected', 'core', 'wider', 'rest')
+STAGES = ('policy', 'build', 'affected-unit', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider', 'rest')
 TEST_STAGES = ('failed', 'affected', 'core', 'wider', 'rest')
 TIERS = {
-    'fast': ('policy', 'build', 'failed', 'affected', 'core'),
-    'pr': ('policy', 'build', 'failed', 'affected', 'core', 'wider'),
+    'quick': ('policy', 'build', 'affected-unit', 'failed', 'affected'),
+    'fast': ('policy', 'build', 'unit', 'failed', 'affected', 'core'),
+    'pr': ('policy', 'build', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider'),
     'main': STAGES,
     'nightly': STAGES,
 }
@@ -25,19 +26,23 @@ build/test-logs/report.html (every test with its transcript, passing ones too; c
 a person or an agent), report.md, report.tsv and report.json. docs/TESTING.md has the details.
 
   tools/test                     every stage, without stopping between them
-  tools/test --fast              what a session runs before pushing (= the PR tier's first stages:
-                                 policy build failed affected core), stopping at the first failing stage
+  tools/test --quick             inner-loop check: policy build affected-unit failed affected
+  tools/test --fast              what a session runs before pushing:
+                                 policy build unit failed affected core, stopping on first failure
   tools/test --tier pr           a CI tier, stopping at the first failing stage
   tools/test core own/smoke      stages and path filters, in any order
 
 stages, in order:
-  policy    the driver's self-test, then tools/check-policy if it exists
-  build     tools/build if it exists (#4)
-  failed    tests that failed in the last run of this branch (of main for a new branch)
-  affected  tests affected by the change since --base
-  core      the core oracles: tests/draft and tests/own
-  wider     differential and incremental suites: tests/diff, tests/incremental
-  rest      every other suite
+  policy         the driver's self-test, then tools/check-policy if it exists
+  build          tools/build if it exists (builds + -L smoke CTests)
+  affected-unit  CTests whose area label matches files changed since --base
+  unit           CTest unit suite (ctest -L unit)
+  failed         tests that failed in the last run of this branch (of main for a new branch)
+  affected       tests affected by the change since --base
+  core           the core oracles: tests/draft and tests/own
+  daemon         CTest daemon suite (ctest -L daemon: compatibility, compare, project_build)
+  wider          differential and incremental suites: tests/diff, tests/incremental
+  rest           every other suite
 A test runs in the first stage that selects it.
 
 exit status: 0 all passed (XFAIL, and UNSUPPORTED unless --no-unsupported); 1 a test or stage failed; 2 usage or
@@ -48,9 +53,17 @@ configuration error; 3 internal driver error; 130 interrupted (Ctrl-C).
 def parse_args(argv):
     p = argparse.ArgumentParser(prog='tools/test', description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('what', nargs='*', help='stages and test path filters (prefixes of test ids or paths)')
+    p.add_argument('--quick', action='store_true',
+                   help='inner-loop tier: policy build affected-unit failed affected (stops on first failure)')
     p.add_argument('--fast', action='store_true', help='the PR tier\'s first stages, stopping at the first failure')
     p.add_argument('--tier', choices=('pr', 'main', 'nightly'), help='a CI tier (stops at the first failing stage)')
     p.add_argument('-x', '--fail-fast', action='store_true', help='stop after the first stage with a failure')
+    p.add_argument('--max-failures', type=int, default=None,
+                   help='stop a test stage after N failures (0 = unlimited; default 10 with --fast)')
+    p.add_argument('--skip-xfail', action='store_true',
+                   help='skip tests already marked XFAIL for the compiler under test')
+    p.add_argument('--daemon', action='store_true',
+                   help='run ycxx tests through a private ephemeral daemon instead of cold processes')
     p.add_argument('--failed-first', action='store_true', help='add the failed stage if the stages chosen lack it')
     p.add_argument('--only-failed', action='store_true', help='run only the tests that failed last time')
     p.add_argument('--cxx', default=os.environ.get('YCXX_TEST_CXX', 'ycxx'), choices=('ycxx', 'clang', 'gcc'),
@@ -179,6 +192,16 @@ def build_stage(ui, logs, records, jobs):
     return command_stage(ui, 'build', 'build (tools/build)', [str(script), '-j', str(jobs)], logs, records)
 
 
+def ctest_stage(ui, name, label_filter, logs, records, jobs):
+    build_dir = REPO / (os.environ.get('YCXX_BUILD_DIR') or 'build')
+    if not (build_dir / 'CTestTestfile.cmake').is_file():
+        ui.skip(name, f'(no CTest configuration in {build_dir})')
+        records.append({'name': name, 'status': 'skip', 'secs': 0, 'detail': f'no CTest configuration in {build_dir}'})
+        return True
+    cmd = ['ctest', '--test-dir', str(build_dir), '-L', label_filter, '--output-on-failure', '-j', str(jobs)]
+    return command_stage(ui, f'ctest-{name}', f'{name} (ctest -L {label_filter})', cmd, logs, records)
+
+
 # --- running tests ----------------------------------------------------------------------------
 
 def summary_error(code, output):
@@ -189,7 +212,7 @@ def summary_error(code, output):
     return ''
 
 
-def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted):
+def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted, max_failures=0):
     """Runs tests in parallel; returns False on any bad result. Fills results[id]."""
     total, done, counts = len(tests), 0, {}
     t0 = time.monotonic()
@@ -197,6 +220,8 @@ def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted)
     running = {}
     detail_limit = int(os.environ.get('YCXX_FAIL_DETAILS', '10'))
     ok = True
+    bad_count = 0
+    stopped_early = False
     pool = cf.ThreadPoolExecutor(max_workers=max(1, args.jobs))
     try:
         futs = {}
@@ -223,6 +248,8 @@ def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted)
                                  'error': err, 'output': output, 'stage': stage, 'kind': t.kind, 'link': ''}
                 good = code in accepted(args)
                 ok = ok and good
+                if not good:
+                    bad_count += 1
                 if not (args.quiet and good):
                     col = ui.green if code in GOOD else ui.yellow if code == 'UNSUPPORTED' else ui.red
                     tail = '; '.join(steps) if code in GOOD else (err or '; '.join(steps))
@@ -233,6 +260,19 @@ def run_tests(ui, args, stage, tests, ctx, results, shown_failures, interrupted)
                     ui.block(f'{code}: {t.id}', output)
                 if not good and ui.gha:
                     ui.line(f'::error file=tests/{t.id},title={code} {t.id}::{err or code}')
+                if max_failures > 0 and bad_count >= max_failures:
+                    stopped_early = True
+                    break
+            if stopped_early:
+                for pfut in pending:
+                    pfut.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                transcript.kill_all()
+                pool.shutdown(wait=True)
+                ui.clear()
+                ui.warn(f'stopped after {bad_count} failure(s) (--max-failures {max_failures})',
+                        f'{done} of {total} tests finished in {stage}')
+                return False
             el = time.monotonic() - t0
             done_exp = sum(x.expected for x in tests if x.id in results)
             pace = min(4.0, max(0.25, el / max(done_exp / max(1, args.jobs), 0.01))) if done_exp else 1.0
@@ -282,13 +322,49 @@ def main(argv=None):
         return EXIT_INTERNAL
 
 
+def _is_known_xfail(test, cut):
+    return bool(kinds.xfail_reason(test, cut.name) or cut.xfail.get(test.id))
+
+
+class _PrivateDaemon:
+    """Private ephemeral ycxx daemon for a single tools/test --daemon run."""
+
+    def __init__(self, repo):
+        from ..daemon.runtime_dir import runtime_root
+        import tempfile
+        self.repo = repo
+        self.runtime = Path(tempfile.mkdtemp(prefix='yt', dir=runtime_root('yt')))
+        os.chmod(self.runtime, 0o700)
+        self.prev = {k: os.environ.get(k) for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_RUNTIME_DIR', 'YCXX_ROOT', 'YCXX_DAEMON_IDLE_EXIT')}
+        os.environ.pop('YCXX_NO_DAEMON', None)
+        os.environ['YCXX_DAEMON'] = '1'
+        os.environ['YCXX_RUNTIME_DIR'] = str(self.runtime)
+        os.environ['YCXX_ROOT'] = str(repo)
+        os.environ['YCXX_DAEMON_IDLE_EXIT'] = '120'
+
+    def close(self, exe):
+        try:
+            if exe:
+                subprocess.run([exe, 'ctl', 'shutdown'], cwd=self.repo, capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            for k, v in self.prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            shutil.rmtree(self.runtime, ignore_errors=True)
+
+
 def _main(argv):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    use_private_daemon = args.daemon or os.environ.get('YCXX_TEST_DAEMON') == 'private'
     # ycxx runs in-process for every test unless asked otherwise: a daemon is the default for
     # `ycxx cxx` (#139), and a test run must neither depend on nor leave one behind. The daemon's
-    # own tests and the .incr suite start private daemons; YCXX_TEST_DAEMON=1 sends every test
-    # through the user's.
-    if os.environ.get('YCXX_TEST_DAEMON') != '1':
+    # own tests and the .incr suite start private daemons; --daemon starts a private daemon for
+    # this run, and YCXX_TEST_DAEMON=1 sends every test through the user's.
+    if not use_private_daemon and os.environ.get('YCXX_TEST_DAEMON') != '1':
         os.environ['YCXX_NO_DAEMON'] = '1'
     ui = UI()
     started = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -306,7 +382,11 @@ def _main(argv):
             p = Path(os.path.relpath(p.resolve(), TESTS))
         filters.append(p.as_posix().removeprefix('tests/').rstrip('/').removeprefix('./'))
     stop_on_fail = args.fail_fast
-    tier = 'fast' if args.fast else args.tier
+    if args.quick and (args.fast or args.tier):
+        print('tools/test: give only one of --quick, --fast, or --tier', file=sys.stderr)
+        return EXIT_USAGE
+    tier = 'quick' if args.quick else ('fast' if args.fast else args.tier)
+    max_failures = args.max_failures if args.max_failures is not None else (5 if tier == 'quick' else 10 if tier == 'fast' else 0)
     if tier:
         if stages:
             print('tools/test: give stages or a tier, not both', file=sys.stderr)
@@ -316,7 +396,10 @@ def _main(argv):
     if args.only_failed:
         stages = ['failed']
     if not stages:
-        stages = list(STAGES)
+        # Path filters without explicit stages run only test stages (never an accidental rebuild).
+        stages = list(TEST_STAGES) if filters else [s for s in STAGES if s != 'affected-unit']
+    if args.cxx != 'ycxx' and not any(w in ('build', 'affected-unit', 'unit', 'daemon') for w in args.what):
+        stages = [s for s in stages if s not in ('build', 'affected-unit', 'unit', 'daemon')]
     if args.failed_first and 'failed' not in stages:
         stages.insert(next((i for i, s in enumerate(stages) if s in TEST_STAGES), len(stages)), 'failed')
     stages = [s for s in STAGES if s in stages]  # always in pyramid order
@@ -359,15 +442,26 @@ def _main(argv):
     sel = [t for t in alltests if not filters or any(t.id == f or t.id.startswith(f) for f in filters)]
     if tier != 'nightly':
         sel = [t for t in sel if t.one('TIER') != 'nightly']
+    changed = state.changed_files(REPO, args.base) if ('affected' in stages or 'affected-unit' in stages or tier in ('quick', 'fast')) else None
+    skipped_xfail = 0
+    if args.skip_xfail or tier == 'quick':
+        before = len(sel)
+        sel = [t for t in sel if not _is_known_xfail(t, cut)]
+        skipped_xfail = before - len(sel)
+    elif tier == 'fast' and not any(
+            f in ('tests/features/ycxx.xfail', 'tests/features/ycxx.txt') or f.startswith('tests/draft/')
+            for f in (changed or ())):
+        # Known draft/ XFAILs dominate --fast wall time (10-45s each); PR/main CI still checks them for XPASS.
+        before = len(sel)
+        sel = [t for t in sel if not (t.suite == 'draft' and _is_known_xfail(t, cut))]
+        skipped_xfail = before - len(sel)
     picked, plan, notes = set(), {}, {}
     loads = [0.0] * shard[1] if shard else None
-    changed = None
     for s in stages:
         if s == 'failed':
             ts = [t for t in sel if t.id in st.failing]
             notes[s] = f'{len(st.failing)} failing in the last run of ' + ('main (new branch)' if st.inherited else branch)
         elif s == 'affected':
-            changed = state.changed_files(REPO, args.base)
             ts, notes[s] = state.affected(changed, sel)
         elif s in TEST_STAGES:
             ts = [t for t in sel if t.stage == s]
@@ -415,6 +509,8 @@ def _main(argv):
     if shard:
         meta['shard'] = f'{shard[0]}/{shard[1]}'
     ui.info('state', f'{args.state}' + (' (no failures recorded for this branch: using main\'s)' if st.inherited else ''))
+    if skipped_xfail:
+        ui.info('xfail', f'skipped {skipped_xfail} known XFAIL test(s)')
 
     if not args.no_state:  # what this run alone learned, for --merge-state; none yet
         (Path(args.state) / 'last-run.json').unlink(missing_ok=True)
@@ -423,43 +519,63 @@ def _main(argv):
     ctx = kinds.Ctx(REPO, cut, compilers, args.oracle, REPO / 'build' / 'test-work' / args.cxx, args.timeout)
     records, results, shown, interrupted = [], {}, [0], [False]
     failed_stage = None
-    for s in stages:
-        t0 = time.monotonic()
-        if interrupted[0] or (failed_stage and stop_on_fail):
-            why = 'interrupted' if interrupted[0] else f'stopped after the failing {failed_stage} stage'
-            ui.section(s)
-            ui.skip(s, f'(not run: {why})')
-            records.append({'name': s, 'status': 'skip', 'secs': 0, 'detail': f'not run: {why}'})
-            continue
-        try:
-            if s == 'policy':
-                ui.section('policy checks')
-                ok = policy_stage(ui, logs, records)
-            elif s == 'build':
-                ui.section('build')
-                ok = build_stage(ui, logs, records, args.jobs)
-                if ok and not cut.available:  # the build has just made it
-                    fresh = toolchain.discover(REPO)[cut.name]
-                    cut.exe, cut.version, cut.why_missing = fresh.exe, fresh.version, fresh.why_missing
-                    if cut.available:
-                        ui.info(f'{cut.name} (under test)', f'{cut.exe}: {cut.version}')
-                        meta[cut.name] = f'{cut.exe}: {cut.version}'
-                    elif cut.features:
-                        ui.fail(f'{cut.name} not found after the build', cut.why_missing)
-                        ok = False
-            else:
-                ts = plan[s]
-                ui.section(f'{s}: {len(ts)} tests' + (f' ({notes[s]})' if s in notes else ''))
-                ok = run_tests(ui, args, s, ts, ctx, results, shown, interrupted) if ts else True
-                bad = sum(1 for t in ts if t.id in results and results[t.id]['code'] not in accepted(args))
-                records.append({'name': s, 'status': 'interrupted' if interrupted[0] else 'ok' if ok else 'FAIL',
-                                'secs': time.monotonic() - t0,
-                                'detail': f'{len(ts)} tests, {bad} not passing' + (f'; {notes[s]}' if s in notes else '')})
-        except KeyboardInterrupt:
-            interrupted[0] = True
-            ok = False
-        if not ok and not interrupted[0]:
-            failed_stage = failed_stage or s
+    private_daemon = _PrivateDaemon(REPO) if (use_private_daemon and args.cxx == 'ycxx') else None
+    if private_daemon:
+        ui.info('daemon', f'private ephemeral daemon ({private_daemon.runtime})')
+    try:
+        for s in stages:
+            t0 = time.monotonic()
+            if interrupted[0] or (failed_stage and stop_on_fail):
+                why = 'interrupted' if interrupted[0] else f'stopped after the failing {failed_stage} stage'
+                ui.section(s)
+                ui.skip(s, f'(not run: {why})')
+                records.append({'name': s, 'status': 'skip', 'secs': 0, 'detail': f'not run: {why}'})
+                continue
+            try:
+                if s == 'policy':
+                    ui.section('policy checks')
+                    ok = policy_stage(ui, logs, records)
+                elif s == 'build':
+                    ui.section('build')
+                    ok = build_stage(ui, logs, records, args.jobs)
+                    if ok and not cut.available:  # the build has just made it
+                        fresh = toolchain.discover(REPO)[cut.name]
+                        cut.exe, cut.version, cut.why_missing = fresh.exe, fresh.version, fresh.why_missing
+                        if cut.available:
+                            ui.info(f'{cut.name} (under test)', f'{cut.exe}: {cut.version}')
+                            meta[cut.name] = f'{cut.exe}: {cut.version}'
+                        elif cut.features:
+                            ui.fail(f'{cut.name} not found after the build', cut.why_missing)
+                            ok = False
+                elif s == 'affected-unit':
+                    labels = state.affected_ctest_labels(changed)
+                    ui.section(f'affected-unit CTests ({", ".join(labels) or "none"})')
+                    if labels:
+                        pattern = '^(' + '|'.join(re.escape(l) for l in labels) + ')$'
+                        ok = ctest_stage(ui, 'affected-unit', pattern, logs, records, args.jobs)
+                    else:
+                        ui.skip('affected-unit', '(no changed source areas map to CTest labels)')
+                        records.append({'name': 'affected-unit', 'status': 'skip', 'secs': 0, 'detail': 'no affected CTest labels'})
+                        ok = True
+                elif s in ('unit', 'daemon'):
+                    ui.section(f'{s} CTests')
+                    ok = ctest_stage(ui, s, s, logs, records, args.jobs)
+                else:
+                    ts = plan[s]
+                    ui.section(f'{s}: {len(ts)} tests' + (f' ({notes[s]})' if s in notes else ''))
+                    ok = run_tests(ui, args, s, ts, ctx, results, shown, interrupted, max_failures=max_failures) if ts else True
+                    bad = sum(1 for t in ts if t.id in results and results[t.id]['code'] not in accepted(args))
+                    records.append({'name': s, 'status': 'interrupted' if interrupted[0] else 'ok' if ok else 'FAIL',
+                                    'secs': time.monotonic() - t0,
+                                    'detail': f'{len(ts)} tests, {bad} not passing' + (f'; {notes[s]}' if s in notes else '')})
+            except KeyboardInterrupt:
+                interrupted[0] = True
+                ok = False
+            if not ok and not interrupted[0]:
+                failed_stage = failed_stage or s
+    finally:
+        if private_daemon:
+            private_daemon.close(cut.exe)
 
     # The state: only what finished before any Ctrl-C (a test cut short proves nothing).
     if not args.no_state and results:
