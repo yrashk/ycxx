@@ -1939,4 +1939,4 @@ constexpr int f() {
 }
 static_assert(f() == 4);
 '''
-evidence = ["tests/own/using/block-using-enum.accept.cpp", "tests/own/using/block-using-enum.reject.cpp", "tests/draft/dcl/enum.udecl-1.accept.cpp", "tests/draft/DISAGREEMENTS.md"]
+evidence = ["tests/daemon/compatibility.py", "tests/own/using/block-using-enum.accept.cpp", "tests/own/using/block-using-enum.reject.cpp", "tests/draft/dcl/enum.udecl-1.accept.cpp", "tests/draft/DISAGREEMENTS.md"]

@@ -2842,20 +2842,31 @@ auto BodyAnalysis::generic_body() -> Result<ast::BodySema> {
     Program* p;
     ~Pop() { p->running_bodies_.pop_back(); }
   } pop{p_};
-  s_.push_scope();
-  for (const auto& [n, t] : gi.g.aliases) s_.local_type_alias(n, t, 0);
-  for (const auto& u : gi.g.usings) s_.replay_block_using(u.name, u.decls, u.type_index);
-  // Innermost first: the first of a name is the one its definition saw.
-  for (std::size_t i = std::min(gi.g.consts.size(), gi.g.const_values.size()); i-- > 0;) {
-    u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
-    if (gi.g.const_values[i] != ast::ConstId::none) s_.set_local_value(l, gi.g.const_values[i]);
+  std::set<std::size_t> depths{0};
+  for (std::size_t d : gi.g.const_depths) depths.insert(d);
+  for (std::size_t d : gi.g.alias_depths) depths.insert(d);
+  for (const auto& u : gi.g.usings) depths.insert(u.depth);
+  const std::size_t const_count = std::min(gi.g.consts.size(), gi.g.const_values.size());
+  for (std::size_t d : depths) {
+    s_.push_scope();
+    for (std::size_t i = 0; i < gi.g.aliases.size(); ++i)
+      if ((i < gi.g.alias_depths.size() ? gi.g.alias_depths[i] : 0) == d)
+        s_.local_type_alias(gi.g.aliases[i].first, gi.g.aliases[i].second, 0);
+    for (const auto& u : gi.g.usings)
+      if (u.depth == d) s_.replay_block_using(u.name, u.decls, u.type_index);
+    // Innermost first in `consts`: reverse keeps declaration order at the same depth.
+    for (std::size_t i = const_count; i-- > 0;)
+      if ((i < gi.g.const_depths.size() ? gi.g.const_depths[i] : 0) == d) {
+        u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);
+        if (gi.g.const_values[i] != ast::ConstId::none) s_.set_local_value(l, gi.g.const_values[i]);
+      }
   }
   if (!gi.g.expansions.empty() || gi.g.part) s_.expansions_override = &gi.g.expansions;
   s_.open_generic(gi.g, gi.spec, gi.spec_type, gi.args);
   ps_.seek(it_->begin + begin() + gi.g.body_begin);
   Ex body = ps_.compound_statement();
   auto r = s_.close_generic(body, ps_.pos());
-  s_.pop_scope();
+  for (std::size_t i = 0; i < depths.size(); ++i) s_.pop_scope();
   Ex root;
   if (r && body.ok()) root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{sema::Sema::at(body, 0)})}, 0, body.end);
   std::vector<ast::LocalRec> locals = r ? r->locals : std::vector<ast::LocalRec>{};

@@ -293,27 +293,45 @@ auto Sema::outer_block_here() -> OuterBlock {
         seen_value.insert(std::to_underlying(t->name));
         b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none, true, false});
       }
-    for (auto u = block_usings_.rbegin(); u != block_usings_.rend(); ++u) {
-      if (u->depth != d) continue;
-      const bool has_value = std::ranges::any_of(u->decls, [](const ast::DeclSema& decl) { return !is_type(decl.kind); });
-      const bool keep_type = u->type_index && seen_type.insert(std::to_underlying(u->name)).second;
-      const bool keep_value = (has_value || keep_type) && seen_value.insert(std::to_underlying(u->name)).second;
+    std::map<u32, std::size_t> depth_usings;
+    for (const BlockUsing& u : block_usings_) {
+      if (u.depth != d) continue;
+      const u32 key = std::to_underlying(u.name);
+      const bool has_value = std::ranges::any_of(u.decls, [](const ast::DeclSema& decl) { return !is_type(decl.kind); });
+      if (auto it = depth_usings.find(key); it != depth_usings.end()) {
+        OuterBlock::Name& existing = b.names[it->second];
+        existing.decls.insert(existing.decls.end(), u.decls.begin(), u.decls.end());
+        if (u.type_index && !existing.type) {
+          const ast::DeclSema& decl = u.decls[*u.type_index];
+          existing.type = decl.type;
+          existing.type_alias = decl.kind == ast::DeclKind::type_alias;
+          existing.type_template = (decl.flags & decl_flag::template_) != 0;
+        }
+        continue;
+      }
+      const bool keep_type = u.type_index && !seen_type.contains(key);
+      const bool keep_value = (has_value || keep_type) && !seen_value.contains(key);
       if (!keep_type && !keep_value) continue;
       OuterBlock::Name n;
       n.kind = OuterBlock::Name::Kind::using_;
-      n.name = u->name;
-      n.decls = u->decls;
-      if (u->type_index) {
-        const ast::DeclSema& decl = u->decls[*u->type_index];
+      n.name = u.name;
+      n.decls = u.decls;
+      if (u.type_index) {
+        const ast::DeclSema& decl = u.decls[*u.type_index];
         n.type = decl.type;
         n.type_alias = decl.kind == ast::DeclKind::type_alias;
         n.type_template = (decl.flags & decl_flag::template_) != 0;
       }
+      depth_usings.emplace(key, b.names.size());
       b.names.push_back(std::move(n));
+    }
+    for (const auto& [key, idx] : depth_usings) {
+      if (b.names[idx].type) seen_type.insert(key);
+      seen_value.insert(key);
     }
     for (const BlockAlias& a : block_aliases_)
       if (a.depth == d && seen_value.insert(std::to_underlying(a.name)).second)
-        b.names.push_back({OuterBlock::Name::Kind::namespace_alias, a.name, {}, std::nullopt, {}, {}, a.ns});
+        b.names.push_back({OuterBlock::Name::Kind::namespace_alias, a.name, {}, std::nullopt, std::nullopt, {}, a.ns});
     for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
       if (u->first == d) b.using_enums.push_back(u->second);
     for (const auto& [depth, ns] : block_directives_)

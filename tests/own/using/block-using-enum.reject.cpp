@@ -88,3 +88,20 @@ void local_class_hidden_by_struct() {
     }
   };
 }
+
+namespace BadUintAlias {
+  using Kind = unsigned int;
+}
+void local_class_hidden_by_uint_alias() {
+  using BadUintAlias::Kind;
+  struct Local {
+    void f() {
+      using enum Kind;  //! error
+    }
+  };
+}
+
+enum UnscopedSelf {
+  SelfA = 1,
+  SelfB = noexcept([] { using enum UnscopedSelf; return SelfA; }())  //! error
+};

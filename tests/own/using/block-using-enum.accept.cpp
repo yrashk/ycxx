@@ -151,3 +151,83 @@ constexpr int in_lambdas() {
   return nongeneric() + generic(3);
 }
 static_assert(in_lambdas() == 11);
+
+// Same-depth function + enum `using`-declarations in a local class preserve both bindings.
+namespace FnKind {
+  constexpr int Kind(int x) { return x + 77; }
+}
+constexpr int same_depth_fn_and_enum_local_class() {
+  using FnKind::Kind;
+  using Library::Kind;
+  struct Local {
+    static constexpr int get() { return static_cast<int>(Kind(1)); }
+  };
+  return Local::get();
+}
+static_assert(same_depth_fn_and_enum_local_class() == 78);
+
+// Imported builtin typedefs (including first-interned QualType index 0) in a local class.
+namespace BuiltinAlias {
+  using U = unsigned int;
+  using I = int;
+}
+constexpr unsigned int builtin_alias_in_local_class() {
+  using BuiltinAlias::U;
+  using BuiltinAlias::I;
+  struct Local {
+    U u = 3u;
+    I i = 4;
+  };
+  Local l{};
+  return l.u + static_cast<unsigned int>(l.i);
+}
+static_assert(builtin_alias_in_local_class() == 7u);
+
+// Generic lambda preserves relative block depths between outer local and inner block `using`.
+constexpr int generic_lambda_depth_shadow() {
+  int Kind = 1;
+  (void)Kind;
+  {
+    using Library::Kind;
+    auto g = [](auto x) {
+      Kind k = Kind::Small;
+      using enum Kind;
+      return static_cast<int>(k) + static_cast<int>(Small) + x;
+    };
+    return g(2);
+  }
+}
+static_assert(generic_lambda_depth_shadow() == 10);
+
+// Local class inside a function template sees outer block `using` shadowing template parameter.
+template<class Kind>
+constexpr int shadow_tparam_local_class() {
+  using Library::Kind;
+  struct Local {
+    static constexpr int get() {
+      using enum Kind;
+      return static_cast<int>(Small);
+    }
+  };
+  return Local::get();
+}
+static_assert(shadow_tparam_local_class<int>() == 4);
+
+// `using namespace` inside a local class ignores enclosing block type `using`-declarations.
+namespace ShadowedNs {
+  constexpr int ns_val = 5;
+}
+namespace OtherTypeNs {
+  enum class ShadowedNs { a = 1 };
+}
+constexpr int local_class_using_directive() {
+  using OtherTypeNs::ShadowedNs;
+  struct Local {
+    static constexpr int get() {
+      using namespace ShadowedNs;
+      return ns_val;
+    }
+  };
+  return Local::get();
+}
+static_assert(local_class_using_directive() == 5);

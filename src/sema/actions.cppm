@@ -60,17 +60,20 @@ struct GenericClosure {
   u16 flags = 0;
   std::vector<ast::LocalRec> consts;
   std::vector<ConstId> const_values;
+  std::vector<std::size_t> const_depths;
   std::vector<Expansion> expansions;  // the pack expansions of its body, which its specializations expand
   // Where it is defined: the template-heads around it and their arguments, and the block-scope
   // type aliases its body can name.
   std::vector<std::vector<ast::TemplateParamSema>> scopes;
   Bindings args;
   struct CapturedUsing {
+    std::size_t depth = 0;
     NameId name{};
     std::vector<ast::DeclSema> decls;
     std::optional<std::size_t> type_index;
   };
   std::vector<std::pair<NameId, QualType>> aliases;
+  std::vector<std::size_t> alias_depths;
   std::vector<CapturedUsing> usings;
   bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
   // Set for a lambda outside every function body: the part it is in, which its specializations
@@ -135,7 +138,7 @@ struct OuterBlock {
     NameId name{};
     ast::LocalRec local{};
     std::optional<ConstId> value;  // a constant's
-    QualType type{};
+    std::optional<QualType> type;
     std::vector<ast::DeclSema> decls;
     EntityId ns = EntityId::none;
     bool type_alias = false;
@@ -1142,7 +1145,8 @@ public:
     const EntityId enumeration = types().enum_of(t);
     if (!q_->require_enum_definition(enumeration)) return;
     const EnumRec* rec = enum_rec(enumeration);
-    if (!rec || !rec->defined) {
+    const bool defining = q_->defining_enum(enumeration) != nullptr;
+    if (!rec || !rec->defined || (defining && (compatibility() != ast::Compatibility::gcc || !rec->fixed))) {
       diag(at_, Diag::incomplete_type, t);
       return;
     }
@@ -4442,7 +4446,7 @@ public:
           hidden = true;
           return std::nullopt;
         }
-        if (n.type != QualType{}) {
+        if (n.type) {
           if (n.type_alias && !aliases) {
             hidden = true;
             return std::nullopt;
