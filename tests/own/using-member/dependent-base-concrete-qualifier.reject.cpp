@@ -71,3 +71,18 @@ template<class T> struct Priv : T {
   using B::priv;                     //! error
 };
 Priv<B> bad_priv;
+
+// A nested class's own non-dependent base hides an enclosing deferred member using-declaration,
+// so an inaccessible member in that base must be diagnosed rather than falling through.
+struct PrivSub {
+private:
+  static constexpr int f() { return 7; }
+};
+
+template<class T> struct OuterWithPrivSub : T {
+  using B::f;
+  struct Inner : PrivSub {
+    static constexpr int x = f();    //! error
+  };
+};
+int bad_priv_sub = OuterWithPrivSub<B>::Inner::x;

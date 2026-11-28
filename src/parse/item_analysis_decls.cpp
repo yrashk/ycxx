@@ -941,9 +941,9 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
   // A direct base, or a base of one: the class is not complete yet, so its base-clause's.
   std::vector<EntityId> direct;
   for (const sema::BaseRec& x : q_.defining_base_records(ce)) direct.push_back(x.cls);
-  if (const auto own = p_->instantiating_bases_.find(ce); own != p_->instantiating_bases_.end() &&
-                                                           !std::ranges::contains(direct, own->second))
-    direct.push_back(own->second);
+  if (const auto own = p_->instantiating_bases_.find(ce); own != p_->instantiating_bases_.end())
+    for (const sema::BaseRec& x : own->second)
+      if (!std::ranges::contains(direct, x.cls)) direct.push_back(x.cls);
   const bool is_base = std::ranges::any_of(direct, [&](EntityId d) {
     int paths = 0;
     return d == b || s_.base_path(d, b, paths).has_value();

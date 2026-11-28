@@ -15,18 +15,33 @@ struct Mid : B {};
 
 template<class T> struct Wrap : T {};
 
+struct Sub {
+  static constexpr int sf() { return 7; }
+};
+
 template<class T> struct D : T {
   using B::f;
   using B::sf;
   using B::ov;
   using B::operator();
   using B::tf;
+  using B::prot;
   constexpr short ov(double) const { return 0; }
   static constexpr int static_v = sf();
   constexpr int call_unqual() const { return f(); }
   constexpr int call_tmpl() const { return this->template tf<int>(4); }
+  constexpr int call_prot() const { return prot(); }
+  static constexpr int call_local() {
+    struct Local {
+      static constexpr int g() { return sf(); }
+    };
+    return Local::g();
+  }
   struct Inner {
     static constexpr int call_outer_static() { return sf(); }
+  };
+  struct InnerSub : Sub {
+    static constexpr int x = sf();
   };
 };
 
@@ -48,6 +63,7 @@ template<class T> struct Outer {
 template<class T> struct PrivInherit : private T {
 public:
   using B::f;
+  using B::prot;
 };
 
 // Unused template with concrete qualifier and dependent base is valid.
@@ -58,7 +74,9 @@ template<class T> struct Unused : T {
 struct Other {};
 
 static_assert(D<B>::static_v == 11);
+static_assert(D<B>::call_local() == 11);
 static_assert(D<B>::Inner::call_outer_static() == 11);
+static_assert(D<B>::InnerSub::x == 7);
 
 void check(D<B> db, D<Mid> dm, Indirect<B> ib, Partial<B*> pb, Outer<B>::Inner oi, PrivInherit<B> pi) {
   static_assert(sizeof(db.ov(1)) == sizeof(char));
@@ -66,10 +84,14 @@ void check(D<B> db, D<Mid> dm, Indirect<B> ib, Partial<B*> pb, Outer<B>::Inner o
   (void)db.f();
   (void)db.call_unqual();
   (void)db.call_tmpl();
+  (void)db.call_prot();
+  (void)db.prot();
   (void)db(5);
   (void)dm.f();
+  (void)dm.prot();
   (void)ib.f();
   (void)pb.f();
   (void)oi.f();
   (void)pi.f();
+  (void)pi.prot();
 }

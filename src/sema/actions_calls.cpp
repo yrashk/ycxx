@@ -371,7 +371,9 @@ auto Sema::accessible(EntityId c, ast::Access a, EntityId naming) -> bool {
     int paths = 0;
     if (a == ast::Access::protected_) {
       if (base_path(k, c, paths)) return true;
-      for (const BaseRec& base : k == current_class && !completing_bases.empty() ? completing_bases : class_prefix_bases(k))
+      auto bases = k == current_class && !completing_bases.empty() ? completing_bases : q_->instantiating_base_records(k);
+      if (bases.empty()) bases = class_prefix_bases(k);
+      for (const BaseRec& base : bases)
         if (base.cls == c || base_path(base.cls, c, paths)) return true;
     }
   }

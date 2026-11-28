@@ -285,6 +285,9 @@ public:
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
+  // The direct bases of a specialization whose members are being analysed (including those
+  // dependent in the pattern, for access checks during instantiation).
+  virtual std::span<const BaseRec> instantiating_base_records(EntityId) { return {}; }
   // Whether a using-declaration of class `c` names `name` in a dependent base: in its template
   // definition, a member of an unknown specialization ([namespace.udecl], [temp.dep.type]/7).
   virtual bool dependent_member_using(EntityId, NameId) { return false; }
@@ -4373,6 +4376,7 @@ public:
         } else if (auto r = enclosing_prefix_value(k, name, begin, end, begin, /*unqualified=*/true, callee)) {
           return *r;  // a class being defined: its members declared so far
         }
+        if (q_->dependent_member_using(k, name)) return dependent_node({}, begin, end);
       }
     }
     return std::nullopt;
@@ -4484,7 +4488,8 @@ public:
     auto path = [&](this auto&& next, EntityId from) -> bool {
       if (from == owner) return true;
       const ClassRec* rec = class_rec(from);
-      const auto bases = rec ? std::span<const BaseRec>(rec->bases) : class_prefix_bases(from);
+      const auto bases = rec ? std::span<const BaseRec>(rec->bases)
+                             : (from == current_class ? q_->defining_base_records(from) : class_prefix_bases(from));
       return std::ranges::any_of(bases, [&](const BaseRec& base) {
         return accessible(from, base.access) && next(base.cls);
       });
