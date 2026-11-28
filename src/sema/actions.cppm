@@ -5052,8 +5052,10 @@ public:
       if (!member.is_ctor || (form == Construction::copy && member.is_explicit)) continue;
       const TypeRec fn = types().rec(member.type);
       const Candidate c{member.entity, member.type, true, member.is_deleted, nullptr, member.defaults};
-      if (args.size() < c.required(fn.params.size()) || (args.size() > fn.params.size() && !fn.variadic)) continue;
-      if (form == Construction::copy && fn.params.empty()) continue;
+      const std::size_t required = c.required(fn.params.size());
+      if (args.size() < required || (args.size() > fn.params.size() && !fn.variadic)) continue;
+      if (form == Construction::copy && (fn.params.empty() || required > 1)) continue;
+      if (member.ineligible || !trailing_constraints_satisfied(member.constraints)) continue;
       bool viable = true;
       for (std::size_t i = 0; i < std::min(args.size(), fn.params.size()) && viable; ++i)
         viable = ics(args[i], fn.params[i]).viable;

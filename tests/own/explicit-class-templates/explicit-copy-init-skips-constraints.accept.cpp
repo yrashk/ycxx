@@ -91,4 +91,19 @@ constexpr bool check_all() {
   return true;
 }
 
+template<class A, class B> constexpr bool same_v = false;
+template<class A> constexpr bool same_v<A, A> = true;
+
+template<class T> constexpr bool run_local() {
+  struct S {
+    constexpr S(int) requires (!same_v<T, int>) {}
+  };
+  struct Caller {
+    static char f(S);
+    static short f(...);
+  };
+  return sizeof(Caller::f(1)) == sizeof(short);
+}
+
 static_assert(check_all());
+static_assert(run_local<int>());

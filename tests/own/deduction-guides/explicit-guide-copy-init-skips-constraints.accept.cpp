@@ -22,11 +22,19 @@ template<class U> requires Trap<U>::value struct ConstrainedBox {
 };
 ConstrainedBox(long) -> ConstrainedBox<long>;
 
+template<class U = long> struct DefaultedBox {
+  int tag;
+  template<class X> requires Trap<X>::value explicit constexpr DefaultedBox(X) : tag(1) {}
+  constexpr DefaultedBox(long, int = 0) : tag(2) {}
+};
+
 constexpr bool check_guides() {
   Box a = 1;
   if (a.tag != 2) return false;
   ConstrainedBox b = 1;
   if (b.tag != 2) return false;
+  DefaultedBox c = 1;
+  if (c.tag != 2) return false;
   return true;
 }
 
