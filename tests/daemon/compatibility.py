@@ -4300,6 +4300,8 @@ def historical_syntax_modes(world, gxx):
         ('templates/destructor-specialization-after-use.reject.cpp', ('clang',)),
         ('array-allocation-syntax/void-delete.reject.cpp', ()),
         ('casts/reinterpret-pointer-integral-discarded.reject.cpp', ('gcc',)),
+        ('casts/reinterpret-identity-constexpr.reject.cpp', ('gcc',)),
+        ('casts/reinterpret-glvalue-constexpr.reject.cpp', ()),
         ('inherit/elaborated-injected-base-access.reject.cpp', ('clang',)),
         ('classes/defaulted-destructor/private-aggregate-member.reject.cpp', ('gcc',)),
         ('consteval/named-result-expired-member.reject.cpp', ('gcc',)),
@@ -4346,6 +4348,8 @@ int f() { P<int,char> p{7}; return p.selected; }
          'constexpr const void* p = reinterpret_cast<const void*>(1UL);'),
         ('cast-operand-side-effect.cpp', (),
          'int n; static_assert((static_cast<void>(reinterpret_cast<const void*>(++n)), true));'),
+        ('reinterpret-adds-qualifiers.cpp', (),
+         'constexpr int n = 4; constexpr const volatile int* p = reinterpret_cast<const volatile int*>(&n);'),
         ('expired-record-read.cpp', (), '''
 struct S { int n; constexpr int value() const { return n; } };
 constexpr bool expired() { const S* p; { S x{7}; p = &x; } return p->value() == 7; }
@@ -4486,6 +4490,114 @@ def flat_record_array_lifetime(world):
                 assert b'access to an object outside its lifetime' in warm[2], (mode, target, warm)
 
 
+def has_builtin_expressions(world):
+    scope = world.scope
+    (scope / 'has-builtin.hpp').write_text('''\
+#define __builtin_strlen shadowed_strlen
+static_assert(__has_builtin(__builtin_strlen) == EXPECTED_SHADOW);
+constexpr int shadowed_in_directive =
+#if __has_builtin(__builtin_strlen)
+    1;
+#else
+    0;
+#endif
+static_assert(shadowed_in_directive == EXPECTED_SHADOW);
+constexpr int via_alias = __has_builtin(ALIAS);
+constexpr int in_directive =
+#if __has_builtin(ALIAS)
+    1;
+#else
+    0;
+#endif
+static_assert(via_alias == EXPECTED_ALIAS && in_directive == EXPECTED_ALIAS);
+''')
+    (scope / 'has-builtin-a.cpp').write_text('#include "has-builtin.hpp"\n')
+    (scope / 'has-builtin-b.cpp').write_text('#include "has-builtin.hpp"\n')
+    (scope / 'has-builtin-target.cpp').write_text('''\
+constexpr int atomic_load = __has_builtin(__atomic_load_n);
+constexpr int fabsl_builtin = __has_builtin(__builtin_fabsl);
+static_assert(atomic_load == EXPECTED_ATOMIC && fabsl_builtin == EXPECTED_FABSL);
+''')
+    (scope / 'has-builtin-bad.cpp').write_text('''\
+int empty = __has_builtin();
+/* \u03b1\u03b2\u03b3 */ int non_id = __has_builtin(123, 456);
+int extra = __has_builtin(__builtin_memcmp, 1);
+int missing_open = __has_builtin 0;
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            options = [target, '-fcompat=' + mode]
+            expected_shadow = 0 if mode == 'gcc' else 1
+            for unit, alias in (('has-builtin-a.cpp', '__builtin_memcmp'),
+                                ('has-builtin-b.cpp', '__builtin_nonexistent')):
+                expected = 1 if mode == 'gcc' and alias == '__builtin_memcmp' else 0
+                command = [*options, f'-DALIAS={alias}', f'-DEXPECTED_ALIAS={expected}',
+                           f'-DEXPECTED_SHADOW={expected_shadow}', '-fsyntax-only', unit]
+                cold, warm = (world.cxx(command, scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm == (0, b'', b''), (mode, target, unit, alias, cold, warm)
+            expected_atomic = 1 if target == LINUX else 0
+            expected_fabsl = 0 if target == LINUX else 1
+            for flag in ('-fsyntax-only', '-E'):
+                command = [*options, f'-DEXPECTED_ATOMIC={expected_atomic}',
+                           f'-DEXPECTED_FABSL={expected_fabsl}', flag, 'has-builtin-target.cpp']
+                cold, warm = (world.cxx(command, scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == 0 and warm[2] == b'', (
+                    mode, target, flag, cold, warm)
+                if flag == '-E':
+                    assert f'atomic_load = {expected_atomic};'.encode() in warm[1], (
+                        mode, target, warm[1])
+                    assert f'fabsl_builtin = {expected_fabsl};'.encode() in warm[1], (
+                        mode, target, warm[1])
+            bad = [*options, '-fsyntax-only', 'has-builtin-bad.cpp']
+            cold, warm = (world.cxx(bad, scope, env, timeout=40)
+                          for env in (world.cold, world.daemon))
+            assert cold == warm and warm[0] == 1, (mode, target, cold, warm)
+            for loc in (b'has-builtin-bad.cpp:1:27:', b'has-builtin-bad.cpp:2:41:',
+                        b'has-builtin-bad.cpp:3:43:', b'has-builtin-bad.cpp:4:34:'):
+                assert loc in warm[2], (mode, target, loc, warm[2])
+
+    (scope / 'has-builtin-override.hpp').write_text('''\
+#ifdef __has_builtin
+constexpr int override_probe = __has_builtin(__ycxx_no_such_builtin);
+#if __has_builtin(__ycxx_no_such_builtin) != EXPECTED_OVERRIDE
+#error unexpected #if __has_builtin value
+#endif
+static_assert(override_probe == EXPECTED_OVERRIDE);
+#else
+constexpr int __has_builtin = EXPECTED_OVERRIDE;
+static_assert(__has_builtin == EXPECTED_OVERRIDE);
+#endif
+''')
+    (scope / 'has-builtin-default.cpp').write_text('#include "has-builtin-override.hpp"\n')
+    (scope / 'has-builtin-undef.cpp').write_text('#undef __has_builtin\n#include "has-builtin-override.hpp"\n')
+    (scope / 'has-builtin-redef.cpp').write_text(
+        '#undef __has_builtin\n#define __has_builtin(x) 42\n#include "has-builtin-override.hpp"\n')
+    (scope / 'has-builtin-delims.cpp').write_text('''\
+#define LP (
+#define RP )
+#define EMPTY
+#define ARG __builtin_memcmp
+static_assert(__has_builtin LP ARG RP == 1);
+static_assert(__has_builtin EMPTY (__builtin_memcmp) == 1);
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            options = [target, '-fcompat=' + mode]
+            for unit, expected_override in (('has-builtin-default.cpp', 0),
+                                            ('has-builtin-undef.cpp', 7),
+                                            ('has-builtin-redef.cpp', 42)):
+                command = [*options, f'-DEXPECTED_OVERRIDE={expected_override}', '-fsyntax-only', unit]
+                cold, warm = (world.cxx(command, scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm == (0, b'', b''), (mode, target, unit, cold, warm)
+            delims = [*options, '-fsyntax-only', 'has-builtin-delims.cpp']
+            cold, warm = (world.cxx(delims, scope, env, timeout=40)
+                          for env in (world.cold, world.daemon))
+            assert cold == warm and warm[0] == (0 if mode == 'gcc' else 1), (mode, target, cold, warm)
+
+
 def general_mode_tests(world, gxx):
     pid = preprocess_and_syntax(world)
     mangling(world)
@@ -4505,6 +4617,7 @@ def general_mode_tests(world, gxx):
     flat_record_array_lifetime(world)
     historical_syntax_modes(world, gxx)
     skipped_quote_diagnostics(world)
+    has_builtin_expressions(world)
     compile_database(world)
     world.same_daemon('compatibility modes', pid)
 

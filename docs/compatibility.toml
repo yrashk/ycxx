@@ -1494,6 +1494,43 @@ clang = "Same as spec."
 evidence = ["tests/own/casts/reinterpret-pointer-integral-discarded.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 probes for discarded, retained and effectful operands"]
 
 [[divergence]]
+id = "constexpr-reinterpret-identity"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [expr.reinterpret.cast]/2,11, #199"
+prior = "A reinterpret_cast to the operand's own type was not supported."
+spec = "Reject a reached reinterpret_cast to the operand's own type in constant evaluation, including a glvalue cast."
+gcc = "Fold a cast to the operand's own type, cv-qualifiers included, into its operand, so constant evaluation accepts the tested integer, pointer and glvalue casts. A cast that adds cv-qualifiers still fails."
+clang = "Same as spec."
+evidence = ["tests/own/casts/reinterpret-identity-constexpr.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.5 constant-evaluation probes for identity, qualification-adding and glvalue casts"]
+
+[[divergence]]
+id = "constexpr-reinterpret-glvalue-address"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [expr.reinterpret.cast]/11, #199, #1702"
+prior = "A glvalue reinterpret_cast was not supported."
+spec = "Reject a reached glvalue reinterpret_cast in constant evaluation even when nothing is accessed through its result."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts a reference bound to the cast of a global and a local cast whose result only has its address taken, and rejects a read through the cast glvalue."
+clang_observed = "Clang 23.1.5 rejects every reached reinterpret_cast."
+evidence = ["tests/own/casts/reinterpret-glvalue-constexpr.reject.cpp"]
+
+[[divergence]]
+id = "reinterpret-object-function-pointer-qualifiers"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.reinterpret.cast]/8, [expr.const.cast]/7, #199, #1702"
+prior = "Conversions between object and function pointers were not supported."
+spec = "Reject converting a pointer to a cv-qualified object type or cv void to a function pointer, which casts away the pointee's qualifiers."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts reinterpret_cast<int (*)(int)>(const void*)."
+clang_observed = "Clang 23.1.5 rejects it as casting away qualifiers."
+evidence = ["tests/own/casts/reinterpret-function-pointer-qualifiers.reject.cpp"]
+
+[[divergence]]
 id = "elaborated-injected-base-access"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1865,3 +1902,17 @@ constexpr int f() {
 static_assert(f() == 42);
 '''
 evidence = ["tests/own/builtins/builtin-operator-new-constant.reject.cpp", "tests/own/builtins/builtin-operator-new.run.cpp", "tests/own/builtins/builtin-operator-new-selection.reject.cpp", "docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/321", "GCC 16.2.0 accepts the probe and upstream Clang 23.1.5 rejects it (strict C++26, arm64 Darwin); both agree with <memory>'s std::construct_at in place of the probe's"]
+
+[[divergence]]
+id = "has-builtin-macro-operand"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "docs/EXTENSIONS.md, Clang feature-checking macros, GCC __has_builtin, #1626"
+prior = "Evaluate __has_builtin only in #if/#elif constant-expression scanning without macro-expanding the operand."
+spec = "Expand the built-in __has_builtin(name) macro in phase 4 across ordinary preprocessing tokens, #if conditions, and #embed/__has_embed parameters by reading unexpanded parentheses and operand tokens."
+gcc = "Read macro-expanded tokens for the '(' delimiter, operand, and ')' delimiter before checking for a single identifier or keyword token, without #if-only defined operator recognition."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 macro-expands tokens following __has_builtin in both #if conditions and ordinary C++ expressions, so macro-supplied parentheses or aliases naming __builtin_memcmp yield 1 and a macro redefining __builtin_strlen to an unknown identifier yields 0."
+clang_observed = "Clang 23.1.5 reads unexpanded parentheses and operand tokens in both #if conditions and ordinary C++ expressions, so macro-supplied parentheses are rejected, a macro alias yields 0, and a macro-redefined __builtin_strlen still yields 1."
+probe = '#define ALIAS __builtin_memcmp\n#define __builtin_strlen shadowed_strlen\nconstexpr int a = __has_builtin(ALIAS);\nconstexpr int b = __has_builtin(__builtin_strlen);'
+evidence = ["tests/daemon/compatibility.py", "tests/unit/pp/pp_test.cpp", "tests/own/pp/has-builtin-expr.accept.cpp", "tests/own/pp/has-builtin-expr.pp.cpp", "tests/own/pp/has-builtin-malformed.reject.cpp"]

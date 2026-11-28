@@ -1188,3 +1188,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - While iterating on a change, use `tools/build --no-smoke`. The full smoke ctest took over 20
     minutes at a load average of about 20, and its daemon timeouts said nothing about the change.
   - Learned on #1680.
+- **Select a conversion function on the operand itself, never on its lvalue-to-rvalue copy.**
+  `static_cast_to` and the end of `convert` call `rvalue(e)` before the standard conversions.
+  For a class operand that copy is a non-const prvalue, so a `&&`-qualified or non-const
+  conversion function looked viable on a `const` or lvalue object, and two reject tests were
+  accepted. The first gate run of #340 caught it.
+  - Do: try `select_conversion` before any `rvalue(e)`. If nothing is viable on the real operand,
+    report the failure from there and do not fall through to a path that copies it.
+  - Learned on #340.

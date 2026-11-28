@@ -97,8 +97,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   mangled signature. GCC and Clang modes use one type for both. C function names retain their
   C linkage and unmangled symbols in every mode.
   Compiler modes also select the documented wide array bound conversions, constexpr byte
-  comparisons, empty union initializers, abstract result checks, and over-width bit-field layout
-  and diagnostics.
+  comparisons, empty union initializers, abstract result checks, over-width bit-field layout
+  and diagnostics, and `__has_builtin` macro-operand expansion.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -282,7 +282,14 @@ What is true of the code today. Work in progress and its owners are tracked in
   - conditional inclusion (`#if`/`#ifdef`/`#ifndef`/`#elif`/`#elifdef`/`#elifndef`/`#else`/
     `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
     in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
-    `__has_include_next`, `__has_embed`, and the `__has_*` probes answering 0;
+    `__has_include_next`, `__has_embed`, and the remaining `__has_*` probes answering 0;
+  - `__has_builtin(name)` is a built-in dynamic macro (`ExpansionKind::builtin`) that expands to
+    `1` or `0` in ordinary preprocessing tokens, `#if` conditions, and `#embed`/`__has_embed`
+    parameter lists using the target's supported builtin table (`lex::has_builtin`), while
+    participating in `#ifdef`/`defined`, `#undef`, `#define`, and region traces. `spec` and
+    `clang` modes read unexpanded delimiter and operand tokens; `gcc` mode reads macro-expanded
+    tokens.
+    [#1626](https://github.com/yrashk/ycxx/issues/1626)
   - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
     (other pragmas pass through to `-E`), and the null directive. Compiler diagnostics report the
     text of `#error` and `#warning` in the main file and included headers (#172);
@@ -1657,7 +1664,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   is kept as an atom and read again after deduction, once the template's constraints are
   satisfied. A substitution failure there fails deduction, and an explicit specialization leaves
   copy-initialization ([temp.deduct.general], [over.match.funcs.general]). Conversion functions
-  (#339) and deduction guides (#316) do not take the specifier yet.
+  (#339) do not take the specifier yet; deduction-guides do (#316).
 - Constructor templates take part in overload resolution only when their associated
   constraints are satisfied ([temp.deduct.general]/5, #1398). An atom spelled in a member of a
   class template specialization, such as a member template's constraint, reads the enclosing
@@ -2139,10 +2146,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   still respects the qualifiers of the underlying object. A by-value class parameter object uses
   the definition's declared qualifiers ([dcl.fct]/5) and permits writes to mutable members.
   Pointer-to-member casts and class or array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
-- Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
-  and pointer-width integral types. A too-narrow integer destination is ill-formed, and
-  an evaluated cast is disallowed in a core constant expression. Smaller integer sources
-  and other reinterpret conversions remain in [#199](https://github.com/yrashk/ycxx/issues/199).
+- Named `reinterpret_cast` converts object pointers (including cv `void*`) to pointer-width
+  integral types and back, object pointers to other object pointers, function pointers to
+  other function pointers and to and from object pointers, and integral, enumeration and
+  pointer values to their own type. It converts an object glvalue to a reference to another
+  object type, naming the same object with the requested value category. These work in
+  templates, with dependent or non-dependent operands. Each conversion keeps the address, and
+  casting away constness ([expr.const.cast]/7), a prvalue or bit-field to a reference, or a
+  too-narrow integer destination is ill-formed. A reached cast is disallowed in a core constant
+  expression, and `-fcompat=gcc` folds a cast to the operand's own type, as GCC does.
+  Pointer-to-member, `std::nullptr_t` and enumeration or non-pointer-width integer to pointer
+  conversions, and function references, remain in [#199](https://github.com/yrashk/ycxx/issues/199).
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
@@ -2242,7 +2256,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Out-of-class definitions check the effective specification of the corresponding declaration.
   Omission agrees with `noexcept(false)` on ordinary potentially throwing constructors, and
   bare `noexcept` agrees with `noexcept(true)` (#219).
-- `N::T(…)` and `N::T{…}` are functional casts.
+- `N::T(…)` and `N::T{…}` are functional casts. A statement `N::T(x);` declares x, as `int(x);`
+  does. In a template, a qualified alias-template-id such as `s::value_t<I>` names a type without
+  `typename` even when the alias denotes a dependent member type; only a qualified name whose
+  scope is a dependent class needs `typename` in a block ([stmt.ambig], [temp.res.general]/5,
+  #711). A class member written `N::S(x);` is still rejected (#1722).
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
@@ -2623,6 +2641,39 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   class templates, explicit and partial specializations, alias templates, packs, concepts,
   qualified names whose nested-name-specifier is a member template, and members found through a
   dependent base.
+
+## Class template argument deduction (#316)
+
+- **Placeholders for a deduced class type** ([dcl.type.class.deduct]): a class template's name
+  without arguments, unqualified or `N::C`, in a variable declaration at block or namespace scope
+  (`C x(args)`, `C x{…}`, `C x = e`, `C x = {…}`), a functional cast (`C(args)`, `C{…}`) and a
+  new-expression (`new C(args)`). The type is a `TAuto` with `deduced_class` set (`Types::deduced_class`),
+  allowed only where the parser's caller sets `Parser::deduced_class_ok`. It is the whole declared
+  type (not `C*` or `C&`), needs an initializer, deduces the same type for every declarator, and
+  is no function's return type.
+- **Deduction** (`Sema::deduce_class_type`, [over.match.class.deduct]): the guides are the
+  constructors of the primary template's pattern (constructor templates with their parameters
+  renumbered after the class's, `constructor_template_guide`), `C()` when C declares no
+  constructor or is not defined, the copy deduction candidate `C(C<T…>)`, and the user's
+  deduction-guides declared before the point. Overload resolution is `resolve` with the
+  tie-breaks of [over.match.best.general]/2.10–2.12 (`Candidate::guide`). Copy-initialization skips
+  explicit guides; copy-list-initialization that selects one is an error. While an argument is
+  type-dependent the type is dependent.
+- **Deduction-guides** ([temp.deduct.guide]) at namespace scope: the splitter marks the item
+  (`Item::deduction_guide`, the template-name) and gives it no name; `ItemAnalysis::deduction_guide`
+  reads `explicit`/`explicit(cond)`, the parameters, the result (a specialization of the
+  template, checked) and a requires-clause, into `Program::deduction_guides_`.
+  `Program::deduction_guides` analyses the guide items before the point on demand.
+- The splitter reads `S s(&i)` as declaring `s`, not `i`: a `(` after a declarator-id that follows
+  a type is never a grouping parenthesis. A template-head's requires-clause ends after a possibly
+  qualified concept-id, so `requires C<T> T f(T)` and `requires C<T> W(T) -> W<T>` keep their names.
+- Tests: `tests/own/deduction-guides` (12), `tests/unit/items` (`deduction_guides`).
+- Not yet: member deduction-guides are accepted and ignored, and deduction through a member
+  class template's qualified name (#1706); aggregate deduction candidates and alias
+  template deduction (C++20, #1707); the initializer-list phase of [over.match.list] for
+  guides (#1708); deduced class types for static data members, non-type template parameters
+  and in `for`/condition declarations (#1709); a value default of a constructor
+  template's parameter is dropped from its guide.
 
 ## Templates, ζ step 3: variable templates and specializations (#88, 2026-11-18)
 
@@ -4616,7 +4667,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), static data member templates (done since: see "Static data member templates";
+  templates (done since: see "Conversion function templates"), static data member templates
+  (done since: see "Static data member templates";
   trailing requires-clauses on member templates came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
@@ -4721,6 +4773,34 @@ static argument tracked in #1301 and #209.
 - Not yet: partial and explicit specializations (#1594); defining one of a class template outside
   the class (#256). Found on the way: #1595 (an undefined specialization's constant use reports an
   internal error).
+
+## Conversion function templates (#340, 2026-11-28)
+
+- **Declared** in a class or class template as `template<…> operator T() …` ([class.conv.fct],
+  [temp.mem]/5-7): a member function template with the conversion function's name, constrained
+  (type-constraints, `requires` before or after the declarator) and ref-qualified ones included.
+- **Selected** in copy-initialization from a class object (`Sema::select_conversion`): for a
+  class target the candidates yield it or a class derived from it ([over.match.copy]/1.2),
+  otherwise a type a standard conversion sequence converts to the target ([over.match.conv]).
+  Explicit conversion functions are no candidates. A template's arguments are deduced from the
+  target (`Templates::deduce_conversion`, [temp.deduct.conv]), its constraints checked after
+  deduction. Candidates rank by the implicit object parameter, then the second standard
+  conversion (/2.2), a non-template over a template, the more specialized template by return
+  type (`Templates::conversion_ordering`, [temp.deduct.partial]/3.2) and the more constrained.
+  A tie is "conversion from 'A' to 'B' is ambiguous". This also makes ordinary conversion
+  functions work in copy-initialization (#339).
+- **Arguments:** `ics()` ranks an argument converted through one as a user-defined conversion
+  sequence for ordinary (non-constructor) candidates ([over.ics.user], [over.best.ics]/4).
+- **Mangled** as Clang and GCC: `cv <type>` in terms of the template's own parameters, no
+  return type (`_ZNKR1RIiEcvS_IT_EIlEEv`, `_ZNK1ScvT_IlEEv`).
+- Tests: `tests/own/conversion-templates/` (10, a PEER test links Clang's definitions).
+  `<iostream>` hello on macOS arm64: errors 778 → 758 at `cf1d4770`; the `algo_results.hpp` and
+  `iterator_adaptors.hpp` conversion templates no longer fail.
+- Not yet: explicit conversion function templates (#1723); conversion functions of base
+  classes, reference binding to a conversion function's result, class template targets with
+  user-declared constructors, constructor arguments through user-defined conversions, and one
+  candidate set for converting constructors and conversion functions (#1724); contextual and
+  operator contexts (#339); the type traits (#1717).
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
@@ -5458,7 +5538,12 @@ Each is removed once ycxx compiles itself.
   `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
   - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
     its importers cannot read ("failed to read compiled module cluster: Bad file data").
-  - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
+  - Fix: belongs in GCC (unreduced, #1705). Use `std::vector<bool>` when ycxx compiles itself.
+- **No `std::vector<bool>` in `sema::DeductionGuide::defaulted`** (`std::vector<std::uint8_t>`, #316).
+  - Cause: a precaution against the same GCC 16.2 module bug (#1705); `ycxx.sema` exports the
+    struct. `parse::Program::Index` keeps `std::vector<bool>` members without it, so the trigger
+    is narrower.
+  - Fix: belongs in GCC. Use `std::vector<bool>` once #1705 shows it is safe, or when ycxx compiles itself.
 - **The interpreter's byte comparison is defined in its implementation unit** (`src/interp/ops.cpp`).
   - Cause: with stock libstdc++, GCC 16.2 cannot read the `ycxx.interp:machine` partition when
     it contains the body of `Machine::compare_bytes`.

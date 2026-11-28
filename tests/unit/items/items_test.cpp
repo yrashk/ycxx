@@ -227,6 +227,36 @@ void initializers_and_templates() {
   check(s.top(10).kind == ItemKind::consteval_block && s.top(10).has_body(), "consteval block");
 }
 
+// Deduction-guides ([temp.deduct.guide]) declare no name; a `(` after a declarator-id that follows
+// a type is an initializer, never a grouping parenthesis (#316).
+void deduction_guides() {
+  auto s = split("template<class T> W(T&) -> W<T>;\n"
+                 "explicit W(int) -> W<long>;\n"
+                 "template<class T> requires C<T> explicit(true) W(T, T) -> W<T>;\n"
+                 "S s(&i), t(*p);\nW w(&i);\nS (*fp)(int);\nS (&r) = x;\nauto f() -> W<int>;\n"
+                 "struct K { template<class U> struct M { M(U); }; template<class U> M(U) -> M<U>; K(int); };\n"
+                 "template<class I, class E> requires C<I> && n::D<E, I> W(I, E) -> W<I>;\n"
+                 "template<class T> requires C<T> T f(T);\n"
+                 "struct R { constexpr R() -> void {} R(int) -> void; };\n");
+  check(s.size() == 12, "twelve items");
+  check(std::ranges::none_of(s.top(11).members, [&](std::uint32_t m) { return !s[m].deduction_guide.empty(); }),
+        "a constructor with a trailing return type, wrongly written, is no guide");
+  check(s.top(9).deduction_guide == "W" && s.top(9).names.empty(), "a guide after a requires-clause of concept-ids");
+  check(names(s.top(10)) == v({"f"}), "a function after a requires-clause, with a named return type");
+  check(s.top(0).deduction_guide == "W" && s.top(0).names.empty() && s.top(0).template_depth == 1,
+        "a deduction-guide template declares no name");
+  check(s.top(1).deduction_guide == "W" && s.top(1).names.empty(), "an explicit non-template deduction-guide");
+  check(s.top(2).deduction_guide == "W" && s.top(2).names.empty(), "a constrained, conditionally explicit guide");
+  check(s.top(3).deduction_guide.empty() && names(s.top(3)) == v({"s", "t"}), "a parenthesized initializer after a name");
+  check(names(s.top(4)) == v({"w"}), "a parenthesized address initializer");
+  check(names(s.top(5)) == v({"fp"}) && names(s.top(6)) == v({"r"}), "grouping parentheses after a class name");
+  check(s.top(7).deduction_guide.empty() && names(s.top(7)) == v({"f"}), "a trailing return type is no guide");
+  const Item& k = s.top(8);
+  check(k.members.size() == 3 && s[k.members[1]].deduction_guide == "M" && s[k.members[1]].names.empty() &&
+            s[k.members[2]].deduction_guide.empty() && names(s[k.members[2]]) == v({"K"}),
+        "a member deduction-guide, and a constructor");
+}
+
 void using_and_typedef() {
   auto s = split("using I = int; using N::f, N::g; using namespace N; using enum E; typedef int T, *P;");
   check(names(s.top(0)) == v({"I"}) && (s.top(0).names[0].flags & nf::type), "alias");
@@ -420,6 +450,7 @@ int main() {
   braced_specialization_heads();
   functions_and_bodies();
   initializers_and_templates();
+  deduction_guides();
   using_and_typedef();
   recovery();
   ids();

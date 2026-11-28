@@ -143,6 +143,16 @@ struct OuterBlock {
   bool templated = false;  // in a template's definition: the class is a templated entity
   std::shared_ptr<const OuterBlock> outer;
 };
+// A deduction-guide ([temp.deduct.guide]) as class template argument deduction reads it: a
+// function declaration, template or not, returning a specialization of its class template, and
+// which of its parameters have default arguments. Its lists hold no nodes.
+struct DeductionGuide {
+  ast::DeclSema decl;
+  // BOOTSTRAP: std::vector<bool>: GCC 16.2 may fail to read an exported struct holding one from a
+  // module (#1705); a precaution here, not a confirmed failure. Intended: `std::vector<bool> defaulted;`
+  std::vector<std::uint8_t> defaulted;
+};
+
 class Questions {
 public:
   virtual bool exceptions_enabled() const { return true; }
@@ -323,6 +333,10 @@ public:
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
   // The declaration of template `t` here: its head and, for an alias template, its type.
   virtual std::optional<ast::DeclSema> template_decl(EntityId /*t*/) { return std::nullopt; }
+  // The deduction-guides for class template `t` declared before the current point
+  // ([temp.deduct.guide]): function declarations, templates or not, whose return type names a
+  // specialization of `t`.
+  virtual std::vector<DeductionGuide> deduction_guides(EntityId /*t*/) { return {}; }
   virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
@@ -1109,6 +1123,13 @@ public:
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
   // arguments of ([temp.names]/3); none if it finds anything else.
   std::optional<ast::DeclSema> class_template(NameId name) { return named_template(name, ast::DeclKind::class_); }
+  // The class template `name` names where its name alone can be a placeholder for a deduced class
+  // type ([dcl.type.class.deduct]); none for anything else, a template template parameter included.
+  EntityId deducible_template(NameId name) {
+    if (template_param(name)) return EntityId::none;
+    auto c = class_template(name);
+    return c ? c->entity : EntityId::none;
+  }
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
@@ -8312,6 +8333,7 @@ public:
   // ------------------------------------------------------------ overload resolution ([over.match])
 
   enum class DefaultArgumentOrigin : u8 { interned, current_item };
+  enum class GuideKind : u8 { none, user, constructor, constructor_template, copy };
 
   // A candidate function: its entity (none for an implicit trivial special member), its type,
   // whether it takes no implicit object (a non-member or static function), and whether it is
@@ -8331,6 +8353,9 @@ public:
     bool is_consteval = false;  // an immediate function ([dcl.constexpr])
     // A non-template function's trailing requires-clause, for [over.match.best.general]/2.6.
     ConstId constraints = ConstId::none;
+    // What a candidate of class template argument deduction is generated from
+    // ([over.match.class.deduct]), for [over.match.best.general]/2.10-2.12.
+    GuideKind guide = GuideKind::none;
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -8502,6 +8527,8 @@ public:
       }
       if (constructor_conversion && !types().is_class(a.type()))
         return constructor_ics(std::span(&a, 1), to, Construction::copy).value_or(Ics{});
+      // A user-defined conversion through a conversion function ([over.best.ics]/2, /4).
+      if (constructor_conversion && select_conversion(a, to, a.begin)) return {true, Ics::user_defined, 0};
       return {};
     }
     // A glvalue of type std::nullptr_t is one after the lvalue-to-rvalue conversion ([conv.ptr]/1).
@@ -8521,6 +8548,8 @@ public:
       return {true, Ics::user_defined, exact ? 0 : 1};
     }
     QualType from = value_type(a);
+    if (constructor_conversion && types().is_class(from) && select_conversion(a, to, a.begin))
+      return {true, Ics::user_defined, 0};  // through a conversion function ([over.best.ics]/2, /4)
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
     if (types().is_enum(to)) return {};
@@ -8762,11 +8791,19 @@ public:
         // the more constrained ([temp.constr.order]).
         if (a12 && equivalent_for_constraints(*f1.pattern, *f2.pattern)) {
           ConstId c1 = f1.pattern->constraints, c2 = f2.pattern->constraints;
-          return t.subsumes(c1, c2) && !t.subsumes(c2, c1);
+          const bool more = t.subsumes(c1, c2) && !t.subsumes(c2, c1);
+          if (more || f1.guide == GuideKind::none || (t.subsumes(c2, c1) && !t.subsumes(c1, c2))) return more;
         }
+        if (f1.guide == GuideKind::none) return false;
+      } else if (f1.pattern || f1.guide == GuideKind::none) {
         return false;
       }
-      return false;
+      // [over.match.best.general]/2.10-2.12: of the candidates of class template argument
+      // deduction, one generated from a deduction-guide, then the copy deduction candidate, then one
+      // generated from a non-template constructor rather than a constructor template.
+      if ((f1.guide == GuideKind::user) != (f2.guide == GuideKind::user)) return f1.guide == GuideKind::user;
+      if ((f1.guide == GuideKind::copy) != (f2.guide == GuideKind::copy)) return f1.guide == GuideKind::copy;
+      return f1.guide == GuideKind::constructor && f2.guide == GuideKind::constructor_template;
     };
     std::optional<std::size_t> best;
     for (std::size_t i = 0; i < viable.size(); ++i) {
@@ -8797,6 +8834,199 @@ public:
     }
     QualType t = types().referee(r);
     return {t, types().rec(r).rvalue_ref && !types().is_function(t) ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
+  }
+
+  // ------------------------------------------------------------ class template argument deduction
+
+  // The guide constructor template `ctor` of a class template with head `outer` implies
+  // ([over.match.class.deduct]/1.1): the class template's parameters, then the constructor's own,
+  // renumbered to follow them at the class's depth, returning `self`, the current instantiation.
+  // None for a form not supported yet: a template template parameter of the constructor.
+  std::optional<ast::DeclSema> constructor_template_guide(const ast::DeclSema& ctor,
+                                                          std::span<const ast::TemplateParamSema> outer, QualType self) {
+    const std::vector<ast::TemplateParamSema> own = ins().seqs.elements(ctor.template_params);
+    if (own.empty() || outer.empty()) return std::nullopt;
+    const u16 depth = outer[0].depth, inner = own[0].depth;
+    if (inner <= depth) return std::nullopt;
+    Templates t = templates();
+    Bindings b;
+    b.levels.resize(inner + 1);
+    for (const TemplateArg& a : t.own_args(outer)) b.levels[depth].push_back(a);
+    std::vector<ast::TemplateParamSema> ps(outer.begin(), outer.end());
+    for (const ast::TemplateParamSema& p : own) {
+      ast::TemplateParamSema q = p;
+      q.depth = depth;
+      q.index = u16(ps.size());
+      if (p.kind == TemplateArgKind::template_) return std::nullopt;
+      if (p.kind == TemplateArgKind::type) {
+        q.type = types().template_param(depth, q.index, p.pack != 0);
+        if (p.has_default) {
+          auto d = t.substitute(p.default_.type, b);
+          if (d) q.default_.type = *d;
+          else q.has_default = 0;
+        }
+      } else {
+        auto pt = t.substitute(p.type, b);
+        if (!pt) return std::nullopt;
+        q.type = *pt;
+        q.has_default = 0;  // BOOTSTRAP: a value default of a constructor template is not substituted yet
+      }
+      b.levels[inner].push_back(t.own_args(std::span(&q, 1)).front());
+      ps.push_back(q);
+    }
+    auto fn = t.substitute(ctor.type, b);
+    if (!fn) return std::nullopt;
+    const TypeRec fr = types().rec(*fn);
+    ast::DeclSema g = ctor;
+    g.entity = EntityId::none;
+    g.type = types().function(self, fr.params, fr.variadic, LangLinkage::cxx);
+    g.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(ps));
+    g.has_trailing_return = false;
+    g.constraints = ConstId::none;
+    if (ctor.constraints != ConstId::none) {
+      auto c = t.substitute_constraint(ctor.constraints, b);
+      if (!c) return std::nullopt;
+      g.constraints = *c;
+    }
+    g.explicit_condition = ConstId::none;
+    if (ctor.explicit_condition != ConstId::none) {
+      auto c = t.substitute_constraint(ctor.explicit_condition, b);
+      if (!c) return std::nullopt;
+      g.explicit_condition = *c;
+    }
+    return g;
+  }
+
+  // The type class template argument deduction gives class template `templ` for initializing an
+  // object from `args`, or the elements of `list`, by `form` ([over.match.class.deduct]): the
+  // return type of the guide that overload resolution selects among the deduction-guides declared
+  // before here, those its constructors imply, and the copy deduction candidate.
+  // `Builtin::dependent` while an argument is type-dependent; none after a diagnosed failure at `at`.
+  std::optional<QualType> deduce_class_type(EntityId templ, std::vector<Ex> args, const Braced* list,
+                                            Construction form, u32 at) {
+    const NameId name = w_->entities.rec(templ).name;
+    if (list) {
+      for (const Braced::Clause& c : list->clauses) {
+        if (c.list || c.designated) {
+          diag(c.begin, Diag::not_supported, lex::Tk::l_brace);  // a nested list or designator
+          return std::nullopt;
+        }
+        args.push_back(c.expr);
+      }
+    }
+    if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return std::nullopt;
+    if (any_dependent(args)) return builtin(Builtin::dependent);
+    auto head = q_->template_decl(templ);
+    const std::vector<ast::TemplateParamSema> params =
+        head ? ins().seqs.elements(head->template_params) : std::vector<ast::TemplateParamSema>{};
+    if (params.empty()) {
+      diag(at, Diag::class_deduction_failed, name);
+      return std::nullopt;
+    }
+    Templates t = templates();
+    const QualType self = types().class_type(class_specialization(templ, t.own_args(params)));
+    // The guides, each with its kind, its parameters' default arguments, and the class template's
+    // own constraints it must also satisfy ([over.match.class.deduct]/1.1).
+    struct Guide {
+      ast::DeclSema decl;
+      GuideKind kind;
+      std::vector<NodeId> defaults;
+      ConstId class_constraints = ConstId::none;
+    };
+    std::deque<Guide> guides;
+    auto implicit = [&](QualType fn, std::vector<NodeId> defaults, bool is_explicit, ConstId constraints, GuideKind kind) {
+      ast::DeclSema g = *head;
+      g.entity = EntityId::none;
+      g.kind = ast::DeclKind::function;
+      g.type = fn;
+      g.params = {};
+      g.has_trailing_return = false;
+      g.is_explicit = is_explicit;
+      g.explicit_condition = ConstId::none;
+      g.constraints = constraints;
+      guides.push_back({g, kind, std::move(defaults), head->constraints});
+    };
+    if (const ClassRec* cr = class_rec(types().class_of(self)); cr && cr->defined) {
+      for (const MemberDeclRec& m : cr->members) {
+        if (!m.is_ctor) continue;
+        if (m.is_template) {
+          auto td = q_->template_decl(m.entity);
+          auto g = td ? constructor_template_guide(*td, params, self) : std::nullopt;
+          if (!g) continue;
+          g->is_explicit = g->is_explicit || m.is_explicit;
+          guides.push_back({*g, GuideKind::constructor_template, m.defaults, head->constraints});
+        } else {
+          const TypeRec fr = types().rec(m.type);
+          implicit(types().function(self, fr.params, fr.variadic, LangLinkage::cxx), m.defaults, m.is_explicit,
+                   m.constraints, GuideKind::constructor);
+        }
+      }
+      if (!cr->user_ctors) implicit(types().function(self, {}, false, LangLinkage::cxx), {}, false, ConstId::none,
+                                    GuideKind::constructor);
+    } else {
+      implicit(types().function(self, {}, false, LangLinkage::cxx), {}, false, ConstId::none, GuideKind::constructor);
+    }
+    // The copy deduction candidate, `C(C<T...>) -> C<T...>` ([over.match.class.deduct]/1.3).
+    implicit(types().function(self, std::span(&self, 1), false, LangLinkage::cxx), {}, false, ConstId::none,
+             GuideKind::copy);
+    for (const DeductionGuide& g : q_->deduction_guides(templ)) {
+      std::vector<NodeId> defaults;  // only whether there is one matters here ([over.match.viable]/2.3)
+      for (std::uint8_t d : g.defaulted) defaults.push_back(d ? NodeId{} : NodeId::none);
+      guides.push_back({g.decl, GuideKind::user, std::move(defaults)});
+    }
+    std::vector<ArgShape> shapes;
+    for (const Ex& a : args) shapes.push_back(argument_shape(a));
+    auto satisfied = [&](ConstId c, std::span<const TemplateArg> targs, u16 depth) {
+      if (c == ConstId::none) return true;
+      auto nf = t.substitute_constraint(c, Bindings::of(depth, targs));
+      auto sat = nf ? q_->satisfied(*nf) : std::optional<bool>(false);
+      return !sat || *sat;
+    };
+    std::vector<Candidate> cands;
+    for (const Guide& g : guides) {
+      const std::vector<ast::TemplateParamSema> gps = ins().seqs.elements(g.decl.template_params);
+      Candidate k{EntityId::none, g.decl.type, true, false, nullptr, g.defaults, g.decl.is_explicit};
+      if (!gps.empty()) {
+        auto targs = t.deduce_call(g.decl, shapes, {}, g.defaults);
+        if (!targs) continue;
+        // Unsatisfied associated constraints fail deduction ([temp.deduct.general]/5).
+        if (!satisfied(g.decl.constraints, *targs, gps[0].depth) ||
+            !satisfied(g.class_constraints, std::span(*targs).first(std::min(targs->size(), params.size())), gps[0].depth))
+          continue;
+        auto st = t.specialization_type(g.decl, *targs);
+        if (!st) continue;
+        k.type = *st;
+        k.pattern = &g.decl;
+        if (g.decl.explicit_condition != ConstId::none) {
+          auto is_explicit = explicit_specialization(g.decl, *targs);
+          if (!is_explicit) continue;
+          k.is_explicit = *is_explicit;
+        }
+      } else if (!trailing_constraints_satisfied(g.decl.constraints)) {
+        continue;
+      }
+      // Copy-initialization considers only converting guides ([over.match.copy]/1.1).
+      if (form == Construction::copy && k.is_explicit) continue;
+      k.guide = g.kind;
+      cands.push_back(std::move(k));
+    }
+    auto chosen = resolve(cands, args, at, name, std::nullopt, std::nullopt, {}, false, /*defer_no_viable=*/true);
+    if (!chosen) {
+      if (chosen.error() == OverloadFailure::no_viable) diag(at, Diag::class_deduction_failed, name);
+      return std::nullopt;
+    }
+    const Candidate& k = cands[*chosen];
+    // [over.match.list]: copy-list-initialization that selects an explicit guide is ill-formed.
+    if (form == Construction::copy_list && k.is_explicit) {
+      diag(at, Diag::class_deduction_explicit, name);
+      return std::nullopt;
+    }
+    const QualType result = types().rec(k.type).inner;
+    if (!types().is_class(result) || w_->entities.rec(types().class_of(result)).templ != templ) {
+      diag(at, Diag::deduction_guide_result, name);
+      return std::nullopt;
+    }
+    return Types::unqualified(result);
   }
 
   // ------------------------------------------------------------ constructors and references
@@ -9415,7 +9645,8 @@ public:
     // Through a base subobject or an identity-preserving glvalue cast ([class.temporary]/6).
     if (auto c = as<ast::ImplicitConversion>(e); c &&
         (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
-         c->conversion == ast::ConversionKind::qualification)) {
+         c->conversion == ast::ConversionKind::qualification ||
+         (c->conversion == ast::ConversionKind::reinterpret && c->info.category != ValueCategory::prvalue))) {
       Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
       return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
@@ -11271,6 +11502,14 @@ public:
           !require_supported_virtual_layout(target, at_)) return {NodeId::none, e.begin, e.end};
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
       const ClassRec* cr = class_rec(types().class_of(target));
+      // [over.match.copy]: from another class, a conversion function of the source can initialize
+      // it. Converting constructors compete with them only where none is viable here (#1724).
+      if (types().is_class(e.type()) && !initializes(target, e) && !base_depth(e.type(), target))
+        if (auto choice = select_conversion(e, target, at_)) {
+          const auto constructor = cr && cr->user_ctors ? constructor_ics(std::span(&e, 1), target, Construction::copy)
+                                                        : std::optional(Ics{});
+          if (constructor && !constructor->viable) return call_conversion(e, *choice, to, at_);
+        }
       // A copy through a constructor that is not trivial, or one converting another type
       // ([class.conv.ctor]). An implicit copy constructor does not take a volatile object.
       if (cr && (cr->user_ctors || (initializes(target, e) && Types::is_volatile(types().canonical(e.type()))) || cr->copy_ctor != EntityId::none || cr->copy_deleted ||
@@ -11290,6 +11529,9 @@ public:
       }
       return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, target);
     }
+    // [over.match.conv]: a class object converts to a non-class type through a conversion function.
+    if (types().is_class(e.type()))
+      if (auto choice = select_conversion(e, target, at_)) return call_conversion(e, *choice, to, at_);
     if (types().is_pointer(target) && is_null_pointer_constant(e))
       return convert_node(e, ast::ConversionKind::null_pointer, target);
     const bool member_target = types().is_member_pointer(target);
@@ -11402,6 +11644,135 @@ public:
     return e;
   }
 
+  // The conversion function that copy-initialization of an object of non-reference type
+  // `target` from class object `e` calls: [over.match.copy]/1.2 for a class `target`, whose
+  // candidates yield it or a class derived from it, else [over.match.conv], whose candidates
+  // yield a type a standard conversion sequence converts to it. Explicit conversion functions
+  // are no candidates. A conversion function template's specialization is the one deduction
+  // gives ([temp.deduct.conv]). None when no candidate is viable, or for a source class with
+  // bases, whose inherited conversion functions are not considered yet (#1724).
+  struct ConversionChoice {
+    const MemberDeclRec* member = nullptr;
+    std::vector<TemplateArg> args;  // a conversion function template's deduced arguments
+    bool ambiguous = false;
+  };
+  std::optional<ConversionChoice> select_conversion(const Ex& e, QualType target, u32 at_) {
+    if (!e.ok() || dependent(e) || types().is_dependent(target) || types().is_reference(target)) return std::nullopt;
+    const QualType source = e.type();
+    if (!types().is_class(source) || types().is_dependent(source) || !is_complete(source)) return std::nullopt;
+    const EntityId cls = types().class_of(source);
+    const ClassRec* record = class_rec(cls);
+    if (!record || !record->bases.empty()) return std::nullopt;
+    const auto members = member_functions(cls, ins().names.intern(lex::conversion_function_name));
+    if (members.empty()) return std::nullopt;
+    const bool class_target = types().is_class(target);
+    const Cv cv = object_cv(source);
+    const bool rvalue = e.cat() != ValueCategory::lvalue;
+    struct Viable {
+      const MemberDeclRec* member;
+      std::vector<TemplateArg> args;
+      const ast::DeclSema* pattern;
+      QualType type;
+      Ics object;
+      Ics second;
+    };
+    std::deque<ast::DeclSema> patterns;
+    std::vector<Viable> viable;
+    Templates t = templates_for_use(at_);
+    for (const MemberDeclRec* m : members) {
+      if (m->is_explicit) continue;
+      QualType type = m->type;
+      std::vector<TemplateArg> args;
+      const ast::DeclSema* pattern = nullptr;
+      if (m->is_template) {
+        auto tmpl = q_->template_decl(m->entity);
+        if (!tmpl) continue;
+        const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+        auto targs = t.deduce_conversion(td, target);
+        if (!targs) continue;
+        if (td.constraints != ConstId::none) {  // [temp.deduct.general]/5
+          std::vector<ast::TemplateParamSema> ps = ins().seqs.elements(td.template_params);
+          auto nf = t.substitute_constraint(td.constraints, Bindings::of(ps.empty() ? 0 : ps[0].depth, *targs));
+          auto sat = nf ? q_->satisfied(*nf) : std::optional<bool>(false);
+          if (sat && !*sat) continue;
+        }
+        auto st = t.specialization_type(td, *targs);
+        if (!st) continue;
+        type = *st;
+        args = std::move(*targs);
+        pattern = &td;
+      } else if (m->ineligible || !trailing_constraints_satisfied(m->constraints)) {
+        continue;
+      }
+      const TypeRec fn = types().rec(type);
+      const Ics object = implicit_object_rank(fn, cv, rvalue);
+      if (!object.viable) continue;
+      const ExprInfo result = result_info(fn.inner);
+      Ics second;
+      if (class_target) {
+        if (same_unqualified(result.type, target)) {
+          second = {true, 0, 0};
+        } else if (int d = base_depth(result.type, target)) {
+          second = {true, 2, 0};
+          second.base_depth = d;
+        }
+      } else if (!types().is_class(result.type)) {  // a standard conversion sequence only
+        second = ics({e.id, e.begin, e.end, result}, target);
+      }
+      if (!second.viable) continue;
+      viable.push_back({m, std::move(args), pattern, type, object, second});
+    }
+    if (viable.empty()) return std::nullopt;
+    // [over.match.best.general]/2: the implicit object parameter's conversion, then the second
+    // standard conversion sequence (/2.2), then a non-template over a template specialization,
+    // then the more specialized template (/2.5, [temp.deduct.partial]/3.2), then the more
+    // constrained (/2.6, [temp.func.order]/6).
+    auto better = [&](const Viable& a, const Viable& b) {
+      if (b.object < a.object) return false;
+      if (a.object < b.object) return true;
+      if (b.second < a.second) return false;
+      if (a.second < b.second) return true;
+      if (!a.pattern != !b.pattern) return !a.pattern;
+      const QualType ra = types().canonical(types().rec(a.type).inner);
+      const QualType rb = types().canonical(types().rec(b.type).inner);
+      if (!a.pattern) {
+        const ConstId ca = a.member->constraints, cb = b.member->constraints;
+        if ((ca == ConstId::none && cb == ConstId::none) || !same_parameter_types(a.type, b.type) || ra != rb) return false;
+        return t.subsumes(ca, cb) && !t.subsumes(cb, ca);
+      }
+      auto [a12, a21] = t.conversion_ordering(*a.pattern, *b.pattern);
+      if (a12 != a21) return a12;
+      if (!a12 || !equivalent_for_constraints(*a.pattern, *b.pattern) ||
+          types().canonical(types().rec(a.pattern->type).inner) != types().canonical(types().rec(b.pattern->type).inner))
+        return false;
+      const ConstId ca = a.pattern->constraints, cb = b.pattern->constraints;
+      return t.subsumes(ca, cb) && !t.subsumes(cb, ca);
+    };
+    std::optional<std::size_t> best;
+    for (std::size_t i = 0; i < viable.size(); ++i) {
+      bool wins = true;
+      for (std::size_t j = 0; j < viable.size() && wins; ++j)
+        if (i != j) wins = better(viable[i], viable[j]);
+      if (wins) best = i;
+    }
+    if (!best) return ConversionChoice{.member = nullptr, .args = {}, .ambiguous = true};
+    return ConversionChoice{.member = viable[*best].member, .args = std::move(viable[*best].args), .ambiguous = false};
+  }
+  // The call of the conversion function `choice` selects on object `e`, converted to `to`.
+  Ex call_conversion(Ex e, const ConversionChoice& choice, QualType to, u32 at_) {
+    if (choice.ambiguous) {
+      diag(at_, Diag::ambiguous_conversion, e.type(), to);
+      return {NodeId::none, e.begin, e.end};
+    }
+    const EntityId cls = types().class_of(e.type());
+    Ex callee = bind_members(cls, {choice.member}, e, false, e.begin, e.end, at_);
+    // A template's specialization is named by the arguments deduction gave (#340).
+    if (choice.member->is_template) explicit_args_[std::to_underlying(callee.id)] = choice.args;
+    Ex call = member_call(callee, {}, e.end, at_);
+    if (!call.ok()) return call;
+    return convert(call, to, at_);
+  }
+
   // [over.match.conv]: the bounded exact-result case. Copy initialization excludes explicit conversions.
   std::optional<Ex> exact_conversion_call(Ex object, QualType target, u32 at_, bool allow_explicit) {
     const EntityId cls = types().class_of(object.type());
@@ -11489,6 +11860,13 @@ public:
     if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     if (named_static_cast && types().is_class(e.type()))
       if (auto cast = exact_conversion_call(e, target, at_, /*allow_explicit=*/true)) return *cast;
+    // The conversion function's implicit object is the operand itself, not a copy of it: one
+    // that cannot bind it is no candidate on a copy either.
+    if (types().is_class(e.type())) {
+      if (auto choice = select_conversion(e, target, at_)) return call_conversion(e, *choice, to, at_);
+      const ClassRec* source = class_rec(types().class_of(e.type()));
+      if (source && !source->closure) return convert(e, to, at_);
+    }
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());
@@ -11739,34 +12117,111 @@ public:
     return convert_node(value, ast::ConversionKind::qualification, target);
   }
 
-  // [expr.reinterpret.cast]: the supported object-pointer/integer conversions.
+  // [expr.const.cast]/7: whether a conversion between pointer types removes cv-qualifiers at a
+  // level both decompose to, or adds them below a level that is not const. The deepest common
+  // decomposition decides, since each level's condition depends only on the levels above it.
+  bool casts_away_constness(QualType from, QualType to) {
+    QualType a = from, b = to;
+    bool const_so_far = true;
+    while (types().is_pointer(a) && types().is_pointer(b)) {
+      a = types().pointee(a);
+      b = types().pointee(b);
+      const Cv ca = object_cv(a), cb = object_cv(b);
+      if (!cv_within(ca, cb) || (ca != cb && !const_so_far)) return true;
+      const_so_far = const_so_far && (std::to_underlying(cb) & std::to_underlying(Cv::const_));
+    }
+    return false;
+  }
+
+  // [expr.reinterpret.cast]: the object and function pointer, pointer/integer, identity and
+  // glvalue conversions. Every one stays out of constant evaluation ([expr.const]).
   Ex reinterpret_cast_to(Ex e, QualType to, u32 at_) {
     if (!e.ok()) return e;
-    QualType target = Types::unqualified(to);
+    const Ex fail{NodeId::none, e.begin, e.end};
+    const TypeRec destination = types().rec(to);
+    const bool reference = destination.kind == TypeKind::reference;
+    const QualType target = reference ? destination.inner : Types::unqualified(to);
+    const ValueCategory category = !reference ? ValueCategory::prvalue :
+        destination.rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue;
     if (dependent(e) || types().is_dependent(to))
-      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(target));
-    Ex v = rvalue(e);
-    if (!v.ok()) return v;
-    QualType from = Types::unqualified(v.type());
-    auto object_pointer = [&](QualType t) {
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(target), category);
+    const auto unsupported = [&] {
+      diag(at_, Diag::not_supported, lex::Tk::kw_reinterpret_cast);
+      return fail;
+    };
+    const auto invalid = [&](QualType from) {
+      diag(at_, Diag::no_conversion, from, to);
+      return fail;
+    };
+    const auto object_pointer = [&](QualType t) {
       if (!types().is_pointer(t)) return false;
       QualType pointee = types().pointee(t);
       return types().is_object(pointee) || types().is_void(pointee);
     };
+    const auto function_pointer = [&](QualType t) {
+      return types().is_pointer(t) && types().is_function(types().pointee(t));
+    };
+    const auto pointer_conversion = [&](QualType from, QualType into) {
+      return (object_pointer(from) || function_pointer(from)) && (object_pointer(into) || function_pointer(into));
+    };
+    // GCC folds a cast to the operand's own type, including its cv-qualifiers, into the operand,
+    // which constant evaluation then accepts.
+    const bool gcc = compatibility() == ast::Compatibility::gcc;
+
+    // /11: a glvalue of type T1 names the same object as a T2 glvalue when a T1 pointer can be
+    // reinterpreted as a T2 pointer. The operand keeps its object; no temporary is created.
+    if (reference) {
+      if (!e.glvalue()) {
+        diag(at_, Diag::reinterpret_rvalue_reference, to);
+        return fail;
+      }
+      if (e.info.bit_width) {
+        diag(at_, Diag::reinterpret_bit_field);
+        return fail;
+      }
+      if (!types().is_object(target) || !types().is_object(e.type())) return unsupported();
+      const QualType from = types().pointer(e.type()), into = types().pointer(target);
+      if (casts_away_constness(from, into)) {
+        diag(at_, Diag::reinterpret_casts_away_qualifiers, from, into);
+        return fail;
+      }
+      if (gcc && types().canonical(e.type()) == types().canonical(target))
+        return convert_node(e, ast::ConversionKind::qualification, target, category);
+      return convert_node(e, ast::ConversionKind::reinterpret, target, category);
+    }
+
+    Ex v = rvalue(e);
+    if (!v.ok()) return v;
+    QualType from = Types::unqualified(v.type());
+    const bool identity = types().canonical(from) == types().canonical(target);
+    // /2: an integral, enumeration or pointer value converts to its own type.
+    if (identity && (types().is_integral(target) || types().is_enum(target) || types().is_pointer(target)))
+      return gcc ? v : convert_node(v, ast::ConversionKind::reinterpret, target);
     unsigned pointer_bits = w_->target.pointer_size * 8;
     if (object_pointer(from) && types().is_integral(target)) {
       unsigned bits = shape(w_->target, *types().builtin_of(target)).bits;
       if (bits == pointer_bits) return convert_node(v, ast::ConversionKind::pointer_to_integral, target);
-      if (bits < pointer_bits) {
-        diag(at_, Diag::no_conversion, from, to);
-        return {NodeId::none, e.begin, e.end};
-      }
+      if (bits < pointer_bits) return invalid(from);
     }
     if (types().is_integral(from) && object_pointer(target) &&
         shape(w_->target, *types().builtin_of(from)).bits == pointer_bits)
       return convert_node(v, ast::ConversionKind::integral_to_pointer, target);
-    diag(at_, Diag::not_supported, lex::Tk::kw_reinterpret_cast);
-    return {NodeId::none, e.begin, e.end};
+    // /6, /7, /8: between object pointers, between function pointers, and (conditionally
+    // supported, as on every target ycxx has) between the two.
+    if (pointer_conversion(from, target)) {
+      if (casts_away_constness(from, target)) {
+        diag(at_, Diag::reinterpret_casts_away_qualifiers, from, to);
+        return fail;
+      }
+      return convert_node(v, ast::ConversionKind::reinterpret, target);
+    }
+    // Valid forms not supported yet: member pointers (/10), std::nullptr_t to an integer (/4),
+    // and an enumeration or a narrower or wider integer to a pointer (/5).
+    if (types().is_member_pointer(from) || types().is_member_pointer(target) ||
+        (types().is(from, Builtin::nullptr_t) && types().is_integral(target)) ||
+        ((types().is_integral(from) || types().is_enum(from)) && types().is_pointer(target)))
+      return unsupported();
+    return invalid(from);
   }
 
   std::vector<ast::DeclSema> written_allocation_declarations(NameId name) {
@@ -12743,7 +13198,8 @@ public:
     if (auto m = as<ast::Member>(e); m && !m->arrow && !m->reference) return check(m->object);
     if (auto c = as<ast::ImplicitConversion>(e); c &&
         (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
-         c->conversion == ast::ConversionKind::qualification))
+         c->conversion == ast::ConversionKind::qualification ||
+         (c->conversion == ast::ConversionKind::reinterpret && c->info.category != ValueCategory::prvalue)))
       return check(c->operand);
     if (auto b = as<ast::OrderedBinary>(e)) {
       if (b->op == ast::OrderedOp::dot_star) return check(b->lhs);
