@@ -11298,7 +11298,7 @@ public:
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
       const ClassRec* cr = class_rec(types().class_of(target));
       // [over.match.copy]: from another class, a conversion function of the source can initialize
-      // it. Converting constructors compete with them only where none is viable here (#339).
+      // it. Converting constructors compete with them only where none is viable here (#1724).
       if (types().is_class(e.type()) && !initializes(target, e) && !base_depth(e.type(), target))
         if (auto choice = select_conversion(e, target, at_)) {
           const auto constructor = cr && cr->user_ctors ? constructor_ics(std::span(&e, 1), target, Construction::copy)
@@ -11445,11 +11445,10 @@ public:
   // yield a type a standard conversion sequence converts to it. Explicit conversion functions
   // are no candidates. A conversion function template's specialization is the one deduction
   // gives ([temp.deduct.conv]). None when no candidate is viable, or for a source class with
-  // bases, whose inherited conversion functions are not considered yet (#339).
+  // bases, whose inherited conversion functions are not considered yet (#1724).
   struct ConversionChoice {
     const MemberDeclRec* member = nullptr;
     std::vector<TemplateArg> args;  // a conversion function template's deduced arguments
-    Ics second;                     // the second standard conversion sequence ([over.best.ics]/2)
     bool ambiguous = false;
   };
   std::optional<ConversionChoice> select_conversion(const Ex& e, QualType target, u32 at_) {
@@ -11551,9 +11550,8 @@ public:
         if (i != j) wins = better(viable[i], viable[j]);
       if (wins) best = i;
     }
-    if (!best) return ConversionChoice{.member = nullptr, .args = {}, .second = {true, 0, 0}, .ambiguous = true};
-    return ConversionChoice{.member = viable[*best].member, .args = std::move(viable[*best].args),
-                            .second = viable[*best].second, .ambiguous = false};
+    if (!best) return ConversionChoice{.member = nullptr, .args = {}, .ambiguous = true};
+    return ConversionChoice{.member = viable[*best].member, .args = std::move(viable[*best].args), .ambiguous = false};
   }
   // The call of the conversion function `choice` selects on object `e`, converted to `to`.
   Ex call_conversion(Ex e, const ConversionChoice& choice, QualType to, u32 at_) {
