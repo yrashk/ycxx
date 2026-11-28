@@ -249,6 +249,7 @@ jobs:
           sparse-checkout: |
             tools/test
             tests/driver
+            tests/daemon/runtime_dir.py
 
       - name: Restore base test state
         uses: actions/cache/restore@v4
