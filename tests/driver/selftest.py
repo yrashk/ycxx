@@ -320,6 +320,24 @@ class Parts(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn('L2 `load`: the x86_64 back end handles it and aarch64 does not', result.stderr)
 
+    def test_path_filter_skips_build_and_skip_xfail(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'clang',
+                                '--state', d, '--branch', 'b', 'own/smoke'],
+                               capture_output=True, text=True, check=True)
+            self.assertNotIn('# build:', p.stdout)
+            self.assertIn('own/smoke/empty-main.accept.cpp', p.stdout)
+
+            full = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'ycxx',
+                                   '--state', d, '--branch', 'b', 'core', 'draft'],
+                                  capture_output=True, text=True, check=True)
+            skipped = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'ycxx',
+                                      '--state', d, '--branch', 'b', '--skip-xfail', 'core', 'draft'],
+                                     capture_output=True, text=True, check=True)
+            full_ids = [l.split('\t')[0] for l in full.stdout.splitlines() if l and not l.startswith('#')]
+            skip_ids = [l.split('\t')[0] for l in skipped.stdout.splitlines() if l and not l.startswith('#')]
+            self.assertLess(len(skip_ids), len(full_ids))
+
 
 if __name__ == '__main__':
     unittest.main()
