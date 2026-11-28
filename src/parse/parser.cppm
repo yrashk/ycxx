@@ -387,7 +387,9 @@ public:
     if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return true;
     if (qualified_type_ahead()) {
       bool failed_qualifier = false;
+      const bool saved_deduced = std::exchange(qualified_deduced_ok_, true);
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false, &failed_qualifier);
+      qualified_deduced_ok_ = saved_deduced;
       if (failed_qualifier) return true;  // let the declaration diagnose the qualifier
       auto context = statement ? PointerLookahead::statement : PointerLookahead::declaration;
       return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
@@ -397,7 +399,9 @@ public:
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) next = past_template_args(1);
-    else if (!is(Tk::identifier) || kind(1) == Tk::coloncolon || !s_->class_name(name_of(tok()))) return false;
+    else if (!is(Tk::identifier) || kind(1) == Tk::coloncolon ||
+             (!s_->class_name(name_of(tok())) && s_->deducible_template(name_of(tok())) == EntityId::none))
+      return false;
     // `T(args).f()` and `T{…}.m` are expressions; `T (x);` declares x ([stmt.ambig]).
     if (kind(next) == Tk::l_brace) return false;
     if (kind(next) != Tk::l_paren) return true;
@@ -703,6 +707,8 @@ public:
                            bool allow_constrained_auto = false) {
     DeclSpec d;
     d.begin = pos();
+    // Only the outermost decl-specifier-seq a caller allows (not one inside it) can deduce.
+    const bool deduced_ok = std::exchange(deduced_class_ok, false);
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
     int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0, n_float = 0, n_double = 0, n_int128 = 0;
     bool c = false, v = false;
@@ -719,8 +725,10 @@ public:
     auto qualified_specifier = [&] {
       const auto diags = s_->diag_count();
       const auto alias_failures = alias_constraint_failures_;
-      if (auto q = qualified_type(0, true);
-          q && (in_type_id || kind(q->second) != Tk::l_paren || function_pointer_declarator_ahead(q->second) ||
+      const bool saved_deduced = std::exchange(qualified_deduced_ok_, deduced_ok);
+      auto q = qualified_type(0, true);
+      qualified_deduced_ok_ = saved_deduced;
+      if (q && (in_type_id || kind(q->second) != Tk::l_paren || function_pointer_declarator_ahead(q->second) ||
                 (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
         cls = q->first;
         take_qualified(q->second);
@@ -1047,6 +1055,13 @@ public:
           if (kind(1) != Tk::coloncolon)
             if (auto t = s_->class_name(name_of(tok()), false, true, pos())) {
               cls = t;
+              break;
+            }
+          // A class template's name without arguments: a placeholder for a deduced class type
+          // ([dcl.type.class.deduct]), where the caller allows one.
+          if (deduced_ok && kind(1) != Tk::coloncolon && kind(1) != Tk::less)
+            if (EntityId templ = s_->deducible_template(name_of(tok())); templ != EntityId::none) {
+              cls = s_->types().deduced_class(templ);
               break;
             }
         }
@@ -2206,6 +2221,11 @@ public:
       auto t = s_->namespace_elaborated_type(*s->ns, name, at, ast::DeclKind::class_);
       return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
     }
+    // `N::C` for a class template C of a namespace: a placeholder for a deduced class type, where
+    // the caller allows one ([dcl.type.class.deduct]).
+    if (qualified_deduced_ok_ && s->ns && !conversion && kind(next + 1) != Tk::less)
+      if (auto c = s_->namespace_class_template(*s->ns, name))
+        return std::pair{s_->types().deduced_class(c->entity), next + 1 - start};
     auto t = conversion && s->ns && at ? s_->namespace_conversion_type(*s, name, *at)
                                  : s_->scope_type(*s, name);
     if (!t) return std::nullopt;
@@ -2854,6 +2874,12 @@ public:
 
   // Set while a lambda's parameters are read, which check their placeholders themselves.
   bool placeholder_params = false;
+  // Set by a caller whose declaration can declare a variable with a placeholder for a deduced
+  // class type ([dcl.type.class.deduct]/1): a class template's name without arguments.
+  bool deduced_class_ok = false;
+private:
+  bool qualified_deduced_ok_ = false;  // `qualified_type` may name a deduced class type
+public:
   void skip_param() {
     int depth = 0;
     while (!at_end()) {
@@ -4966,6 +4992,7 @@ public:
       }
     }
     if (!type) {
+      deduced_class_ok = true;  // [expr.new]/2
       DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
       if (!spec.ok) return {NodeId::none, begin, pos()};
       if (spec.is_static || spec.is_extern || spec.is_constexpr || spec.is_consteval || spec.is_constinit ||
@@ -5020,6 +5047,19 @@ public:
     if (excluded || (placement && bound)) {
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
+    }
+    // [expr.new]/2: a placeholder for a deduced class type is the new-type-id's whole type, deduced
+    // from the new-initializer ([over.match.class.deduct]).
+    if (const EntityId templ = s_->types().deduced_class_in(*type); templ != EntityId::none) {
+      if (bound || s_->types().kind(*type) != sema::TypeKind::placeholder) {
+        s_->diag(begin, Diag::class_deduction_context, s_->world().entities.rec(templ).name);
+        return {NodeId::none, begin, pos()};
+      }
+      std::vector<Ex> given = args ? *args : std::vector<Ex>{};
+      const auto form = braces ? sema::Construction::direct_list : sema::Construction::direct;
+      auto t = s_->deduce_class_type(templ, std::move(given), braces.get(), form, begin);
+      if (!t) return {NodeId::none, begin, pos()};
+      type = s_->types().add_cv(*t, sema::Types::cv(*type));
     }
     Ex result = bound ? s_->new_array(*type, *bound, literal_arithmetic_bound, args, braces.get(), begin, pos())
                       : s_->new_object(*type, args, braces.get(), begin, pos(), placement);
@@ -5708,6 +5748,13 @@ public:
           bump();
           return type_conversion(*t, begin);
         }
+      // `C(args)` or `C{…}` for a class template C: a placeholder for a deduced class type
+      // ([expr.type.conv]/1, [dcl.type.class.deduct]).
+      if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
+        if (EntityId templ = s_->deducible_template(n); templ != EntityId::none) {
+          bump();
+          return deduced_type_conversion(templ, begin);
+        }
       if (kind(1) == Tk::coloncolon) return qualified_id(begin);
       bump();
       if (is(Tk::less))
@@ -5926,6 +5973,32 @@ public:
       }
     }
     return s_->pack_index_type(name, at, *index, index_at, spelling);
+  }
+  // `C(args)` or `C{…}` at the `(` or `{`, C a class template: the type class template argument
+  // deduction gives it from the initializer, then the conversion ([expr.type.conv]/1).
+  Ex deduced_type_conversion(EntityId templ, u32 begin) {
+    const u32 open = pos();
+    std::unique_ptr<sema::Braced> list;
+    std::vector<Ex> args;
+    sema::Construction form = sema::Construction::direct;
+    if (is(Tk::l_brace)) {
+      form = sema::Construction::direct_list;
+      list = braced_init_list();
+    } else {
+      bump();
+      if (!is(Tk::r_paren))
+        do args.push_back(assignment_expression());
+        while (accept(Tk::comma));
+      if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    }
+    auto t = s_->deduce_class_type(templ, args, list.get(), form, open);
+    if (!t) return {NodeId::none, begin, pos()};
+    if (list) {
+      Ex r = s_->list_init(*t, *list);
+      return {r.id, begin, pos(), r.info};
+    }
+    Ex r = s_->functional_cast(*t, std::move(args), begin, pos());
+    return {r.id, begin, pos(), r.info};
   }
   // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
   Ex type_conversion(QualType t, u32 begin) {
@@ -6161,6 +6234,9 @@ public:
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it. Here an unresolved dependent name does not denote a type
     // ([temp.res.general]), so `Q<T>::f(args...)` goes through postfix call parsing.
+    // `N::C(args)` or `N::C{…}` for a class template C: a deduced class type ([expr.type.conv]/1).
+    if ((is(Tk::l_paren) || is(Tk::l_brace)) && s->ns && !s_->scope_names_object(*s, n))
+      if (auto c = s_->namespace_class_template(*s->ns, n)) return deduced_type_conversion(c->entity, begin);
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
       if (auto t = s_->scope_type(*s, n, /*assume_dependent_type=*/false)) {
         for (const auto& qualifier : type_qualifiers)
@@ -7959,6 +8035,7 @@ public:
       bump();
       return s_->node(ast::ExprStmt{}, begin, pos());
     }
+    deduced_class_ok = true;
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);
@@ -8226,6 +8303,8 @@ public:
   // variable initialized as one of that type. `replaced` holds what an earlier declarator's
   // placeholder deduced. An invalid `Ex` after a diagnosed error.
   Ex placeholder_variable(const DeclSpec& spec, Declarator& d, u32 local, std::optional<QualType>& replaced) {
+    if (s_->types().deduced_class_template(spec.type) != EntityId::none)
+      return deduced_class_variable(spec, d, local, replaced);
     u32 at = pos();
     Ex e;
     if (accept(Tk::equal)) {
@@ -8259,6 +8338,89 @@ public:
     d.type = *t;
     s_->set_local_type(local, d.type);
     Ex init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
+    constant_local(local, d.type, spec.is_constexpr, init);
+    return init;
+  }
+
+  // A deduced class type's initializer, read before the type is known: `= e`, `= {…}`, `{…}` or
+  // `(…)`, with the form of initialization it performs ([dcl.init.general]).
+  struct DeducedInitializer {
+    sema::Construction form = sema::Construction::direct;
+    std::vector<Ex> args;
+    std::unique_ptr<sema::Braced> list;
+    u32 open = 0;  // the `(`, `{` or the expression
+    bool ok = false;
+  };
+  DeducedInitializer deduced_initializer() {
+    DeducedInitializer r;
+    r.open = pos();
+    if (accept(Tk::equal)) {
+      r.open = pos();
+      if (is(Tk::l_brace)) {
+        r.form = sema::Construction::copy_list;
+        r.list = braced_init_list();
+      } else {
+        r.form = sema::Construction::copy;
+        r.args.push_back(assignment_expression());
+      }
+    } else if (is(Tk::l_brace)) {
+      r.form = sema::Construction::direct_list;
+      r.list = braced_init_list();
+    } else {
+      bump();
+      if (!is(Tk::r_paren))
+        do r.args.push_back(assignment_expression());
+        while (accept(Tk::comma));
+      if (!expect(Tk::r_paren)) return r;
+    }
+    r.ok = std::ranges::all_of(r.args, [](const Ex& a) { return a.ok(); });
+    return r;
+  }
+
+  // Block-scope variable `d`, declared as `local` with a placeholder for a deduced class type
+  // ([dcl.type.class.deduct]): its initializer read, class template argument deduction gives the
+  // type ([over.match.class.deduct]), then the variable is initialized as one of that type.
+  // `replaced` holds what an earlier declarator deduced. An invalid `Ex` after a diagnosed error.
+  Ex deduced_class_variable(const DeclSpec& spec, Declarator& d, u32 local, std::optional<QualType>& replaced) {
+    const u32 at = pos();
+    sema::Types& types = s_->types();
+    const EntityId templ = types.deduced_class_template(spec.type);
+    if (types.deduced_class_template(d.type) != templ) {  // [dcl.type.class.deduct]/1: `cv T` alone
+      s_->diag(d.name_at, Diag::class_deduction_declarator, spec.type, d.name);
+      return {NodeId::none, at, pos()};
+    }
+    if (!is(Tk::equal) && !is(Tk::l_brace) && !is(Tk::l_paren)) {
+      s_->diag(d.name_at, Diag::class_deduction_uninitialized, d.name);
+      return {NodeId::none, at, pos()};
+    }
+    DeducedInitializer in = deduced_initializer();
+    if (!in.ok) return {NodeId::none, at, pos()};
+    auto t = s_->deduce_class_type(templ, in.args, in.list.get(), in.form, in.open);
+    if (!t) return {NodeId::none, at, pos()};
+    if (replaced && !types.is_dependent(*t) && !types.is_dependent(*replaced) &&
+        types.canonical(*replaced) != types.canonical(*t)) {
+      s_->diag(d.name_at, Diag::class_deduction_inconsistent, d.name, *t, *replaced);
+      return {NodeId::none, at, pos()};
+    }
+    replaced = *t;
+    d.type = types.add_cv(*t, sema::Types::cv(d.type));
+    s_->set_local_type(local, d.type);
+    Ex init;
+    if (in.list) {
+      init = s_->list_init(d.type, *in.list, in.form, /*extend_reference=*/true);
+    } else if (in.form == sema::Construction::copy) {
+      init = s_->convert(in.args[0], d.type, in.args[0].begin);
+    } else if (types.is_dependent(d.type) || s_->any_dependent(in.args)) {
+      init = s_->construct(d.type, std::move(in.args), in.open, pos());
+    } else {
+      const bool aggregate = !spec.is_static && s_->can_parenthesize_aggregate(d.type, in.args, !spec.is_constexpr);
+      if (!aggregate && !s_->has_user_ctors(d.type) && in.args.size() == 1)
+        init = s_->convert(in.args[0], d.type, in.open);
+      else
+        init = s_->construct(d.type, std::move(in.args), in.open, pos(),
+                             aggregate ? sema::Construction::direct_paren_aggregate : sema::Construction::direct);
+    }
+    if (!init.ok()) return init;
     constant_local(local, d.type, spec.is_constexpr, init);
     return init;
   }

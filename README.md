@@ -153,6 +153,11 @@ Mem-initializers can expand packs, as in `value(static_cast<A&&>(args)...)` and 
 Base-class pack expansions such as `Bs(x)...` wait on base-specifier packs.
 [#1400](https://github.com/yrashk/ycxx/issues/1400) [#308](https://github.com/yrashk/ycxx/issues/308)
 
+Class templates deduce their arguments from an initializer: `Box b(3)`, `n::pair p(1, 2.0)`,
+`auto x = Box{4}` and `new Box(5)`. Deduction uses the constructors, the copy deduction candidate
+and the deduction-guides declared at namespace scope, including `explicit` and constrained ones.
+[#316](https://github.com/yrashk/ycxx/issues/316)
+
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. A class template's ordinary member alias can use those fields directly or in a

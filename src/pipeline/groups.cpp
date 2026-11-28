@@ -200,6 +200,7 @@ class GroupFacts {
     }
     range(it.qualifier_begin, it.qualifier_end);
     h.uint(it.template_depth).uint(std::uint8_t(it.specialization)).uint(it.unnamed_type_ordinal).uint(it.ordinal);
+    str(it.deduction_guide);
     h.fp(it.id).fp(it.body);
     str(it.scope);
     h.fp(it.parent == items::none ? Fp128{} : id(it.parent));

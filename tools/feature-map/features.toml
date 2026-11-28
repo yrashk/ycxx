@@ -1663,7 +1663,7 @@ struct S { explicit(false) S(int) {} };
 int main() { S s = 1; (void)s; return 0; }
 '''
 issues = [339, 316]
-note = 'Constructors and constructor templates of ordinary classes and class templates, with a condition that is not dependent, dependent on the class template, or value-dependent on the constructor template and evaluated after deduction (#715). Conversion functions (#339) and deduction guides (#316) remain.'
+note = 'Constructors and constructor templates of ordinary classes and class templates, with a condition that is not dependent, dependent on the class template, or value-dependent on the constructor template and evaluated after deduction (#715). Conversion functions (#339) remain; deduction-guides take it (#316).'
 
 [[feature]]
 id = 'class-delegating-ctor'
@@ -2152,7 +2152,7 @@ clauses = ['dcl.type.class.deduct', 'over.match.class.deduct', 'temp.deduct.guid
 std = 'C++17'
 ftm = '__cpp_deduction_guides'
 detect = '\)\s*->\s*[\w:]+\s*<[^;{]*>\s*;'
-status = 'missing'
+status = 'partial'
 probe = '''
 template<class T> struct Box { T v; Box(T x) : v(x) {} };
 template<class T> struct Agg { T v; };
@@ -2160,6 +2160,7 @@ template<class T> Agg(T) -> Agg<T>;
 int main() { Box b(3); Agg a{4}; return b.v + a.v - 7; }
 '''
 issues = [316]
+note = 'Variable declarations, functional casts and new-expressions, from constructors, the copy deduction candidate and namespace-scope deduction-guides (#316). Aggregate and alias template deduction and member deduction-guides remain.'
 
 [[feature]]
 id = 'temp-auto-nttp'
