@@ -2941,6 +2941,7 @@ auto ItemAnalysis::member_declarators(const DeclSpec& spec, const ast::DeclSema&
       }
       if (written && written->begin == it_->begin + from) {
         ps_.seek(written->end);
+        written->type = d.type;
         p_->set_dmi(sem.entity, *written);
       } else {
         const std::size_t n = s_.diag_count();
@@ -2951,7 +2952,7 @@ auto ItemAnalysis::member_declarators(const DeclSpec& spec, const ast::DeclSema&
         if (v) value = *v;
         else init = {};
         p_->set_dmi(sem.entity, {.item = k_, .begin = it_->begin + from, .end = it_->begin + ps_.pos(),
-                                .braced = braced, .form = form});
+                                .type = d.type, .braced = braced, .form = form});
       }
     }
     s_.own.push_back({d.name, sem});

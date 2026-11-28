@@ -698,8 +698,11 @@ public:
     f = ast::mix(f, ins_->names.fp(r.name));
     if (r.scope != EntityId::none) f = ast::mix(f, ins_->entities.fp(r.scope));
     // A variable's type is not part of its identity; a function's is ([basic.link]).
+    // A data member is never redeclared with a different type in the same class, and two units or
+    // revisions in a shared World may define distinct classes of the same name with different
+    // member types (#1730): include its canonical type so `rec(e).type` is never stale.
     if (r.kind == EntityKind::function || r.kind == EntityKind::constructor || r.kind == EntityKind::destructor ||
-        r.kind == EntityKind::function_template)
+        r.kind == EntityKind::function_template || r.kind == EntityKind::data_member)
       f = ast::mix(f, types_->fp(types_->canonical(r.type)));
     if (r.kind == EntityKind::variable) f = ast::mix(f, std::to_underlying(r.lang));
     // A static local's number among its function's statics of its name ([stmt.dcl]/3).
