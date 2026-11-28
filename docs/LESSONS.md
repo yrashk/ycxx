@@ -1191,6 +1191,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Pass the storage context when a helper reads both. For a draft that adopts a published node,
     look up the adopted node through the builder before reading it from the interner.
   - The discarded-cast and `noexcept` probes exercise both paths.
+- **A trait that answers "no conversion" must find every conversion the language provides,
+  recorded or not.** The first #1680 version answered `__is_convertible(closure, int (*)(int))`
+  false. A closure's conversion function is not a recorded member, so the class looked like it
+  had none. Overload resolution finds it as the invoker (`closure_invoker`). The old code
+  diagnosed the case. The new code gave a wrong answer without any diagnostic.
+  - Do: before a new path turns "unsupported" into `false`, probe closures, members of bases,
+    templates and implicitly declared members against both oracles. Answer `no` only where every
+    source of the conversion has been looked at. Otherwise keep the diagnostic.
+  - While iterating on a change, use `tools/build --no-smoke`. The full smoke ctest took over 20
+    minutes at a load average of about 20, and its daemon timeouts said nothing about the change.
+  - Learned on #1680.
 - **Select a conversion function on the operand itself, never on its lvalue-to-rvalue copy.**
   `static_cast_to` and the end of `convert` call `rvalue(e)` before the standard conversions.
   For a class operand that copy is a non-const prvalue, so a `&&`-qualified or non-const

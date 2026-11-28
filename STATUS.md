@@ -2904,8 +2904,10 @@ session's.*
 - `__is_constructible(T, Args...)`, `__is_nothrow_constructible(T, Args...)` and
   `__is_trivially_constructible(T, Args...)` check concrete operand types at the original source
   point. Their domain includes complete types, cv `void`, and arrays of unknown bound. They fold
-  function and cv `void` targets, scalar and reference targets with no arguments, and arithmetic
-  targets with arithmetic or arithmetic-reference arguments. Each viable initialization in that
+  function and cv `void` targets, scalar and reference targets with no arguments, and scalar
+  (arithmetic, object pointer, `std::nullptr_t`) targets with one scalar or scalar-reference
+  argument, converted by a standard conversion; direct-initialization also converts a null pointer
+  value to `bool` ([dcl.init.general]/16.9, #1680). Each viable initialization in that
   scope is trivial and nonthrowing. Incomplete operands and other complete combinations get hard
   diagnostics. The supported class-template base and variable-template initializer replay paths
   accept dependent operands. Replay expands packs in place among the arguments, checks newly
@@ -2946,7 +2948,18 @@ session's.*
   converted temporary for a const lvalue or rvalue reference, never for a reference-related
   (similar) operand (/5.4, CWG2352; Clang 23 differs, GCC 16 agrees) (#1396). Pointers whose pointee arrays or member pointers differ, and array and function
   sources, are diagnosed (#1399). Supported class-template bases and variable-template initializers
-  replay dependent operands and check class completeness at the demand. Other combinations,
+  replay dependent operands and check class completeness at the demand. `__is_convertible`
+  also answers a user-defined conversion between complete non-union types that are not
+  reference-related ([conv.general]/3, [over.best.ics]), through the overload machinery: a
+  converting constructor of a class target, with a reference to const or an rvalue reference to it
+  binding the temporary, or a non-template conversion function of the source class followed by a
+  standard conversion, ranked by the implicit object parameter and then that conversion, and a
+  captureless closure's conversion to a pointer to function (a closure source with a class target
+  waits for #1718). An
+  explicit, ambiguous, deleted or inaccessible selection gives false
+  (`tests/own/builtins/user_defined_convertibility.accept.cpp`). Reference targets through a
+  conversion function, conversion functions of bases or templates, constructors competing with
+  conversion functions, and the nothrow variant get hard diagnostics (#1717). Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
 - `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
