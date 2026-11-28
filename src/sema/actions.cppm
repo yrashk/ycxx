@@ -774,7 +774,7 @@ public:
   };
 
   enum class ClassBodyLookup {
-    unqualified, qualified, enum_qualifier, qualified_enum, before_template_parameter, class_prefix
+    unqualified, qualified, qualified_class, enum_qualifier, qualified_enum, before_template_parameter, class_prefix
   };
 
   // [class.pre], [class.member.lookup]: a class's injected name stops the search on
@@ -2149,10 +2149,20 @@ public:
         return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
       });
     }
-    if (s.type && types().is_class(*s.type))
-      if (const ClassRec* c = class_rec(types().class_of(*s.type)))
+    if (s.type && types().is_class(*s.type)) {
+      const EntityId cls = types().class_of(*s.type);
+      if (const ClassRec* c = class_rec(cls))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; }) ||
                std::ranges::contains(c->introduced, n, &MemberDeclRec::name);
+      if (cls == current_class || encloses_current_class(cls)) {
+        auto m = cls == current_class ? q_->earlier_member(n, /*type_only=*/false)
+                                      : q_->enclosing_earlier_member(cls, n, /*type_only=*/false);
+        if (m)
+          return m->kind == ast::DeclKind::function || m->kind == ast::DeclKind::variable ||
+                 m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::enumerator;
+        if (q_->dependent_member_using(cls, n)) return true;
+      }
+    }
     return false;
   }
   // The ordinary lookup result can hide an inherited type from a template argument.
@@ -2231,6 +2241,56 @@ public:
     }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
+  }
+
+  // [basic.lookup.elab], [dcl.type.elab]/2: look past non-types in a class scope, reject typedefs
+  // and class templates without arguments, and resolve nested or injected class tags.
+  std::optional<QualType> qualified_elaborated_class(const Scope& scope, NameId name, std::optional<u32> at) {
+    if (!scope.type || !types().is_class(*scope.type)) return std::nullopt;
+    const EntityId naming = types().class_of(*scope.type);
+    const EntityRec& entity = w_->entities.rec(naming);
+    if (entity.kind != EntityKind::class_) return std::nullopt;
+    const bool enclosing = encloses_current_class(naming);
+    if (types().is_dependent(*scope.type)) {
+      if (naming != current_class && !enclosing) return std::nullopt;
+      auto member = naming == current_class ? q_->earlier_member(name, /*type_only=*/true)
+                                            : q_->enclosing_earlier_member(naming, name, /*type_only=*/true);
+      if (member) {
+        if (member->kind == ast::DeclKind::type_alias && !(member->flags & decl_flag::template_)) {
+          if (at) diag(*at, Diag::elaborated_typedef, name);
+          return std::nullopt;
+        }
+        if (member->flags & decl_flag::template_) return std::nullopt;
+        return member->type;
+      }
+      if (entity.name == name) return types().class_type(naming);
+      const ClassRec incomplete;
+      return class_body_type(naming, incomplete, name, at, ClassBodyLookup::qualified_class, /*type_only=*/true).type;
+    }
+    const ClassRec* cls = class_rec(naming);
+    if (!cls && naming != current_class && !enclosing) return std::nullopt;
+    if (naming == current_class && (!cls || !cls->defined)) {
+      if (auto member = q_->earlier_member(name, /*type_only=*/true)) {
+        if (member->kind == ast::DeclKind::type_alias && !(member->flags & decl_flag::template_)) {
+          if (at) diag(*at, Diag::elaborated_typedef, name);
+          return std::nullopt;
+        }
+        if (member->flags & decl_flag::template_) return std::nullopt;
+        return member->type;
+      }
+    }
+    if (enclosing && (!cls || !cls->defined)) {
+      if (auto member = q_->enclosing_earlier_member(naming, name, /*type_only=*/true)) {
+        if (member->kind == ast::DeclKind::type_alias && !(member->flags & decl_flag::template_)) {
+          if (at) diag(*at, Diag::elaborated_typedef, name);
+          return std::nullopt;
+        }
+        if (member->flags & decl_flag::template_) return std::nullopt;
+        return member->type;
+      }
+    }
+    const ClassRec incomplete;
+    return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified_class, /*type_only=*/true).type;
   }
 
   // Qualified namespace lookup for an elaborated type specifier skips non-types.
@@ -2312,8 +2372,22 @@ public:
   std::optional<QualType> scope_type(const Scope& s, NameId n, bool assume_dependent_type = true) {
     auto m = scope_member(s, n, assume_dependent_type);
     if (!m || !m->type) return std::nullopt;
-    if (s.type && types().is_class(*s.type) && unscoped_member_enumerator(types().class_of(*s.type), n))
-      return std::nullopt;
+    if (s.type && types().is_class(*s.type)) {
+      const EntityId cls = types().class_of(*s.type);
+      if (unscoped_member_enumerator(cls, n)) return std::nullopt;
+      const ClassRec* cr = !types().is_dependent(*s.type) ? class_rec(cls) : nullptr;
+      if (cr && cr->defined) {
+        if (auto found = find_member(cls, n); found && !found->ambiguous &&
+            (found->nested_type == EntityId::none || found->enumerator != EntityId::none))
+          return std::nullopt;
+      } else if (cls == current_class || encloses_current_class(cls)) {
+        auto earlier = cls == current_class ? q_->earlier_member(n, /*type_only=*/false)
+                                            : q_->enclosing_earlier_member(cls, n, /*type_only=*/false);
+        if (earlier && (!is_type(earlier->kind) || (earlier->flags & decl_flag::template_)))
+          return std::nullopt;
+        if (q_->dependent_member_using(cls, n)) return std::nullopt;
+      }
+    }
     return m->type;
   }
   // Ordinary qualified lookup still applies to a typename-specifier ([temp.res.general]).

@@ -1959,3 +1959,27 @@ enum class ScopedSelf : int {
 };
 '''
 evidence = ["tests/daemon/compatibility.py", "tests/own/using/block-using-enum.reject.cpp"]
+
+[[divergence]]
+id = "member-using-base-tag-and-fn"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "supported", clang = "pending" }
+reference = "[basic.lookup.general]/3, [namespace.udecl]/1, [basic.scope.scope]/4, #1554"
+prior = "Derived class tags were rejected whenever a member using-declaration named a base function of the same name."
+spec = "When a base class declares both a nested tag `struct f` and a member function `f(...)`, ordinary lookup for `using B::f;` finds only the function (the tag is hidden in `B`), so `using B::f;` may coexist with a derived nested tag `struct f`."
+gcc = "Same as spec."
+clang = "Reject `using B::f;` in `struct D : B { struct f {}; using B::f; };` when `B` also declares `struct f` alongside `f(...)`, diagnosing a conflict with `D::f`."
+gcc_observed = "GCC 16.2.0 accepts `struct B { struct f { char c[1]; }; static constexpr int f(int) { return 1; } }; struct D : B { struct f { char c[8]; }; using B::f; };`."
+clang_observed = "Clang 23.1.5 rejects `using B::f;` with `target of using declaration conflicts with declaration already in scope`."
+probe = '''
+struct B {
+  struct f { char c[1]; };
+  static constexpr int f(int) { return 1; }
+};
+struct D : B {
+  struct f { char c[8]; };
+  using B::f;
+};
+static_assert(D::f(0) == 1 && sizeof(struct D::f) == 8);
+'''
+evidence = ["tests/own/using-member/tag-and-ordinary-conflicts.accept.cpp"]

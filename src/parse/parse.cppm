@@ -5383,20 +5383,43 @@ void Program::introduce_members(EntityId cls, sema::ClassRec& rec, std::span<con
     if (own.is_template && !equivalent_heads(own.entity, base.entity)) return false;
     return corresponding_signatures(own.type, base.type);
   };
+  const auto conflicts = [&](NameId name) {
+    if (std::ranges::contains(rec.fields, name, &sema::FieldRec::name)) return true;
+    if (std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& m) {
+          return m.name == name && !m.is_function;
+        }))
+      return true;
+    if (std::ranges::contains(rec.alias_templates, name, &sema::NestedType::name)) return true;
+    for (const sema::NestedType& nt : rec.types) {
+      if (nt.name == name) {
+        const auto kind = w_->entities.rec(nt.entity).kind;
+        if (kind != sema::EntityKind::class_ && kind != sema::EntityKind::enum_) return true;
+      }
+      if (w_->types.is_enum(nt.type) && w_->types.enum_of(nt.type) == nt.entity) {
+        if (const sema::EnumRec* er = classes_.find_enum(nt.entity);
+            er && !er->scoped && std::ranges::contains(er->enumerators, name, &sema::EnumeratorRec::name))
+          return true;
+      }
+    }
+    return false;
+  };
   for (const auto& [m, access] : usings) {
     const auto found = member_usings_.find({m, std::to_underlying(cls)});
     if (found == member_usings_.end()) continue;
+    std::set<u32> conflicted;
     for (const sema::MemberDeclRec& f : found->second) {
-      // [basic.scope.scope]/4: a data member or member type of the class conflicts with it.
-      if (std::ranges::contains(rec.fields, f.name, &sema::FieldRec::name) ||
-          std::ranges::contains(rec.types, f.name, &sema::NestedType::name)) {
-        u32 offset = 0;
-        for (const items::DeclName& n : items_->items[m].names)
-          if (n.name == w_->ins.names.spelling(f.name)) offset = n.offset;
-        engine::Diagnostic d{engine::Loc{std::to_underlying(id(m)), offset}, sema::diag_id(sema::Diag::conflicting_declaration),
-                             {{std::to_underlying(f.name), w_->ins.names.fp(f.name)}}};
-        if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
-        break;
+      // [basic.scope.scope]/4: a data member, member alias/template, or enumerator conflicts;
+      // a nested class or enumeration tag may share a name with an introduced base function.
+      if (conflicts(f.name)) {
+        if (conflicted.insert(std::to_underlying(f.name)).second) {
+          u32 offset = 0;
+          for (const items::DeclName& n : items_->items[m].names)
+            if (n.name == w_->ins.names.spelling(f.name)) offset = n.offset;
+          engine::Diagnostic d{engine::Loc{std::to_underlying(id(m)), offset}, sema::diag_id(sema::Diag::conflicting_declaration),
+                               {{std::to_underlying(f.name), w_->ins.names.fp(f.name)}}};
+          if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+        }
+        continue;
       }
       if (std::ranges::contains(rec.introduced, f.entity, &sema::MemberDeclRec::entity) ||
           std::ranges::any_of(rec.members, [&](const sema::MemberDeclRec& own) { return corresponds(own, f); }))

@@ -5361,7 +5361,10 @@ for calls and for selection against a static function-pointer target.
   compares its conversion type. A member function template also compares its template-head's
   parameter kinds and depths (a class template's member template never hides an ordinary base's:
   #1437). A constrained declaration hides nothing. The using-declaration's access goes in
-  `ClassRec::access` (/16). A data member or member type of the same name conflicts with it.
+  `ClassRec::access` (/16). Data members (including static data members and member variable
+  templates), member aliases, member alias/class templates, and unscoped enumerators conflict with
+  it, while nested class/union/enum tags may share its name and remain reachable via qualified
+  elaborated lookup (`struct D::f`, #1554).
 - In a template definition, a name taken from a dependent base (`using Fn::name;`) is
   type-dependent ([temp.dep.expr]/3; `Program::dependent_member_usings_`), so unqualified calls of
   it are resolved in each specialization. In an incomplete class (a static member's initializer, a
