@@ -68,8 +68,8 @@ jobs:
       - name: Policy (tools/check-policy)
         run: tools/check-policy
 
-      - name: Build and bootstrap smoke test (tools/build)
-        run: tools/build -j ${{ matrix.host.jobs }}
+      - name: Build and CTest suites (tools/build --all-tests)
+        run: tools/build --all-tests -j ${{ matrix.host.jobs }}
 
       - name: Standalone YCXX Bench install and external consumer
         run: tools/ci/bench-package ${{ matrix.host.jobs }}

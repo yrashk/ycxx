@@ -68,11 +68,22 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   modules, reflection instead of generators and boilerplate, contracts, coroutines and
   `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,
   marked `// BOOTSTRAP: <feature>: <reason>` and listed in STATUS.
-- Run `tools/test --fast` before pushing; CI confirms, it does not debug (DECISIONS §9).
-- To run tests without building, name the stage: `tools/test core <path>`, or
-  `tools/test --cxx clang affected <path>` for an oracle. A path alone also runs `tools/build`.
-  Never run two builds in one build directory. They broke modules and cost 15–37 minutes four
-  times (LESSONS, #659, #218, #259, #309).
+- **Fast two-loop testing workflow** (DECISIONS §9):
+  - *Inner loop (seconds):* build only what you need with `tools/build --no-tests` (`ycxxc` only) or
+    `tools/build --target unit_<area>`, then run targeted tests (`tools/test own/<area>`,
+    `ctest --test-dir build -L area:<area> -j 4`, or `tools/test --quick`). Path filters without
+    explicit stages (e.g., `tools/test own/smoke` or `tools/test --cxx clang own/x`) run only
+    test stages and never trigger a build.
+  - *Pre-push gate:* run `tools/test --fast` before pushing (builds with `Dev` `-O1 -g1` + fast
+    linker, runs `-L smoke` + `unit` + `failed` + `affected` + `core` skipping slow `draft/`
+    XFAILs, stopping after 10 failures). Run `tools/test daemon` or `ctest --test-dir build -L compat`
+    when touching daemon, compatibility, or project-build code. CI confirms; it does not debug.
+  - Never run two builds in one build directory. They broke modules and cost 15–37 minutes four
+    times (LESSONS, #659, #218, #259, #309).
+- Prefer placing non-template function definitions in C++26 module implementation units (`.cpp`
+  files with `module ycxx.<area>;`, like `src/parse/layout_attrs.cpp` and `src/pipeline/groups.cpp`)
+  rather than inline inside large `.cppm` module interfaces (`actions.cppm`, `parse.cppm`), so
+  routine edits do not regenerate BMIs and cascade across 25+ downstream modules.
 - Triage timeouts by checking `uptime` and rerunning the timed-out CTests with
   `ctest --test-dir build -R '<names>' -j 2`. Use `tools/test failed affected core` to rerun the
   driver stages without rebuilding. A passing isolated rerun can point to contention and can
