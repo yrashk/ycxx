@@ -159,7 +159,7 @@ def main():
             tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}') or f'{sub.name}/{t.name}' in ALWAYS]
         actions = ([], ['-c'], ['-fsyntax-only'], ['-E'])
         cases = ((t, action) for t in tests for action in actions)
-        reference_workers = 2
+        reference_workers = int(os.environ.get('YCXX_COMPARE_WORKERS', str(min(4, max(2, os.cpu_count() or 2)))))
         workers = ThreadPoolExecutor(max_workers=reference_workers)
 
         def submit(t, action):

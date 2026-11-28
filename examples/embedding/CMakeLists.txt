@@ -34,3 +34,8 @@ if(ycxx_STDLIB STREQUAL "system")
   target_link_libraries(embedded_stock_runtime PRIVATE ycxx::engine embedded_stock_peer)
   add_test(NAME embedded_stock_runtime COMMAND embedded_stock_runtime)
 endif()
+
+get_directory_property(_embed_tests TESTS)
+foreach(_t IN LISTS _embed_tests)
+  set_property(TEST "${_t}" APPEND PROPERTY LABELS "smoke;embedding")
+endforeach()

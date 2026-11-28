@@ -36,3 +36,8 @@ set_tests_properties(bootstrap.ycxx_version PROPERTIES
 add_test(NAME bootstrap.ycxx_unknown_front COMMAND ycxxc frobnicate)
 set_tests_properties(bootstrap.ycxx_unknown_front PROPERTIES WILL_FAIL TRUE)
 
+get_directory_property(_bootstrap_tests TESTS)
+foreach(_t IN LISTS _bootstrap_tests)
+  set_property(TEST "${_t}" APPEND PROPERTY LABELS "smoke;bootstrap")
+endforeach()
+
