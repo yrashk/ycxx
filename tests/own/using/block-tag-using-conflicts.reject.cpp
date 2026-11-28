@@ -114,3 +114,16 @@ void elaborated_key_mismatch_and_typedef() {
   typedef int B;
   struct B;  //! error
 }
+
+namespace EnumNs {
+enum En { e = 7 };
+}  // namespace EnumNs
+
+void using_enum_hides_local_tag_unqualified() {
+  using EnumNs::En;
+  struct e {
+    int a;
+  };
+  using enum En;
+  using T = e;  //! error
+}

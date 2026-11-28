@@ -22,6 +22,10 @@ auto Sema::class_name(NameId name, bool elaborated, bool aliases, std::optional<
         if (u.depth == d && u.name == name &&
             std::ranges::any_of(u.decls, [](const ast::DeclSema& decl) { return !is_type(decl.kind); }))
           return std::nullopt;
+      for (const auto& [scope, e] : using_enums_)
+        if (scope == d)
+          if (const EnumRec* record = enum_rec(e); record && std::ranges::contains(record->enumerators, name, &EnumeratorRec::name))
+            return std::nullopt;
     }
     for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
       if (t->depth == d && t->name == name) return (aliases || t->is_tag) ? std::optional(t->type) : std::nullopt;
@@ -371,7 +375,6 @@ auto Sema::named_template(NameId name, ast::DeclKind kind, std::optional<u32> at
     if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; }))
       return std::nullopt;
   }
-  if (!found && template_param(name)) return std::nullopt;
   const EntityId injected = !found && kind == ast::DeclKind::class_ ? injected_class_template(name) : EntityId::none;
   // A block-scope using-declaration is found before the class's members ([basic.lookup.unqual]).
   if (!found && injected == EntityId::none && names_member(name))
@@ -394,6 +397,7 @@ auto Sema::named_template(NameId name, ast::DeclKind kind, std::optional<u32> at
             return std::nullopt;
     }
   }
+  if (!found && template_param(name)) return std::nullopt;
   for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
     if (p->name == name) found = p->sema;
   std::vector<ast::DeclSema> decls;
@@ -2420,10 +2424,13 @@ auto Sema::is_template_name(NameId name) -> bool {
           return true;
       }
     if (saw_using) return false;
+    for (const auto& [scope, e] : using_enums_)
+      if (scope == d)
+        if (const EnumRec* record = enum_rec(e); record && std::ranges::contains(record->enumerators, name, &EnumeratorRec::name))
+          return false;
     if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; }))
       return false;
   }
-  if (template_param(name)) return false;
   // A member template of the class whose member is being analysed ([temp.mem]).
   // A static data member template of the class, a base or an enclosing class ([temp.mem]).
   if (unqualified_member_variable_template(name)) return true;
@@ -2449,6 +2456,7 @@ auto Sema::is_template_name(NameId name) -> bool {
       return false;
     }
   }
+  if (template_param(name)) return false;
   for (const OwnDecl& o : own)
     if (o.name == name) return (o.sema.flags & decl_flag::template_) != 0;
   for (DeclId d : q_->visible_decls(name, directives()))
@@ -2927,23 +2935,27 @@ auto Sema::close_lambda(Ex body, u32 body_begin, u32 end) -> Ex {
   std::vector<GenericClosure::CapturedUsing> usings;
   if (generic) {
     std::set<u32> seen;
-    for (std::size_t d = scopes_.size(); d-- > 0 && context_of(d) == lambdas_.size();)
+    for (std::size_t d = scopes_.size(); d-- > 0;) {
+      const u32 ctx = context_of(d);
       for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p) {
         if (p->first == no_name() || !seen.insert(std::to_underlying(p->first)).second) continue;
         if (p->second & capture_bit) {
           const u32 field = p->second & ~capture_bit;
-          if (!lambdas_.empty() && field < lambdas_.back().fields.size()) {
-            consts.push_back({p->first, lambdas_.back().fields[field].type, EntityId::none, NodeId::none, 0});
+          if (ctx > 0 && field < lambdas_[ctx - 1].fields.size()) {
+            consts.push_back({p->first, lambdas_[ctx - 1].fields[field].type, EntityId::none, NodeId::none, 0});
             values.push_back(ConstId::none);
             const_depths.push_back(d);
           }
           continue;
         }
-        consts.push_back(locals_[p->second]);
+        const auto& ls = ctx == lambdas_.size() ? locals_ : lambdas_[ctx].outer_locals;
+        const auto& vs = ctx == lambdas_.size() ? local_values_ : lambdas_[ctx].outer_values;
+        consts.push_back(ls[p->second]);
         consts.back().decl = NodeId::none;
-        values.push_back(p->second < local_values_.size() && local_values_[p->second] ? *local_values_[p->second] : ConstId::none);
+        values.push_back(p->second < vs.size() && vs[p->second] ? *vs[p->second] : ConstId::none);
         const_depths.push_back(d);
       }
+    }
     std::set<u32> seen_types;
     std::set<u32> seen_values;
     for (std::size_t d = scopes_.size(); d-- > 0;) {

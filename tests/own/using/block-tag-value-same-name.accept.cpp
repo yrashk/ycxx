@@ -278,3 +278,70 @@ constexpr int test_using_enum_beside_local_tag() {
 }
 static_assert(test_using_enum_beside_local_tag() == 22);
 
+template <class T>
+constexpr int e(T v) {
+  return static_cast<int>(v);
+}
+
+constexpr int test_using_enum_hides_global_template() {
+  using M3::En;
+  using enum En;
+  struct L {
+    constexpr int g() const { return (e < 10) ? 1 : 0; }
+  };
+  return (e < 10) + L{}.g();
+}
+static_assert(test_using_enum_hides_global_template() == 2);
+
+namespace M4 {
+template <class U>
+struct CT {
+  U a;
+};
+template <class T>
+constexpr int gfn(T v) {
+  return static_cast<int>(v) + 1;
+}
+}  // namespace M4
+
+template <class CT>
+constexpr int test_outer_block_using_over_template_param_type() {
+  {
+    using M4::CT;
+    struct Local {
+      CT<int> m;
+    };
+    return Local{{3}}.m.a;
+  }
+}
+
+template <class gfn>
+constexpr int test_outer_block_using_over_template_param_fn() {
+  {
+    using M4::gfn;
+    struct Local {
+      constexpr int g() const { return gfn<int>(3); }
+    };
+    return Local{}.g();
+  }
+}
+static_assert(test_outer_block_using_over_template_param_type<double>() == 3);
+static_assert(test_outer_block_using_over_template_param_fn<double>() == 4);
+
+constexpr int test_nested_lambda_init_capture_hides_outer_tag() {
+  struct x {
+    char c[16];
+  };
+  using M3::x;
+  auto lam1 = [x = 'a']() {
+    auto lam2 = []() {
+      auto glam = [](auto d) { return sizeof(x) + sizeof(d) - sizeof(d); };
+      return glam(1);
+    };
+    return lam2();
+  };
+  return static_cast<int>(lam1());
+}
+static_assert(test_nested_lambda_init_capture_hides_outer_tag() == static_cast<int>(sizeof(char)));
+
+

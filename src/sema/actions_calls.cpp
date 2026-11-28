@@ -1751,15 +1751,18 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
     return {NodeId::none, begin, end};
   }
   // A non-type template parameter is a prvalue whose value depends on the argument
-  // ([temp.param]/8, [temp.dep.constexpr]).
-  if (const ast::TemplateParamSema* p = template_param(name)) {
+  // ([temp.param]/8, [temp.dep.constexpr]). For a local class, its enclosing blocks sit inside the
+  // template's scope and are checked before the template parameters.
+  auto check_template_param = [&]() -> std::optional<Ex> {
+    const ast::TemplateParamSema* p = template_param(name);
+    if (!p) return std::nullopt;
     if (p->kind == ast::TemplateArgKind::type) {
       diag(begin, Diag::expected_expression);
-      return {NodeId::none, begin, end};
+      return Ex{NodeId::none, begin, end};
     }
     if (p->pack && pattern_packs_.empty() && frames_.empty()) {
       diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
-      return {NodeId::none, begin, end};
+      return Ex{NodeId::none, begin, end};
     }
     if (auto a = bound_arg(*p)) {
       if (!ins().values.is<ast::VAggregate>(a->value))
@@ -1782,7 +1785,9 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
     Ex result = node(ast::Literal{info, v}, begin, end, info);
     if (class_parameter) declared_types_[std::to_underlying(result.id)] = declared;
     return result;
-  }
+  };
+  if (!outer())
+    if (auto r = check_template_param()) return *r;
   if (const auto* declaration = earlier_nested_enumerator(name))
     return enumerator_in_list(*declaration, begin, end);
   // The enclosing class's members ([basic.scope.class]).
@@ -1803,6 +1808,8 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
     }
   }
   if (auto r = outer_block_value(name, begin, end, callee)) return *r;
+  if (outer())
+    if (auto r = check_template_param()) return *r;
   if (namespace_lambda && namespace_lambda->name == name)
     return undeduced_namespace_lambda(name, begin, end);
   std::vector<ast::DeclSema> found;
