@@ -247,7 +247,6 @@ draft/expr/expr.ref-2.accept.cpp 'struct' not supported yet
 draft/expr/expr.reflect-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.reflect-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.reflect-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.type.conv-1.accept.cpp 'struct' not supported yet
 draft/lex/lex.ext-2.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/lex/lex.ext-3.reject.cpp errors elsewhere: '' not supported yet
 draft/lex/lex.fcon-2.accept.cpp preprocessing directives are not supported yet

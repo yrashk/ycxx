@@ -10876,25 +10876,33 @@ public:
     return convert_node(e, ast::ConversionKind::lvalue_to_rvalue, Types::unqualified(t));
   }
 
-  // [expr.type.conv], [dcl.type.auto.deduct]: scalar decay-copy.
+  // [expr.type.conv]/1, [dcl.type.auto.deduct]: decay-copy, `auto(e)` or `auto{e}`. The result
+  // is a prvalue of the decayed type of `e`, copy-initialized from `e`.
   Ex decay_copy(Ex operand, u32 begin, u32 end, bool replay_body) {
     if (!operand.ok()) return operand;
     const auto supported = [&](QualType type) {
-      return types().is_scalar(type) && !types().is_member_pointer(type);
+      return (types().is_scalar(type) && !types().is_member_pointer(type)) || types().is_class(type);
     };
     if (dependent(operand)) {
-      if (replay_body) {
-        // [temp.dep.expr]: a value-dependent operand can still determine the prvalue type.
-        // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
-        std::optional<QualType> type;
-        if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
-        if (type ? supported(*type) : has_proven_dependent_type(operand)) {
-          // The tokens will be replayed. This node supplies no canonical template argument value.
-          u8 flags = expr_flag::unrepresented_value | expr_flag::deferred_decay_copy;
-          if (!type) flags |= expr_flag::type_dependent;
-          return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, flags);
-        }
+      // [temp.dep.expr]: a value-dependent operand can still determine the prvalue type.
+      // [temp.deduct.call]: decay the operand's type without evaluating or converting it.
+      std::optional<QualType> type;
+      if (!types().is_dependent(operand.type())) type = ast::adjust_parameter(ins(), types().canonical(operand.type()));
+      if (!type || supported(*type)) {
+        // Instantiation analyses the concrete copy: a function template body or a
+        // requires-expression is replayed with its arguments ([temp.inst], [temp.constr.atomic]).
+        // This node supplies no canonical template argument value.
+        u8 flags = expr_flag::unrepresented_value;
+        if (replay_body) flags |= expr_flag::deferred_decay_copy;
+        if (!type) flags |= expr_flag::type_dependent;
+        return dependent_node({operand}, begin, end, type, ValueCategory::prvalue, flags);
       }
+    } else if (QualType decayed = ast::adjust_parameter(ins(), types().canonical(operand.type())); types().is_class(decayed)) {
+      // [expr.type.conv]/2: one parenthesized expression is the cast `(T)e`, a direct-initialization
+      // ([expr.static.cast]/4); a braced one with an element of the class itself initializes from
+      // it ([dcl.init.list]/3.2). A prvalue of the class initializes the result itself
+      // ([dcl.init.general]/16.6.1).
+      return functional_cast(decayed, {operand}, begin, end);
     } else {
       if (types().is_array(operand.type()) && !operand.glvalue())
         operand = materialize(operand, operand.type(), false);

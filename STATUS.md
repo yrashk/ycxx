@@ -5575,10 +5575,11 @@ declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
 
-## Scalar and pointer decay-copy expressions (#286)
+## Decay-copy expressions (#286)
 
-- Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
-  including bit-field reads and array and function decay. Grouped declarations
+- Single-expression `auto(x)` and `auto{x}` perform scalar, pointer and class decay-copy,
+  including bit-field reads and array and function decay. A class operand is copied or moved
+  by direct-initialization; a prvalue of the class initializes the result with no copy. Grouped declarations
   still take precedence where the statement can be a declaration.
 - Function-template bodies replay decay-copy of supported dependent operands with the
   template arguments bound. A value-dependent operand with known type gives the conversion
@@ -5586,9 +5587,14 @@ the body. A non-generic lambda body uses its own evaluation context.
 - Concrete decay-copy works in a non-type template argument with `auto{expr}` or with
   `auto(expr)` when the initializer starts with an integer literal. The argument must be
   a converted constant expression. Function and function-pointer type-ids keep precedence.
-- General class objects, member pointers, operands whose type dependence is unresolved, and
-  other direct parenthesized template argument spellings remain open, as do dependent
-  template arguments, requirements, and exception specifications.
+- A dependent operand gives a dependent prvalue in any templated context: requires-expressions
+  and compound requirements (as libycxx's ranges CPOs write them), noexcept operators and
+  specifiers, trailing return types and base specifiers. Substitution analyses the copy, so a
+  deleted copy constructor makes a requirement unsatisfied.
+- In a constraint, a decay-copy is written as a conversion to the `auto` placeholder, which
+  mangles as `cv Da e` and `tl Da e E` as Clang and GCC do (`tests/own/abi/decay-copy-constraints.run.cpp`).
+- Member pointers, other direct parenthesized template argument spellings such as
+  `Tag<auto(n)>`, and dependent template arguments remain open.
 
 ## Comparisons: `<=>`, defaulted `==` and `<=>`, rewritten candidates (#295)
 

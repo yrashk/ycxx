@@ -225,8 +225,8 @@ and reflection annotations. The standalone C++20 package provides runtime owners
 capability tokens, effect budgets, and scoped handlers for GCC and Clang builds.
 [YCXX Policies package](packages/ycxx-policies/README.md)
 
-Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
-array and function decay. Non-type template parameters can have enumeration types
+Single-expression `auto(x)` and `auto{x}` perform decay-copy of scalars, pointers and classes,
+including array and function decay, also with dependent operands in requires-expressions. Non-type template parameters can have enumeration types
 ([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
 instantiation, and a function template whose signature holds a dependent variable-template-id
 or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). C++26
