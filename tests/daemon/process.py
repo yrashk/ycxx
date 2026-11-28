@@ -493,6 +493,36 @@ def live_trace(env):
                 pass
 
 
+def same_named_class_member_types(env):
+    # #1730: a resident daemon shares one sema::World across translation units and revisions.
+    # Two units (or two revisions of one unit) defining classes of the same name with differently
+    # typed data members must not reuse a stale member type when replaying default member
+    # initializers.
+    d = env.scope / 'member_types'
+    d.mkdir()
+    (d / 'array_member.cpp').write_text('struct A { int y[3]; };\n')
+    (d / 'scalar_member.cpp').write_text('class A { public: int y = 0; };\nint use(A a) { return a.y; }\n')
+    code1, _, err1 = env.cxx(['-std=c++26', '-fsyntax-only', 'array_member.cpp'], d, env.daemon)
+    if code1 != 0:
+        fail(f'same_named_class_member_types: array_member.cpp failed ({code1}): {err1}')
+        return
+    code2, _, err2 = env.cxx(['-std=c++26', '-fsyntax-only', 'scalar_member.cpp'], d, env.daemon)
+    if code2 != 0:
+        fail(f'same_named_class_member_types: scalar_member.cpp failed under daemon ({code2}): {err2}')
+        return
+    # Also verify changing a member's type in place in the same translation unit.
+    edit = d / 'edit_member.cpp'
+    edit.write_text('struct B { int y[3] = {1, 2, 3}; };\n')
+    code3, _, err3 = env.cxx(['-std=c++26', '-fsyntax-only', 'edit_member.cpp'], d, env.daemon)
+    if code3 != 0:
+        fail(f'same_named_class_member_types: edit_member.cpp v1 failed ({code3}): {err3}')
+        return
+    edit.write_text('struct B { int y = 0; };\nint use_b(B b) { return b.y; }\n')
+    code4, _, err4 = env.cxx(['-std=c++26', '-fsyntax-only', 'edit_member.cpp'], d, env.daemon)
+    if code4 != 0:
+        fail(f'same_named_class_member_types: edit_member.cpp v2 failed under daemon ({code4}): {err4}')
+
+
 def main():
     ycxx, driver = map(os.path.abspath, sys.argv[1:])
     env = Env(ycxx, driver)
@@ -505,8 +535,9 @@ def main():
                 env.pid() != env.fixture_daemon.pid):
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (edit_during_build, edit_error_during_build, edit_policy_during_build, killed_client,
-                     concurrent_clients, live_trace, killed_daemon, restart):
+        for test in (same_named_class_member_types, edit_during_build, edit_error_during_build,
+                     edit_policy_during_build, killed_client, concurrent_clients, live_trace,
+                     killed_daemon, restart):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:
