@@ -143,6 +143,17 @@ struct TBaseElab : BaseNested {
 };
 TBaseElab<int> tbase_elab_inst;
 
+// Nested class calling enclosing class's introduced static function and using `D::f::Sub` qualifier.
+struct DInner : B {
+  struct f { using Sub = int; };
+  using B::sf;
+  struct Inner {
+    static constexpr int x = DInner::sf();
+    DInner::f::Sub s = 1;
+  };
+};
+static_assert(DInner::Inner::x == 2);
+
 int check(D d, DRev dr, DClass dc, DUnion du, DEnum de, DScopedEnum dse, DMulti dm,
           TDep<B> td, TConcrete<int> tc, TDepCall<B> tdc) {
   return d.f() + d.inside() + dr.f() + dc.f() + du.f() + de.f() + dse.f() + dm.f() +

@@ -2154,8 +2154,10 @@ public:
       if (const ClassRec* c = class_rec(cls))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; }) ||
                std::ranges::contains(c->introduced, n, &MemberDeclRec::name);
-      if (cls == current_class) {
-        if (auto m = q_->earlier_member(n, /*type_only=*/false))
+      if (cls == current_class || encloses_current_class(cls)) {
+        auto m = cls == current_class ? q_->earlier_member(n, /*type_only=*/false)
+                                      : q_->enclosing_earlier_member(cls, n, /*type_only=*/false);
+        if (m)
           return m->kind == ast::DeclKind::function || m->kind == ast::DeclKind::variable ||
                  m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::enumerator;
         if (q_->dependent_member_using(cls, n)) return true;
@@ -2373,16 +2375,17 @@ public:
     if (s.type && types().is_class(*s.type)) {
       const EntityId cls = types().class_of(*s.type);
       if (unscoped_member_enumerator(cls, n)) return std::nullopt;
-      if (!types().is_dependent(*s.type)) {
-        if (const ClassRec* cr = class_rec(cls); cr && cr->defined) {
-          if (auto found = find_member(cls, n); found && !found->ambiguous &&
-              (found->nested_type == EntityId::none || found->enumerator != EntityId::none))
-            return std::nullopt;
-        } else if (cls == current_class) {
-          if (auto earlier = q_->earlier_member(n, /*type_only=*/false);
-              earlier && (!is_type(earlier->kind) || (earlier->flags & decl_flag::template_)))
-            return std::nullopt;
-        }
+      const ClassRec* cr = !types().is_dependent(*s.type) ? class_rec(cls) : nullptr;
+      if (cr && cr->defined) {
+        if (auto found = find_member(cls, n); found && !found->ambiguous &&
+            (found->nested_type == EntityId::none || found->enumerator != EntityId::none))
+          return std::nullopt;
+      } else if (cls == current_class || encloses_current_class(cls)) {
+        auto earlier = cls == current_class ? q_->earlier_member(n, /*type_only=*/false)
+                                            : q_->enclosing_earlier_member(cls, n, /*type_only=*/false);
+        if (earlier && (!is_type(earlier->kind) || (earlier->flags & decl_flag::template_)))
+          return std::nullopt;
+        if (q_->dependent_member_using(cls, n)) return std::nullopt;
       }
     }
     return m->type;

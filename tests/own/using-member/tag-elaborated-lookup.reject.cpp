@@ -57,3 +57,26 @@ struct MILeft : MIBase { using f = MIBase::f; };
 struct MIRight : MIBase {};
 struct MIDerived : MILeft, MIRight {};
 struct MIDerived::f* bad_mi_alias_tag = nullptr;  //! error
+
+// Enclosing incomplete class and dependent current instantiation hide nested tags behind non-types.
+struct DInnerBad : BStatic {
+  struct sf { int v = 10; };
+  using BStatic::sf;
+  struct Inner {
+    using Bad = DInnerBad::sf;  //! error
+  };
+};
+
+template<class T> struct TInnerBad : T {
+  struct f { long long a, b; };
+  using T::f;
+  struct Inner {
+    using Bad = TInnerBad::f;  //! error
+  };
+};
+
+template<class T> struct TDirectNoInst {
+  struct f { long long a, b; };
+  static constexpr int f = 0;
+  using Bad = TDirectNoInst::f;  //! error
+};
