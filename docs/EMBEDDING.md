@@ -172,11 +172,13 @@ int main() {
 
 To edit a unit, call `set_source` again with the same `TuId` and ask for a new result.
 Keep the session alive while using its query results. Copy any object or diagnostics you want
-to retain across updates. To compile a source file that includes headers, populate
-`pp::Config` with the include paths for the target. The installed package exposes
-`ycxx_RESOURCE_DIR` for compiler resource headers and `ycxx_TARGET_INCLUDE_DIR` for target
-libycxx headers. [The compiler example](../examples/embedding/compiler.cpp) shows how to
-add the Linux resource include directory. The C++ runtime used by your host application
+to retain across updates. To compile a source file that includes headers, call `ycxx::pp::with_system_dirs` or populate
+`pp::Config` with the include paths for the target. In an installed or relocated SDK,
+`pp::with_system_dirs` and `pp::resource_include_dir` resolve the installed resource and target
+libycxx headers automatically. The installed package also exposes `ycxx_RESOURCE_DIR` and
+`ycxx_TARGET_INCLUDE_DIR` for explicit configuration through `pp::Config::resource_dir` /
+`target_include_dir` or `pp::Config::angle_dirs`. [The compiler example](../examples/embedding/compiler.cpp)
+shows how to add the Linux resource include directory explicitly. The C++ runtime used by your host application
 and the runtime you link into the generated program are independent choices. See the
 [Darwin runtime inputs](BUILDING.md#linking-ycxx-into-a-c-application) when linking a
 Darwin program from an installed SDK.

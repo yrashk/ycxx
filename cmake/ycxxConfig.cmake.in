@@ -41,6 +41,48 @@ foreach(_ycxx_target IN ITEMS @ycxxc_exported_components@)
 endforeach()
 unset(_ycxx_standard_module)
 unset(_ycxx_target)
+if(TARGET ycxx::preprocessor)
+  if(NOT TARGET _ycxx_pp_sdk_paths)
+    string(REPLACE "\\" "\\\\" _ycxx_pp_resource_lit "${ycxx_RESOURCE_DIR}")
+    string(REPLACE "\"" "\\\"" _ycxx_pp_resource_lit "${_ycxx_pp_resource_lit}")
+    string(REPLACE "\\" "\\\\" _ycxx_pp_target_lit "${ycxx_TARGET_INCLUDE_DIR}")
+    string(REPLACE "\"" "\\\"" _ycxx_pp_target_lit "${_ycxx_pp_target_lit}")
+    set(_ycxx_pp_paths_src "${CMAKE_BINARY_DIR}/_ycxx_sdk/pp_sdk_paths.cpp")
+    string(CONCAT _ycxx_pp_paths_content
+      "extern \"C\" void ycxx_pp_register_sdk_paths(const char*, const char*) noexcept;\n"
+      "namespace {\n"
+      "[[gnu::constructor, gnu::used]] void ycxx_pp_register_installed_sdk_paths() noexcept {\n"
+      "  ycxx_pp_register_sdk_paths(\"${_ycxx_pp_resource_lit}\", \"${_ycxx_pp_target_lit}\");\n"
+      "}\n"
+      "}\n")
+    set(_ycxx_pp_write TRUE)
+    if(EXISTS "${_ycxx_pp_paths_src}")
+      file(READ "${_ycxx_pp_paths_src}" _ycxx_pp_existing)
+      if(_ycxx_pp_existing STREQUAL _ycxx_pp_paths_content)
+        set(_ycxx_pp_write FALSE)
+      endif()
+      unset(_ycxx_pp_existing)
+    endif()
+    if(_ycxx_pp_write)
+      file(WRITE "${_ycxx_pp_paths_src}" "${_ycxx_pp_paths_content}")
+    endif()
+    add_library(_ycxx_pp_sdk_paths OBJECT "${_ycxx_pp_paths_src}")
+    set_target_properties(_ycxx_pp_sdk_paths PROPERTIES
+      CXX_SCAN_FOR_MODULES OFF
+      CXX_EXTENSIONS OFF
+      POSITION_INDEPENDENT_CODE ON)
+    unset(_ycxx_pp_resource_lit)
+    unset(_ycxx_pp_target_lit)
+    unset(_ycxx_pp_paths_src)
+    unset(_ycxx_pp_paths_content)
+    unset(_ycxx_pp_write)
+  endif()
+  get_target_property(_ycxx_pp_iface_libs ycxx::preprocessor INTERFACE_LINK_LIBRARIES)
+  if(NOT _ycxx_pp_iface_libs OR NOT "_ycxx_pp_sdk_paths" IN_LIST _ycxx_pp_iface_libs)
+    set_property(TARGET ycxx::preprocessor APPEND PROPERTY INTERFACE_LINK_LIBRARIES _ycxx_pp_sdk_paths)
+  endif()
+  unset(_ycxx_pp_iface_libs)
+endif()
 foreach(component IN LISTS ycxx_FIND_COMPONENTS)
   if(TARGET "ycxx::${component}")
     set("ycxx_${component}_FOUND" TRUE)

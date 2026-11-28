@@ -158,6 +158,72 @@ void* pointer = NULL;
         "libycxx's full cstddef finds max_align_t after a partial stddef.h include");
 }
 
+void explicit_and_relocated_resources() {
+  check(pp::resource_include_dir(ast::x86_64_linux, "/opt/ycxx/resources/") == "/opt/ycxx/resources/linux/include",
+        "explicit Linux resource_include_dir normalizes trailing slash");
+  check(pp::resource_include_dir(ast::aarch64_darwin, "/opt/ycxx/resources/") == "/opt/ycxx/resources/common/include",
+        "explicit Darwin resource_include_dir resolves common/include");
+
+  auto linux_dirs = pp::system_dirs(ast::x86_64_linux, {}, true, "/opt/ycxx/resources", "/opt/ycxx/target/include/");
+  check(linux_dirs.size() >= 3 && linux_dirs[0] == "/opt/ycxx/target/include" &&
+            linux_dirs[1] == "/opt/ycxx/resources/linux/include" &&
+            linux_dirs[2] == "/opt/ycxx/resources/common/include",
+        "explicit system_dirs places target include before Linux and common resources");
+
+  auto darwin_dirs = pp::system_dirs(ast::aarch64_darwin, {}, false, "/opt/ycxx/resources", "/opt/ycxx/target/include");
+  check(!darwin_dirs.empty() && darwin_dirs[0] == "/opt/ycxx/resources/common/include" &&
+            !std::ranges::contains(darwin_dirs, std::string_view("/opt/ycxx/target/include")) &&
+            !std::ranges::contains(darwin_dirs, std::string_view("/opt/ycxx/resources/linux/include")),
+        "explicit system_dirs honors include_libycxx=false and Darwin resource layout");
+
+  pp::Config cfg;
+  cfg.target = &ast::x86_64_linux;
+  cfg.resource_dir = "sdk/resources";
+  cfg.target_include_dir = "sdk/target/include";
+  cfg.angle_dirs = {"/work/sdk/resources/linux/include", "/work/user"};
+  cfg.system_from = 2;
+  cfg = pp::with_system_dirs(std::move(cfg), "/work");
+  check(cfg.resource_dir.empty() && cfg.target_include_dir.empty(),
+        "with_system_dirs consumes explicit resource_dir and target_include_dir");
+  check(cfg.system_from == 1 && cfg.angle_dirs.size() >= 4 && cfg.angle_dirs[0] == "/work/user" &&
+            cfg.angle_dirs[1] == "/work/sdk/target/include" &&
+            cfg.angle_dirs[2] == "/work/sdk/resources/linux/include" &&
+            cfg.angle_dirs[3] == "/work/sdk/resources/common/include",
+        "with_system_dirs normalizes relative overrides against cwd and deduplicates -I");
+
+  MemHost h;
+  h.files["/work/sdk/target/include/stddef.h"] = "#define FROM_EXPLICIT_TARGET 1\n#include_next <stddef.h>\n";
+  h.files["/work/sdk/resources/linux/include/stddef.h"] = "#define FROM_EXPLICIT_LINUX_RES 1\ntypedef unsigned long size_t;\n";
+  h.files["/work/sdk/resources/common/include/stdarg.h"] = "#define FROM_EXPLICIT_COMMON_RES 1\n";
+  h.files["main.cpp"] =
+      "#include <stddef.h>\n#include <stdarg.h>\n"
+      "int ok = FROM_EXPLICIT_TARGET + FROM_EXPLICIT_LINUX_RES + FROM_EXPLICIT_COMMON_RES;\nsize_t n;\n";
+  pp::Session s(h, cfg);
+  auto p = run(s, h);
+  check(p.diags.empty() && text(p.region) == "typedef unsigned long size_t ; int ok = 1 + 1 + 1 ; size_t n ;",
+        "explicit resource_dir and target_include_dir resolve stddef.h and stdarg.h");
+
+  pp::Config nostd;
+  nostd.target = &ast::x86_64_linux;
+  nostd.nostdinc = true;
+  nostd.resource_dir = "/opt/ycxx/resources";
+  nostd.target_include_dir = "/opt/ycxx/target/include";
+  nostd = pp::with_system_dirs(std::move(nostd));
+  check(nostd.angle_dirs.empty() && nostd.resource_dir.empty() && nostd.target_include_dir.empty(),
+        "-nostdinc omits explicit resource_dir and target_include_dir too");
+
+  pp::Config nostdxx;
+  nostdxx.target = &ast::x86_64_linux;
+  nostdxx.nostdincxx = true;
+  nostdxx.resource_dir = "/opt/ycxx/resources";
+  nostdxx.target_include_dir = "/opt/ycxx/target/include";
+  nostdxx = pp::with_system_dirs(std::move(nostdxx));
+  check(nostdxx.resource_dir.empty() && nostdxx.target_include_dir.empty() &&
+            !std::ranges::contains(nostdxx.angle_dirs, std::string_view("/opt/ycxx/target/include")) &&
+            std::ranges::contains(nostdxx.angle_dirs, std::string_view("/opt/ycxx/resources/linux/include")),
+        "-nostdinc++ omits target_include_dir while keeping explicit resource_dir");
+}
+
 void source_target() {
   for (auto target : {&ast::aarch64_darwin, &ast::x86_64_linux}) {
     pp::Source source{"main.cpp", {}, {}};
@@ -786,6 +852,7 @@ int main() {
   includes();
   linux_system_includes();
   linux_stddef();
+  explicit_and_relocated_resources();
   source_target();
   object_like();
   function_like();

@@ -92,9 +92,13 @@ In a separate CMake build, use `find_package(ycxx CONFIG REQUIRED)` and link the
 you need. Set `CMAKE_PREFIX_PATH` to the installation prefix and build the examples with
 `YCXX_EMBED_INSTALLED=ON`, then run `ctest --test-dir <consumer-build> --output-on-failure`.
 The stock configuration also tests catching an exception from a separately built shared library.
-For an installed compiler session, pass the include paths to `ycxx::pp::Config`.
-The package exposes `ycxx_RESOURCE_DIR` for the compiler resource headers and
-`ycxx_TARGET_INCLUDE_DIR` for the target libycxx headers.
+For an installed compiler or preprocessor session, `ycxx::pp::with_system_dirs` and
+`ycxx::pp::resource_include_dir` automatically resolve the installed resource and target
+libycxx headers, including in a relocated prefix. To override those locations explicitly, set
+`resource_dir` or `target_include_dir` on `ycxx::pp::Config` before calling `with_system_dirs`,
+call `ycxx::pp::resource_include_dir(target, resource_dir)`, or append include directories
+directly to `ycxx::pp::Config::angle_dirs`. The package exposes `ycxx_RESOURCE_DIR` for the
+compiler resource headers and `ycxx_TARGET_INCLUDE_DIR` for the target libycxx headers.
 `ycxx_STDLIB` identifies the standard library used to build the package.
 
 For an SDK built on arm64 macOS with the target runtime, `ycxx_DARWIN_RUNTIME_ARCHIVES` gives

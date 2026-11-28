@@ -27,6 +27,7 @@ export import :files;
 export import :region;
 export import :unit;
 export import :tu;
+export import :system_os;
 export import :system;
 export import :predefined;
 export import :cond;
@@ -629,7 +630,12 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
   };
   std::vector<std::string> dirs;
   const bool include_libycxx = !std::exchange(cfg.nostdincxx, false);
-  if (!std::exchange(cfg.nostdinc, false)) dirs = system_dirs(*cfg.target, sdkroot, include_libycxx);
+  std::string resource_dir = std::exchange(cfg.resource_dir, {});
+  std::string target_include_dir = std::exchange(cfg.target_include_dir, {});
+  if (!resource_dir.empty()) resource_dir = normal(resource_dir);
+  if (!target_include_dir.empty()) target_include_dir = normal(target_include_dir);
+  if (!std::exchange(cfg.nostdinc, false))
+    dirs = system_dirs(*cfg.target, sdkroot, include_libycxx, resource_dir, target_include_dir);
   auto system = dirs | std::views::transform(normal) | std::ranges::to<std::vector>();
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
   // directory's place only. -isystem directories are system directories too: a `-I` directory
