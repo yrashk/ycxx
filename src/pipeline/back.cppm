@@ -103,7 +103,8 @@ struct Entity {
   std::optional<QualType> template_type{};
   std::vector<ast::TemplateArg> template_args{};
   std::vector<ast::TemplateParamSema> template_params{};  // its template's head
-  // BOOTSTRAP: std::vector<bool>: GCC 16 writes a module unit exporting one that importers cannot read.
+  // BOOTSTRAP: std::vector<bool>: GCC 16 writes a module unit exporting one that importers cannot read
+  // (#1705). Intended: `std::vector<bool> template_same_heads{};`
   std::vector<std::uint8_t> template_same_heads{};  // by argument: see `TemplateSpec`
   ast::WrittenConstraint template_head_constraint{}, template_trailing_constraint{};
   // A non-template member function's trailing requires-clause, which its name encodes (#1417).

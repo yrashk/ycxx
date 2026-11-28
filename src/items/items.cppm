@@ -128,6 +128,9 @@ struct Item {
   u32 brace_end = 0;
   u32 template_depth = 0;  // the number of template-heads
   bool specialization = false;  // `template<>`: an explicit specialization ([temp.expl.spec])
+  // A deduction-guide ([temp.deduct.guide]): the template-name it is for. It declares no name
+  // lookup finds; empty for any other item.
+  std::string deduction_guide;
   // The spelled nested-name-specifier of the first declarator (`N::S::` in `void N::S::f()`), as
   // region tokens [qualifier_begin, qualifier_end).
   u32 qualifier_begin = 0;
@@ -585,9 +588,14 @@ static u32 after_requires_clause(u32 j, auto kind, auto match, auto match_angle,
     } else if (kind(j) == Tk::kw_true || kind(j) == Tk::kw_false) {
       ++j;
     } else {
-      while (kind(j) == Tk::identifier || kind(j) == Tk::coloncolon) {
+      // A possibly qualified name, perhaps a template-id: an identifier after it begins what
+      // the clause constrains (`requires C<T> T f(T)`, `requires C<T> W(T) -> W<T>`).
+      if (kind(j) == Tk::coloncolon) ++j;
+      while (kind(j) == Tk::identifier) {
         ++j;
         if (kind(j) == Tk::less) j = match_angle(j);
+        if (kind(j) != Tk::coloncolon) break;
+        ++j;
       }
       if (kind(j) == Tk::l_paren && value_trait(j - 1)) j = match(j);
     }
@@ -1142,6 +1150,7 @@ private:
     u32 qual_end = none;
     bool function = false;
     bool has_type = !first;  // later declarators share the first one's decl-specifiers
+    bool typed_name = false;  // a type was spelled before the candidate name
     u32 n = from;
     while (n < to) {
       Tk t = kind(n);
@@ -1165,6 +1174,7 @@ private:
         }
         cand = n;
         spelled = name(n);
+        typed_name = has_type;
         qual_begin = qual;
         qual_end = n;
         qual = none;
@@ -1201,9 +1211,10 @@ private:
         n = operator_spelling(n + 1, to, spelled, /*comma_ends=*/false);
         cand_end = n;
       } else if (t == Tk::l_paren) {
-        // A ptr-operator after `(` starts a grouped declarator, including `T (C::*p)(…)`.
+        // A ptr-operator after `(` starts a grouped declarator, including `T (C::*p)(…)`, unless
+        // the `(` follows a declarator-id after a type: `S s(&i)` initializes `s`.
         bool ptr = kind(n + 1) == Tk::star || kind(n + 1) == Tk::amp || kind(n + 1) == Tk::ampamp || member_ptr_ahead(n + 1, to);
-        if (cand != none && n == cand_end && !ptr) {
+        if (cand != none && n == cand_end && (!ptr || typed_name)) {
           function = true;
           break;
         }
@@ -1227,6 +1238,14 @@ private:
       }
     }
     if (cand == none) return;
+    // `explicit(opt) template-name ( parameters ) -> simple-template-id ;`: a deduction-guide
+    // ([temp.deduct.guide]), whose name no lookup finds; no type precedes the template-name.
+    if (first && function && !typed_name && qual_begin == none && cand_end == cand + 1 && !out_.items[k].has_body() &&
+        kind(match(cand_end)) == Tk::arrow &&
+        (kind(match(cand_end) + 1) == Tk::identifier || kind(match(cand_end) + 1) == Tk::coloncolon)) {
+      out_.items[k].deduction_guide = spelled;
+      return;
+    }
     if (first && qual_begin != none) {
       out_.items[k].qualifier_begin = qual_begin;
       out_.items[k].qualifier_end = qual_end;

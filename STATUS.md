@@ -1657,7 +1657,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   is kept as an atom and read again after deduction, once the template's constraints are
   satisfied. A substitution failure there fails deduction, and an explicit specialization leaves
   copy-initialization ([temp.deduct.general], [over.match.funcs.general]). Conversion functions
-  (#339) and deduction guides (#316) do not take the specifier yet.
+  (#339) do not take the specifier yet; deduction-guides do (#316).
 - Constructor templates take part in overload resolution only when their associated
   constraints are satisfied ([temp.deduct.general]/5, #1398). An atom spelled in a member of a
   class template specialization, such as a member template's constraint, reads the enclosing
@@ -2623,6 +2623,39 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   class templates, explicit and partial specializations, alias templates, packs, concepts,
   qualified names whose nested-name-specifier is a member template, and members found through a
   dependent base.
+
+## Class template argument deduction (#316)
+
+- **Placeholders for a deduced class type** ([dcl.type.class.deduct]): a class template's name
+  without arguments, unqualified or `N::C`, in a variable declaration at block or namespace scope
+  (`C x(args)`, `C x{…}`, `C x = e`, `C x = {…}`), a functional cast (`C(args)`, `C{…}`) and a
+  new-expression (`new C(args)`). The type is a `TAuto` with `deduced_class` set (`Types::deduced_class`),
+  allowed only where the parser's caller sets `Parser::deduced_class_ok`. It is the whole declared
+  type (not `C*` or `C&`), needs an initializer, deduces the same type for every declarator, and
+  is no function's return type.
+- **Deduction** (`Sema::deduce_class_type`, [over.match.class.deduct]): the guides are the
+  constructors of the primary template's pattern (constructor templates with their parameters
+  renumbered after the class's, `constructor_template_guide`), `C()` when C declares no
+  constructor or is not defined, the copy deduction candidate `C(C<T…>)`, and the user's
+  deduction-guides declared before the point. Overload resolution is `resolve` with the
+  tie-breaks of [over.match.best.general]/2.10–2.12 (`Candidate::guide`). Copy-initialization skips
+  explicit guides; copy-list-initialization that selects one is an error. While an argument is
+  type-dependent the type is dependent.
+- **Deduction-guides** ([temp.deduct.guide]) at namespace scope: the splitter marks the item
+  (`Item::deduction_guide`, the template-name) and gives it no name; `ItemAnalysis::deduction_guide`
+  reads `explicit`/`explicit(cond)`, the parameters, the result (a specialization of the
+  template, checked) and a requires-clause, into `Program::deduction_guides_`.
+  `Program::deduction_guides` analyses the guide items before the point on demand.
+- The splitter reads `S s(&i)` as declaring `s`, not `i`: a `(` after a declarator-id that follows
+  a type is never a grouping parenthesis. A template-head's requires-clause ends after a possibly
+  qualified concept-id, so `requires C<T> T f(T)` and `requires C<T> W(T) -> W<T>` keep their names.
+- Tests: `tests/own/deduction-guides` (12), `tests/unit/items` (`deduction_guides`).
+- Not yet: member deduction-guides are accepted and ignored, and deduction through a member
+  class template's qualified name (#1706); aggregate deduction candidates and alias
+  template deduction (C++20, #1707); the initializer-list phase of [over.match.list] for
+  guides (#1708); deduced class types for static data members, non-type template parameters
+  and in `for`/condition declarations (#1709); a value default of a constructor
+  template's parameter is dropped from its guide.
 
 ## Templates, ζ step 3: variable templates and specializations (#88, 2026-11-18)
 
@@ -5445,7 +5478,12 @@ Each is removed once ycxx compiles itself.
   `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
   - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
     its importers cannot read ("failed to read compiled module cluster: Bad file data").
-  - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
+  - Fix: belongs in GCC (unreduced, #1705). Use `std::vector<bool>` when ycxx compiles itself.
+- **No `std::vector<bool>` in `sema::DeductionGuide::defaulted`** (`std::vector<std::uint8_t>`, #316).
+  - Cause: a precaution against the same GCC 16.2 module bug (#1705); `ycxx.sema` exports the
+    struct. `parse::Program::Index` keeps `std::vector<bool>` members without it, so the trigger
+    is narrower.
+  - Fix: belongs in GCC. Use `std::vector<bool>` once #1705 shows it is safe, or when ycxx compiles itself.
 - **The interpreter's byte comparison is defined in its implementation unit** (`src/interp/ops.cpp`).
   - Cause: with stock libstdc++, GCC 16.2 cannot read the `ycxx.interp:machine` partition when
     it contains the body of `Machine::compare_bytes`.

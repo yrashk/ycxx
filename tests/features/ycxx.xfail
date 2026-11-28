@@ -273,7 +273,6 @@ draft/over/over.match.best.general-2.accept.cpp 'template' not supported yet
 draft/over/over.match.best.general-3.accept.cpp 'template' not supported yet
 draft/over/over.match.best.general-4.accept.cpp 'struct' not supported yet
 draft/over/over.match.best.general-5.accept.cpp 'struct' not supported yet
-draft/over/over.match.best.general-7.accept.cpp 'template' not supported yet
 draft/over/over.match.class.deduct-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/over/over.match.class.deduct-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/over/over.match.class.deduct-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
