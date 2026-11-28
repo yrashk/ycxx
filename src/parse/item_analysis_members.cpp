@@ -2844,6 +2844,7 @@ auto BodyAnalysis::generic_body() -> Result<ast::BodySema> {
   } pop{p_};
   s_.push_scope();
   for (const auto& [n, t] : gi.g.aliases) s_.local_type_alias(n, t, 0);
+  for (const auto& u : gi.g.usings) s_.replay_block_using(u.name, u.decls, u.type_index);
   // Innermost first: the first of a name is the one its definition saw.
   for (std::size_t i = std::min(gi.g.consts.size(), gi.g.const_values.size()); i-- > 0;) {
     u32 l = s_.declare_local(gi.g.consts[i].name, gi.g.consts[i].type, 0, 0, false);

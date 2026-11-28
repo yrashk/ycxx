@@ -274,11 +274,12 @@ auto Sema::outer_block_here() -> OuterBlock {
   OuterBlock b;
   b.function = local_scope();
   b.cls = current_class;
-  std::set<u32> seen;
+  std::set<u32> seen_value;
+  std::set<u32> seen_type;
   for (std::size_t d = scopes_.size(); d-- > 0;) {
     const u32 ctx = context_of(d);
     for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p) {
-      if (p->first == no_name() || (p->second & capture_bit) || !seen.insert(std::to_underlying(p->first)).second) continue;
+      if (p->first == no_name() || (p->second & capture_bit) || !seen_value.insert(std::to_underlying(p->first)).second) continue;
       OuterBlock::Name n;
       n.name = p->first;
       n.local = ctx == lambdas_.size() ? locals_[p->second] : lambdas_[ctx].outer_locals[p->second];
@@ -288,19 +289,30 @@ auto Sema::outer_block_here() -> OuterBlock {
       b.names.push_back(std::move(n));
     }
     for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
-      if (t->depth == d && seen.insert(std::to_underlying(t->name)).second)
-        b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none});
-    for (const BlockUsing& u : block_usings_)
-      if (u.depth == d && seen.insert(std::to_underlying(u.name)).second) {
-        OuterBlock::Name n;
-        n.kind = OuterBlock::Name::Kind::using_;
-        n.name = u.name;
-        n.decls = u.decls;
-        if (u.type_index) n.type = u.decls[*u.type_index].type;
-        b.names.push_back(std::move(n));
+      if (t->depth == d && seen_type.insert(std::to_underlying(t->name)).second) {
+        seen_value.insert(std::to_underlying(t->name));
+        b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none, true, false});
       }
+    for (auto u = block_usings_.rbegin(); u != block_usings_.rend(); ++u) {
+      if (u->depth != d) continue;
+      const bool has_value = std::ranges::any_of(u->decls, [](const ast::DeclSema& decl) { return !is_type(decl.kind); });
+      const bool keep_type = u->type_index && seen_type.insert(std::to_underlying(u->name)).second;
+      const bool keep_value = (has_value || keep_type) && seen_value.insert(std::to_underlying(u->name)).second;
+      if (!keep_type && !keep_value) continue;
+      OuterBlock::Name n;
+      n.kind = OuterBlock::Name::Kind::using_;
+      n.name = u->name;
+      n.decls = u->decls;
+      if (u->type_index) {
+        const ast::DeclSema& decl = u->decls[*u->type_index];
+        n.type = decl.type;
+        n.type_alias = decl.kind == ast::DeclKind::type_alias;
+        n.type_template = (decl.flags & decl_flag::template_) != 0;
+      }
+      b.names.push_back(std::move(n));
+    }
     for (const BlockAlias& a : block_aliases_)
-      if (a.depth == d && seen.insert(std::to_underlying(a.name)).second)
+      if (a.depth == d && seen_value.insert(std::to_underlying(a.name)).second)
         b.names.push_back({OuterBlock::Name::Kind::namespace_alias, a.name, {}, std::nullopt, {}, {}, a.ns});
     for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
       if (u->first == d) b.using_enums.push_back(u->second);

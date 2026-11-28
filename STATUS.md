@@ -1866,7 +1866,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Unscoped and scoped enumerations (`enum class`, `enum struct`), fixed underlying types,
   enumerator values from constant expressions (narrowing into a fixed type diagnosed), unscoped
   enumerators in the enclosing scope and clashes with other declarations, `E::e`, enumerations
-  nested in classes (`C::E`, `C::e`), `using enum` in a block, `enum E` elaborated specifiers.
+  nested in classes (`C::E`, `C::e`), `using enum` in a block (including unqualified operands
+  imported by block `using`-declarations, local-class and generic-lambda block capture, incomplete
+  opaque enum rejection, and `-fcompat=gcc` non-type hiding; #1695), `enum E` elaborated specifiers.
   Without a fixed type the underlying type is the Itanium compilers' (#220): `unsigned int` or
   `unsigned long` when no enumerator is negative, else `int` or `long`, the narrower that holds
   every value (`tests/own/classes/s4-enum-*`, symbols checked against Clang's). It promotes to

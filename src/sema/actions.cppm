@@ -65,7 +65,13 @@ struct GenericClosure {
   // type aliases its body can name.
   std::vector<std::vector<ast::TemplateParamSema>> scopes;
   Bindings args;
+  struct CapturedUsing {
+    NameId name{};
+    std::vector<ast::DeclSema> decls;
+    std::optional<std::size_t> type_index;
+  };
   std::vector<std::pair<NameId, QualType>> aliases;
+  std::vector<CapturedUsing> usings;
   bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
   // Set for a lambda outside every function body: the part it is in, which its specializations
   // are analysed in, and the class it is in, if any. `body_begin` is an offset in that part.
@@ -132,6 +138,8 @@ struct OuterBlock {
     QualType type{};
     std::vector<ast::DeclSema> decls;
     EntityId ns = EntityId::none;
+    bool type_alias = false;
+    bool type_template = false;
   };
   EntityId function = EntityId::none;  // the enclosing function, or lambda's function call operator
   EntityId cls = EntityId::none;       // the class the function is a member of, if any
@@ -722,6 +730,9 @@ public:
   std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true,
                                     std::optional<u32> type_at = std::nullopt, bool search_locals = true,
                                     std::optional<EntityId>* qualifier_namespace = nullptr);
+  // Operand lookup for an unqualified `using enum E;` ([enum.udecl]/1, CWG 2877): type-only in
+  // spec/clang modes, and ordinary lookup (non-types hide types) in gcc mode.
+  std::optional<QualType> using_enum_type(NameId name);
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
@@ -1123,13 +1134,22 @@ public:
   }
 
   // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
-  void using_enum(QualType t, u32 at_) {
+  void using_enum(QualType t, u32 at_, std::optional<NameId> name = std::nullopt) {
     if (!types().is_enum(t)) {
-      diag(at_, Diag::not_a_type, no_name());
+      diag(at_, Diag::not_a_type, name.value_or(no_name()));
       return;
     }
     const EntityId enumeration = types().enum_of(t);
-    if (q_->require_enum_definition(enumeration)) using_enums_.push_back({scopes_.size() - 1, enumeration});
+    if (!q_->require_enum_definition(enumeration)) return;
+    const EnumRec* rec = enum_rec(enumeration);
+    if (!rec || !rec->defined) {
+      diag(at_, Diag::incomplete_type, t);
+      return;
+    }
+    using_enums_.push_back({scopes_.size() - 1, enumeration});
+  }
+  void replay_block_using(NameId name, std::vector<ast::DeclSema> decls, std::optional<std::size_t> type_index) {
+    block_usings_.push_back({scopes_.size() - 1, name, std::move(decls), type_index});
   }
 
   // ------------------------------------------------------------ concepts ([temp.concept], [temp.constr])
@@ -4381,10 +4401,10 @@ public:
     }
     return std::nullopt;
   }
-  std::optional<QualType> outer_block_class_name(NameId name, bool elaborated, bool& hidden) {
+  std::optional<QualType> outer_block_class_name(NameId name, bool elaborated, bool aliases, bool& hidden) {
     EntityId last = outermost_class(current_class);
     for (const OuterBlock* b = outer(); b && is_local_class(last); b = b->outer.get()) {
-      if (auto t = outer_block_type(*b, name, elaborated, hidden)) return t;
+      if (auto t = outer_block_type(*b, name, elaborated, aliases, hidden)) return t;
       if (hidden) return std::nullopt;
       last = EntityId::none;
       for (EntityId k = b->cls; k != EntityId::none; k = enclosing_class(k)) {
@@ -4402,12 +4422,39 @@ public:
     return std::nullopt;
   }
   // The same for a type-name: the type, or none after `hidden` when a non-type hides it.
-  std::optional<QualType> outer_block_type(const OuterBlock& b, NameId name, bool elaborated, bool& hidden) const {
+  std::optional<QualType> outer_block_type(const OuterBlock& b, NameId name, bool elaborated, bool aliases,
+                                           bool& hidden) const {
     for (const OuterBlock::Name& n : b.names) {
       if (n.name != name) continue;
-      if (n.kind == OuterBlock::Name::Kind::type) return n.type;
-      if (n.kind == OuterBlock::Name::Kind::using_ && n.type != QualType{}) return n.type;
-      if (!elaborated) hidden = true;
+      if (n.kind == OuterBlock::Name::Kind::type) {
+        if (!aliases) {
+          hidden = true;
+          return std::nullopt;
+        }
+        return n.type;
+      }
+      if (n.kind == OuterBlock::Name::Kind::using_) {
+        if (!elaborated && std::ranges::any_of(n.decls, [](const ast::DeclSema& d) { return !is_type(d.kind); })) {
+          hidden = true;
+          return std::nullopt;
+        }
+        if (n.type_template) {
+          hidden = true;
+          return std::nullopt;
+        }
+        if (n.type != QualType{}) {
+          if (n.type_alias && !aliases) {
+            hidden = true;
+            return std::nullopt;
+          }
+          return n.type;
+        }
+        if (elaborated) continue;
+        hidden = true;
+        return std::nullopt;
+      }
+      if (elaborated) continue;
+      hidden = true;
       return std::nullopt;
     }
     return std::nullopt;
