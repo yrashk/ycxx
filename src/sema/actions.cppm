@@ -11655,6 +11655,13 @@ public:
     if (types().is_class(target) || types().is_array(target)) return convert(e, to, at_);
     if (named_static_cast && types().is_class(e.type()))
       if (auto cast = exact_conversion_call(e, target, at_, /*allow_explicit=*/true)) return *cast;
+    // The conversion function's implicit object is the operand itself, not a copy of it: one
+    // that cannot bind it is no candidate on a copy either.
+    if (types().is_class(e.type())) {
+      if (auto choice = select_conversion(e, target, at_)) return call_conversion(e, *choice, to, at_);
+      const ClassRec* source = class_rec(types().class_of(e.type()));
+      if (source && !source->closure) return convert(e, to, at_);
+    }
     Ex v = rvalue(e);
     if (!v.ok()) return v;
     QualType from = Types::unqualified(v.type());
