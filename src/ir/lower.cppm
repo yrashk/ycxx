@@ -795,7 +795,8 @@ class Lowering {
         out(n, 0, resize(v, *t, is_signed(f_.operands_of(n)[0])));
         return {};
       }
-      case Op::ptr_cast: out(n, 0, in(n, 0)); return {};
+      case Op::ptr_cast:
+      case Op::ptr_reinterpret: out(n, 0, in(n, 0)); return {};
       case Op::ptr_to_int: {
         auto t = result_type();
         if (!t) return fail(t.error());

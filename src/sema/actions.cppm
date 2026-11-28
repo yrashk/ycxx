@@ -9436,7 +9436,8 @@ public:
     // Through a base subobject or an identity-preserving glvalue cast ([class.temporary]/6).
     if (auto c = as<ast::ImplicitConversion>(e); c &&
         (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
-         c->conversion == ast::ConversionKind::qualification)) {
+         c->conversion == ast::ConversionKind::qualification ||
+         (c->conversion == ast::ConversionKind::reinterpret && c->info.category != ValueCategory::prvalue))) {
       Ex inner = extended({c->operand.id, e.begin + c->operand.at, e.end, {}});
       return node(ast::ImplicitConversion{c->info, c->conversion, c->function, at(inner, e.begin)}, e.begin, e.end, c->info);
     }
@@ -11760,34 +11761,111 @@ public:
     return convert_node(value, ast::ConversionKind::qualification, target);
   }
 
-  // [expr.reinterpret.cast]: the supported object-pointer/integer conversions.
+  // [expr.const.cast]/7: whether a conversion between pointer types removes cv-qualifiers at a
+  // level both decompose to, or adds them below a level that is not const. The deepest common
+  // decomposition decides, since each level's condition depends only on the levels above it.
+  bool casts_away_constness(QualType from, QualType to) {
+    QualType a = from, b = to;
+    bool const_so_far = true;
+    while (types().is_pointer(a) && types().is_pointer(b)) {
+      a = types().pointee(a);
+      b = types().pointee(b);
+      const Cv ca = object_cv(a), cb = object_cv(b);
+      if (!cv_within(ca, cb) || (ca != cb && !const_so_far)) return true;
+      const_so_far = const_so_far && (std::to_underlying(cb) & std::to_underlying(Cv::const_));
+    }
+    return false;
+  }
+
+  // [expr.reinterpret.cast]: the object and function pointer, pointer/integer, identity and
+  // glvalue conversions. Every one stays out of constant evaluation ([expr.const]).
   Ex reinterpret_cast_to(Ex e, QualType to, u32 at_) {
     if (!e.ok()) return e;
-    QualType target = Types::unqualified(to);
+    const Ex fail{NodeId::none, e.begin, e.end};
+    const TypeRec destination = types().rec(to);
+    const bool reference = destination.kind == TypeKind::reference;
+    const QualType target = reference ? destination.inner : Types::unqualified(to);
+    const ValueCategory category = !reference ? ValueCategory::prvalue :
+        destination.rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue;
     if (dependent(e) || types().is_dependent(to))
-      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(target));
-    Ex v = rvalue(e);
-    if (!v.ok()) return v;
-    QualType from = Types::unqualified(v.type());
-    auto object_pointer = [&](QualType t) {
+      return dependent_node({e}, e.begin, e.end, types().is_dependent(to) ? std::nullopt : std::optional(target), category);
+    const auto unsupported = [&] {
+      diag(at_, Diag::not_supported, lex::Tk::kw_reinterpret_cast);
+      return fail;
+    };
+    const auto invalid = [&](QualType from) {
+      diag(at_, Diag::no_conversion, from, to);
+      return fail;
+    };
+    const auto object_pointer = [&](QualType t) {
       if (!types().is_pointer(t)) return false;
       QualType pointee = types().pointee(t);
       return types().is_object(pointee) || types().is_void(pointee);
     };
+    const auto function_pointer = [&](QualType t) {
+      return types().is_pointer(t) && types().is_function(types().pointee(t));
+    };
+    const auto pointer_conversion = [&](QualType from, QualType into) {
+      return (object_pointer(from) || function_pointer(from)) && (object_pointer(into) || function_pointer(into));
+    };
+    // GCC folds a cast to the operand's own type, including its cv-qualifiers, into the operand,
+    // which constant evaluation then accepts.
+    const bool gcc = compatibility() == ast::Compatibility::gcc;
+
+    // /11: a glvalue of type T1 names the same object as a T2 glvalue when a T1 pointer can be
+    // reinterpreted as a T2 pointer. The operand keeps its object; no temporary is created.
+    if (reference) {
+      if (!e.glvalue()) {
+        diag(at_, Diag::reinterpret_rvalue_reference, to);
+        return fail;
+      }
+      if (e.info.bit_width) {
+        diag(at_, Diag::reinterpret_bit_field);
+        return fail;
+      }
+      if (!types().is_object(target) || !types().is_object(e.type())) return unsupported();
+      const QualType from = types().pointer(e.type()), into = types().pointer(target);
+      if (casts_away_constness(from, into)) {
+        diag(at_, Diag::reinterpret_casts_away_qualifiers, from, into);
+        return fail;
+      }
+      if (gcc && types().canonical(e.type()) == types().canonical(target))
+        return convert_node(e, ast::ConversionKind::qualification, target, category);
+      return convert_node(e, ast::ConversionKind::reinterpret, target, category);
+    }
+
+    Ex v = rvalue(e);
+    if (!v.ok()) return v;
+    QualType from = Types::unqualified(v.type());
+    const bool identity = types().canonical(from) == types().canonical(target);
+    // /2: an integral, enumeration or pointer value converts to its own type.
+    if (identity && (types().is_integral(target) || types().is_enum(target) || types().is_pointer(target)))
+      return gcc ? v : convert_node(v, ast::ConversionKind::reinterpret, target);
     unsigned pointer_bits = w_->target.pointer_size * 8;
     if (object_pointer(from) && types().is_integral(target)) {
       unsigned bits = shape(w_->target, *types().builtin_of(target)).bits;
       if (bits == pointer_bits) return convert_node(v, ast::ConversionKind::pointer_to_integral, target);
-      if (bits < pointer_bits) {
-        diag(at_, Diag::no_conversion, from, to);
-        return {NodeId::none, e.begin, e.end};
-      }
+      if (bits < pointer_bits) return invalid(from);
     }
     if (types().is_integral(from) && object_pointer(target) &&
         shape(w_->target, *types().builtin_of(from)).bits == pointer_bits)
       return convert_node(v, ast::ConversionKind::integral_to_pointer, target);
-    diag(at_, Diag::not_supported, lex::Tk::kw_reinterpret_cast);
-    return {NodeId::none, e.begin, e.end};
+    // /6, /7, /8: between object pointers, between function pointers, and (conditionally
+    // supported, as on every target ycxx has) between the two.
+    if (pointer_conversion(from, target)) {
+      if (casts_away_constness(from, target)) {
+        diag(at_, Diag::reinterpret_casts_away_qualifiers, from, to);
+        return fail;
+      }
+      return convert_node(v, ast::ConversionKind::reinterpret, target);
+    }
+    // Valid forms not supported yet: member pointers (/10), std::nullptr_t to an integer (/4),
+    // and an enumeration or a narrower or wider integer to a pointer (/5).
+    if (types().is_member_pointer(from) || types().is_member_pointer(target) ||
+        (types().is(from, Builtin::nullptr_t) && types().is_integral(target)) ||
+        ((types().is_integral(from) || types().is_enum(from)) && types().is_pointer(target)))
+      return unsupported();
+    return invalid(from);
   }
 
   std::vector<ast::DeclSema> written_allocation_declarations(NameId name) {
@@ -12764,7 +12842,8 @@ public:
     if (auto m = as<ast::Member>(e); m && !m->arrow && !m->reference) return check(m->object);
     if (auto c = as<ast::ImplicitConversion>(e); c &&
         (c->conversion == ast::ConversionKind::derived_to_base || c->conversion == ast::ConversionKind::base_to_derived ||
-         c->conversion == ast::ConversionKind::qualification))
+         c->conversion == ast::ConversionKind::qualification ||
+         (c->conversion == ast::ConversionKind::reinterpret && c->info.category != ValueCategory::prvalue)))
       return check(c->operand);
     if (auto b = as<ast::OrderedBinary>(e)) {
       if (b->op == ast::OrderedOp::dot_star) return check(b->lhs);

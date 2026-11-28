@@ -2299,6 +2299,7 @@ class Gen {
       case ast::ConversionKind::floating_integral: return arithmetic(info(from).type, t, rvalue(from));
       case ast::ConversionKind::pointer_to_integral: return pure(ir::Op::ptr_to_int, t, {rvalue(from)});
       case ast::ConversionKind::integral_to_pointer: return pure(ir::Op::int_to_ptr, t, {rvalue(from)});
+      case ast::ConversionKind::reinterpret: return pure(ir::Op::ptr_reinterpret, t, {rvalue(from)}, {word(ty(t))});
       case ast::ConversionKind::boolean: return pure(ir::Op::tobool, t, {rvalue(from)});
       case ast::ConversionKind::array_to_pointer: {
         Place arr = lvalue(from);
@@ -2954,6 +2955,12 @@ class Gen {
         return subobject(lvalue(child(a, c.operand)), ir::Step::base, std::to_underlying(c.function), t);
       if (c.conversion == ast::ConversionKind::base_to_derived)
         return {derived_address(a, t, /*pointer=*/false), t};
+      if (c.conversion == ast::ConversionKind::reinterpret) {
+        // [expr.reinterpret.cast]/11: the same object through a glvalue of another type.
+        Place p = lvalue(child(a, c.operand));
+        const auto ptr_type = facts_.pointer_to(t);
+        return {pure(ir::Op::ptr_reinterpret, ptr_type, {p.ptr}, {word(ty(ptr_type))}), t};
+      }
       if (c.conversion == ast::ConversionKind::qualification) {
         // An explicit xvalue cast preserves storage while carrying the target type's qualifiers.
         Place p = lvalue(child(a, c.operand));

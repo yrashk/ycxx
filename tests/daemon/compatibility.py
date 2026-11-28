@@ -4300,6 +4300,8 @@ def historical_syntax_modes(world, gxx):
         ('templates/destructor-specialization-after-use.reject.cpp', ('clang',)),
         ('array-allocation-syntax/void-delete.reject.cpp', ()),
         ('casts/reinterpret-pointer-integral-discarded.reject.cpp', ('gcc',)),
+        ('casts/reinterpret-identity-constexpr.reject.cpp', ('gcc',)),
+        ('casts/reinterpret-glvalue-constexpr.reject.cpp', ()),
         ('inherit/elaborated-injected-base-access.reject.cpp', ('clang',)),
         ('classes/defaulted-destructor/private-aggregate-member.reject.cpp', ('gcc',)),
         ('consteval/named-result-expired-member.reject.cpp', ('gcc',)),
@@ -4346,6 +4348,8 @@ int f() { P<int,char> p{7}; return p.selected; }
          'constexpr const void* p = reinterpret_cast<const void*>(1UL);'),
         ('cast-operand-side-effect.cpp', (),
          'int n; static_assert((static_cast<void>(reinterpret_cast<const void*>(++n)), true));'),
+        ('reinterpret-adds-qualifiers.cpp', (),
+         'constexpr int n = 4; constexpr const volatile int* p = reinterpret_cast<const volatile int*>(&n);'),
         ('expired-record-read.cpp', (), '''
 struct S { int n; constexpr int value() const { return n; } };
 constexpr bool expired() { const S* p; { S x{7}; p = &x; } return p->value() == 7; }
