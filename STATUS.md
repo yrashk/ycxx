@@ -2672,7 +2672,7 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
 - The splitter reads `S s(&i)` as declaring `s`, not `i`: a `(` after a declarator-id that follows
   a type is never a grouping parenthesis. A template-head's requires-clause ends after a possibly
   qualified concept-id, so `requires C<T> T f(T)` and `requires C<T> W(T) -> W<T>` keep their names.
-- Tests: `tests/own/deduction-guides` (12), `tests/unit/items` (`deduction_guides`).
+- Tests: `tests/own/deduction-guides` (14), `tests/unit/items` (`deduction_guides`).
 - Not yet: member deduction-guides are accepted and ignored, and deduction through a member
   class template's qualified name (#1706); aggregate deduction candidates and alias
   template deduction (C++20, #1707); the initializer-list phase of [over.match.list] for
