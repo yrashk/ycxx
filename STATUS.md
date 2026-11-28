@@ -283,10 +283,12 @@ What is true of the code today. Work in progress and its owners are tracked in
     `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
     in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
     `__has_include_next`, `__has_embed`, and the remaining `__has_*` probes answering 0;
-  - `__has_builtin(name)` expands to `1` or `0` in ordinary preprocessing tokens, `#if`
-    conditions, and `__has_embed` parameter lists (`ExpansionKind::builtin`), using the target's
-    supported builtin table (`lex::has_builtin`). `spec` and `clang` modes inspect the raw
-    operand token; `gcc` mode macro-expands the operand first.
+  - `__has_builtin(name)` is a built-in dynamic macro (`ExpansionKind::builtin`) that expands to
+    `1` or `0` in ordinary preprocessing tokens, `#if` conditions, and `#embed`/`__has_embed`
+    parameter lists using the target's supported builtin table (`lex::has_builtin`), while
+    participating in `#ifdef`/`defined`, `#undef`, `#define`, and region traces. `spec` and
+    `clang` modes read unexpanded delimiter and operand tokens; `gcc` mode reads macro-expanded
+    tokens.
     [#1626](https://github.com/yrashk/ycxx/issues/1626)
   - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
     (other pragmas pass through to `-E`), and the null directive. Compiler diagnostics report the

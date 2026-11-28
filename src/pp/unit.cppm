@@ -102,7 +102,7 @@ public:
   explicit Unit(Session& s) : s_(&s) {
     using enum MacroDef::Dynamic;
     for (auto [name, kind] : {std::pair{"__LINE__", line}, {"__FILE__", file}, {"__COUNTER__", counter},
-                              {"__DATE__", date}, {"__TIME__", time}}) {
+                              {"__DATE__", date}, {"__TIME__", time}, {"__has_builtin", has_builtin}}) {
       auto d = std::make_shared<MacroDef>();
       d->name = s_->spellings.name(name);
       d->dynamic = kind;
@@ -586,7 +586,6 @@ private:
         return t;
       }
       if (t.painted) return t;
-      if (name == "__has_builtin") return has_builtin(f, t);
       if (f.in_condition && (name == "defined" || condition_operator(t.tok.payload) != CondOp::none)) {
         if (!f.in_embed_probe) return condition(f, t);
         report(f, t, lex::LexDiag::embed_cond_operator);
@@ -1072,6 +1071,7 @@ private:
   // name.
   PTok dynamic(Frame& f, const PTok& name, const MacroDef& def) {
     using enum MacroDef::Dynamic;
+    if (def.dynamic == has_builtin) return this->has_builtin(f, name);
     u32 e = static_cast<u32>(f.out.expansions.size());
     f.out.expansions.push_back(Expansion{ExpansionKind::builtin, def.name, name.loc.expansion, name.loc.file, name.loc.offset,
                                          name.loc.file, name.loc.offset, 0, 0});
@@ -1108,6 +1108,7 @@ private:
       ask(Question{Ask::time, 0, 0, 0, 0, time_answer()});
       text = def.dynamic == date ? s_->build_time.first : s_->build_time.second;
       break;
+    case has_builtin:
     case none: std::unreachable();
     }
     PTok t = lex_one(text).value();
@@ -1461,14 +1462,12 @@ private:
   }
 
   // The operators of a #if expression that are not macros ([cpp.cond]/1).
-  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute, has_builtin };
+  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute };
   CondOp condition_operator(u32 name) const {
     std::string_view n = s_->spellings.name(name);
     if (n == "__has_include") return CondOp::has_include;
     if (n == "__has_include_next") return CondOp::has_include_next;
     if (n == "__has_embed") return CondOp::has_embed;
-    // DECISIONS §1.5: `__has_builtin` reports the built-ins ycxx supports on this target.
-    if (n == "__has_builtin") return CondOp::has_builtin;
     if (n == "__has_cpp_attribute" || n == "__has_attribute" || n == "__has_c_attribute" ||
         n == "__has_feature" || n == "__has_extension")
       return CondOp::has_attribute;
@@ -1492,44 +1491,47 @@ private:
     return out;
   }
 
-  // `__has_builtin ( identifier )` in `#if` and ordinary C++ expressions (#1626).
+  // DECISIONS §1.5: `__has_builtin ( identifier )` in `#if` and ordinary C++ expressions (#1626).
   PTok has_builtin(Frame& f, const PTok& t) {
-    PTok open = read(f);
+    const bool gcc = s_->config.compatibility == ast::Compatibility::gcc;
+    const bool saved_cond = f.in_condition;
+    const bool saved_embed = f.in_embed_probe;
+    if (gcc) {
+      f.in_condition = false;
+      f.in_embed_probe = false;
+    }
+    struct Restore {
+      Frame& f;
+      bool cond;
+      bool embed;
+      ~Restore() {
+        f.in_condition = cond;
+        f.in_embed_probe = embed;
+      }
+    } restore{f, saved_cond, saved_embed};
+    auto step = [&] { return gcc ? next(f) : read(f); };
+    PTok open = step();
     if (open.tok.kind != Tk::l_paren) {
       report(f, open.tok.kind == Tk::eof ? t : open, lex::LexDiag::cond_expected_lparen);
       return builtin_number(f, t, 0);
     }
     std::vector<PTok> operand;
     PTok close;
-    {
-      ++f.collecting;
-      struct Done {
-        Frame& f;
-        ~Done() { --f.collecting; }
-      } done{f};
-      for (std::size_t depth = 0;;) {
-        PTok a = read(f);
-        if (a.tok.kind == Tk::eof) {
-          report(f, t, lex::LexDiag::cond_expected_rparen);
-          return builtin_number(f, t, 0);
-        }
-        if (a.tok.kind == Tk::l_paren) ++depth;
-        if (a.tok.kind == Tk::r_paren && depth-- == 0) {
-          close = a;
-          break;
-        }
-        if (a.tok.has(tok_flag::line_start)) a.tok.flags = u8((a.tok.flags & ~tok_flag::line_start) | tok_flag::space_before);
-        if (a.tok.kind == Tk::identifier && f.active.contains(a.tok.payload)) a.painted = true;
-        operand.push_back(a);
+    for (std::size_t depth = 0;;) {
+      PTok a = step();
+      if (a.tok.kind == Tk::eof) {
+        report(f, t, lex::LexDiag::cond_expected_rparen);
+        return builtin_number(f, t, 0);
       }
+      if (a.tok.kind == Tk::l_paren) ++depth;
+      if (a.tok.kind == Tk::r_paren && depth-- == 0) {
+        close = a;
+        break;
+      }
+      operand.push_back(a);
     }
-    if (!f.in_condition)
+    if (!saved_cond)
       f.out.continuations.push_back({static_cast<u32>(f.out.tokens.size()), site(f, t), site(f, close)});
-    if (s_->config.compatibility == ast::Compatibility::gcc) {
-      const bool saved = std::exchange(f.in_condition, false);
-      operand = expand_line(f, std::move(operand));
-      f.in_condition = saved;
-    }
     if (operand.size() != 1 || operand[0].tok.kind != Tk::identifier) {
       const PTok& bad = operand.empty() ? close : operand[0].tok.kind != Tk::identifier ? operand[0] : operand[1];
       report(f, bad, lex::LexDiag::cond_expected_rparen);
@@ -1570,7 +1572,6 @@ private:
     }
     CondOp op = condition_operator(t.tok.payload);
     if (op == CondOp::has_embed) return has_embed(f, t);
-    if (op == CondOp::has_builtin) return has_builtin(f, t);
     // `__has_x ( balanced tokens )`.
     PTok open = read(f);
     if (open.tok.kind != Tk::l_paren) {

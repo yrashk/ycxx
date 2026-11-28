@@ -661,6 +661,41 @@ int atomic_ok = __has_builtin(__atomic_load_n);
     auto [printed, msgs] = pp::preprocess_to_text(s, "int a = __has_builtin(\n  __builtin_memcmp\n) + 5;\n", "line.cpp");
     check(msgs.empty() && printed == "# 1 \"line.cpp\"\nint a = 1 + 5;\n",
           "multi-line __has_builtin continues its output line in -E");
+
+    auto [with_pragma, pragma_msgs] =
+        pp::preprocess_to_text(s, "int a = __has_builtin(\n#pragma probe\n  __builtin_memcmp);\n", "pragma.cpp");
+    check(pragma_msgs.empty() && with_pragma.contains("#pragma probe\n") && with_pragma.contains("1\n"),
+          "direct multi-line __has_builtin allows passthrough #pragma");
+  }
+
+  // `#undef __has_builtin` and `#define __has_builtin` participate in macro lookup and cached header traces.
+  {
+    MemHost host;
+    host.files["probe.h"] =
+        "#ifdef __has_builtin\n"
+        "#if defined(__has_builtin)\n"
+        "int def = __has_builtin(__builtin_memcmp);\n"
+        "#endif\n"
+        "#else\n"
+        "int __has_builtin = 9;\n"
+        "#endif\n";
+    host.files["default.cpp"] = "#include \"probe.h\"\n";
+    host.files["undef.cpp"] = "#undef __has_builtin\n#include \"probe.h\"\n";
+    host.files["custom.cpp"] = "#undef __has_builtin\n#define __has_builtin(x) 42\n#include \"probe.h\"\n";
+    pp::Session warm(host);
+    auto d = run(warm, host, "default.cpp");
+    auto u = run(warm, host, "undef.cpp");
+    auto c = run(warm, host, "custom.cpp");
+    pp::Session cold_u(host), cold_c(host);
+    check(d.diags.empty() && text(d.region) == "int def = 1 ;", "default __has_builtin in header");
+    check(u.diags.empty() && text(u.region) == "int __has_builtin = 9 ;" && u.region == run(cold_u, host, "undef.cpp").region,
+          "#undef __has_builtin invalidates cached header and leaves identifier ordinary");
+    check(c.diags.empty() && text(c.region) == "int def = 42 ;" && c.region == run(cold_c, host, "custom.cpp").region,
+          "redefining __has_builtin after #undef overrides both #if and expression probes");
+
+    auto direct_redef = pp::preprocess(warm, "#define __has_builtin(x) 42\nint v = __has_builtin(foo);\n", "redef.cpp");
+    check(kinds(direct_redef) == std::vector{lex::LexDiag::macro_redefined} && text(direct_redef.region) == "int v = 42 ;",
+          "redefining __has_builtin without #undef reports macro_redefined and applies replacement");
   }
 
   // Compatibility modes and cached header traces when a macro shadows or names the operand.
@@ -693,6 +728,25 @@ int atomic_ok = __has_builtin(__atomic_load_n);
     auto self = pp::preprocess(cold, "#define M __has_builtin(M\nint x = M);\n", "self.cpp");
     check(self.diags.empty() && text(self.region) == "int x = 0 ;",
           "active macro read into __has_builtin operand stays painted");
+    auto mutual = pp::preprocess(cold, "#define N M\n#define M __has_builtin(N\nint x = M);\n", "mutual.cpp");
+    check(mutual.diags.empty() && text(mutual.region) == "int x = 0 ;",
+          "mutual macro cycle across split-paren __has_builtin stays painted");
+
+    auto delims = pp::preprocess(
+        cold,
+        "#define LP (\n#define RP )\n#define EMPTY\n#define ARG __builtin_memcmp\n"
+        "int a = __has_builtin LP ARG RP;\nint b = __has_builtin EMPTY (__builtin_memcmp);\n",
+        "delims.cpp");
+    if (mode == ast::Compatibility::gcc) {
+      check(delims.diags.empty() && text(delims.region) == "int a = 1 ; int b = 1 ;",
+            "GCC mode macro-expands parentheses and empty macros before __has_builtin");
+      auto nested_open = pp::preprocess(cold, "#define M __has_builtin(\nint x = __has_builtin(M __builtin_memcmp));\n", "nested.cpp");
+      check(kinds(nested_open) == std::vector{lex::LexDiag::cond_expected_rparen} && text(nested_open.region) == "int x = 0 ;",
+            "GCC mode evaluates nested macro-supplied __has_builtin( cleanly");
+    } else {
+      check(kinds(delims) == std::vector{lex::LexDiag::cond_expected_lparen, lex::LexDiag::cond_expected_lparen},
+            "spec and Clang modes require an unexpanded '(' immediately after __has_builtin");
+    }
   }
 
   // Malformed operands preserve physical byte offsets across UTF-8, splices and macro arguments.

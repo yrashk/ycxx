@@ -30,3 +30,13 @@ static_assert(
 
 constexpr const char* raw_probe = STRINGIZE(__has_builtin(__builtin_memcmp));
 static_assert(raw_probe[0] == '_');
+
+#if __has_embed(__FILE__ limit(__has_builtin(__builtin_memcmp))) != 1
+#error __has_builtin inside __has_embed limit failed
+#endif
+
+constexpr int with_pragma = __has_builtin(
+#pragma ycxx_has_builtin_probe
+    __builtin_memcmp);
+static_assert(with_pragma == 1);
+

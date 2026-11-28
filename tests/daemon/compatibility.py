@@ -4554,6 +4554,45 @@ int missing_open = __has_builtin 0;
                         b'has-builtin-bad.cpp:3:43:', b'has-builtin-bad.cpp:4:34:'):
                 assert loc in warm[2], (mode, target, loc, warm[2])
 
+    (scope / 'has-builtin-override.hpp').write_text('''\
+#ifdef __has_builtin
+constexpr int override_probe = __has_builtin(__ycxx_no_such_builtin);
+#if __has_builtin(__ycxx_no_such_builtin) != EXPECTED_OVERRIDE
+#error unexpected #if __has_builtin value
+#endif
+static_assert(override_probe == EXPECTED_OVERRIDE);
+#else
+constexpr int __has_builtin = EXPECTED_OVERRIDE;
+static_assert(__has_builtin == EXPECTED_OVERRIDE);
+#endif
+''')
+    (scope / 'has-builtin-default.cpp').write_text('#include "has-builtin-override.hpp"\n')
+    (scope / 'has-builtin-undef.cpp').write_text('#undef __has_builtin\n#include "has-builtin-override.hpp"\n')
+    (scope / 'has-builtin-redef.cpp').write_text(
+        '#undef __has_builtin\n#define __has_builtin(x) 42\n#include "has-builtin-override.hpp"\n')
+    (scope / 'has-builtin-delims.cpp').write_text('''\
+#define LP (
+#define RP )
+#define EMPTY
+#define ARG __builtin_memcmp
+static_assert(__has_builtin LP ARG RP == 1);
+static_assert(__has_builtin EMPTY (__builtin_memcmp) == 1);
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            options = [target, '-fcompat=' + mode]
+            for unit, expected_override in (('has-builtin-default.cpp', 0),
+                                            ('has-builtin-undef.cpp', 7),
+                                            ('has-builtin-redef.cpp', 42)):
+                command = [*options, f'-DEXPECTED_OVERRIDE={expected_override}', '-fsyntax-only', unit]
+                cold, warm = (world.cxx(command, scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm == (0, b'', b''), (mode, target, unit, cold, warm)
+            delims = [*options, '-fsyntax-only', 'has-builtin-delims.cpp']
+            cold, warm = (world.cxx(delims, scope, env, timeout=40)
+                          for env in (world.cold, world.daemon))
+            assert cold == warm and warm[0] == (0 if mode == 'gcc' else 1), (mode, target, cold, warm)
+
 
 def general_mode_tests(world, gxx):
     pid = preprocess_and_syntax(world)
