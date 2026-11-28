@@ -160,6 +160,8 @@ jobs:
             build/deps/libycxx/libycxx.a
             build/deps/libycxx/libycxx-abi.a
             build/deps/libycxx/generated/include
+            build/src/pipeline/libemutls_w.a
+            build/src/pipeline/libgcc-int128.a
           retention-days: 1
 
       - name: Feature map files
