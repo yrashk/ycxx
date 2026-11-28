@@ -74,8 +74,17 @@ static_assert(sizeof(size_t) == sizeof(void*));
 
         runtime_dir = Path(runtime_tmp)
         os.chmod(runtime_dir, 0o700)
-        base_env = os.environ.copy()
-        base_env.update(LC_ALL='C', YCXX_THREADS='2', YCXX_ROOT=str(scope), YCXX_RUNTIME_DIR=str(runtime_dir))
+        base_env = {
+            k: v for k, v in os.environ.items()
+            if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH', 'YCXX_DAEMON_IDLE_EXIT')
+        }
+        base_env.update(
+            LC_ALL='C',
+            YCXX_THREADS='2',
+            YCXX_ROOT=str(scope),
+            YCXX_RUNTIME_DIR=str(runtime_dir),
+            YCXX_DAEMON_IDLE_EXIT='120',
+        )
         cold_env = base_env | {'YCXX_NO_DAEMON': '1'}
         daemon_env = base_env | {'YCXX_DAEMON': 'require'}
 
