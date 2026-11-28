@@ -3119,6 +3119,17 @@ the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as a
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
 
+## Allocation builtins (#1681)
+
+`__builtin_operator_new(args)` and `__builtin_operator_delete(args)` are lowered in sema to the
+call `::operator new(args)` or `::operator delete(args)` would be: the global overload set (the
+implicit usual declarations plus written ones) and ordinary overload resolution. The selected
+function must be a replaceable one (`World::replaceable_allocation_function`: the usual forms and
+their `std::nothrow_t` forms); anything else is diagnosed. Dependent calls are checked when the
+instantiation is reparsed. The result is an ordinary `ast::Call`, so native code calls the
+symbol and a program's replacement is used. The calls are not elided or merged. Constant
+evaluation of them waits for constexpr dynamic allocation (#321).
+
 ## Function spelling for type ordering (#1361)
 
 `__PRETTY_FUNCTION__` in a namespace-scope function body is a static `const char[N]` lvalue.

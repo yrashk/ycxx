@@ -9461,6 +9461,24 @@ public:
     return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
+  // `__builtin_operator_new(args)` and `__builtin_operator_delete(args)` (docs/EXTENSIONS.md): the
+  // call of the global `operator new` or `operator delete` that overload resolution selects for
+  // `args`, as `::operator new(args)` would be ([over.match.call]). Only the replaceable functions
+  // qualify ([new.delete.single]), not placement or other written overloads. A dependent call is
+  // checked when its instantiation is reparsed.
+  Ex builtin_allocation_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end, u32 paren_at) {
+    const bool allocating = b.function == lex::BuiltinFunction::operator_new;
+    const auto name = allocation_name(allocating ? AllocationFunction::allocate : AllocationFunction::deallocate);
+    Ex r = call(allocation_name_expr(name, begin, begin), std::move(args), end, paren_at);
+    if (!r.ok() || dependent(r)) return r;
+    if (const auto selected = as<ast::Call>(r); selected && selected->function != EntityId::none) {
+      const auto& f = w_->entities.rec(selected->function);
+      if (f.scope == EntityId::none && w_->replaceable_allocation_function(name, f.type)) return r;
+    }
+    diag(begin, Diag::builtin_allocation_not_replaceable, ins().names.intern(b.name));
+    return {NodeId::none, begin, end};
+  }
+
   ast::LibraryBuiltin written_library_builtin(EntityId function, const TypeRec& signature) {
     using enum ast::LibraryBuiltin;
     if (compatibility() != ast::Compatibility::gcc || function == EntityId::none || signature.variadic) return none;
@@ -9953,6 +9971,8 @@ public:
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_constant_probe(args.front(), begin, end);
     }
+    if (b.function == operator_new || b.function == operator_delete)
+      return builtin_allocation_call(b, std::move(args), begin, end, paren_at);
     if (b.function == library)
       return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
     if (b.function == add_overflow || b.function == mul_overflow) {
@@ -9996,6 +10016,8 @@ public:
       case ctzg:
       case clzll:
       case library:
+      case operator_new:
+      case operator_delete:
       case constant_p:
       case add_overflow:
       case mul_overflow:
