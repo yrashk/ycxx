@@ -901,6 +901,32 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     return false;
   }
   if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) {
+    // [namespace.udecl]/8, [basic.scope.scope]/4: a repeated dependent member using-declarator
+    // (same canonical qualifier, name, and non-dependent conversion target) is ill-formed in the
+    // template definition.
+    if (!conversion || !types.is_dependent(*conversion)) {
+      const Program::DependentUsingKey key{
+          types.canonical(*sc->type), *name,
+          conversion ? std::optional(types.canonical(*conversion)) : std::nullopt};
+      auto& seen_here = p_->dependent_member_using_keys_[{k_, std::to_underlying(ce)}];
+      if (std::ranges::contains(seen_here, key)) {
+        s_.diag(at, Diag::redeclared_member, *name);
+        return false;
+      }
+      for (u32 m : p_->items().items[it_->parent].members) {
+        if (m == k_) break;
+        if (p_->items().items[m].kind == ItemKind::access_spec ||
+            p_->region().tokens[p_->items().items[m].begin].kind != Tk::kw_using)
+          continue;
+        if (!p_->class_patterns_.contains(std::to_underlying(ce)) && !p_->running(m)) p_->item_sema(m);
+        const auto earlier = p_->dependent_member_using_keys_.find({m, std::to_underlying(ce)});
+        if (earlier != p_->dependent_member_using_keys_.end() && std::ranges::contains(earlier->second, key)) {
+          s_.diag(at, Diag::redeclared_member, *name);
+          return false;
+        }
+      }
+      seen_here.push_back(key);
+    }
     p_->dependent_member_usings_[std::to_underlying(ce)].insert(*name);
     return true;
   }
@@ -955,8 +981,19 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
   // [namespace.udecl]/14: each declaration it names is accessible here.
   for (const sema::MemberDeclRec* f : functions)
     if (!s_.check_access(found->owner, f->entity, *name, at, b)) return false;
-  // [namespace.udecl]/10, [class.mem.general]/6: a member using-declarator is not repeated.
+  // [namespace.udecl]/8, [basic.scope.scope]/4, [class.mem.general]/5: a member using-declarator
+  // cannot repeat a declaration already named in the same class scope (earlier in the same
+  // using-declarator-list or in a preceding using-declaration).
+  auto already_introduced = [&](const std::vector<sema::MemberDeclRec>& list) {
+    return std::ranges::any_of(functions, [&](const sema::MemberDeclRec* f) {
+      return std::ranges::contains(list, f->entity, &sema::MemberDeclRec::entity);
+    });
+  };
   std::vector<sema::MemberDeclRec>& introduced = p_->member_usings_[{k_, std::to_underlying(ce)}];
+  if (already_introduced(introduced)) {
+    s_.diag(at, Diag::redeclared_member, *name);
+    return false;
+  }
   for (u32 m : p_->items().items[it_->parent].members) {
     if (m == k_) break;
     if (p_->items().items[m].kind == ItemKind::access_spec ||
@@ -966,11 +1003,10 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     if (!p_->class_patterns_.contains(std::to_underlying(ce)) && !p_->running(m)) p_->item_sema(m);
     const auto earlier = p_->member_usings_.find({m, std::to_underlying(ce)});
     if (earlier == p_->member_usings_.end()) continue;
-    for (const sema::MemberDeclRec* f : functions)
-      if (std::ranges::contains(earlier->second, f->entity, &sema::MemberDeclRec::entity)) {
-        s_.diag(at, Diag::redeclared_member, *name);
-        return false;
-      }
+    if (already_introduced(earlier->second)) {
+      s_.diag(at, Diag::redeclared_member, *name);
+      return false;
+    }
   }
   for (const sema::MemberDeclRec* f : functions)
     if (!std::ranges::contains(introduced, f->entity, &sema::MemberDeclRec::entity)) introduced.push_back(*f);
