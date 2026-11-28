@@ -2256,7 +2256,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Out-of-class definitions check the effective specification of the corresponding declaration.
   Omission agrees with `noexcept(false)` on ordinary potentially throwing constructors, and
   bare `noexcept` agrees with `noexcept(true)` (#219).
-- `N::T(…)` and `N::T{…}` are functional casts.
+- `N::T(…)` and `N::T{…}` are functional casts. A statement `N::T(x);` declares x, as `int(x);`
+  does. In a template, a qualified alias-template-id such as `s::value_t<I>` names a type without
+  `typename` even when the alias denotes a dependent member type; only a qualified name whose
+  scope is a dependent class needs `typename` in a block ([stmt.ambig], [temp.res.general]/5,
+  #711). A class member written `N::S(x);` is still rejected (#1722).
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
