@@ -7,12 +7,17 @@ Python 3.10 or later and nothing else.
 ## Running
 
 ```sh
-tools/test --fast                 # before pushing: policy build failed affected core, stop at the first failing stage
+tools/test --quick                # inner loop: policy build affected-unit failed affected (stops fast)
+tools/test --fast                 # before pushing: policy build unit failed affected core (skips slow draft/ XFAILs)
 tools/test                        # every stage, without stopping between them
 tools/test --tier pr|main|nightly # a CI tier (DECISIONS §9.3), stopping at the first failing stage
+tools/test own/smoke              # path filter alone runs test stages only (never triggers build)
 tools/test core own/smoke         # stages and path filters, in any order
-tools/test --cxx clang            # check the tests themselves against an oracle as the compiler under test
+tools/test --cxx clang own/smoke  # check tests against an oracle (skips build/unit/daemon automatically)
 tools/test --only-failed          # just what failed last time
+tools/test --skip-xfail core      # skip tests already marked XFAIL for the compiler under test
+tools/test --max-failures 5 core  # abort a stage after 5 failures
+tools/test --daemon core          # run ycxx tests through a private ephemeral daemon
 tools/test --list --shard 2/4     # what shard 2 of 4 would run, with recorded durations
 tools/test --help                 # every option
 ```
@@ -59,16 +64,25 @@ ycxx passes the test on the specified host. A crash is never expected.
 | stage | runs |
 |---|---|
 | policy | the driver's self-test (`tests/driver/selftest.py`), then `tools/check-policy` if it exists |
-| build | `tools/build -j N` if it exists (#4; it also runs ctest: the bootstrap smoke test in `tests/bootstrap` and the unit tests in `tests/unit`, which are not suites of the driver) |
+| build | `tools/build -j N` (builds with `Dev` `-O1 -g1` by default, plus `-L smoke` CTests: bootstrap and embedding) |
+| affected-unit | CTests whose `area:<dir>` label matches changed source files since `--base` |
+| unit | CTest unit suite (`ctest -L unit`) |
 | failed | tests that failed in the last run of this branch (of `main` for a new branch) |
 | affected | tests affected by the change since `--base` (default: merge-base with `origin/main`) |
 | core | the core oracles: `tests/draft`, `tests/own` |
+| daemon | CTest daemon suite (`ctest -L daemon`: 9 parallel compatibility groups, compare, project_build) |
 | wider | `tests/diff`, `tests/incremental` |
 | rest | every other suite |
 
 A test runs in the first stage that selects it; within a stage, longest first. The tiers:
-`--fast` is policy to core; `pr` adds wider; `main` and `nightly` add rest, and nightly also runs
-tests marked `// TIER: nightly`.
+`--quick` is `policy`, `build`, `affected-unit`, `failed`, `affected` (`--max-failures 5`, `--skip-xfail`);
+`--fast` is `policy`, `build`, `unit`, `failed`, `affected`, `core` (`--max-failures 10`, skipping
+known `draft/` XFAILs unless `ycxx.xfail` or `tests/draft/` changed); `pr` adds `daemon` and `wider`;
+`main` and `nightly` add `rest`, and nightly also runs tests marked `// TIER: nightly`.
+
+CTests are labeled for direct selective runs via `ctest --test-dir build -L <label>`: `smoke`,
+`bootstrap`, `embedding`, `unit`, `area:<subdir>` (e.g. `area:pp`, `area:sema`, `area:pipeline`),
+`daemon`, `compat`, `project`, and `heavy`.
 
 **State** (`build/test-state/`, `--state`): `durations.json` (each test's last duration, per
 compiler) and `failures/<branch>.json` (the tests failing on that branch). A run updates only the
@@ -79,10 +93,11 @@ tests it ran, so a test stays failing until it passes (UNSUPPORTED leaves it as 
 across all stages, deterministic. All shards must start from the same state; afterwards
 `tools/test --merge-state DIR...` merges what each shard learned (its `last-run.json`) into one.
 
-**Affected tests** (`state.affected()`, the hook): a changed test file selects itself; a change to
-the driver or the features file selects everything; documentation selects nothing; other
-changes select nothing yet, for lack of dependency information (the core stage runs anyway).
-Later: coarse source-area maps, then ycxx's own query engine (§9.2.3).
+**Affected tests** (`state.affected()`, `state.affected_ctest_labels()`): a changed test file
+selects itself; a change to the driver or the features file selects everything; documentation
+selects nothing; changes under `src/<area>/` map via coarse area tables (`AREA_TESTS`,
+`AREA_CTEST_LABELS`) to the directly relevant `tests/own/` suites and CTest `area:<dir>` labels.
+Later: ycxx's own query engine (§9.2.3).
 
 ## Writing tests
 

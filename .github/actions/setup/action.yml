@@ -17,7 +17,7 @@ runs:
       shell: bash
       run: |
         apt-get update -qq
-        apt-get install -y -qq ninja-build cmake python3 git >/dev/null
+        apt-get install -y -qq ninja-build cmake python3 git lld >/dev/null
     - if: runner.os == 'Linux' && inputs.oracle == 'true'
       uses: ./.github/actions/setup-linux-oracle
     - if: runner.os == 'macOS'

@@ -289,12 +289,21 @@ class Parts(unittest.TestCase):
             self.assertEqual(status('core', inc, '--no-unsupported'), 1)
 
     def test_affected(self):
-        tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]
+        tests = [
+            discover.Test('own/a.run.cpp', Path(), 'own', 'run'),
+            discover.Test('own/b.run.cpp', Path(), 'own', 'run'),
+            discover.Test('own/pp/macros.pp.cpp', Path(), 'own', 'preprocess'),
+            discover.Test('own/smoke/ok.accept.cpp', Path(), 'own', 'accept'),
+        ]
         self.assertEqual([t.id for t in state.affected(['tests/own/a.run.cpp.stdout', 'README.md'], tests)[0]],
                          ['own/a.run.cpp'])
-        self.assertEqual(len(state.affected(['tests/driver/kinds.py'], tests)[0]), 2)
-        self.assertEqual(state.affected(['src/parse.cpp'], tests)[0], [])
+        self.assertEqual(len(state.affected(['tests/driver/kinds.py'], tests)[0]), len(tests))
+        self.assertEqual(sorted(t.id for t in state.affected(['src/pp/unit.cppm'], tests)[0]),
+                         ['own/pp/macros.pp.cpp', 'own/smoke/ok.accept.cpp'])
+        self.assertEqual(state.affected(['src/unknown.cpp'], tests)[0], [])
         self.assertEqual(state.affected(None, tests)[0], [])
+        self.assertEqual(state.affected_ctest_labels(['src/pp/unit.cppm', 'tests/unit/lex/lex_test.cpp']),
+                         ['area:lex', 'area:pp'])
 
     def test_parity_requires_aarch64_load_patterns(self):
         patterns = 'src/target/aarch64/aarch64.patterns'
@@ -319,6 +328,24 @@ class Parts(unittest.TestCase):
             result = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn('L2 `load`: the x86_64 back end handles it and aarch64 does not', result.stderr)
+
+    def test_path_filter_skips_build_and_skip_xfail(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'clang',
+                                '--state', d, '--branch', 'b', 'own/smoke'],
+                               capture_output=True, text=True, check=True)
+            self.assertNotIn('# build:', p.stdout)
+            self.assertIn('own/smoke/empty-main.accept.cpp', p.stdout)
+
+            full = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'ycxx',
+                                   '--state', d, '--branch', 'b', 'core', 'draft'],
+                                  capture_output=True, text=True, check=True)
+            skipped = subprocess.run([sys.executable, str(REPO / 'tools' / 'test'), '--list', '--cxx', 'ycxx',
+                                      '--state', d, '--branch', 'b', '--skip-xfail', 'core', 'draft'],
+                                     capture_output=True, text=True, check=True)
+            full_ids = [l.split('\t')[0] for l in full.stdout.splitlines() if l and not l.startswith('#')]
+            skip_ids = [l.split('\t')[0] for l in skipped.stdout.splitlines() if l and not l.startswith('#')]
+            self.assertLess(len(skip_ids), len(full_ids))
 
 
 if __name__ == '__main__':

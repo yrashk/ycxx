@@ -4598,6 +4598,45 @@ static_assert(__has_builtin EMPTY (__builtin_memcmp) == 1);
             assert cold == warm and warm[0] == (0 if mode == 'gcc' else 1), (mode, target, cold, warm)
 
 
+def general_core_tests(world, _gxx):
+    pid = preprocess_and_syntax(world)
+    mangling(world)
+    floating_underflow_warnings(world)
+    over_width_bit_field_diagnostics(world)
+    compile_database(world)
+    world.same_daemon('compatibility general core modes', pid)
+
+
+def general_lambda_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    private_closure_symbols(world, gxx)
+    generic_invoker_symbols(world, gxx)
+    dependent_variable_spellings(world, gxx)
+    static_lambda_conversion(world, gxx)
+    lambda_conversion_symbols(world, gxx)
+    world.same_daemon('compatibility general lambda modes', pid)
+
+
+def general_template_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    pack_index_symbols(world, gxx)
+    bound_pack_index_symbols(world, gxx)
+    template_argument_prefixes(world, gxx)
+    placeholder_template_prefixes(world, gxx)
+    concrete_transform_signatures(world)
+    immediate_template_escalation(world)
+    world.same_daemon('compatibility general template modes', pid)
+
+
+def general_syntax_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    flat_record_array_lifetime(world)
+    historical_syntax_modes(world, gxx)
+    skipped_quote_diagnostics(world)
+    has_builtin_expressions(world)
+    world.same_daemon('compatibility general syntax modes', pid)
+
+
 def general_mode_tests(world, gxx):
     pid = preprocess_and_syntax(world)
     mangling(world)
@@ -4629,6 +4668,34 @@ def start_compatibility_daemon(world):
     return world.pid()
 
 
+def abi_call_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    mixed_empty_class_arguments(world, gxx)
+    over_width_bit_fields(world, gxx)
+    # PARITY: by design: the parameter difference here is the SysV AMD64 MEMORY class.
+    if NATIVE_LINUX:
+        mixed_class_calls(world, gxx)
+        mixed_large_class_calls(world, gxx)
+        # PARITY: by design: native array new is currently available on Linux x86-64.
+        wide_array_allocations(world, gxx)
+    mixed_darwin_class_calls(world, gxx)
+    function_language_linkage(world, gxx)
+    mixed_abstract_result(world, gxx)
+    world.same_daemon('compatibility ABI call modes', pid)
+
+
+def abi_layout_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    mixed_class_alignment(world, gxx)
+    mixed_tail_padding(world, gxx)
+    overlapping_member_layout(world, gxx)
+    late_defaulted_special_members(world, gxx)
+    wide_enumerations(world, gxx)
+    empty_union(world, gxx)
+    mixed_source_location(world, gxx)
+    world.same_daemon('compatibility ABI layout modes', pid)
+
+
 def abi_mode_tests(world, gxx):
     pid = start_compatibility_daemon(world)
     mixed_empty_class_arguments(world, gxx)
@@ -4650,6 +4717,41 @@ def abi_mode_tests(world, gxx):
     empty_union(world, gxx)
     mixed_source_location(world, gxx)
     world.same_daemon('compatibility ABI modes', pid)
+
+
+def constraint_lambda_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    constrained_lambda_conversions(world, gxx)
+    nested_template_symbols(world, gxx)
+    lambda_constraint_expression_symbols(world, gxx)
+    implicit_object_constraint_symbols(world, gxx)
+    remaining_constraint_symbols(world, gxx)
+    mixed_constraints(world, gxx)
+    operator_constraints(world, gxx)
+    world.same_daemon('compatibility constraint lambda modes', pid)
+
+
+def constraint_fold_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    requires_expression_symbols(world, gxx)
+    fold_constraint_symbols(world, gxx)
+    fold_constraint_ordering(world)
+    fold_constraint_satisfaction(world)
+    binary_fold_constraints(world)
+    fold_constraint_substitution_failures(world)
+    world.same_daemon('compatibility constraint fold modes', pid)
+
+
+def constraint_pack_tests(world, gxx):
+    pid = start_compatibility_daemon(world)
+    constrained_parameter_packs(world, gxx)
+    concept_template_parameters(world)
+    concept_dependent_template_heads(world)
+    constraint_expression_symbols(world, gxx)
+    constrained_lambda_members(world, gxx)
+    written_trait_constraint_symbols(world, gxx)
+    written_allocation_constraint_symbols(world, gxx)
+    world.same_daemon('compatibility constraint pack modes', pid)
 
 
 def constraint_mode_tests(world, gxx):
@@ -4677,6 +4779,23 @@ def constraint_mode_tests(world, gxx):
     world.same_daemon('compatibility constraint modes', pid)
 
 
+GROUPS = {
+    'general': (general_mode_tests,),
+    'general_core': (general_core_tests,),
+    'general_lambdas': (general_lambda_tests,),
+    'general_templates': (general_template_tests,),
+    'general_syntax': (general_syntax_tests,),
+    'abi': (abi_mode_tests,),
+    'abi_calls': (abi_call_tests,),
+    'abi_layout': (abi_layout_tests,),
+    'constraints': (constraint_mode_tests,),
+    'constraints_lambdas': (constraint_lambda_tests,),
+    'constraints_folds': (constraint_fold_tests,),
+    'constraints_packs': (constraint_pack_tests,),
+    'all': (general_mode_tests, abi_mode_tests, constraint_mode_tests),
+}
+
+
 def main():
     # Keep the oracle SDK and driver settings inside these test processes.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -4684,18 +4803,15 @@ def main():
     load_toolchains_env()
     ycxx, gxx, *groups = sys.argv[1:]
     group, = groups or ['all']
-    if group not in ('all', 'general', 'abi', 'constraints'):
+    runners = GROUPS.get(group)
+    if runners is None:
         raise ValueError(f'unknown compatibility test group {group}')
     world = Env(str(Path(ycxx).resolve()))
     for env in (world.base, world.cold, world.daemon):
         env.update(LC_ALL='C', YCXX_THREADS='2')
     try:
-        if group in ('all', 'general'):
-            general_mode_tests(world, gxx)
-        if group in ('all', 'abi'):
-            abi_mode_tests(world, gxx)
-        if group in ('all', 'constraints'):
-            constraint_mode_tests(world, gxx)
+        for runner in runners:
+            runner(world, gxx)
     finally:
         world.close()
     return bool(failures)

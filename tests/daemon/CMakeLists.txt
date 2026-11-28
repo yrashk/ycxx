@@ -3,21 +3,20 @@ add_test(NAME daemon.runtime_dir
   COMMAND python3 -B -X utf8 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_dir_test.py)
 add_test(NAME daemon.auto_var_init
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/auto_var_init.py $<TARGET_FILE:ycxxc>)
-add_test(NAME daemon.compatibility
-  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
-          "${CMAKE_CXX_COMPILER}" general)
-add_test(NAME daemon.compatibility_abi
-  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
-          "${CMAKE_CXX_COMPILER}" abi)
-add_test(NAME daemon.compatibility_constraints
-  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
-          "${CMAKE_CXX_COMPILER}" constraints)
-# Run the ABI group alongside the comparison and other mode tests on a fresh CI runner.
-set_tests_properties(daemon.compatibility_abi PROPERTIES COST 450)
-set_tests_properties(daemon.compatibility daemon.compatibility_constraints PROPERTIES COST 300)
+foreach(_compat_group IN ITEMS
+  general_core general_lambdas general_templates general_syntax
+  abi_calls abi_layout
+  constraints_lambdas constraints_folds constraints_packs)
+  add_test(NAME daemon.compatibility_${_compat_group}
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.py $<TARGET_FILE:ycxxc>
+            "${CMAKE_CXX_COMPILER}" ${_compat_group})
+  set_tests_properties(daemon.compatibility_${_compat_group} PROPERTIES
+    COST 300
+    LABELS "daemon;compat;heavy")
+endforeach()
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
 # Overlap the comparison with other tests even before CTest has timing history (#1230).
-set_tests_properties(daemon.compare PROPERTIES COST 400)
+set_tests_properties(daemon.compare PROPERTIES COST 400 LABELS "daemon;heavy")
 add_test(NAME daemon.no_rtti
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_rtti.py
           $<TARGET_FILE:ycxxc> "${YCXXC_LIBYCXX_SOURCE_DIR}" "${CMAKE_CXX_COMPILER}")
@@ -184,3 +183,11 @@ add_test(NAME daemon.project_generated_inventory
 
 add_test(NAME daemon.project_shader_reflection
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_shader_reflection.py $<TARGET_FILE:ycxxc>)
+
+get_directory_property(_daemon_tests TESTS)
+foreach(_t IN LISTS _daemon_tests)
+  set_property(TEST "${_t}" APPEND PROPERTY LABELS daemon)
+  if(_t MATCHES "^daemon\\.project_")
+    set_property(TEST "${_t}" APPEND PROPERTY LABELS project)
+  endif()
+endforeach()
