@@ -1405,6 +1405,7 @@ public:
     u32 item = 0;
     u32 begin = 0;
     u32 end = 0;
+    QualType type{};
     bool braced = false;
     bool invalid = false;
     sema::Construction form = sema::Construction::direct_list;
@@ -2954,9 +2955,10 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   // ([dcl.init.aggr]). A specialization's defaults and those whose value depends on being
   // constant-evaluated have none either. Other nonconstant forms remain #118.
   const auto& types = caller.types();
-  const QualType element = types.innermost_array_element(entity.type);
-  if (fallback && (types.is_dependent(entity.type) || !types.is_scalar(element))) return std::nullopt;
-  if (fallback && types.is_member_pointer(element) && types.is_array(entity.type)) return std::nullopt;
+  const QualType field_type = dmi->type;
+  const QualType element = types.innermost_array_element(field_type);
+  if (fallback && (types.is_dependent(field_type) || !types.is_scalar(element))) return std::nullopt;
+  if (fallback && types.is_member_pointer(element) && types.is_array(field_type)) return std::nullopt;
   if (dmi->invalid) return NodeId::none;
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
@@ -2987,7 +2989,7 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   auto& active = p_->replaying_default_members_;
   if (!active.insert(field).second) {
     // [dcl.init.aggr]/13: only a potentially evaluated use can require this initializer again.
-    if (caller.unevaluated) return replay.value_init(entity.type, 0, 0).id;
+    if (caller.unevaluated) return replay.value_init(field_type, 0, 0).id;
     replay.diag(0, Diag::recursive_default_member_initializer, entity.name);
     return NodeId::none;
   }
@@ -3005,7 +3007,7 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
     return source.observed_enum_definition_failure ||
            !valid_member_declarations(std::span(p_->end_diags_).subspan(end_diag_begin));
   };
-  Ex init = parser.member_initializer(entity.type, dmi->braced, dmi->form);
+  Ex init = parser.member_initializer(field_type, dmi->braced, dmi->form);
   if (instantiation_failed() || replay.has_error_since(diag_begin)) return NodeId::none;
   if (!init.ok() || !parser.at_end()) {
     if (parser.at_end()) replay.diag(parser.pos(), Diag::expected_expression);
