@@ -767,7 +767,11 @@ class Mangler {
       *sig += *trailing;
       return local + "N" + member_qualifiers(f) + *p + unqualified + *args + "E" + *sig;
     }
-    auto n = template_name(name, scope, special, internal_name);
+    // A conversion function template's <unqualified-name> is `cv <type>`, its return type in terms
+    // of its own parameters, and its <encoding> has no return type (§5.1.3, §5.1.5.1).
+    const bool conversion = name == lex::conversion_function_name && in_.types.is<ast::TFunction>(c);
+    auto n = conversion ? conversion_template_name(in_.types.get<ast::TFunction>(c), scope)
+                        : template_name(name, scope, special, internal_name);
     if (!n) return n;
     // GCC's primary nested-name encoding uses only the arguments at this position.
     // A trailing requires-clause is still part of the subsequent function signature.
@@ -778,7 +782,8 @@ class Mangler {
     if (!args) return args;
     // A variable template specialization: its name and arguments, no type (§5.1.2).
     if (!in_.types.is<ast::TFunction>(c)) return delimit_name(*n + *args, scope);
-    auto sig = signature(in_.types.get<ast::TFunction>(c), !special);  // a constructor has no return type
+    // A constructor or conversion function has no return type here.
+    auto sig = signature(in_.types.get<ast::TFunction>(c), !special && !conversion);
     if (!sig) return sig;
     auto trailing = constraint_suffix(spec.trailing, false);
     if (!trailing) return trailing;
@@ -1699,6 +1704,22 @@ class Mangler {
     if (special) r += name;
     else if (name.starts_with(lex::literal_operator_prefix)) r += "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
     else r += source_name(name);
+    candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
+    return r;
+  }
+
+  // A conversion function template's <template-prefix>: its class's <prefix>, then `cv` and the
+  // template's return type (a candidate, as `template_name`'s).
+  std::expected<std::string, std::string> conversion_template_name(const ast::TFunction& f, ast::EntityId scope) {
+    std::string r;
+    if (scope != ast::EntityId::none) {
+      auto p = prefix(scope);
+      if (!p) return p;
+      r = *p;
+    }
+    auto target = type(f.ret);
+    if (!target) return target;
+    r += "cv" + *target;
     candidates_.push_back((std::uint64_t{2} << 32) | candidates_.size());
     return r;
   }

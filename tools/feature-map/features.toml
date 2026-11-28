@@ -1647,7 +1647,7 @@ int main() { S s = 3; int i = s; return (s && f(2) == 2 && i == 3) ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157, 219, 339]
-note = 'Constructors and constructor templates, in ordinary classes and class templates, support explicit-specifiers and direct, copy, and copy-list selection (#715). In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads'
+note = 'Constructors and constructor templates, in ordinary classes and class templates, support explicit-specifiers and direct, copy, and copy-list selection (#715). In-class conversion functions can use dependent aliases and be selected by named static_cast to an exact non-class value type, including ordinary ref-qualified overloads. Copy-initialization from a class object without bases calls its non-explicit conversion functions and conversion function templates ([over.match.copy], [over.match.conv]), and an argument can convert through them ([over.ics.user])'
 
 [[feature]]
 id = 'class-explicit-bool'
@@ -2015,7 +2015,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'Member function templates, member alias templates (also as `Q::template M<args>` and as template template arguments) and static data member templates work. Member class templates (#306), conversion function templates (#339), specializations of static data member templates (#1594), defining one of a class template outside the class (#256) and `&S::f<int>` remain.'
+note = 'Member function templates, member alias templates (also as `Q::template M<args>` and as template template arguments), static data member templates and conversion function templates (constrained and ref-qualified ones too) work. Member class templates (#306), explicit conversion function templates (#1723), specializations of static data member templates (#1594), defining one of a class template outside the class (#256) and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };

@@ -242,6 +242,7 @@ enum class Diag : std::uint32_t {
   too_few_arguments [[=message{Severity::error, "too few arguments in call: expected {0}, have {1}"}]],
   too_many_arguments [[=message{Severity::error, "too many arguments in call: expected {0}, have {1}"}]],
   no_conversion [[=message{Severity::error, "cannot convert '{0:t}' to '{1:t}'"}]],
+  ambiguous_conversion [[=message{Severity::error, "conversion from '{0:t}' to '{1:t}' is ambiguous"}]],
   dynamic_cast_target [[=message{Severity::error, "invalid dynamic_cast target type '{0:t}'"}]],
   dynamic_cast_operand [[=message{Severity::error, "invalid dynamic_cast operand of type '{0:t}'"}]],
   dynamic_cast_polymorphic [[=message{Severity::error, "runtime dynamic_cast requires a polymorphic source, but '{0:t}' is not polymorphic"}]],
