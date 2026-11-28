@@ -4598,6 +4598,64 @@ static_assert(__has_builtin EMPTY (__builtin_memcmp) == 1);
             assert cold == warm and warm[0] == (0 if mode == 'gcc' else 1), (mode, target, cold, warm)
 
 
+def using_enum_lookup(world):
+    scope = world.scope / 'using-enum-lookup'
+    scope.mkdir(exist_ok=True)
+    (scope / 'using-enum-hiding.cpp').write_text('''\
+namespace Library { enum class Kind { Small = 4 }; }
+enum class Kind { Other = 7 };
+constexpr int direct() {
+  using Library::Kind;
+  int Kind = 1;
+  (void)Kind;
+  using enum Kind;
+  return static_cast<int>(Small);
+}
+static_assert(direct() == 4);
+constexpr int local_cls() {
+  using Library::Kind;
+  int Kind = 1;
+  (void)Kind;
+  struct Local {
+    static constexpr int get() {
+      using enum Kind;
+      return static_cast<int>(Small);
+    }
+  };
+  return Local::get();
+}
+static_assert(local_cls() == 4);
+''')
+    (scope / 'using-enum-val-using.cpp').write_text('''\
+namespace Library { enum class Kind { Small = 4 }; }
+namespace Val { constexpr int Kind = 9; }
+constexpr int via_val_using() {
+  using Library::Kind;
+  using Val::Kind;
+  (void)Kind;
+  using enum Kind;
+  return static_cast<int>(Small);
+}
+static_assert(via_val_using() == 4);
+''')
+    (scope / 'using-enum-self-fixed.cpp').write_text('''\
+enum class ScopedSelf : int {
+  A = 1,
+  B = noexcept([] { using enum ScopedSelf; return A; }())
+};
+''')
+    for mode in MODES:
+        for target in (LINUX, DARWIN):
+            options = [target, '-fcompat=' + mode, '-fsyntax-only']
+            for unit, gcc_ok in (('using-enum-hiding.cpp', False),
+                                 ('using-enum-val-using.cpp', False),
+                                 ('using-enum-self-fixed.cpp', True)):
+                expected = 0 if (mode == 'gcc') == gcc_ok else 1
+                cold, warm = (world.cxx([*options, unit], scope, env, timeout=40)
+                              for env in (world.cold, world.daemon))
+                assert cold == warm and warm[0] == expected, (mode, target, unit, expected, cold, warm)
+
+
 def general_core_tests(world, _gxx):
     pid = preprocess_and_syntax(world)
     mangling(world)
@@ -4634,6 +4692,7 @@ def general_syntax_tests(world, gxx):
     historical_syntax_modes(world, gxx)
     skipped_quote_diagnostics(world)
     has_builtin_expressions(world)
+    using_enum_lookup(world)
     world.same_daemon('compatibility general syntax modes', pid)
 
 
@@ -4657,6 +4716,7 @@ def general_mode_tests(world, gxx):
     historical_syntax_modes(world, gxx)
     skipped_quote_diagnostics(world)
     has_builtin_expressions(world)
+    using_enum_lookup(world)
     compile_database(world)
     world.same_daemon('compatibility modes', pid)
 

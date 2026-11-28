@@ -1916,3 +1916,46 @@ gcc_observed = "GCC 16.2.0 macro-expands tokens following __has_builtin in both 
 clang_observed = "Clang 23.1.5 reads unexpanded parentheses and operand tokens in both #if conditions and ordinary C++ expressions, so macro-supplied parentheses are rejected, a macro alias yields 0, and a macro-redefined __builtin_strlen still yields 1."
 probe = '#define ALIAS __builtin_memcmp\n#define __builtin_strlen shadowed_strlen\nconstexpr int a = __has_builtin(ALIAS);\nconstexpr int b = __has_builtin(__builtin_strlen);'
 evidence = ["tests/daemon/compatibility.py", "tests/unit/pp/pp_test.cpp", "tests/own/pp/has-builtin-expr.accept.cpp", "tests/own/pp/has-builtin-expr.pp.cpp", "tests/own/pp/has-builtin-malformed.reject.cpp"]
+
+[[divergence]]
+id = "using-enum-type-only-lookup"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[enum.udecl]/1, CWG 2877, [basic.lookup.elab], #1695"
+prior = "Unqualified `using enum` in a block skipped block `using`-declarations and did not model GCC's non-type hiding."
+spec = "Perform type-only lookup for an unqualified `using enum E;` operand, ignoring non-type declarations (such as same-scope or inner-block variables, non-type block `using`-declarations, and namespace aliases) while resolving block-imported enumerations and aliases."
+gcc = "Perform ordinary lookup for `using enum E;`, so a non-type declaration in the same or an enclosing block hides an enumeration of the same name."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 rejects `using Library::Kind; int Kind = 1; using enum Kind;` with `'Kind' is not a type`, while accepting `enum Kind` elaborated-type-specifiers."
+clang_observed = "Clang 23.1.5 accepts `using Library::Kind; int Kind = 1; using enum Kind;` by ignoring the local variable during type-only lookup."
+probe = '''
+namespace Library { enum class Kind { Small = 4 }; }
+constexpr int f() {
+  using Library::Kind;
+  int Kind = 1;
+  (void)Kind;
+  using enum Kind;
+  return static_cast<int>(Small);
+}
+static_assert(f() == 4);
+'''
+evidence = ["tests/daemon/compatibility.py", "tests/own/using/block-using-enum.accept.cpp", "tests/own/using/block-using-enum.reject.cpp", "tests/draft/dcl/enum.udecl-1.accept.cpp", "tests/draft/DISAGREEMENTS.md"]
+
+[[divergence]]
+id = "using-enum-defining-fixed"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[enum.udecl]/2, [dcl.enum]/6, #1695"
+prior = "`using enum` accepted an enumeration whose definition was still in progress."
+spec = "Reject `using enum E;` while `E` is still being defined (before its closing `}`), even when `E` has a fixed underlying type, because `E` is still incomplete."
+gcc = "Accept `using enum E;` inside `E`'s own enumerator-list when `E` has a fixed underlying type, while rejecting an unfixed enumeration whose underlying type is not yet determined."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 accepts `enum class ScopedSelf : int { A = 1, B = noexcept([] { using enum ScopedSelf; return A; }()) };` and rejects `enum UnscopedSelf { A = 1, B = noexcept([] { using enum UnscopedSelf; return A; }()) };`."
+clang_observed = "Clang 23.1.5 rejects both with `enumeration '...' is incomplete`."
+probe = '''
+enum class ScopedSelf : int {
+  A = 1,
+  B = noexcept([] { using enum ScopedSelf; return A; }())
+};
+'''
+evidence = ["tests/daemon/compatibility.py", "tests/own/using/block-using-enum.reject.cpp"]

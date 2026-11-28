@@ -60,12 +60,21 @@ struct GenericClosure {
   u16 flags = 0;
   std::vector<ast::LocalRec> consts;
   std::vector<ConstId> const_values;
+  std::vector<std::size_t> const_depths;
   std::vector<Expansion> expansions;  // the pack expansions of its body, which its specializations expand
   // Where it is defined: the template-heads around it and their arguments, and the block-scope
   // type aliases its body can name.
   std::vector<std::vector<ast::TemplateParamSema>> scopes;
   Bindings args;
+  struct CapturedUsing {
+    std::size_t depth = 0;
+    NameId name{};
+    std::vector<ast::DeclSema> decls;
+    std::optional<std::size_t> type_index;
+  };
   std::vector<std::pair<NameId, QualType>> aliases;
+  std::vector<std::size_t> alias_depths;
+  std::vector<CapturedUsing> usings;
   bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
   // Set for a lambda outside every function body: the part it is in, which its specializations
   // are analysed in, and the class it is in, if any. `body_begin` is an offset in that part.
@@ -129,9 +138,11 @@ struct OuterBlock {
     NameId name{};
     ast::LocalRec local{};
     std::optional<ConstId> value;  // a constant's
-    QualType type{};
+    std::optional<QualType> type;
     std::vector<ast::DeclSema> decls;
     EntityId ns = EntityId::none;
+    bool type_alias = false;
+    bool type_template = false;
   };
   EntityId function = EntityId::none;  // the enclosing function, or lambda's function call operator
   EntityId cls = EntityId::none;       // the class the function is a member of, if any
@@ -722,6 +733,9 @@ public:
   std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true,
                                     std::optional<u32> type_at = std::nullopt, bool search_locals = true,
                                     std::optional<EntityId>* qualifier_namespace = nullptr);
+  // Operand lookup for an unqualified `using enum E;` ([enum.udecl]/1, CWG 2877): type-only in
+  // spec/clang modes, and ordinary lookup (non-types hide types) in gcc mode.
+  std::optional<QualType> using_enum_type(NameId name);
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
@@ -1123,13 +1137,23 @@ public:
   }
 
   // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
-  void using_enum(QualType t, u32 at_) {
+  void using_enum(QualType t, u32 at_, std::optional<NameId> name = std::nullopt) {
     if (!types().is_enum(t)) {
-      diag(at_, Diag::not_a_type, no_name());
+      diag(at_, Diag::not_a_type, name.value_or(no_name()));
       return;
     }
     const EntityId enumeration = types().enum_of(t);
-    if (q_->require_enum_definition(enumeration)) using_enums_.push_back({scopes_.size() - 1, enumeration});
+    if (!q_->require_enum_definition(enumeration)) return;
+    const EnumRec* rec = enum_rec(enumeration);
+    const bool defining = q_->defining_enum(enumeration) != nullptr;
+    if (!rec || !rec->defined || (defining && (compatibility() != ast::Compatibility::gcc || !rec->fixed))) {
+      diag(at_, Diag::incomplete_type, t);
+      return;
+    }
+    using_enums_.push_back({scopes_.size() - 1, enumeration});
+  }
+  void replay_block_using(NameId name, std::vector<ast::DeclSema> decls, std::optional<std::size_t> type_index) {
+    block_usings_.push_back({scopes_.size() - 1, name, std::move(decls), type_index});
   }
 
   // ------------------------------------------------------------ concepts ([temp.concept], [temp.constr])
@@ -3035,11 +3059,11 @@ public:
     const ast::TemplateParamSema* p = declared_template_param(name);
     return p && p->depth < enclosing_class_heads() && class_scope_declares(name) ? nullptr : p;
   }
-  // How many template-heads enclose the class whose scope this is, its own included: the depths of
-  // the parameters its scope is inside. An explicit specialization has none of its own.
-  u16 enclosing_class_heads() {
+  // How many template-heads enclose class `c`, its own included: the depths of the parameters
+  // its scope is inside. An explicit specialization has none of its own.
+  u16 class_heads(EntityId c) {
     u16 n = 0;
-    for (EntityId c = current_class; c != EntityId::none;) {
+    for (; c != EntityId::none;) {
       const EntityRec& r = w_->entities.rec(c);
       if (r.kind != EntityKind::class_) break;
       if (r.templ != EntityId::none && !q_->explicit_specialization(c)) ++n;
@@ -3047,6 +3071,7 @@ public:
     }
     return n;
   }
+  u16 enclosing_class_heads() { return class_heads(current_class); }
   // Whether a class scope before the template parameter scope declares `name`, including
   // each enclosing class's nondependent bases ([temp.local]/7).
   bool class_scope_declares(NameId name) {
@@ -4381,14 +4406,23 @@ public:
     }
     return std::nullopt;
   }
-  std::optional<QualType> outer_block_class_name(NameId name, bool elaborated, bool& hidden) {
+  std::optional<QualType> outer_block_class_name(NameId name, bool elaborated, bool aliases, bool& hidden) {
     EntityId last = outermost_class(current_class);
     for (const OuterBlock* b = outer(); b && is_local_class(last); b = b->outer.get()) {
-      if (auto t = outer_block_type(*b, name, elaborated, hidden)) return t;
+      if (auto t = outer_block_type(*b, name, elaborated, aliases, hidden)) return t;
       if (hidden) return std::nullopt;
       last = EntityId::none;
       for (EntityId k = b->cls; k != EntityId::none; k = enclosing_class(k)) {
         last = k;
+        if (!is_local_class(k))
+          if (const ast::TemplateParamSema* p = declared_template_param(name); p && p->depth >= class_heads(k)) {
+            if (elaborated || p->kind != ast::TemplateArgKind::type) {
+              hidden = true;
+              return std::nullopt;
+            }
+            if (auto a = bound_arg(*p)) return a->type;
+            return p->type;
+          }
         if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
         if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
           if (auto r = nested_member(k, name, true)) return r->first.type;
@@ -4402,12 +4436,39 @@ public:
     return std::nullopt;
   }
   // The same for a type-name: the type, or none after `hidden` when a non-type hides it.
-  std::optional<QualType> outer_block_type(const OuterBlock& b, NameId name, bool elaborated, bool& hidden) const {
+  std::optional<QualType> outer_block_type(const OuterBlock& b, NameId name, bool elaborated, bool aliases,
+                                           bool& hidden) const {
     for (const OuterBlock::Name& n : b.names) {
       if (n.name != name) continue;
-      if (n.kind == OuterBlock::Name::Kind::type) return n.type;
-      if (n.kind == OuterBlock::Name::Kind::using_ && n.type != QualType{}) return n.type;
-      if (!elaborated) hidden = true;
+      if (n.kind == OuterBlock::Name::Kind::type) {
+        if (!aliases) {
+          hidden = true;
+          return std::nullopt;
+        }
+        return n.type;
+      }
+      if (n.kind == OuterBlock::Name::Kind::using_) {
+        if (!elaborated && std::ranges::any_of(n.decls, [](const ast::DeclSema& d) { return !is_type(d.kind); })) {
+          hidden = true;
+          return std::nullopt;
+        }
+        if (n.type_template) {
+          hidden = true;
+          return std::nullopt;
+        }
+        if (n.type) {
+          if (n.type_alias && !aliases) {
+            hidden = true;
+            return std::nullopt;
+          }
+          return n.type;
+        }
+        if (elaborated) continue;
+        hidden = true;
+        return std::nullopt;
+      }
+      if (elaborated) continue;
+      hidden = true;
       return std::nullopt;
     }
     return std::nullopt;

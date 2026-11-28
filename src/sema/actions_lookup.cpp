@@ -12,23 +12,37 @@ import ycxx.lex;
 namespace ycxx::sema {
 
 auto Sema::class_name(NameId name, bool elaborated, bool aliases, std::optional<u32> type_at, bool search_locals, std::optional<EntityId>* qualifier_namespace) -> std::optional<QualType> {
-  // Innermost block first: a block-scope typedef-name, or a local that hides the type.
+  // Innermost block first: a block-scope typedef-name, block using-declaration, or a local that hides the type.
   for (std::size_t d = search_locals ? scopes_.size() : 0; d-- > 0;) {
+    if (!elaborated) {
+      if (std::ranges::any_of(scopes_[d], [&](const auto& p) { return p.first == name; })) return std::nullopt;
+      if (std::ranges::any_of(block_aliases_, [&](const BlockAlias& a) { return a.depth == d && a.name == name; }))
+        return std::nullopt;
+      for (const BlockUsing& u : block_usings_)
+        if (u.depth == d && u.name == name &&
+            std::ranges::any_of(u.decls, [](const ast::DeclSema& decl) { return !is_type(decl.kind); }))
+          return std::nullopt;
+    }
     for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
-      if (t->depth == d && t->name == name) {
-        if (aliases) return t->type;
-        break;
-      }
-    if (!elaborated && std::ranges::any_of(scopes_[d], [&](const auto& p) { return p.first == name; })) return std::nullopt;
+      if (t->depth == d && t->name == name) return aliases ? std::optional(t->type) : std::nullopt;
+    for (auto u = block_usings_.rbegin(); u != block_usings_.rend(); ++u) {
+      if (u->depth != d || u->name != name || !u->type_index) continue;
+      const ast::DeclSema& decl = u->decls[*u->type_index];
+      if (decl.flags & decl_flag::template_) return std::nullopt;
+      if (decl.kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
+      return decl.type;
+    }
   }
   // A template parameter hides what the enclosing scopes declare ([basic.scope.temp]).
-  if (const ast::TemplateParamSema* p = template_param(name)) {
-    if (elaborated || p->kind != ast::TemplateArgKind::type) return std::nullopt;
-    if (auto a = bound_arg(*p)) return a->type;
-    return p->type;
-  }
+  // For a local class, its enclosing blocks are inside the template's scope and are checked first.
+  if (!outer())
+    if (const ast::TemplateParamSema* p = template_param(name)) {
+      if (elaborated || p->kind != ast::TemplateArgKind::type) return std::nullopt;
+      if (auto a = bound_arg(*p)) return a->type;
+      return p->type;
+    }
   // One the class's scope hides ([temp.local]/7): what it declares, a type or not.
-  if (declared_template_param(name)) {
+  if (!outer() && declared_template_param(name)) {
     for (EntityId cls = current_class; cls != EntityId::none; cls = enclosing_class(cls)) {
       const ClassRec* cr = class_rec(cls);
       if ((!cr || !cr->defined) && cls != current_class)
@@ -107,10 +121,15 @@ auto Sema::class_name(NameId name, bool elaborated, bool aliases, std::optional<
       }
     }
   }
-  // Past a local class, the block enclosing it ([class.local]).
+  // Past a local class, the block enclosing it ([class.local]), then its template parameters.
   if (bool hidden = false; outer()) {
-    if (auto t = outer_block_class_name(name, elaborated, hidden)) return t;
+    if (auto t = outer_block_class_name(name, elaborated, aliases, hidden)) return t;
     if (hidden) return std::nullopt;
+    if (const ast::TemplateParamSema* p = template_param(name)) {
+      if (elaborated || p->kind != ast::TemplateArgKind::type) return std::nullopt;
+      if (auto a = bound_arg(*p)) return a->type;
+      return p->type;
+    }
   }
   // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
   // reports the optional's payload as possibly uninitialized after the `!found` checks (#748).
@@ -1662,16 +1681,17 @@ auto Sema::scope_named(NameId n, std::optional<u32> enum_qualifier_at, bool* amb
   for (const OuterBlock* b = outer(); b; b = b->outer.get())
     for (const OuterBlock::Name& nm : b->names)
       if (nm.name == n && nm.kind == OuterBlock::Name::Kind::namespace_alias) return Scope{nm.ns, std::nullopt};
-  const bool search_local_aliases = !search_block_import_types;
-  if (enum_qualifier_at) {
-    std::optional<EntityId> ns;
-    if (auto t = class_name(n, true, true, enum_qualifier_at, search_local_aliases, &ns))
+  if (search_block_import_types) {
+    if (enum_qualifier_at) {
+      std::optional<EntityId> ns;
+      if (auto t = class_name(n, true, true, enum_qualifier_at, /*search_locals=*/false, &ns))
+        return Scope{std::nullopt, t};
+      if (ns) return Scope{ns, std::nullopt};
+      return std::nullopt;
+    }
+    if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, /*search_locals=*/false))
       return Scope{std::nullopt, t};
-    if (ns) return Scope{ns, std::nullopt};
-    return std::nullopt;
   }
-  if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, search_local_aliases))
-    return Scope{std::nullopt, t};
   if (auto ns = q_->namespace_named(n, directives())) {
     if (ambiguous_namespace)
       *ambiguous_namespace = competing_qualifier(*ns, q_->qualifier_decls(n, std::nullopt, directives()));
@@ -2824,7 +2844,10 @@ auto Sema::close_lambda(Ex body, u32 body_begin, u32 end) -> Ex {
   // with their values, the others for unevaluated operands; and its type aliases.
   std::vector<ast::LocalRec> consts;
   std::vector<ConstId> values;
+  std::vector<std::size_t> const_depths;
   std::vector<std::pair<NameId, QualType>> aliases;
+  std::vector<std::size_t> alias_depths;
+  std::vector<GenericClosure::CapturedUsing> usings;
   if (generic) {
     std::set<u32> seen;
     for (std::size_t d = scopes_.size(); d-- > 0 && context_of(d) == lambdas_.size();)
@@ -2833,9 +2856,19 @@ auto Sema::close_lambda(Ex body, u32 body_begin, u32 end) -> Ex {
         consts.push_back(locals_[p->second]);
         consts.back().decl = NodeId::none;
         values.push_back(p->second < local_values_.size() && local_values_[p->second] ? *local_values_[p->second] : ConstId::none);
+        const_depths.push_back(d);
       }
-    for (const BlockType& t : block_types_)
-      if (t.depth < scopes_.size()) aliases.push_back({t.name, t.type});
+    std::set<u32> seen_types;
+    for (std::size_t d = scopes_.size(); d-- > 0;) {
+      for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
+        if (t->depth == d && seen_types.insert(std::to_underlying(t->name)).second) {
+          aliases.push_back({t->name, t->type});
+          alias_depths.push_back(d);
+        }
+      for (auto u = block_usings_.rbegin(); u != block_usings_.rend(); ++u)
+        if (u->depth == d && u->type_index && seen_types.insert(std::to_underlying(u->name)).second)
+          usings.push_back({d, u->name, u->decls, u->type_index});
+    }
   }
   if (generic) {
     std::vector<NameId> names;
@@ -2849,7 +2882,8 @@ auto Sema::close_lambda(Ex body, u32 body_begin, u32 end) -> Ex {
       if (x.begin >= body_begin && x.begin < end) exps.push_back(x);
     std::vector<std::vector<ast::TemplateParamSema>> outer(template_scopes.begin(), template_scopes.end() - (template_scopes.empty() ? 0 : 1));
     generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts,
-                                                       values, exps, outer, template_args, aliases, diag_count() > fr.diags_at};
+                                                       values, const_depths, exps, outer, template_args, aliases, alias_depths, usings,
+                                                       diag_count() > fr.diags_at};
     if (declaration_part)
       generic_closures_[std::to_underlying(fr.call)].part = GenericClosure::Part{item_, loc_base_, current_class};
     q_->generic_defined(generic_closures_[std::to_underlying(fr.call)]);
@@ -2870,6 +2904,25 @@ auto Sema::close_lambda(Ex body, u32 body_begin, u32 end) -> Ex {
   }
   ExprInfo info{types().class_type(fr.closure), ValueCategory::prvalue, 0};
   return node(ast::Lambda{info, fr.closure, b_->list(inits)}, fr.begin, end, info);
+}
+
+auto Sema::using_enum_type(NameId name) -> std::optional<QualType> {
+  if (compatibility() != ast::Compatibility::gcc) return class_name(name, /*elaborated=*/true);
+  // GCC rejects `using enum E;` when a non-type declaration hides E (CWG 2877),
+  // while still rejecting an unshadowed template parameter `using enum T;`.
+  bool shadowed =
+      std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth < scopes_.size() && t.name == name; }) ||
+      std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.depth < scopes_.size() && u.name == name; });
+  if (!shadowed && outer()) {
+    EntityId last = outermost_class(current_class);
+    for (const OuterBlock* b = outer(); b && is_local_class(last) && !shadowed; b = b->outer.get()) {
+      bool hidden = false;
+      shadowed = outer_block_type(*b, name, /*elaborated=*/false, /*aliases=*/true, hidden).has_value() || hidden;
+      last = b->cls;
+    }
+  }
+  if (!shadowed && template_param(name)) return std::nullopt;
+  return class_name(name, /*elaborated=*/false);
 }
 
 }  // namespace ycxx::sema

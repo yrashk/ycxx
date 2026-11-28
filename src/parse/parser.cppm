@@ -6894,9 +6894,9 @@ public:
         u32 at = pos();
         NameId n = name_of(tok());
         bump();
-        auto t = s_->class_name(n, true);
+        auto t = s_->using_enum_type(n);
         if (!t) s_->diag(at, Diag::not_a_type, n);
-        else s_->using_enum(*t, at);
+        else s_->using_enum(*t, at, n);
         expect(Tk::semi);
         return s_->node(ast::ExprStmt{}, begin, pos());
       }
