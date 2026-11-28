@@ -4837,6 +4837,13 @@ private:
     d.noexcept_tokens.reset();
   }
 
+  // Whether the class being defined has a dependent base in its template pattern.
+  bool has_dependent_base() {
+    if (inst_ || s_.template_scopes.empty()) return false;
+    const auto base = p_->class_base_patterns_.find(it_->parent);
+    return base != p_->class_base_patterns_.end() && s_.types().is_dependent(base->second.base.type);
+  }
+
   // In a class template's definition, a base or a signature can be dependent: each specialization
   // checks what its member overrides ([temp.res.general]).
   bool may_override_dependent_base(bool dependent_member) {

@@ -1729,6 +1729,7 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
       if (auto r = incomplete_class_member(name, begin, end, begin, /*unqualified=*/true, callee)) return *r;
     // Then the classes it is nested in ([class.nest], [basic.lookup.unqual]/2).
     for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
+      if (q_->dependent_member_using(k, name)) return dependent_node({}, begin, end);
       if (class_rec(k)) {
         if (auto r = class_member(k, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       } else if (auto r = enclosing_prefix_value(k, name, begin, end, begin, /*unqualified=*/true, callee)) {

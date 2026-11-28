@@ -900,7 +900,7 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     s_.diag(at, Diag::using_namespace_member, *name);
     return false;
   }
-  if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) {
+  auto defer_dependent_using = [&]() -> bool {
     // [namespace.udecl]/8, [basic.scope.scope]/4: a repeated dependent member using-declarator
     // (same canonical qualifier, name, and non-dependent conversion target) is ill-formed in the
     // template definition.
@@ -929,6 +929,9 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     }
     p_->dependent_member_usings_[std::to_underlying(ce)].insert(*name);
     return true;
+  };
+  if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) {
+    return defer_dependent_using();
   }
   if (!sc->type || !types.is_class(*sc->type)) {
     s_.diag(at, Diag::using_not_base, sc->type ? *sc->type : s_.builtin(sema::Builtin::void_), types.class_type(ce));
@@ -945,7 +948,14 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     int paths = 0;
     return d == b || s_.base_path(d, b, paths).has_value();
   });
-  if (b == ce || !is_base) {
+  if (b == ce) {
+    s_.diag(at, Diag::using_not_base, *sc->type, types.class_type(ce));
+    return false;
+  }
+  if (!is_base) {
+    // [namespace.udecl]/3, [temp.dep], [temp.inst]: when the class has a dependent base,
+    // whether a concrete class is a base cannot be decided until instantiation.
+    if (has_dependent_base()) return defer_dependent_using();
     s_.diag(at, Diag::using_not_base, *sc->type, types.class_type(ce));
     return false;
   }
