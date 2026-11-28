@@ -13,6 +13,7 @@ export namespace ycxx::pp::detail {
 std::optional<std::string> image_path_of(const void* address) {
   Dl_info info{};
   if (::dladdr(address, &info) == 0 || !info.dli_fname || !*info.dli_fname) return std::nullopt;
+  if (std::string_view(info.dli_fname).find('/') == std::string_view::npos) return std::nullopt;
   if (char* real = ::realpath(info.dli_fname, nullptr)) {
     std::string out = real;
     ::free(real);

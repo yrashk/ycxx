@@ -15,12 +15,16 @@ def run(cmd, cwd, env):
 def main():
     ycxx_bin = Path(sys.argv[1]).resolve()
     repo_resources = Path(sys.argv[2]).resolve()
-    install_datadir = sys.argv[3]
+    install_bindir = sys.argv[3]
+    install_datadir = sys.argv[4]
+
+    if os.path.isabs(install_bindir) or os.path.isabs(install_datadir):
+        return 0
 
     with tempfile.TemporaryDirectory(prefix='ycxx-relocated-prefix-') as tmp:
         root = Path(tmp).resolve()
         prefix = root / 'moved-sdk'
-        bindir = prefix / 'bin'
+        bindir = prefix / install_bindir
         data_dir = prefix / install_datadir / 'ycxx'
         resources_dir = data_dir / 'resources'
         target_inc = data_dir / 'target' / 'include'
@@ -78,6 +82,21 @@ static_assert(sizeof(size_t) == sizeof(void*));
             assert res_linux == (0, want_linux, b''), (exe, res_linux, want_linux)
             res_darwin = run([str(exe), 'cxx', '--target=arm64-apple-darwin', '-print-file-name=include'], scope, cold_env)
             assert res_darwin == (0, want_darwin, b''), (exe, res_darwin, want_darwin)
+
+        # Bare PATH invocation must not resolve a decoy file/prefix in the current working directory.
+        decoy_prefix = root / 'decoy-sdk'
+        decoy_bin = decoy_prefix / install_bindir
+        decoy_res = decoy_prefix / install_datadir / 'ycxx' / 'resources'
+        decoy_bin.mkdir(parents=True)
+        (decoy_bin / ycxx_bin.name).write_text('decoy\n')
+        (decoy_res / 'linux/include').mkdir(parents=True)
+        (decoy_res / 'common/include').mkdir(parents=True)
+        (decoy_res / 'linux/include/stddef.h').write_text('')
+        (decoy_res / 'common/include/stdarg.h').write_text('')
+        path_env = cold_env | {'PATH': f'{bindir}{os.pathsep}{cold_env.get("PATH", "")}'}
+        res_path = run([ycxx_bin.name, 'cxx', '--target=x86_64-pc-linux-gnu', '-print-file-name=include'],
+                       decoy_bin, path_env)
+        assert res_path == (0, want_linux, b''), (res_path, want_linux)
 
         try:
             for extra in ([], ['-nostdinc++', '-DNO_TARGET_HEADER']):

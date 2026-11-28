@@ -77,8 +77,12 @@ std::optional<DefaultPaths> probe_relative_to(const std::optional<std::string>& 
 }
 
 DefaultPaths resolve_default_paths() {
-  if (auto found = probe_relative_to(detail::image_path_of(pp_image_address()), libdir_to_datadir)) return *found;
-  if (auto found = probe_relative_to(detail::executable_path(), bindir_to_datadir)) return *found;
+  const auto exe = detail::executable_path();
+  const auto img = detail::image_path_of(pp_image_address());
+  if (img && (!exe || *img != *exe)) {
+    if (auto found = probe_relative_to(img, libdir_to_datadir)) return *found;
+  }
+  if (auto found = probe_relative_to(exe, bindir_to_datadir)) return *found;
 
   std::string reg_resources;
   std::string reg_target;
