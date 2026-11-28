@@ -982,6 +982,11 @@ public:
           d.ok = false;
           continue;
         }
+        if (t && !is(Tk::semi) && (!s_->types().is_class(*t) || s_->is_union_type(*t) == !(k == Tk::kw_union))) {
+          s_->diag(at + 1, Diag::conflicting_declaration, n);
+          d.ok = false;
+          continue;
+        }
         const std::size_t diags = s_->diag_count();
         if (!t && declare_class) t = declare_class(n, k, name_at);
         if (!t) {
@@ -8056,7 +8061,13 @@ public:
     // ([dcl.type.elab]/2, [basic.scope.pdecl]/7): a local class.
     if (body && is_class_key(kind()) && kind(1) == Tk::identifier && kind(2) == Tk::semi && declare_class) {
       const NameId n = name_of(tok(1));
-      if (!s_->innermost_block_type(n)) declare_class(n, kind(), begin + 1);
+      if (auto b = s_->innermost_block_type_binding(n)) {
+        if (!b->second) s_->diag(begin + 1, Diag::elaborated_typedef, n);
+        else if (!s_->types().is_class(b->first) || s_->is_union_type(b->first) == !(kind() == Tk::kw_union))
+          s_->diag(begin + 1, Diag::conflicting_declaration, n);
+      } else {
+        declare_class(n, kind(), begin + 1);
+      }
       bump();
       bump();
       bump();

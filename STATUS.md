@@ -1814,7 +1814,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   owner's, so same-shaped classes of different functions stay distinct.
 - Members see the block as of the class-head (`sema::OuterBlock`): its types, using-declarations
   and using-directives, namespace aliases, `using enum`s, static locals, and constants for their
-  values. An automatic variable is usable
+  values. Non-type block using-declarations coexist with same-name local class tags in the block,
+  local classes, and generic lambdas while elaborated references resolve to the tag
+  ([#1696](https://github.com/yrashk/ycxx/issues/1696)). An automatic variable is usable
   only unevaluated ([basic.def.odr]). Lookup reaches the block after the local class and before
   the function's class ([basic.lookup.unqual]), including a class still being defined around a
   lambda in a static member's initializer. Access is the function's ([class.local]/1).

@@ -289,9 +289,9 @@ auto Sema::outer_block_here() -> OuterBlock {
       b.names.push_back(std::move(n));
     }
     for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
-      if (t->depth == d && seen_type.insert(std::to_underlying(t->name)).second) {
+      if (t->depth == d && !t->is_tag && seen_type.insert(std::to_underlying(t->name)).second) {
         seen_value.insert(std::to_underlying(t->name));
-        b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none, true, false});
+        b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none, true, false, false});
       }
     std::map<u32, std::size_t> depth_usings;
     for (const BlockUsing& u : block_usings_) {
@@ -329,6 +329,11 @@ auto Sema::outer_block_here() -> OuterBlock {
       if (b.names[idx].type) seen_type.insert(key);
       seen_value.insert(key);
     }
+    for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
+      if (t->depth == d && t->is_tag && seen_type.insert(std::to_underlying(t->name)).second) {
+        seen_value.insert(std::to_underlying(t->name));
+        b.names.push_back({OuterBlock::Name::Kind::type, t->name, {}, std::nullopt, t->type, {}, EntityId::none, false, false, true});
+      }
     for (const BlockAlias& a : block_aliases_)
       if (a.depth == d && seen_value.insert(std::to_underlying(a.name)).second)
         b.names.push_back({OuterBlock::Name::Kind::namespace_alias, a.name, {}, std::nullopt, std::nullopt, {}, a.ns});
@@ -1698,7 +1703,7 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
         }
         return local_ref(p->second, begin, end);
       }
-    if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; })) {
+    if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name && !t.is_tag; })) {
       diag(begin, Diag::type_as_expression, name);  // [expr.prim.id]: a type is not an expression
       return {NodeId::none, begin, end};
     }
@@ -1706,6 +1711,10 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
     for (const BlockUsing& u : block_usings_)
       if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
     if (!used.empty()) return decls_expr(std::move(used), true, name, begin, end, callee, true);
+    if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; })) {
+      diag(begin, Diag::type_as_expression, name);  // [expr.prim.id]: a type is not an expression
+      return {NodeId::none, begin, end};
+    }
   }
   // A function parameter pack of an instantiation, unless a block declares the name: its element
   // ([temp.variadic]/8).
