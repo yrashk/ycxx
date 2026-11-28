@@ -2507,10 +2507,26 @@ public:
       if (ts.is_reference(target)) return bool_literal(false, begin, end);
     }
     const std::span<const ConstructibilityOperand> arguments(args);
-    if (ts.is_arithmetic(target) && std::ranges::all_of(arguments.subspan(1), [&](const ConstructibilityOperand& arg) {
-          return ts.is_arithmetic(ts.referee(ts.canonical(arg.type)));
-        }))
-      return bool_literal(args.size() == 2, begin, end);
+    // A scalar is direct-initialized from one expression of arithmetic, pointer or
+    // `std::nullptr_t` type by a standard conversion, as copy-initialization would, and also
+    // `bool` from a null pointer value ([dcl.init.general]/16.9, [conv.bool]).
+    const auto scalar = [&](QualType t) {
+      t = ts.canonical(t);
+      return ts.is_arithmetic(t) || ts.is_pointer(t) || ts.is(t, Builtin::nullptr_t);
+    };
+    if (scalar(target) && std::ranges::all_of(arguments.subspan(1), [&](const ConstructibilityOperand& arg) {
+          return scalar(ts.referee(ts.canonical(arg.type)));
+        })) {
+      if (args.size() != 2) return bool_literal(false, begin, end);
+      const QualType from = object_unqualified(ts.referee(ts.canonical(args[1].type))), to = object_unqualified(target);
+      if (ts.is(from, Builtin::nullptr_t) && ts.is(to, Builtin::bool_)) return bool_literal(true, begin, end);
+      switch (scalar_conversion(from, to, loc)) {
+        case PointerConversion::no: return bool_literal(false, begin, end);
+        case PointerConversion::yes: return bool_literal(true, begin, end);
+        case PointerConversion::failed: return {NodeId::none, begin, end};
+        case PointerConversion::unmodelled: break;
+      }
+    }
     if (op == ast::DepOp::is_nothrow_constructible && ts.is_class(target) && Types::cv(target) == Cv::none && args.size() == 2) {
       const TypeRec source = ts.rec(args[1].type);
       if (source.kind == TypeKind::reference && source.rvalue_ref && ts.canonical(source.inner) == target)
@@ -2712,6 +2728,188 @@ public:
     if (*related && !clang_pointer_temporary) return no;
     return scalar_conversion(object_unqualified(source), object_unqualified(target), loc);
   }
+  // An operand of type `type` and category `category` with no value: what a type trait's
+  // `declval<T>()` or a conversion function's result gives the initialization rules, which ask
+  // only for those ([declval], [meta.rel]).
+  Ex opaque_operand(QualType type, ValueCategory category, u32 at_) {
+    const ExprInfo info{type, category, 0};
+    return node(ast::Dependent{info, b_->list({})}, at_, at_, info);
+  }
+  // `declval<T>()`: an lvalue for an lvalue reference or function T, else an xvalue.
+  Ex declval_operand(QualType t, u32 at_) {
+    const Types& ts = types();
+    const QualType object = ts.canonical(ts.referee(t));
+    const bool lvalue = (ts.is_reference(t) && !ts.rec(t).rvalue_ref) || ts.is_function(object);
+    return opaque_operand(object, lvalue ? ValueCategory::lvalue : ValueCategory::xvalue, at_);
+  }
+  // A failure that makes an initialization ill-formed in its immediate context: no viable,
+  // an ambiguous, a deleted or an inaccessible function, an abstract class object, no
+  // conversion, or a reference that cannot bind. A type trait asking for that initialization
+  // is false ([meta.rel], [meta.unary.prop]).
+  static bool immediate_initialization_failure(engine::DiagId id) {
+    for (Diag d : {Diag::no_viable_constructor, Diag::no_viable_function, Diag::ambiguous_call,
+                   Diag::ambiguous_constructor, Diag::deleted_constructor, Diag::deleted_function,
+                   Diag::private_member, Diag::protected_member, Diag::inaccessible_base, Diag::abstract_object,
+                   Diag::no_conversion, Diag::bind_to_lvalue, Diag::bind_to_rvalue, Diag::bind_drops_qualifiers})
+      if (id == diag_id(d)) return true;
+    return false;
+  }
+  // Performs `initialize` in an unevaluated context as a trial and keeps none of its
+  // diagnostics. `no` when it is ill-formed in its immediate context, and `unmodelled` on
+  // anything else, such as a limit of ycxx's or a failure whose diagnostic a replay already
+  // reported (`diag` does not repeat it).
+  template <class F>
+  PointerConversion trial_initialization(F&& initialize) {
+    using enum PointerConversion;
+    const auto before = diag_count();
+    ++unevaluated;
+    const Ex result = initialize();
+    --unevaluated;
+    std::vector<engine::DiagId> errors;
+    for (const engine::Diagnostic& d : std::span(*diags_).subspan(before))
+      if (auto kind = sema_diag_of(d.id); kind && message_of(*kind).severity == lex::Severity::error) errors.push_back(d.id);
+    truncate_diags(before);
+    if (result.ok() && errors.empty()) return yes;
+    if (!errors.empty() && std::ranges::all_of(errors, immediate_initialization_failure)) return no;
+    return unmodelled;
+  }
+  // Whether `cls` or one of its bases declares a conversion function; true where a class on
+  // the way has no record.
+  bool declares_conversion_functions(EntityId cls) {
+    const NameId name = ins().names.intern(lex::conversion_function_name);
+    std::vector<EntityId> pending{cls};
+    std::set<EntityId> visited;
+    while (!pending.empty()) {
+      const EntityId current = pending.back();
+      pending.pop_back();
+      if (!visited.insert(current).second) continue;
+      const ClassRec* record = classes().find(current);
+      if (!record || !record->defined) return true;
+      if (std::ranges::contains(record->members, name, &MemberDeclRec::name) ||
+          std::ranges::contains(record->introduced, name, &MemberDeclRec::name))
+        return true;
+      for (const BaseRec& edge : record->bases) pending.push_back(edge.cls);
+    }
+    return false;
+  }
+  // [over.match.copy]/1.2, [over.match.conv]: the conversion functions of the class of `object`
+  // that initialize an object of the non-reference type `target`. For a class target, those
+  // yielding it or a class derived from it; for another, those whose result converts to it by a
+  // standard conversion sequence. Explicit ones only for direct-initialization of a non-class
+  // target, through an exact match. Candidates rank by the implicit object parameter, then by
+  // that second standard conversion sequence ([over.match.best.general]/2.2). None without a
+  // viable candidate; `no` when the best is ambiguous, deleted or not public (access is checked
+  // from a context unrelated to both types, [meta.rel]). Conversion function templates and those
+  // of base classes are unmodelled.
+  std::optional<PointerConversion> conversion_function_initialization(const Ex& object, QualType target, bool direct) {
+    using enum PointerConversion;
+    const Types& ts = types();
+    const EntityId cls = ts.class_of(object.type());
+    const ClassRec* record = class_rec(cls);
+    if (!record) return unmodelled;
+    for (const BaseRec& edge : record->bases)
+      if (declares_conversion_functions(edge.cls)) return unmodelled;
+    struct Viable {
+      const MemberDeclRec* function;
+      Ics object, result;
+    };
+    std::vector<Viable> viable;
+    const bool class_target = ts.is_class(target);
+    const Cv cv = object_cv(object.type());
+    const bool object_rvalue = object.cat() != ValueCategory::lvalue;
+    for (const MemberDeclRec* candidate : member_functions(cls, ins().names.intern(lex::conversion_function_name))) {
+      if (candidate->is_template) return unmodelled;
+      if (candidate->is_explicit && (!direct || class_target)) continue;
+      const TypeRec fn = ts.rec(candidate->type);
+      const Ics object_rank = implicit_object_rank(fn, cv, object_rvalue);
+      if (!object_rank.viable) continue;
+      // A reference result is an lvalue, or an xvalue for an rvalue reference to an object
+      // ([expr.call]/14).
+      const QualType produced = ts.canonical(ts.referee(fn.inner));
+      Ics result_rank{true, 0, 0};
+      if (class_target) {
+        if (!ts.is_class(produced)) continue;
+        if (!same_unqualified(produced, target)) {
+          const int depth = base_depth(produced, target);
+          if (!depth) continue;
+          result_rank = {true, 2, 0};
+          result_rank.base_depth = depth;
+        }
+      } else {
+        const bool reference = ts.is_reference(fn.inner);
+        const ValueCategory category = !reference ? ValueCategory::prvalue
+                                       : ts.rec(fn.inner).rvalue_ref && !ts.is_function(produced) ? ValueCategory::xvalue
+                                                                                                  : ValueCategory::lvalue;
+        const QualType result_type = reference || ts.is_class(produced) ? produced : Types::unqualified(produced);
+        result_rank = ics(opaque_operand(result_type, category, object.begin), target);
+        if (!result_rank.viable || (candidate->is_explicit && result_rank.rank != 0)) continue;
+      }
+      viable.push_back({candidate, object_rank, result_rank});
+    }
+    if (viable.empty()) return std::nullopt;
+    const auto better = [](const Viable& a, const Viable& b) {
+      if (a.object < b.object) return true;
+      if (b.object < a.object) return false;
+      return a.result < b.result;
+    };
+    const Viable* best = nullptr;
+    for (const Viable& v : viable)
+      if (std::ranges::all_of(viable, [&](const Viable& other) { return &other == &v || better(v, other); })) best = &v;
+    if (!best) return no;  // ambiguous ([over.match.best.general]/3)
+    if (best->function->is_deleted || record->access_of(best->function->entity) != ast::Access::public_) return no;
+    return yes;
+  }
+  // `__is_convertible(From, To)` through a user-defined conversion ([conv.general]/3,
+  // [over.best.ics], [class.conv]): the copy-initialization of a `To` from `declval<From>()`,
+  // where one of the types is a class and they are not reference-related. None outside that
+  // domain, or where a class is incomplete or a union, for the standard conversions above.
+  std::optional<PointerConversion> user_convertibility(QualType from, QualType to, engine::Loc loc, u32 at_) {
+    using enum PointerConversion;
+    const Types& ts = types();
+    const QualType from_object = ts.canonical(ts.referee(from)), to_object = ts.canonical(ts.referee(to));
+    const bool from_class = ts.is_class(from_object), to_class = ts.is_class(to_object);
+    if (!from_class && !to_class) return std::nullopt;
+    for (QualType operand : {from_object, to_object}) {
+      if (!ts.is_class(operand)) continue;
+      if (is_union_type(operand) != false) return std::nullopt;
+      const EntityId cls = ts.class_of(operand);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) return std::nullopt;
+    }
+    if (from_class && to_class) {
+      const EntityId f = ts.class_of(from_object), t = ts.class_of(to_object);
+      if (f == t || reaches_base(f, t) != false) return std::nullopt;
+    }
+    const bool reference = ts.is_reference(to);
+    if (!reference && (ts.is_array(to) || ts.is_function(to))) return std::nullopt;
+    const Ex source = declval_operand(from, at_);
+    const bool conversion_functions = from_class && declares_conversion_functions(ts.class_of(from_object));
+    // [dcl.init.ref]/5 through a conversion function ([over.match.ref]) is not modelled.
+    if (reference && conversion_functions) return unmodelled;
+    if (reference) return trial_initialization([&] { return bind_reference(source, to, at_); });
+    const QualType target = Types::unqualified(to);
+    // A closure's conversion function to a pointer to function is not a recorded member
+    // ([expr.prim.lambda.closure]/9); `ics` finds it as the invoker. Its other uses, such as a
+    // following boolean conversion, are not modelled, nor is a class target, whose converting
+    // constructor would take the invoker as a second user-defined conversion ([over.best.ics]/4, #1718).
+    if (const ClassRec* record = from_class ? class_rec(ts.class_of(from_object)) : nullptr; record && record->closure) {
+      if (!to_class &&
+          (closure_invoker(from_object, target) || generic_invoker(from_object, target, at_, /*demand_definition=*/false)))
+        return yes;
+      return unmodelled;
+    }
+    const auto converted = [&] { return trial_initialization([&] { return convert(source, target, at_); }); };
+    if (!conversion_functions) return to_class ? converted() : no;
+    const auto by_function = conversion_function_initialization(source, target, /*direct=*/false);
+    if (!to_class) return by_function.value_or(no);
+    if (by_function == unmodelled) return unmodelled;
+    // Converting constructors compete with the conversion functions in one overload
+    // resolution ([over.match.copy]/1); comparing the two kinds is not modelled.
+    const PointerConversion by_constructor = converted();
+    if (!by_function) return by_constructor;
+    if (by_constructor == no) return by_function;
+    return unmodelled;
+  }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
   Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {
     const Types& ts = types();
@@ -2746,6 +2944,11 @@ public:
     };
     // Only `void` converts to `void` ([meta.rel]).
     if (from_void || to_void) return bool_literal(from_void && to_void, begin, end);
+    if (auto user = user_convertibility(from, to, loc, begin)) {
+      // Whether the selected constructor or conversion function throws is not modelled.
+      if (op == ast::DepOp::is_nothrow_convertible && *user == PointerConversion::yes) return unsupported();
+      return answer(*user);
+    }
     // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
     // throw ([conv.ptr], [conv.qual], [conv.bool]).
     if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t)))
@@ -8301,8 +8504,10 @@ public:
         return constructor_ics(std::span(&a, 1), to, Construction::copy).value_or(Ics{});
       return {};
     }
-    if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
-    if (is_data_member_pointer(to) && (types().is(a.type(), Builtin::nullptr_t) || is_null_pointer_constant(a)))
+    // A glvalue of type std::nullptr_t is one after the lvalue-to-rvalue conversion ([conv.ptr]/1).
+    const bool null_type = types().is(Types::unqualified(types().canonical(a.type())), Builtin::nullptr_t);
+    if (types().is_pointer(to) && (null_type || is_null_pointer_constant(a))) return {true, 2, 0};
+    if (is_data_member_pointer(to) && (null_type || is_null_pointer_constant(a)))
       return {true, 2, 0};
     // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2). Through
     // the one conversion function, the second standard conversion ranks them: identity before a
