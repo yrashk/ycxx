@@ -690,7 +690,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
       [#992](https://github.com/yrashk/ycxx/issues/992)
     - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
       earlier items that can declare an entity before a side table is read, `settle` completes a
-      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
+      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens. A question
+      about one specialization reads only the explicit and partial specializations that declare
+      its name, and a group's END reads those from its first item on (#1704).
     - A group's analysis is reused between revisions while what it read gives the same answers
       (`GroupTrace`, kept per session): the items it read (`ItemsView`) and their position-free
       content, its by-name questions (`Program::NameProbe`, filtered by the shared
