@@ -1874,6 +1874,48 @@ void layout() {
   check(!strip_sgr(b.frame().lines[1]).contains("keys"), "any other key closes it");
 }
 
+
+// What the terminal is sent for a frame (#1713): all of it first; then only the lines that changed,
+// so that a key costs a few lines, and the screen that results is the browser's frame.
+void frame_updates() {
+  trace::Tree t;
+  t.add(browser_events());
+  trace::Browser b(t);
+  b.resize(24, 120);
+  // The screen the bytes leave: each `ESC [ row ; 1 H` and the line after it. The cursor's part
+  // goes first: at column 1 it looks like a row's move.
+  const auto apply = [](std::vector<std::string> screen, std::string text) {
+    if (text.ends_with("\x1b[?25l")) text.resize(text.size() - 6);
+    else if (text.ends_with("\x1b[?25h")) text.resize(text.rfind("\x1b[", text.size() - 7));
+    const std::regex move("\x1b\\[([0-9]+);1H");
+    std::vector<std::smatch> moves;
+    for (auto m = std::sregex_iterator(text.begin(), text.end(), move); m != std::sregex_iterator(); ++m) moves.push_back(*m);
+    for (std::size_t i = 0; i < moves.size(); ++i) {
+      const std::size_t row = std::stoul(moves[i][1]) - 1;
+      const auto from = static_cast<std::size_t>(moves[i].position() + moves[i].length());
+      const auto to = i + 1 < moves.size() ? static_cast<std::size_t>(moves[i + 1].position()) : text.size();
+      if (row >= screen.size()) screen.resize(row + 1);
+      screen[row] = text.substr(from, to - from);
+    }
+    return screen;
+  };
+  const trace::Frame first = b.frame();
+  const std::string whole = trace::frame_update(nullptr, first);
+  check(apply({}, whole) == first.lines, "with nothing shown, the whole frame");
+  check(trace::frame_update(&first, first) == "\x1b[?25l", "the same frame again: only the cursor");
+  (void)b.handle(trace::Key{"j"});
+  const trace::Frame next = b.frame();
+  const std::string moved = trace::frame_update(&first, next);
+  check(apply(first.lines, moved) == next.lines, "after a key, the lines sent make the new frame");
+  const auto changed = std::ranges::count_if(std::views::iota(std::size_t{0}, next.lines.size()),
+                                             [&](std::size_t i) { return first.lines[i] != next.lines[i]; });
+  check(changed > 0 && changed < static_cast<std::ptrdiff_t>(next.lines.size()) && moved.size() < whole.size(),
+        std::format("a key sends only the {} lines it changed: {} bytes, not {}", changed, moved.size(), whole.size()));
+  b.resize(20, 120);
+  const trace::Frame smaller = b.frame();
+  check(apply({}, trace::frame_update(&next, smaller)) == smaller.lines, "a screen of other rows is drawn whole");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1896,5 +1938,6 @@ int main(int argc, char** argv) {
   histograms(std::filesystem::path(argv[1]).parent_path() / "histogram.golden", update);
   live();
   layout();
+  frame_updates();
   return ycxx::unit::result("unit.trace");
 }

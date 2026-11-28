@@ -172,14 +172,21 @@ class Terminal {
       s.remove_prefix(static_cast<std::size_t>(n));
     }
   }
-  void draw(const Frame& f) const {
-    // Each line at its own row (each is the screen's width): nothing depends on where the last
-    // line left the cursor.
-    std::string out;
-    for (std::size_t i = 0; i < f.lines.size(); ++i) out += std::format("\x1b[{};1H{}", i + 1, f.lines[i]);
-    if (f.cursor) out += std::format("\x1b[{};{}H\x1b[?25h", f.cursor->first + 1, f.cursor->second + 1);
-    else out += "\x1b[?25l";
-    write(out);
+  // The lines that changed since the last frame (`frame_update`); all of them after `forget`.
+  void draw(Frame f) {
+    write(frame_update(shown_ ? &*shown_ : nullptr, f));
+    shown_ = std::move(f);
+  }
+  // The screen no longer shows the last frame: a resize may have cleared or reflowed it.
+  void forget() { shown_.reset(); }
+  // Whether an input is waiting, so that it is handled before the next frame.
+  bool ready() const {
+    if (pending_) return true;
+    fd_set in;
+    FD_ZERO(&in);
+    FD_SET(fd_, &in);
+    timeval tv{0, 0};
+    return ::select(fd_ + 1, &in, nullptr, nullptr, &tv) > 0;
   }
 
   enum class Wake : std::uint8_t { input, feed, resize, tick };
@@ -276,6 +283,7 @@ class Terminal {
   int fd_ = -1;
   termios saved_{};
   std::optional<char> pending_;
+  std::optional<Frame> shown_;  // what the screen shows
 };
 
 // The clipboard beyond the terminal (#636). OSC 52 reaches it from anywhere a terminal supports it
@@ -416,7 +424,7 @@ bool browse(Tree& tree, Feed* feed) {
     else if (tree.version() != before || tree.running() > 0) pending = true;
   };
   while (true) {
-    if (const auto now_size = term.size(); now_size != size) size = now_size, dirty = true;
+    if (const auto now_size = term.size(); now_size != size) size = now_size, dirty = true, term.forget();
     const auto now = clock::now();
     if (feed && feed->tick && now >= next_frame) {
       live_step(feed->tick);
@@ -451,7 +459,7 @@ bool browse(Tree& tree, Feed* feed) {
     if (feed && feed->tick) until(next_frame);
     if (pending) until(next_draw);
     switch (term.wait(feed && feed->pump ? feed->fd : -1, wait)) {
-      case Terminal::Wake::resize: dirty = true; continue;
+      case Terminal::Wake::resize: dirty = true, term.forget(); continue;
       case Terminal::Wake::tick: continue;
       case Terminal::Wake::feed:
         live_step(feed->pump);
@@ -459,14 +467,20 @@ bool browse(Tree& tree, Feed* feed) {
       case Terminal::Wake::input: break;
     }
     dirty = true;
-    const auto at = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - start);
-    const Action a = b.handle(parse_input(term.read_input()), at);
-    if (a.quit) return true;
-    if (a.copy) {
-      term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
-      const std::optional<std::string> how = copy_locally(*a.copy);
-      b.note(std::format("{} (OSC 52{})", b.notice(), how ? ", " + *how : std::string()));
-    }
+    // The inputs already waiting are handled before the next frame: keys that piled up while a
+    // slow or busy terminal drew (key repeat) cost one frame, not one each (#1713). At most a
+    // batch, so a stream of input still shows.
+    const auto batch_until = clock::now() + std::chrono::milliseconds(50);
+    do {
+      const auto at = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - start);
+      const Action a = b.handle(parse_input(term.read_input()), at);
+      if (a.quit) return true;
+      if (a.copy) {
+        term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
+        const std::optional<std::string> how = copy_locally(*a.copy);
+        b.note(std::format("{} (OSC 52{})", b.notice(), how ? ", " + *how : std::string()));
+      }
+    } while (clock::now() < batch_until && term.ready());
   }
 }
 
