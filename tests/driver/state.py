@@ -116,27 +116,120 @@ def changed_files(repo, base):
     return sorted(files)
 
 
+# Coarse source-area-to-test mapping (DECISIONS §9.2.3): selects the most directly relevant
+# language test prefixes and CTest labels when compiler sources change.
+AREA_TESTS = (
+    ('src/pp/', ('own/pp/', 'own/headers/', 'own/smoke/')),
+    ('src/lex/', ('own/pp/', 'own/cooked-literals/', 'own/unicode-strings/', 'own/smoke/')),
+    ('src/items/', ('own/smoke/', 'own/decls/', 'own/syntax/', 'own/classes/')),
+    ('src/interp/', ('own/consteval/', 'own/smoke/')),
+    ('src/ir/', ('own/slice/', 'own/smoke/', 'own/abi/', 'own/layout/', 'own/runtime/')),
+    ('src/irgen/', ('own/slice/', 'own/smoke/', 'own/abi/', 'own/layout/', 'own/runtime/')),
+    ('src/target/', ('own/slice/', 'own/smoke/', 'own/abi/', 'own/layout/')),
+    ('src/obj/', ('own/slice/', 'own/smoke/', 'own/abi/')),
+    ('src/link/', ('own/slice/', 'own/smoke/', 'own/abi/')),
+    ('src/sema/templates', ('own/templates/', 'own/concepts/', 'own/constraints/', 'own/deduction-guides/', 'own/smoke/')),
+    ('src/sema/', ('own/smoke/', 'own/slice/', 'own/classes/', 'own/templates/', 'own/concepts/', 'own/decls/', 'own/operators/')),
+    ('src/parse/', ('own/smoke/', 'own/slice/', 'own/syntax/', 'own/declarators/', 'own/decls/', 'own/stmt/')),
+    ('src/pipeline/', ('own/smoke/', 'own/slice/', 'own/abi/')),
+    ('src/daemon/', ('own/smoke/', 'own/slice/', 'incremental/')),
+    ('src/client/', ('own/smoke/', 'own/slice/', 'incremental/')),
+    ('src/driver/', ('own/smoke/', 'own/slice/')),
+    ('src/project_build/', ('own/smoke/',)),
+    ('src/lsp/', ('own/smoke/',)),
+    ('src/trace/', ('own/smoke/',)),
+    ('src/engine/', ('own/smoke/',)),
+    ('src/ast/', ('own/smoke/', 'own/slice/')),
+    ('src/hash/', ('own/smoke/',)),
+    ('src/cm/', ('own/smoke/',)),
+    ('src/memory/', ('own/smoke/',)),
+    ('src/execution/', ('own/smoke/',)),
+)
+
+AREA_CTEST_LABELS = (
+    ('src/pp/', ('area:pp',)),
+    ('src/lex/', ('area:lex',)),
+    ('src/ast/', ('area:ast',)),
+    ('src/engine/', ('area:engine',)),
+    ('src/hash/', ('area:hash',)),
+    ('src/cm/', ('area:cm',)),
+    ('src/ir/', ('area:ir', 'area:codegen')),
+    ('src/items/', ('area:items',)),
+    ('src/irgen/', ('area:irgen',)),
+    ('src/interp/', ('area:interp',)),
+    ('src/link/', ('area:link',)),
+    ('src/obj/', ('area:obj',)),
+    ('src/sema/', ('area:sema',)),
+    ('src/parse/', ('area:sema', 'area:pipeline')),
+    ('src/target/', ('area:codegen', 'area:pipeline')),
+    ('src/pipeline/', ('area:pipeline',)),
+    ('src/project_build/action/', ('area:build_action', 'area:project_build')),
+    ('src/project_build/', ('area:project_build', 'project')),
+    ('src/daemon/', ('area:daemon', 'daemon')),
+    ('src/lsp/', ('area:lsp',)),
+    ('src/trace/', ('area:trace',)),
+    ('src/driver/', ('area:driver',)),
+    ('src/client/', ('area:driver', 'area:daemon')),
+    ('packages/ycxx-bench/', ('area:bench',)),
+    ('tests/daemon/compatibility', ('compat',)),
+    ('tests/daemon/project_', ('project',)),
+    ('tests/daemon/', ('daemon',)),
+)
+
+
+def affected_ctest_labels(changed):
+    """CTest labels affected by changed files (empty list when nothing maps)."""
+    if not changed:
+        return []
+    labels = set()
+    for f in changed:
+        if f.startswith('tests/unit/'):
+            parts = f.split('/')
+            if len(parts) >= 3 and parts[2] not in ('CMakeLists.txt', 'support'):
+                labels.add(f'area:{parts[2]}')
+            continue
+        for prefix, mapped in AREA_CTEST_LABELS:
+            if f.startswith(prefix):
+                labels.update(mapped)
+                break
+    return sorted(labels)
+
+
 def affected(changed, tests):
     """The hook selecting the tests a change can affect: (tests, why).
 
-    Today: a changed test (or its .stdout) selects itself; a change to the driver or to the
-    features file selects every test; documentation selects nothing. Changes to the compiler
-    select nothing here (the core stage runs the core suites anyway) until dependency
-    information exists: first coarse source-area-to-suite maps, then ycxx's own query engine
-    answering which tests read a changed input (DECISIONS §9.2.3)."""
+    A changed test (or its .stdout) selects itself; a change to the driver or to the
+    features file selects every test; documentation selects nothing; compiler sources map
+    via AREA_TESTS to the most directly relevant test suites (DECISIONS §9.2.3)."""
     if changed is None:
         return [], 'git cannot tell what changed'
     by_path = {f'tests/{t.id}': t for t in tests}
-    picked, other = {}, []
+    picked, areas, other = {}, set(), []
     for f in changed:
         if f.startswith('tests/driver/') or f in ('tools/test', 'tests/features/ycxx.txt', 'tests/features/ycxx.xfail'):
             return list(tests), f'the driver or ycxx\'s features changed ({f})'
         t = by_path.get(f) or by_path.get(f.removesuffix('.stdout'))
         if t:
             picked[t.id] = t
-        elif not (f.endswith('.md') or f.startswith('docs/')):
+            continue
+        if f.endswith('.md') or f.startswith('docs/'):
+            continue
+        matched = False
+        for prefix, suite_prefixes in AREA_TESTS:
+            if f.startswith(prefix):
+                areas.add(prefix.rstrip('/'))
+                for test in tests:
+                    if any(test.id.startswith(sp) for sp in suite_prefixes):
+                        picked[test.id] = test
+                matched = True
+                break
+        if not matched:
             other.append(f)
-    why = f'{len(picked)} changed test(s)'
+    parts = []
+    if picked:
+        parts.append(f'{len(picked)} test(s)')
+    if areas:
+        parts.append(f'areas: {", ".join(sorted(areas))}')
     if other:
-        why += f'; {len(other)} other changed file(s) without dependency information yet'
-    return list(picked.values()), why
+        parts.append(f'{len(other)} unmapped file(s)')
+    return list(picked.values()), '; '.join(parts) or 'no affected tests'

@@ -7,9 +7,10 @@ from . import discover, kinds, report, state, toolchain, transcript
 
 REPO = Path(__file__).resolve().parents[2]
 TESTS = REPO / 'tests'
-STAGES = ('policy', 'build', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider', 'rest')
+STAGES = ('policy', 'build', 'affected-unit', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider', 'rest')
 TEST_STAGES = ('failed', 'affected', 'core', 'wider', 'rest')
 TIERS = {
+    'quick': ('policy', 'build', 'affected-unit', 'failed', 'affected'),
     'fast': ('policy', 'build', 'unit', 'failed', 'affected', 'core'),
     'pr': ('policy', 'build', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider'),
     'main': STAGES,
@@ -25,21 +26,23 @@ build/test-logs/report.html (every test with its transcript, passing ones too; c
 a person or an agent), report.md, report.tsv and report.json. docs/TESTING.md has the details.
 
   tools/test                     every stage, without stopping between them
+  tools/test --quick             inner-loop check: policy build affected-unit failed affected
   tools/test --fast              what a session runs before pushing:
                                  policy build unit failed affected core, stopping on first failure
   tools/test --tier pr           a CI tier, stopping at the first failing stage
   tools/test core own/smoke      stages and path filters, in any order
 
 stages, in order:
-  policy    the driver's self-test, then tools/check-policy if it exists
-  build     tools/build if it exists (builds + -L smoke CTests)
-  unit      CTest unit suite (ctest -L unit)
-  failed    tests that failed in the last run of this branch (of main for a new branch)
-  affected  tests affected by the change since --base
-  core      the core oracles: tests/draft and tests/own
-  daemon    CTest daemon suite (ctest -L daemon: compatibility, compare, project_build)
-  wider     differential and incremental suites: tests/diff, tests/incremental
-  rest      every other suite
+  policy         the driver's self-test, then tools/check-policy if it exists
+  build          tools/build if it exists (builds + -L smoke CTests)
+  affected-unit  CTests whose area label matches files changed since --base
+  unit           CTest unit suite (ctest -L unit)
+  failed         tests that failed in the last run of this branch (of main for a new branch)
+  affected       tests affected by the change since --base
+  core           the core oracles: tests/draft and tests/own
+  daemon         CTest daemon suite (ctest -L daemon: compatibility, compare, project_build)
+  wider          differential and incremental suites: tests/diff, tests/incremental
+  rest           every other suite
 A test runs in the first stage that selects it.
 
 exit status: 0 all passed (XFAIL, and UNSUPPORTED unless --no-unsupported); 1 a test or stage failed; 2 usage or
@@ -50,6 +53,8 @@ configuration error; 3 internal driver error; 130 interrupted (Ctrl-C).
 def parse_args(argv):
     p = argparse.ArgumentParser(prog='tools/test', description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('what', nargs='*', help='stages and test path filters (prefixes of test ids or paths)')
+    p.add_argument('--quick', action='store_true',
+                   help='inner-loop tier: policy build affected-unit failed affected (stops on first failure)')
     p.add_argument('--fast', action='store_true', help='the PR tier\'s first stages, stopping at the first failure')
     p.add_argument('--tier', choices=('pr', 'main', 'nightly'), help='a CI tier (stops at the first failing stage)')
     p.add_argument('-x', '--fail-fast', action='store_true', help='stop after the first stage with a failure')
@@ -377,8 +382,11 @@ def _main(argv):
             p = Path(os.path.relpath(p.resolve(), TESTS))
         filters.append(p.as_posix().removeprefix('tests/').rstrip('/').removeprefix('./'))
     stop_on_fail = args.fail_fast
-    tier = 'fast' if args.fast else args.tier
-    max_failures = args.max_failures if args.max_failures is not None else (10 if tier == 'fast' else 0)
+    if args.quick and (args.fast or args.tier):
+        print('tools/test: give only one of --quick, --fast, or --tier', file=sys.stderr)
+        return EXIT_USAGE
+    tier = 'quick' if args.quick else ('fast' if args.fast else args.tier)
+    max_failures = args.max_failures if args.max_failures is not None else (5 if tier == 'quick' else 10 if tier == 'fast' else 0)
     if tier:
         if stages:
             print('tools/test: give stages or a tier, not both', file=sys.stderr)
@@ -389,9 +397,9 @@ def _main(argv):
         stages = ['failed']
     if not stages:
         # Path filters without explicit stages run only test stages (never an accidental rebuild).
-        stages = list(TEST_STAGES) if filters else list(STAGES)
-    if args.cxx != 'ycxx' and not any(w in ('build', 'unit', 'daemon') for w in args.what):
-        stages = [s for s in stages if s not in ('build', 'unit', 'daemon')]
+        stages = list(TEST_STAGES) if filters else [s for s in STAGES if s != 'affected-unit']
+    if args.cxx != 'ycxx' and not any(w in ('build', 'affected-unit', 'unit', 'daemon') for w in args.what):
+        stages = [s for s in stages if s not in ('build', 'affected-unit', 'unit', 'daemon')]
     if args.failed_first and 'failed' not in stages:
         stages.insert(next((i for i, s in enumerate(stages) if s in TEST_STAGES), len(stages)), 'failed')
     stages = [s for s in STAGES if s in stages]  # always in pyramid order
@@ -434,9 +442,9 @@ def _main(argv):
     sel = [t for t in alltests if not filters or any(t.id == f or t.id.startswith(f) for f in filters)]
     if tier != 'nightly':
         sel = [t for t in sel if t.one('TIER') != 'nightly']
-    changed = state.changed_files(REPO, args.base) if ('affected' in stages or tier == 'fast') else None
+    changed = state.changed_files(REPO, args.base) if ('affected' in stages or 'affected-unit' in stages or tier in ('quick', 'fast')) else None
     skipped_xfail = 0
-    if args.skip_xfail:
+    if args.skip_xfail or tier == 'quick':
         before = len(sel)
         sel = [t for t in sel if not _is_known_xfail(t, cut)]
         skipped_xfail = before - len(sel)
@@ -539,6 +547,16 @@ def _main(argv):
                         elif cut.features:
                             ui.fail(f'{cut.name} not found after the build', cut.why_missing)
                             ok = False
+                elif s == 'affected-unit':
+                    labels = state.affected_ctest_labels(changed)
+                    ui.section(f'affected-unit CTests ({", ".join(labels) or "none"})')
+                    if labels:
+                        pattern = '^(' + '|'.join(re.escape(l) for l in labels) + ')$'
+                        ok = ctest_stage(ui, 'affected-unit', pattern, logs, records, args.jobs)
+                    else:
+                        ui.skip('affected-unit', '(no changed source areas map to CTest labels)')
+                        records.append({'name': 'affected-unit', 'status': 'skip', 'secs': 0, 'detail': 'no affected CTest labels'})
+                        ok = True
                 elif s in ('unit', 'daemon'):
                     ui.section(f'{s} CTests')
                     ok = ctest_stage(ui, s, s, logs, records, args.jobs)

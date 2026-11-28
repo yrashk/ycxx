@@ -289,12 +289,21 @@ class Parts(unittest.TestCase):
             self.assertEqual(status('core', inc, '--no-unsupported'), 1)
 
     def test_affected(self):
-        tests = [discover.Test('own/a.run.cpp', Path(), 'own', 'run'), discover.Test('own/b.run.cpp', Path(), 'own', 'run')]
+        tests = [
+            discover.Test('own/a.run.cpp', Path(), 'own', 'run'),
+            discover.Test('own/b.run.cpp', Path(), 'own', 'run'),
+            discover.Test('own/pp/macros.pp.cpp', Path(), 'own', 'preprocess'),
+            discover.Test('own/smoke/ok.accept.cpp', Path(), 'own', 'accept'),
+        ]
         self.assertEqual([t.id for t in state.affected(['tests/own/a.run.cpp.stdout', 'README.md'], tests)[0]],
                          ['own/a.run.cpp'])
-        self.assertEqual(len(state.affected(['tests/driver/kinds.py'], tests)[0]), 2)
-        self.assertEqual(state.affected(['src/parse.cpp'], tests)[0], [])
+        self.assertEqual(len(state.affected(['tests/driver/kinds.py'], tests)[0]), len(tests))
+        self.assertEqual(sorted(t.id for t in state.affected(['src/pp/unit.cppm'], tests)[0]),
+                         ['own/pp/macros.pp.cpp', 'own/smoke/ok.accept.cpp'])
+        self.assertEqual(state.affected(['src/unknown.cpp'], tests)[0], [])
         self.assertEqual(state.affected(None, tests)[0], [])
+        self.assertEqual(state.affected_ctest_labels(['src/pp/unit.cppm', 'tests/unit/lex/lex_test.cpp']),
+                         ['area:lex', 'area:pp'])
 
     def test_parity_requires_aarch64_load_patterns(self):
         patterns = 'src/target/aarch64/aarch64.patterns'
