@@ -593,6 +593,139 @@ void pool() {
   fs::remove_all(dir);
 }
 
+void has_builtin_expressions() {
+  // Target-specific and general answers agree between `#if` and ordinary expressions.
+  for (const ast::Target* target : {&ast::aarch64_darwin, &ast::x86_64_linux}) {
+    for (auto mode : {ast::Compatibility::spec, ast::Compatibility::gcc, ast::Compatibility::clang}) {
+      MemHost host;
+      pp::Config cfg;
+      cfg.target = target;
+      cfg.compatibility = mode;
+      pp::Session s(host, cfg);
+      const bool linux_target = target == &ast::x86_64_linux;
+      auto p = pp::preprocess(s, R"cpp(
+#if !__has_builtin(__builtin_memcmp) || __has_builtin(__ycxx_missing) || __has_builtin(__is_constructible)
+#error unexpected directive answer
+#endif
+int memcmp_ok = __has_builtin(__builtin_memcmp);
+int missing_ok = __has_builtin(__ycxx_missing);
+int partial_ok = __has_builtin(__is_constructible);
+int offset_ok = __has_builtin(__builtin_offsetof);
+int srcloc_ok = __has_builtin(__builtin_source_location);
+int atomic_ok = __has_builtin(__atomic_load_n);
+)cpp", "probe.cpp");
+      check(p.diags.empty(), "ordinary and directive __has_builtin probes preprocess cleanly");
+      std::string want = std::format(
+          "int memcmp_ok = 1 ; int missing_ok = 0 ; int partial_ok = 0 ; int offset_ok = 1 ; "
+          "int srcloc_ok = {} ; int atomic_ok = {} ;",
+          linux_target ? 1 : 0, linux_target ? 1 : 0);
+      check(text(p.region) == want, "ordinary __has_builtin matches target and advertisement answers");
+    }
+  }
+
+  // Provenance: direct builtin expansion and nested expansion through an includer's macro binding.
+  {
+    MemHost host;
+    host.files["use.h"] = "int b = WRAP(__builtin_memcmp);\n";
+    std::string main_src = "#define WRAP(x) __has_builtin(x)\nint a = __has_builtin(__builtin_memcmp);\n#include \"use.h\"\n";
+    host.files["main.cpp"] = main_src;
+    pp::Session s(host);
+    auto p = run(s, host);
+    const pp::Region& r = p.region;
+    check(p.diags.empty() && text(r) == "int a = 1 ; int b = 1 ;", "direct and macro-wrapped __has_builtin");
+    // Token 3 is `1` in `int a = 1 ;`; token 8 is `1` in `int b = 1 ;`.
+    const u32 direct_pos = static_cast<u32>(main_src.find("__has_builtin(__builtin_memcmp)"));
+    const u32 body_pos = static_cast<u32>(main_src.find("__has_builtin(x)"));
+    const u32 wrap_site = static_cast<u32>(host.files["use.h"].find("WRAP"));
+    const pp::TokLoc direct_loc = r.locs.at(3);
+    check(direct_loc.file == 0 && direct_loc.offset == direct_pos && direct_loc.expansion != 0,
+          "direct __has_builtin keeps its spelling offset and expansion");
+    const pp::Expansion& direct_exp = r.expansions.at(direct_loc.expansion);
+    check(direct_exp.kind == pp::ExpansionKind::builtin &&
+              r.names.at(direct_exp.macro) == "__has_builtin" &&
+              direct_exp.parent == 0 &&
+              direct_exp.site_file == 0 && direct_exp.site_offset == direct_pos,
+          "direct __has_builtin records a builtin expansion");
+
+    const pp::TokLoc wrapped_loc = r.locs.at(8);
+    const pp::Expansion& wrapped_exp = r.expansions.at(wrapped_loc.expansion);
+    check(wrapped_exp.kind == pp::ExpansionKind::builtin &&
+              r.names.at(wrapped_exp.macro) == "__has_builtin" &&
+              wrapped_exp.parent != 0 &&
+              wrapped_exp.site_file == 0 && wrapped_exp.site_offset == body_pos &&
+              r.expansions.at(wrapped_exp.parent).kind == pp::ExpansionKind::function &&
+              r.names.at(r.expansions.at(wrapped_exp.parent).macro) == "WRAP" &&
+              r.site(8) == pp::TokLoc{1, 0, wrap_site},
+          "macro-wrapped __has_builtin chains its builtin expansion under the outer macro");
+
+    auto [printed, msgs] = pp::preprocess_to_text(s, "int a = __has_builtin(\n  __builtin_memcmp\n) + 5;\n", "line.cpp");
+    check(msgs.empty() && printed == "# 1 \"line.cpp\"\nint a = 1 + 5;\n",
+          "multi-line __has_builtin continues its output line in -E");
+  }
+
+  // Compatibility modes and cached header traces when a macro shadows or names the operand.
+  for (auto mode : {ast::Compatibility::spec, ast::Compatibility::gcc, ast::Compatibility::clang}) {
+    MemHost host;
+    host.files["h.h"] =
+        "int alias = __has_builtin(ALIAS);\n"
+        "int shadowed = __has_builtin(__builtin_strlen);\n"
+        "#if __has_builtin(ALIAS)\nint dir_alias = 1;\n#else\nint dir_alias = 0;\n#endif\n"
+        "#if __has_builtin(__builtin_strlen)\nint dir_shadowed = 1;\n#else\nint dir_shadowed = 0;\n#endif\n";
+    host.files["plain.cpp"] = "#include \"h.h\"\n";
+    host.files["macros.cpp"] = "#define ALIAS __builtin_memcmp\n#define __builtin_strlen custom_len\n#include \"h.h\"\n";
+    pp::Config cfg;
+    cfg.compatibility = mode;
+    pp::Session warm(host, cfg);
+    auto first = run(warm, host, "plain.cpp");
+    auto second = run(warm, host, "macros.cpp");
+    pp::Session cold(host, cfg);
+    auto fresh = run(cold, host, "macros.cpp");
+    check(first.diags.empty() && second.diags.empty(), "mode macro-operand probe has no diagnostics");
+    check(second.region == fresh.region && second.diags == fresh.diags, "warm header trace matches cold session");
+    if (mode == ast::Compatibility::gcc) {
+      check(text(second.region) == "int alias = 1 ; int shadowed = 0 ; int dir_alias = 1 ; int dir_shadowed = 0 ;",
+            "GCC mode macro-expands __has_builtin operands in directives and expressions");
+    } else {
+      check(text(second.region) == "int alias = 0 ; int shadowed = 1 ; int dir_alias = 0 ; int dir_shadowed = 1 ;",
+            "spec and Clang modes inspect the unexpanded __has_builtin identifier");
+    }
+
+    auto self = pp::preprocess(cold, "#define M __has_builtin(M\nint x = M);\n", "self.cpp");
+    check(self.diags.empty() && text(self.region) == "int x = 0 ;",
+          "active macro read into __has_builtin operand stays painted");
+  }
+
+  // Malformed operands preserve physical byte offsets across UTF-8, splices and macro arguments.
+  {
+    MemHost host;
+    pp::Session s(host);
+    std::string src =
+        "/* αβγ */ int a = __has_builtin();\n"
+        "int b = \\\n__has_builtin(123, 456);\n"
+        "int c = __has_builtin(__builtin_memcmp, 1);\n"
+        "#define M(x) __has_builtin(x)\n"
+        "int d = M(99);\n"
+        "int e = __has_builtin 0;\n"
+        "int f = __has_builtin(__builtin_memcmp";
+    auto p = pp::preprocess(s, src, "bad.cpp");
+    check(kinds(p) == std::vector{lex::LexDiag::cond_expected_rparen, lex::LexDiag::cond_expected_rparen,
+                                  lex::LexDiag::cond_expected_rparen, lex::LexDiag::cond_expected_rparen,
+                                  lex::LexDiag::cond_expected_lparen, lex::LexDiag::cond_expected_rparen},
+          "malformed __has_builtin diagnostics");
+    std::vector<u32> offsets;
+    for (const pp::Diag& d : p.diags) offsets.push_back(d.offset);
+    const std::vector<u32> want_offsets{
+        static_cast<u32>(src.find(");")),
+        static_cast<u32>(src.find("123")),
+        static_cast<u32>(src.find(", 1)")),
+        static_cast<u32>(src.find("99")),
+        static_cast<u32>(src.find("0;")),
+        static_cast<u32>(src.rfind("__has_builtin")),
+    };
+    check(offsets == want_offsets, "malformed __has_builtin diagnostics preserve exact byte offsets");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -609,6 +742,7 @@ int main() {
   roots_and_depth();
   incremental_equals_cold();
   embed_resources();
+  has_builtin_expressions();
   spacing();
   pool();
   return unit::result("unit.pp");

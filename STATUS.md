@@ -97,8 +97,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   mangled signature. GCC and Clang modes use one type for both. C function names retain their
   C linkage and unmangled symbols in every mode.
   Compiler modes also select the documented wide array bound conversions, constexpr byte
-  comparisons, empty union initializers, abstract result checks, and over-width bit-field layout
-  and diagnostics.
+  comparisons, empty union initializers, abstract result checks, over-width bit-field layout
+  and diagnostics, and `__has_builtin` macro-operand expansion.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -282,7 +282,12 @@ What is true of the code today. Work in progress and its owners are tracked in
   - conditional inclusion (`#if`/`#ifdef`/`#ifndef`/`#elif`/`#elifdef`/`#elifndef`/`#else`/
     `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
     in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
-    `__has_include_next`, `__has_embed`, and the `__has_*` probes answering 0;
+    `__has_include_next`, `__has_embed`, and the remaining `__has_*` probes answering 0;
+  - `__has_builtin(name)` expands to `1` or `0` in ordinary preprocessing tokens, `#if`
+    conditions, and `__has_embed` parameter lists (`ExpansionKind::builtin`), using the target's
+    supported builtin table (`lex::has_builtin`). `spec` and `clang` modes inspect the raw
+    operand token; `gcc` mode macro-expands the operand first.
+    [#1626](https://github.com/yrashk/ycxx/issues/1626)
   - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
     (other pragmas pass through to `-E`), and the null directive. Compiler diagnostics report the
     text of `#error` and `#warning` in the main file and included headers (#172);

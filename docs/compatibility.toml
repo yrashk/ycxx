@@ -1841,3 +1841,17 @@ gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future 
 clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
 limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "has-builtin-macro-operand"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "docs/EXTENSIONS.md, Clang feature-checking macros, GCC __has_builtin, #1626"
+prior = "Evaluate __has_builtin only in #if/#elif constant-expression scanning without macro-expanding the operand."
+spec = "Expand __has_builtin(name) in phase 4 across ordinary preprocessing tokens, #if conditions, and __has_embed parameters without macro-expanding the operand."
+gcc = "Macro-expand the parenthesized operand tokens before checking for a single identifier or keyword token, without #if-only defined operator recognition."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 macro-expands the operand of __has_builtin(...) in both #if conditions and ordinary C++ expressions, so a macro alias naming __builtin_memcmp yields 1 and a macro redefining __builtin_strlen to an unknown identifier yields 0."
+clang_observed = "Clang 23.1.5 inspects the raw operand token without macro expansion in both #if conditions and ordinary C++ expressions, so a macro alias yields 0 and a macro-redefined __builtin_strlen still yields 1."
+probe = '#define ALIAS __builtin_memcmp\n#define __builtin_strlen shadowed_strlen\nconstexpr int a = __has_builtin(ALIAS);\nconstexpr int b = __has_builtin(__builtin_strlen);'
+evidence = ["tests/daemon/compatibility.py", "tests/unit/pp/pp_test.cpp", "tests/own/pp/has-builtin-expr.accept.cpp", "tests/own/pp/has-builtin-expr.pp.cpp", "tests/own/pp/has-builtin-malformed.reject.cpp"]
