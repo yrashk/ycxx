@@ -2914,8 +2914,12 @@ auto Sema::using_enum_type(NameId name) -> std::optional<QualType> {
       std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth < scopes_.size() && t.name == name; }) ||
       std::ranges::any_of(block_usings_, [&](const BlockUsing& u) { return u.depth < scopes_.size() && u.name == name; });
   if (!shadowed && outer()) {
-    bool hidden = false;
-    shadowed = outer_block_class_name(name, /*elaborated=*/false, /*aliases=*/true, hidden).has_value() || hidden;
+    EntityId last = outermost_class(current_class);
+    for (const OuterBlock* b = outer(); b && is_local_class(last) && !shadowed; b = b->outer.get()) {
+      bool hidden = false;
+      shadowed = outer_block_type(*b, name, /*elaborated=*/false, /*aliases=*/true, hidden).has_value() || hidden;
+      last = b->cls;
+    }
   }
   if (!shadowed && template_param(name)) return std::nullopt;
   return class_name(name, /*elaborated=*/false);

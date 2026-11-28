@@ -1940,3 +1940,22 @@ constexpr int f() {
 static_assert(f() == 4);
 '''
 evidence = ["tests/daemon/compatibility.py", "tests/own/using/block-using-enum.accept.cpp", "tests/own/using/block-using-enum.reject.cpp", "tests/draft/dcl/enum.udecl-1.accept.cpp", "tests/draft/DISAGREEMENTS.md"]
+
+[[divergence]]
+id = "using-enum-defining-fixed"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[enum.udecl]/2, [dcl.enum]/6, #1695"
+prior = "`using enum` accepted an enumeration whose definition was still in progress."
+spec = "Reject `using enum E;` while `E` is still being defined (before its closing `}`), even when `E` has a fixed underlying type, because `E` is still incomplete."
+gcc = "Accept `using enum E;` inside `E`'s own enumerator-list when `E` has a fixed underlying type, while rejecting an unfixed enumeration whose underlying type is not yet determined."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2.0 accepts `enum class ScopedSelf : int { A = 1, B = noexcept([] { using enum ScopedSelf; return A; }()) };` and rejects `enum UnscopedSelf { A = 1, B = noexcept([] { using enum UnscopedSelf; return A; }()) };`."
+clang_observed = "Clang 23.1.5 rejects both with `enumeration '...' is incomplete`."
+probe = '''
+enum class ScopedSelf : int {
+  A = 1,
+  B = noexcept([] { using enum ScopedSelf; return A; }())
+};
+'''
+evidence = ["tests/daemon/compatibility.py", "tests/own/using/block-using-enum.reject.cpp"]

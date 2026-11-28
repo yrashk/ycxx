@@ -3059,11 +3059,11 @@ public:
     const ast::TemplateParamSema* p = declared_template_param(name);
     return p && p->depth < enclosing_class_heads() && class_scope_declares(name) ? nullptr : p;
   }
-  // How many template-heads enclose the class whose scope this is, its own included: the depths of
-  // the parameters its scope is inside. An explicit specialization has none of its own.
-  u16 enclosing_class_heads() {
+  // How many template-heads enclose class `c`, its own included: the depths of the parameters
+  // its scope is inside. An explicit specialization has none of its own.
+  u16 class_heads(EntityId c) {
     u16 n = 0;
-    for (EntityId c = current_class; c != EntityId::none;) {
+    for (; c != EntityId::none;) {
       const EntityRec& r = w_->entities.rec(c);
       if (r.kind != EntityKind::class_) break;
       if (r.templ != EntityId::none && !q_->explicit_specialization(c)) ++n;
@@ -3071,6 +3071,7 @@ public:
     }
     return n;
   }
+  u16 enclosing_class_heads() { return class_heads(current_class); }
   // Whether a class scope before the template parameter scope declares `name`, including
   // each enclosing class's nondependent bases ([temp.local]/7).
   bool class_scope_declares(NameId name) {
@@ -4413,6 +4414,15 @@ public:
       last = EntityId::none;
       for (EntityId k = b->cls; k != EntityId::none; k = enclosing_class(k)) {
         last = k;
+        if (!is_local_class(k))
+          if (const ast::TemplateParamSema* p = declared_template_param(name); p && p->depth >= class_heads(k)) {
+            if (elaborated || p->kind != ast::TemplateArgKind::type) {
+              hidden = true;
+              return std::nullopt;
+            }
+            if (auto a = bound_arg(*p)) return a->type;
+            return p->type;
+          }
         if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
         if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
           if (auto r = nested_member(k, name, true)) return r->first.type;

@@ -105,3 +105,15 @@ enum UnscopedSelf {
   SelfA = 1,
   SelfB = noexcept([] { using enum UnscopedSelf; return SelfA; }())  //! error
 };
+
+struct OuterMemberEnumHiding {
+  enum class E { A = 1 };
+  template<class E>
+  static void run() {
+    struct Local {
+      static void get() {
+        using enum E;  //! error
+      }
+    };
+  }
+};

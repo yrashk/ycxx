@@ -231,3 +231,16 @@ constexpr int local_class_using_directive() {
   return Local::get();
 }
 static_assert(local_class_using_directive() == 5);
+
+// Member function template parameter hides enclosing class member inside a local class.
+struct OuterMemberHiding {
+  using T = char;
+  template<class T>
+  static constexpr int run_size() {
+    struct Local {
+      static constexpr int size() { return static_cast<int>(sizeof(T)); }
+    };
+    return Local::size();
+  }
+};
+static_assert(OuterMemberHiding::run_size<double>() == static_cast<int>(sizeof(double)));
