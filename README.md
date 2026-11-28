@@ -836,7 +836,8 @@ written default member initializer are value-initialized.
 - `__array_rank(T)` counts array dimensions and supports dependent operands in template arguments
   and variable-template initializers. [#1082](https://github.com/yrashk/ycxx/issues/1082)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
-  supported scalar, reference, function and `void` queries, including argument packs in
+  supported scalar (including pointer-from-pointer-reference), reference, function and `void`
+  queries, including argument packs in
   class-template base and variable-template initializer replay.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_assignable`, `__is_nothrow_assignable` and `__is_trivially_assignable` for arithmetic
@@ -845,6 +846,9 @@ written default member initializer are value-initialized.
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
   cv `void`, object and multi-level pointers (derived-to-base, `void*`, qualification conversions,
   `bool`) and references to pointers, including dependent operands in the same template contexts.
+  `__is_convertible` also follows user-defined conversions: converting constructors and a class's
+  own non-template conversion functions, as libycxx's `string_view` constraints use them
+  ([#1717](https://github.com/yrashk/ycxx/issues/1717) for the rest).
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
