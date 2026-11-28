@@ -2230,14 +2230,17 @@ public:
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
-    auto injected = s_->qualified_injected_type(*s, name, at, type_only);
-    if (injected.found)
-      return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
     if (type_only) {
-      if (!s->ns) return std::nullopt;
-      auto t = s_->namespace_elaborated_type(*s->ns, name, at, ast::DeclKind::class_);
+      if (s->ns) {
+        auto t = s_->namespace_elaborated_type(*s->ns, name, at, ast::DeclKind::class_);
+        return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
+      }
+      auto t = s_->qualified_elaborated_class(*s, name, at);
       return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
     }
+    auto injected = s_->qualified_injected_type(*s, name, at, false);
+    if (injected.found)
+      return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
     // `N::C` for a class template C of a namespace: a placeholder for a deduced class type, where
     // the caller allows one ([dcl.type.class.deduct]).
     if (qualified_deduced_ok_ && s->ns && !conversion && kind(next + 1) != Tk::less)

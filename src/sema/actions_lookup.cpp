@@ -195,9 +195,10 @@ auto Sema::enclosing_prefix_value(EntityId cls, NameId name, u32 begin, u32 end,
 }
 
 auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, std::optional<u32> type_at, ClassBodyLookup lookup, bool type_only) -> ClassBodyType {
+  const bool qualified_class = lookup == ClassBodyLookup::qualified_class;
   const bool qualified_enum = lookup == ClassBodyLookup::qualified_enum;
   const bool enum_lookup = qualified_enum || lookup == ClassBodyLookup::enum_qualifier;
-  const bool qualified = lookup == ClassBodyLookup::qualified || enum_lookup;
+  const bool qualified = lookup == ClassBodyLookup::qualified || qualified_class || enum_lookup;
   const bool unqualified = lookup == ClassBodyLookup::unqualified;
   const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
   const bool class_prefix = lookup == ClassBodyLookup::class_prefix;
@@ -218,7 +219,7 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
   auto collect = [&](this auto&& visit, EntityId cls, const ClassRec& cr) -> void {
     const EntityRec& c = w_->entities.rec(cls);
     if (c.kind == EntityKind::class_ && c.name == name &&
-        (c.templ == EntityId::none || class_prefix || (before_parameter && cls != naming))) {
+        (c.templ == EntityId::none || class_prefix || qualified_class || (before_parameter && cls != naming))) {
       hits.push_back({types().class_type(cls), cls, cls, ast::Access::public_, true, path});
       return;
     }
@@ -231,6 +232,10 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
       auto nested = std::ranges::find(cr.types, name, &NestedType::name);
       if (nested != cr.types.end() &&
           (type_only || (member->nested_type != EntityId::none && member->enumerator == EntityId::none))) {
+        if (w_->entities.rec(nested->entity).kind == EntityKind::class_template) {
+          hits.push_back({std::nullopt, cls, EntityId::none, ast::Access::public_, false, path});
+          return;
+        }
         hits.push_back({nested->type, cls, nested->entity, cr.access_of(nested->entity), false, path});
         return;
       }
@@ -271,7 +276,7 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
   if (first == hits.end()) return {true, std::nullopt};
   // Merge equivalent designated types before checking the declarations and base paths that
   // can supply the selected type ([class.member.lookup], [class.access]).
-  if (class_prefix || (type_at && (injected || inherited_alias || enum_lookup || before_parameter))) {
+  if (class_prefix || (type_at && (injected || inherited_alias || enum_lookup || qualified_class || before_parameter))) {
     QualType selected = types().canonical(*first->type);
     const bool gcc_alias = compatibility() == ast::Compatibility::gcc && inherited_alias &&
                            first->declaration != EntityId::none &&
@@ -281,11 +286,12 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
                  (gcc_alias && h.declaration != first->declaration);
         })) {
       if (type_at) diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
-      if (enum_lookup || class_prefix) return {true, std::nullopt};
+      if (enum_lookup || qualified_class || class_prefix) return {true, std::nullopt};
     } else if (type_at) {
-      if (qualified_enum) {
+      if (qualified_enum || qualified_class) {
         std::erase_if(hits, [&](const Hit& hit) {
-          return w_->entities.rec(hit.declaration).kind == EntityKind::type_alias;
+          return hit.declaration != EntityId::none &&
+                 w_->entities.rec(hit.declaration).kind == EntityKind::type_alias;
         });
         if (hits.empty()) {
           diag(*type_at, Diag::elaborated_typedef, name);
@@ -293,7 +299,7 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
         }
         first = hits.begin();
       }
-      const bool clang_elaborated = type_only && lookup == ClassBodyLookup::qualified &&
+      const bool clang_elaborated = type_only && (lookup == ClassBodyLookup::qualified || qualified_class) &&
                                     compatibility() == ast::Compatibility::clang;
       auto allowed = [this, naming, before_parameter, clang_elaborated](const Hit& h) {
         return accessible(h.owner, h.access, naming) &&
@@ -304,13 +310,20 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
       if (!std::ranges::any_of(hits, allowed)) {
         QualType type = *first->type;
         if (qualified && defer_type_access) {
-          deferred_injected_access_.push_back([this, at = *type_at, type, naming, allowed, hits = std::move(hits)] {
-            if (!std::ranges::any_of(hits, allowed))
-              diag(at, Diag::inaccessible_base, type, types().class_type(naming));
+          deferred_injected_access_.push_back([this, at = *type_at, type, naming, name, first_owner = first->owner,
+                                               first_access = first->access, qualified_class, allowed,
+                                               hits = std::move(hits)] {
+            if (!std::ranges::any_of(hits, allowed)) {
+              if (qualified_class && !accessible(first_owner, first_access, naming))
+                diag(at, first_access == ast::Access::protected_ ? Diag::protected_member : Diag::private_member,
+                     name, types().class_type(first_owner));
+              else
+                diag(at, Diag::inaccessible_base, type, types().class_type(naming));
+            }
           });
           return {true, type};
         }
-        if ((before_parameter || inherited_alias) && !accessible(first->owner, first->access, naming))
+        if ((before_parameter || inherited_alias || qualified_class) && !accessible(first->owner, first->access, naming))
           diag(*type_at, first->access == ast::Access::protected_ ? Diag::protected_member : Diag::private_member,
                name, types().class_type(first->owner));
         else
