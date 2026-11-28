@@ -74,12 +74,18 @@ auto Sema::class_name(NameId name, bool elaborated, bool aliases, std::optional<
         if (hit.found) return hit.type;
       }
       if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
+      if (!elaborated && !types().is_dependent(types().class_type(current_class)))
+        if (auto found = find_member(current_class, name, /*unqualified=*/true);
+            found && !found->ambiguous &&
+            (found->nested_type == EntityId::none || found->enumerator != EntityId::none))
+          return std::nullopt;
       if (c.name == name && enclosing_class(current_class) != EntityId::none) return types().class_type(current_class);
       if (auto r = nested_member(current_class, name, true)) return r->first.type;
     } else {
       const auto prefix_bases = class_prefix_bases(current_class);
       if (!elaborated && !prefix_bases.empty() &&
           (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
+      if (!elaborated && q_->dependent_member_using(current_class, name)) return std::nullopt;
       if (auto m = q_->earlier_member(name, elaborated)) {
         if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_))
           return std::nullopt;  // a member alias template, not a type
@@ -252,7 +258,7 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
     for (const BaseRec& b : bases) {
       // [temp.dep.general]: the naming class's dependent bases are not searched. A base of a
       // nondependent base is nondependent, whatever it was in that base's own pattern.
-      if (before_parameter && cls == naming && b.dependent_in_pattern) continue;
+      if ((before_parameter || qualified_class) && cls == naming && b.dependent_in_pattern) continue;
       if (const ClassRec* base = class_rec(b.cls)) {
         if (type_at) path.push_back({cls, b.access});
         visit(b.cls, *base);
@@ -289,15 +295,18 @@ auto Sema::class_body_type(EntityId naming, const ClassRec& root, NameId name, s
       if (enum_lookup || qualified_class || class_prefix) return {true, std::nullopt};
     } else if (type_at) {
       if (qualified_enum || qualified_class) {
-        std::erase_if(hits, [&](const Hit& hit) {
+        const auto is_alias = [&](const Hit& hit) {
           return hit.declaration != EntityId::none &&
                  w_->entities.rec(hit.declaration).kind == EntityKind::type_alias;
-        });
-        if (hits.empty()) {
+        };
+        if (std::ranges::all_of(hits, is_alias)) {
           diag(*type_at, Diag::elaborated_typedef, name);
           return {true, std::nullopt};
         }
-        first = hits.begin();
+        if (std::ranges::any_of(hits, is_alias)) {
+          diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
+          return {true, std::nullopt};
+        }
       }
       const bool clang_elaborated = type_only && (lookup == ClassBodyLookup::qualified || qualified_class) &&
                                     compatibility() == ast::Compatibility::clang;

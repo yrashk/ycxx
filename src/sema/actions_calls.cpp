@@ -456,8 +456,15 @@ auto Sema::qualified_class_prefix_value(EntityId cls, NameId name, u32 begin, u3
   };
   for (const OwnDecl& d : own)
     if (d.name == name && static_data(d.sema)) return static_member(cls, d.sema.entity, d.sema.type, begin, end);
-  if (auto declaration = q_->earlier_member(name)) {
+  std::vector<ast::DeclSema> functions;
+  if (auto declaration = q_->earlier_member(name, /*type_only=*/false, &functions)) {
     if (static_data(*declaration)) return static_member(cls, declaration->entity, declaration->type, begin, end);
+    if (declaration->kind == ast::DeclKind::function) {
+      const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
+      if (!functions.empty() && std::ranges::all_of(functions, is_static))
+        return decls_expr(std::move(functions), true, name, begin, end, true);
+      if (is_static(*declaration)) return decls_expr({*declaration}, true, name, begin, end, true);
+    }
     if (declaration->kind == ast::DeclKind::enumerator && declaration->entity != EntityId::none) {
       const EntityId enumeration = w_->entities.rec(declaration->entity).scope;
       if (w_->entities.rec(enumeration).scope == cls)

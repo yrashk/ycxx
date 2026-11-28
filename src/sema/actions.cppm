@@ -2149,10 +2149,18 @@ public:
         return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
       });
     }
-    if (s.type && types().is_class(*s.type))
-      if (const ClassRec* c = class_rec(types().class_of(*s.type)))
+    if (s.type && types().is_class(*s.type)) {
+      const EntityId cls = types().class_of(*s.type);
+      if (const ClassRec* c = class_rec(cls))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; }) ||
                std::ranges::contains(c->introduced, n, &MemberDeclRec::name);
+      if (cls == current_class) {
+        if (auto m = q_->earlier_member(n, /*type_only=*/false))
+          return m->kind == ast::DeclKind::function || m->kind == ast::DeclKind::variable ||
+                 m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::enumerator;
+        if (q_->dependent_member_using(cls, n)) return true;
+      }
+    }
     return false;
   }
   // The ordinary lookup result can hide an inherited type from a template argument.
@@ -2254,7 +2262,8 @@ public:
         return member->type;
       }
       if (entity.name == name) return types().class_type(naming);
-      return std::nullopt;
+      const ClassRec incomplete;
+      return class_body_type(naming, incomplete, name, at, ClassBodyLookup::qualified_class, /*type_only=*/true).type;
     }
     const ClassRec* cls = class_rec(naming);
     if (!cls && naming != current_class && !enclosing) return std::nullopt;
@@ -2364,10 +2373,17 @@ public:
     if (s.type && types().is_class(*s.type)) {
       const EntityId cls = types().class_of(*s.type);
       if (unscoped_member_enumerator(cls, n)) return std::nullopt;
-      if (!types().is_dependent(*s.type))
-        if (auto found = find_member(cls, n); found && !found->ambiguous &&
-            (found->nested_type == EntityId::none || found->enumerator != EntityId::none))
-          return std::nullopt;
+      if (!types().is_dependent(*s.type)) {
+        if (const ClassRec* cr = class_rec(cls); cr && cr->defined) {
+          if (auto found = find_member(cls, n); found && !found->ambiguous &&
+              (found->nested_type == EntityId::none || found->enumerator != EntityId::none))
+            return std::nullopt;
+        } else if (cls == current_class) {
+          if (auto earlier = q_->earlier_member(n, /*type_only=*/false);
+              earlier && (!is_type(earlier->kind) || (earlier->flags & decl_flag::template_)))
+            return std::nullopt;
+        }
+      }
     }
     return m->type;
   }

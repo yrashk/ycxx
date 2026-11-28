@@ -107,11 +107,44 @@ static_assert(tconc_tag.v == 14);
 struct DStatic : B {
   struct sf { int v = 15; };
   using B::sf;
+  static constexpr int qual_call = DStatic::sf();
 };
 constexpr struct DStatic::sf dstatic_tag{};
-static_assert(DStatic::sf() == 2 && dstatic_tag.v == 15);
+static_assert(DStatic::sf() == 2 && DStatic::qual_call == 2 && dstatic_tag.v == 15);
+
+// Incomplete-class `sizeof(D::f)` sees the static data member, not the hidden nested tag.
+struct IncompleteStaticHide {
+  struct f { long long a, b; };
+  static constexpr int f = 0;
+  static constexpr int sz = static_cast<int>(sizeof(IncompleteStaticHide::f));
+};
+static_assert(IncompleteStaticHide::sz == static_cast<int>(sizeof(int)));
+
+// Template member functions and static initializers call introduced `f()` / `sf()`, not hidden tag.
+template<class T>
+struct TDepCall : T {
+  struct f { int v = 10; };
+  using T::f;
+  constexpr int m() const { return f(); }
+};
+template<class T>
+struct TConcreteStatic : B {
+  struct sf { int v = 10; };
+  using B::sf;
+  static constexpr int val = sf();
+};
+static_assert(TConcreteStatic<int>::val == 2);
+
+// Dependent current instantiation elaborated lookup searches nondependent bases.
+template<class U>
+struct TBaseElab : BaseNested {
+  struct TBaseElab::f* p1 = nullptr;
+  struct TBaseElab::BaseNested* p2 = nullptr;
+};
+TBaseElab<int> tbase_elab_inst;
 
 int check(D d, DRev dr, DClass dc, DUnion du, DEnum de, DScopedEnum dse, DMulti dm,
-          TDep<B> td, TConcrete<int> tc) {
-  return d.f() + d.inside() + dr.f() + dc.f() + du.f() + de.f() + dse.f() + dm.f() + td.f() + tc.f();
+          TDep<B> td, TConcrete<int> tc, TDepCall<B> tdc) {
+  return d.f() + d.inside() + dr.f() + dc.f() + du.f() + de.f() + dse.f() + dm.f() +
+         td.f() + tc.f() + tdc.m();
 }

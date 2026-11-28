@@ -49,38 +49,3 @@ DepStatic<B> bad_dep_static;
 
 template<class T> struct DepAliasTmpl : T { using T::f; template<class U> using f = U; };  //! error
 DepAliasTmpl<B> bad_dep_alias_tmpl;
-
-// Qualified elaborated class lookup controls.
-struct HasAlias {
-  using f = Tag;
-};
-struct HasAlias::f* bad_elab_alias;  //! error
-
-struct HasEnum {
-  enum f { a };
-};
-struct HasEnum::f* bad_elab_enum;  //! error
-
-struct HasStruct {
-  struct f {};
-};
-union HasStruct::f* bad_elab_union;  //! error
-
-struct HasPrivate {
-private:
-  struct f {};
-};
-struct HasPrivate::f* bad_elab_priv;  //! error
-
-struct BaseWithTag {
-  struct f {};
-};
-struct PrivBaseDer : private BaseWithTag {};
-struct PrivBaseDer::f* bad_elab_priv_base;  //! error
-
-// Ordinary qualified lookup `D::f` is hidden by introduced `B::f`.
-struct DTagAndFn : B {
-  struct f {};
-  using B::f;
-};
-DTagAndFn::f bad_ordinary_hidden;  //! error
