@@ -433,7 +433,7 @@ private:
   std::map<u32, Callee> bodies_;
   std::map<u32, std::optional<GlobalVar>> global_info_;
   std::map<u32, u32> globals_;
-  std::map<u32, std::optional<RecordStorage>> records_;
+  std::map<std::pair<u32, bool>, std::optional<RecordStorage>> records_;
   std::vector<Group> groups_;
 
   EntityId wanted_{};
@@ -569,7 +569,9 @@ u32 Machine::extend(u32 path, std::span<const u64> words) {
 const Machine::RecordStorage* Machine::record_storage(QualType t, const ConstantRecordLayout* known) {
   const QualType type = in_->canonical(t);
   if (!in_->types.is<ast::TClass>(type)) return nullptr;
-  const u32 key = std::to_underlying(type);
+  // A host-supplied layout for an initialized global can admit fields that evaluation-created
+  // storage does not yet support. Cache each admission independently.
+  const auto key = std::pair{std::to_underlying(type), known != nullptr};
   auto [it, inserted] = records_.try_emplace(key);
   auto& storage = it->second;
   if (storage) return &*storage;

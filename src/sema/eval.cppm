@@ -525,7 +525,7 @@ private:
   }
 
   // Use the same field order and layout as initialization and native member access.
-  std::optional<interp::ConstantRecordLayout> constant_record_layout(QualType type) {
+  std::optional<interp::ConstantRecordLayout> constant_record_layout(QualType type, bool stored = false) {
     Types& types = s_->types();
     type = types.canonical(type);
     if (!types.is_class(type) || Types::is_volatile(type)) return std::nullopt;
@@ -556,7 +556,7 @@ private:
     for (std::size_t i = 0; i < fields; ++i) {
       const FieldRec& field = record->fields[i];
       if ((aggregate && record->access_of(field.entity) != ast::Access::public_) || field.bit_width || field.no_unique_address ||
-          !constant_record_field(field.type))
+          !(constant_record_field(field.type) || (stored && stored_integral_array_field(field.type))))
         return std::nullopt;
       // Preserve the enum type in the field path. The interpreter decodes its underlying value.
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
@@ -686,6 +686,14 @@ private:
            (ast::is_floating(*b) && (ast::computes(target[*b].format) || target[*b].format == ast::FloatFormat::x87_extended));
   }
 
+  // An initialized global already has a typed value for each array element.
+  bool stored_integral_array_field(QualType type) {
+    Types& types = s_->types();
+    if (!types.is_array(type)) return false;
+    const TypeRec array = types.rec(type);
+    return array.bound != 0 && types.is_integral(array.inner) && constant_record_field(array.inner);
+  }
+
   struct Host {
     Questions* q;
     Evaluator* e;
@@ -709,7 +717,7 @@ private:
         const QualType leaf = types.innermost_array_element(type);
         if (Types::is_const(leaf) && e->s_->world().entities.rec(v).linkage != ast::Linkage::none &&
             (leaf == type || e->s_->is_aggregate(leaf)))
-          value->record = e->constant_record_layout(leaf);
+          value->record = e->constant_record_layout(leaf, /*stored=*/true);
       }
       return {std::move(value)};
     }
