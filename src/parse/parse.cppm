@@ -568,7 +568,7 @@ public:
     local_declared_.insert(e);
     classes_.record_class_key(e, key == Tk::kw_union);
     const QualType type = w_->types.class_type(e);
-    s.local_type_alias(name, type, at);
+    s.local_class_tag(name, type, at);
     return type;
   }
   // The local class item that is or encloses item `k`, none if there is none.
@@ -5152,13 +5152,16 @@ std::optional<Parser::LocalClass> Program::define_local_class(u32 owner, u32 ind
       break;
     }
   // `typedef struct { … } T;`: the class has T for its name for linkage purposes ([dcl.typedef]/9).
+  bool typedef_unnamed = false;
   if (name == s.no_name()) {
     u32 j = index;
     while (j > items_->items[owner].begin && (r_->tokens[j - 1].kind == Tk::kw_const || r_->tokens[j - 1].kind == Tk::kw_volatile)) --j;
     const u32 after = items_->items[c].end;
     if (j > items_->items[owner].begin && r_->tokens[j - 1].kind == Tk::kw_typedef && after < r_->tokens.size() &&
-        r_->tokens[after].kind == Tk::identifier)
+        r_->tokens[after].kind == Tk::identifier) {
       name = w_->ins.names.intern(r_->name(r_->tokens[after]));
+      typedef_unnamed = true;
+    }
   }
   // In a templated function's specialization, the class is instantiated with it ([temp.inst]/3):
   // its members are the definition's, analysed again with the arguments bound.
@@ -5174,7 +5177,10 @@ std::optional<Parser::LocalClass> Program::define_local_class(u32 owner, u32 ind
     }
     if (e == EntityId::none) e = local_class_entity(s, scope, name, ordinal, false);
     const QualType type = w_->types.class_type(e);
-    if (name != s.no_name()) s.local_type_alias(name, type, at + 1);
+    if (name != s.no_name()) {
+      if (typedef_unnamed) s.local_type_alias(name, type, at + 1);
+      else s.local_class_tag(name, type, at + 1);
+    }
     if (!local_instances_.contains(std::to_underlying(e))) {
       const auto params = block->template_scopes.back();
       const sema::Bindings args = block->template_args;
@@ -5197,7 +5203,10 @@ std::optional<Parser::LocalClass> Program::define_local_class(u32 owner, u32 ind
   }
   local_classes_[c] = {e, std::move(block)};
   const QualType type = w_->types.class_type(e);
-  if (name != s.no_name()) s.local_type_alias(name, type, at + 1);
+  if (name != s.no_name()) {
+    if (typedef_unnamed) s.local_type_alias(name, type, at + 1);
+    else s.local_class_tag(name, type, at + 1);
+  }
   const auto& head = item_sema(c);
   if (w_->ins.seqs.size(head.value.decls) == 0) return out;
   class_def(c);

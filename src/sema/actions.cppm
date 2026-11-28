@@ -74,6 +74,7 @@ struct GenericClosure {
   };
   std::vector<std::pair<NameId, QualType>> aliases;
   std::vector<std::size_t> alias_depths;
+  std::vector<u8> alias_is_tag;
   std::vector<CapturedUsing> usings;
   bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
   // Set for a lambda outside every function body: the part it is in, which its specializations
@@ -133,7 +134,7 @@ struct PresumedSource {
 // member function of a local class, that class's own enclosing block.
 struct OuterBlock {
   struct Name {
-    enum class Kind : u8 { local, type, using_, namespace_alias };
+    enum class Kind : u8 { local, type, using_, namespace_alias, enumerator };
     Kind kind = Kind::local;
     NameId name{};
     ast::LocalRec local{};
@@ -143,6 +144,7 @@ struct OuterBlock {
     EntityId ns = EntityId::none;
     bool type_alias = false;
     bool type_template = false;
+    bool is_tag = false;
   };
   EntityId function = EntityId::none;  // the enclosing function, or lambda's function call operator
   EntityId cls = EntityId::none;       // the class the function is a member of, if any
@@ -814,7 +816,7 @@ public:
   }
   bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
     return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
-      return decl.kind == ast::DeclKind::type_alias &&
+      return is_type(decl.kind) &&
              ((decl.flags & decl_flag::template_) || types().canonical(decl.type) != types().canonical(type));
     });
   }
@@ -827,15 +829,40 @@ public:
     bool guarded = scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2 &&
                    std::ranges::any_of(scopes_[guarded_.back()], [&](const auto& p) { return p.first == name; });
     if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
+        std::ranges::any_of(block_aliases_, [&](const BlockAlias& a) { return a.depth == depth && a.name == name; }) ||
         std::ranges::any_of(block_types_, [&](const BlockType& t) {
           return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
         }) || std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
-          return used.depth == depth && used.name == name && conflicts_with_imported_alias(used.decls, type);
+          return used.depth == depth && used.name == name &&
+                 (std::ranges::any_of(used.decls, [](const ast::DeclSema& decl) { return !is_type(decl.kind); }) ||
+                  conflicts_with_imported_alias(used.decls, type));
         })) {
       diag(at_, Diag::redeclared_local, name);
       return;
     }
-    block_types_.push_back({depth, name, type});
+    block_types_.push_back({depth, name, type, false});
+  }
+  // A block-scope class tag ([basic.scope.scope]/4, [namespace.udecl]/10): it may coexist in the
+  // same block with a non-type using-declaration, but conflicts with imported types and aliases.
+  void local_class_tag(NameId name, QualType type, u32 at_) {
+    std::size_t depth = scopes_.size() - 1;
+    bool guarded = scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2 &&
+                   std::ranges::any_of(scopes_[guarded_.back()], [&](const auto& p) { return p.first == name; });
+    if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
+        std::ranges::any_of(block_aliases_, [&](const BlockAlias& a) { return a.depth == depth && a.name == name; }) ||
+        std::ranges::any_of(block_types_, [&](const BlockType& t) {
+          return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
+        }) || std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
+          return used.depth == depth && used.name == name && used.type_index.has_value();
+        })) {
+      diag(at_, Diag::redeclared_local, name);
+      return;
+    }
+    if (std::ranges::any_of(block_types_, [&](const BlockType& t) {
+          return t.depth == depth && t.name == name && t.is_tag && types().canonical(t.type) == types().canonical(type);
+        }))
+      return;
+    block_types_.push_back({depth, name, type, true});
   }
 
   // Whether `name` is a member of the class whose member is being analysed, which hides what
@@ -4445,10 +4472,14 @@ public:
   // The function a local class defined here is local to: the enclosing function, or the innermost
   // lambda's function call operator ([class.local], docs/design/closures.md decision 3).
   EntityId local_scope() const { return lambdas_.empty() ? current_function : lambdas_.back().call; }
+  std::optional<std::pair<QualType, bool>> innermost_block_type_binding(NameId name) const {
+    for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
+      if (t->depth + 1 == scopes_.size() && t->name == name) return std::pair{t->type, t->is_tag};
+    return std::nullopt;
+  }
   // The type a block-scope declaration of `name` in the innermost block gives it, if any.
   std::optional<QualType> innermost_block_type(NameId name) const {
-    for (const BlockType& t : block_types_)
-      if (t.depth + 1 == scopes_.size() && t.name == name) return t.type;
+    if (auto b = innermost_block_type_binding(name)) return b->first;
     return std::nullopt;
   }
   OuterBlock outer_block_here();
@@ -4515,7 +4546,7 @@ public:
     for (const OuterBlock::Name& n : b.names) {
       if (n.name != name) continue;
       if (n.kind == OuterBlock::Name::Kind::type) {
-        if (!aliases) {
+        if (!aliases && !n.is_tag) {
           hidden = true;
           return std::nullopt;
         }
@@ -7763,6 +7794,7 @@ private:
     std::size_t depth;
     NameId name;
     QualType type;
+    bool is_tag = false;
   };
   std::vector<BlockType> block_types_;
   mutable bool outer_asked_ = false;  // `outer` asked the questions for the block around a local class

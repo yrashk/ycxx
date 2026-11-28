@@ -2850,8 +2850,11 @@ auto BodyAnalysis::generic_body() -> Result<ast::BodySema> {
   for (std::size_t d : depths) {
     s_.push_scope();
     for (std::size_t i = 0; i < gi.g.aliases.size(); ++i)
-      if ((i < gi.g.alias_depths.size() ? gi.g.alias_depths[i] : 0) == d)
-        s_.local_type_alias(gi.g.aliases[i].first, gi.g.aliases[i].second, 0);
+      if ((i < gi.g.alias_depths.size() ? gi.g.alias_depths[i] : 0) == d) {
+        if (i < gi.g.alias_is_tag.size() && gi.g.alias_is_tag[i])
+          s_.local_class_tag(gi.g.aliases[i].first, gi.g.aliases[i].second, 0);
+        else s_.local_type_alias(gi.g.aliases[i].first, gi.g.aliases[i].second, 0);
+      }
     for (const auto& u : gi.g.usings)
       if (u.depth == d) s_.replay_block_using(u.name, u.decls, u.type_index);
     // Innermost first in `consts`: reverse keeps declaration order at the same depth.
