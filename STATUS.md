@@ -4654,7 +4654,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), static data member templates (done since: see "Static data member templates";
+  templates (done since: see "Conversion function templates"), static data member templates
+  (done since: see "Static data member templates";
   trailing requires-clauses on member templates came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
@@ -4759,6 +4760,34 @@ static argument tracked in #1301 and #209.
 - Not yet: partial and explicit specializations (#1594); defining one of a class template outside
   the class (#256). Found on the way: #1595 (an undefined specialization's constant use reports an
   internal error).
+
+## Conversion function templates (#340, 2026-11-28)
+
+- **Declared** in a class or class template as `template<…> operator T() …` ([class.conv.fct],
+  [temp.mem]/5-7): a member function template with the conversion function's name, constrained
+  (type-constraints, `requires` before or after the declarator) and ref-qualified ones included.
+- **Selected** in copy-initialization from a class object (`Sema::select_conversion`): for a
+  class target the candidates yield it or a class derived from it ([over.match.copy]/1.2),
+  otherwise a type a standard conversion sequence converts to the target ([over.match.conv]).
+  Explicit conversion functions are no candidates. A template's arguments are deduced from the
+  target (`Templates::deduce_conversion`, [temp.deduct.conv]), its constraints checked after
+  deduction. Candidates rank by the implicit object parameter, then the second standard
+  conversion (/2.2), a non-template over a template, the more specialized template by return
+  type (`Templates::conversion_ordering`, [temp.deduct.partial]/3.2) and the more constrained.
+  A tie is "conversion from 'A' to 'B' is ambiguous". This also makes ordinary conversion
+  functions work in copy-initialization (#339).
+- **Arguments:** `ics()` ranks an argument converted through one as a user-defined conversion
+  sequence for ordinary (non-constructor) candidates ([over.ics.user], [over.best.ics]/4).
+- **Mangled** as Clang and GCC: `cv <type>` in terms of the template's own parameters, no
+  return type (`_ZNKR1RIiEcvS_IT_EIlEEv`, `_ZNK1ScvT_IlEEv`).
+- Tests: `tests/own/conversion-templates/` (10, a PEER test links Clang's definitions).
+  `<iostream>` hello on macOS arm64: errors 778 → 758 at `cf1d4770`; the `algo_results.hpp` and
+  `iterator_adaptors.hpp` conversion templates no longer fail.
+- Not yet: explicit conversion function templates (#1723); conversion functions of base
+  classes, reference binding to a conversion function's result, class template targets with
+  user-declared constructors, constructor arguments through user-defined conversions, and one
+  candidate set for converting constructors and conversion functions (#1724); contextual and
+  operator contexts (#339); the type traits (#1717).
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 

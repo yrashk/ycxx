@@ -539,7 +539,14 @@ including a dependent alias in a class template. A named `static_cast` can call 
 conversion function for an exact non-class value type, including ordinary `&`- and
 `&&`-qualified conversion functions. Ordinary in-class conversion functions accept bare
 `explicit` in either order with `constexpr`.
+Copy-initialization (`B b = a;`, `int i = s;`, a call argument) calls the source class's
+non-explicit conversion functions and conversion function templates, including constrained
+and `&`/`&&`-qualified member templates of class templates, deducing the template's arguments
+from the target. Conversion functions inherited from a base class, references bound directly to
+a conversion function's result and explicit conversion function templates are not supported yet.
 [#339](https://github.com/yrashk/ycxx/issues/339) [#1468](https://github.com/yrashk/ycxx/issues/1468)
+[#340](https://github.com/yrashk/ycxx/issues/340) [#1723](https://github.com/yrashk/ycxx/issues/1723)
+[#1724](https://github.com/yrashk/ycxx/issues/1724)
 
 Both targets accept leading `[[…]]` attributes on ordinary data and function member declarations.
 [#190](https://github.com/yrashk/ycxx/issues/190)
@@ -1185,7 +1192,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   `typeid`, other `dynamic_cast` forms, and virtual destruction for other class shapes.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
-- Member class and alias templates, conversion function templates, and constraints on class
+- Member class templates, and constraints on class
   templates outside the directly named primary case and constraints on members.
 - Native throwing beyond the Linux `int` slice, typed and multiple handlers, cleanup during
   source-level unwinding, and unwind discovery in ycxx-linked programs.
