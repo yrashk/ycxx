@@ -14,6 +14,7 @@ using AliasB = B;
 
 struct D1 : B {
   using B::f, B::f;                  //! error
+  void f(int);
   void recover() { f(); }
 };
 
@@ -61,6 +62,7 @@ template<class T> struct T2<T*> : B {
 
 template<class T> struct T3 : T {
   using T::f, T::f;                  //! error
+  void recover() { f(); }
 };
 
 template<class T> struct T4 : T {
