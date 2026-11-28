@@ -1032,6 +1032,9 @@ auto Sema::deduce_class_type(EntityId templ, std::vector<Ex> args, const Braced*
   };
   std::vector<Candidate> cands;
   for (const Guide& g : guides) {
+    // Copy-initialization excludes a known explicit guide before deduction and constraints
+    // ([over.match.copy]/1.1, [over.match.class.deduct]/1).
+    if (form == Construction::copy && g.decl.explicit_condition == ConstId::none && g.decl.is_explicit) continue;
     const std::vector<ast::TemplateParamSema> gps = ins().seqs.elements(g.decl.template_params);
     Candidate k{EntityId::none, g.decl.type, true, false, nullptr, g.defaults, g.decl.is_explicit};
     if (!gps.empty()) {
@@ -1050,8 +1053,10 @@ auto Sema::deduce_class_type(EntityId templ, std::vector<Ex> args, const Braced*
         if (!is_explicit) continue;
         k.is_explicit = *is_explicit;
       }
-    } else if (!trailing_constraints_satisfied(g.decl.constraints)) {
-      continue;
+    } else {
+      TypeRec fr = types().rec(g.decl.type);
+      if (args.size() < k.required(fr.params.size()) || (args.size() > fr.params.size() && !fr.variadic)) continue;
+      if (!trailing_constraints_satisfied(g.decl.constraints)) continue;
     }
     // Copy-initialization considers only converting guides ([over.match.copy]/1.1).
     if (form == Construction::copy && k.is_explicit) continue;
@@ -1106,10 +1111,14 @@ auto Sema::construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, Const
     shapes.push_back(argument_shape(a));
   for (const MemberDeclRec& m : cr->members)
     if (m.is_ctor && m.is_template) {
+      // Copy-initialization excludes a known explicit constructor template before deduction
+      // and associated-constraint satisfaction ([over.match.copy]/1.1, [temp.deduct.general]/5).
+      if (copy_init && m.is_explicit) continue;
       // A constructor template: the specialization deduction gives ([temp.over]/1), never a
       // copy constructor ([class.copy.ctor]/5).
       auto tmpl = q_->template_decl(m.entity);
       if (!tmpl) continue;
+      if (copy_init && tmpl->explicit_condition == ConstId::none && tmpl->is_explicit) continue;
       const ast::DeclSema& td = patterns.emplace_back(*tmpl);
       Templates t = templates();
       auto targs = t.deduce_call(td, shapes, {}, m.defaults);
@@ -1147,12 +1156,15 @@ auto Sema::construct(QualType t, std::vector<Ex> args, u32 begin, u32 end, Const
       Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
       k.is_consteval = m.is_consteval;
       k.constraints = m.constraints;
+      const std::size_t required = k.required(fr.params.size());
       // A user-declared copy constructor suppresses the implicit one even when it is not a
       // candidate ([class.copy.ctor]/6, [over.match.viable]/3).
-      user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
-      if (m.ineligible || !trailing_constraints_satisfied(m.constraints)) continue;
+      user_copy = user_copy || is_copy_ctor(fr, ut, required);
       // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
-      if (copy_init && (m.is_explicit || fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
+      // Filter candidate eligibility and arity ([over.match.viable]/2) before checking constraints (/3).
+      if (copy_init && (m.is_explicit || fr.params.empty() || required > 1)) continue;
+      if (args.size() < required || (args.size() > fr.params.size() && !fr.variadic)) continue;
+      if (m.ineligible || !trailing_constraints_satisfied(m.constraints)) continue;
       cands.push_back(std::move(k));
     }
   QualType void_ = builtin(Builtin::void_);
