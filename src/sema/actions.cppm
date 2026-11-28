@@ -386,7 +386,7 @@ enum class Construction { direct, direct_paren_aggregate, copy, direct_list, cop
 enum class ConstructorDestination { object, delegation, polymorphic_base, lambda_result };
 
 // A braced-init-list as written ([dcl.init.general]): each initializer-clause is an analysed
-// expression or a nested list, with its designator (`.name =`, [dcl.init.aggr]) if it has one.
+// expression or a nested list, with its designator and written form if it has one ([dcl.init.aggr]).
 // Sema decides what it initializes once it knows the target type.
 struct Braced {
   struct Clause {
@@ -395,6 +395,7 @@ struct Braced {
     NameId designator{};
     bool designated = false;
     u32 begin = 0;
+    bool direct_list = false;
   };
   u32 begin = 0;
   u32 end = 0;
@@ -4585,9 +4586,8 @@ public:
       diag(c.begin, Diag::braces_for_scalar, Types::unqualified(t));
       return fail;
     }
-    // [dcl.init.list]/3.8: an enumeration with a fixed underlying type from one integer, without
-    // narrowing.
-    if (types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
+    // [dcl.init.list]/3.8: direct-list-initialize a fixed enum from one integer, without narrowing.
+    if (form == Construction::direct_list && types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
       const EnumRec* er = enum_rec(types().enum_of(t));
       if (er && er->fixed) {
         Ex v = list_element(*er->underlying, c.expr);
@@ -4665,7 +4665,8 @@ public:
       QualType et = elems[i].type;
       if (c.list) {
         ++next;
-        out.push_back(list_init(et, *c.list, Construction::copy_list));
+        // A designated member's brace-or-equal-initializer determines its initialization form.
+        out.push_back(list_init(et, *c.list, c.direct_list ? Construction::direct_list : Construction::copy_list));
       } else if (auto str = string_element(et, c.expr)) {
         // [dcl.init.string]: a character array element from a string literal, not elided into.
         ++next;

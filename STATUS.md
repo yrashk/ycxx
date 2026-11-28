@@ -1862,8 +1862,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   whose value outgrows its predecessor's type gets a wider one ([dcl.enum]/5).
 - Conversions: an unscoped enumeration promotes ([conv.prom]/4) and converts to integers and
   bool; nothing converts implicitly to an enumeration except its own type; a scoped one
-  compares only with its own type; `E e{n}` for a fixed underlying type ([dcl.init.list]/3.8).
-  Overload ranking knows enumeration promotions.
+  compares only with its own type. A fixed underlying type permits direct-list initialization
+  from a nonnarrowing integer, as in `E e{n}`. A one-element copy-list uses ordinary implicit
+  conversion to the enum type ([dcl.init.list]/3.8). Overload ranking knows enumeration promotions.
+  [#966](https://github.com/yrashk/ycxx/issues/966)
 - An enumerator is a `Literal` of its enumeration with an underlying integer constant. L1
   preserves the enumeration type. The interpreter, lowering and layout use the underlying
   integer representation. [#262](https://github.com/yrashk/ycxx/issues/262)

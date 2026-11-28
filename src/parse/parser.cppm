@@ -6081,7 +6081,8 @@ public:
         c.designated = true;
         c.designator = name_of(tok());
         bump();
-        if (!is(Tk::l_brace) && !expect(Tk::equal)) {
+        c.direct_list = is(Tk::l_brace);
+        if (!c.direct_list && !expect(Tk::equal)) {
           skip_to_brace_end();
           break;
         }
