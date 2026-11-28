@@ -1809,6 +1809,45 @@ public:
       }
       if (!deduce_expansion(type_arg(p), as, depth, out, allow)) return std::nullopt;
     }
+    return finish_deduction(tmpl, params, std::move(out));
+  }
+  // The template arguments of conversion function template `tmpl` for a conversion to `a`, the
+  // type the conversion requires ([temp.deduct.conv]); none when deduction fails.
+  std::optional<std::vector<TemplateArg>> deduce_conversion(const ast::DeclSema& tmpl, QualType a) {
+    std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
+    if (params.empty()) return std::nullopt;
+    Deducing deducing(this, params);
+    const u16 depth = params[0].depth;
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    // P is the conversion function template's return type (/1); a reference P deduces from the
+    // type it refers to (/4).
+    QualType p = types().rec(tmpl.type).inner;
+    if (types().is_reference(p)) p = types().rec(p).inner;
+    // /3: A's top-level cv-qualifiers are ignored, and a reference A is the type it refers to.
+    const bool reference_a = types().is_reference(a);
+    if (reference_a) a = types().rec(a).inner;
+    Allowance allow;
+    if (reference_a) {
+      allow.more_cv = true;  // /5.1: A can be more cv-qualified than the deduced A
+    } else {
+      // /4: P's array or function type decays, and its top-level cv-qualifiers are ignored.
+      if (types().is_array(p)) p = types().pointer(types().rec(p).inner);
+      else if (types().is_function(p)) p = types().pointer(p);
+      p = Types::unqualified(types().canonical(p));
+      a = Types::unqualified(types().canonical(a));
+      // /5.2, /5.3: a qualification or function pointer conversion can reach A.
+      allow.qualification = types().is_pointer(p);
+      allow.function_conversion = types().is_pointer(p) && types().is_function(types().pointee(p));
+    }
+    if (mentions(p, depth) && !deduce(p, a, depth, out, allow)) return std::nullopt;
+    return finish_deduction(tmpl, params, std::move(out));
+  }
+  // The deduced arguments of `tmpl` completed: a deduced value converted to its parameter's type,
+  // the rest from defaults ([temp.deduct.general]).
+  std::optional<std::vector<TemplateArg>> finish_deduction(const ast::DeclSema& tmpl,
+                                                           std::span<const ast::TemplateParamSema> params,
+                                                           std::vector<std::optional<TemplateArg>> out) {
+    const u16 depth = params[0].depth;
     // A value deduced from an array bound converts to its parameter's type
     // ([temp.deduct.type]/20).
     for (std::size_t i = 0; i < params.size(); ++i) {
@@ -2382,6 +2421,25 @@ public:
       std::vector<std::optional<TemplateArg>> out(pp.size());
       Deducing deducing(this, pp);
       return transformed && deduce(p.type, *transformed, pp[0].depth, out);
+    };
+    return {at_least(f1, f2), at_least(f2, f1)};
+  }
+
+  // Partial ordering of conversion function templates `f1` and `f2`: by their return types
+  // ([temp.deduct.partial]/3.2), without references and top-level cv-qualifiers (/5, /7).
+  std::pair<bool, bool> conversion_ordering(const ast::DeclSema& f1, const ast::DeclSema& f2) {
+    auto result = [&](QualType t) {
+      if (types().is_reference(t)) t = types().rec(t).inner;
+      return Types::unqualified(types().canonical(t));
+    };
+    auto at_least = [&](const ast::DeclSema& a, const ast::DeclSema& p) {
+      std::vector<ast::TemplateParamSema> ap = ins().seqs.elements(a.template_params);
+      std::vector<ast::TemplateParamSema> pp = ins().seqs.elements(p.template_params);
+      if (ap.empty() || pp.empty()) return false;
+      auto transformed = substitute(types().rec(a.type).inner, unique_bindings(ap));
+      std::vector<std::optional<TemplateArg>> out(pp.size());
+      Deducing deducing(this, pp);
+      return transformed && deduce(result(types().rec(p.type).inner), result(*transformed), pp[0].depth, out);
     };
     return {at_least(f1, f2), at_least(f2, f1)};
   }

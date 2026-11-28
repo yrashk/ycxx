@@ -102,7 +102,7 @@ public:
   explicit Unit(Session& s) : s_(&s) {
     using enum MacroDef::Dynamic;
     for (auto [name, kind] : {std::pair{"__LINE__", line}, {"__FILE__", file}, {"__COUNTER__", counter},
-                              {"__DATE__", date}, {"__TIME__", time}}) {
+                              {"__DATE__", date}, {"__TIME__", time}, {"__has_builtin", has_builtin}}) {
       auto d = std::make_shared<MacroDef>();
       d->name = s_->spellings.name(name);
       d->dynamic = kind;
@@ -1071,6 +1071,7 @@ private:
   // name.
   PTok dynamic(Frame& f, const PTok& name, const MacroDef& def) {
     using enum MacroDef::Dynamic;
+    if (def.dynamic == has_builtin) return this->has_builtin(f, name);
     u32 e = static_cast<u32>(f.out.expansions.size());
     f.out.expansions.push_back(Expansion{ExpansionKind::builtin, def.name, name.loc.expansion, name.loc.file, name.loc.offset,
                                          name.loc.file, name.loc.offset, 0, 0});
@@ -1107,6 +1108,7 @@ private:
       ask(Question{Ask::time, 0, 0, 0, 0, time_answer()});
       text = def.dynamic == date ? s_->build_time.first : s_->build_time.second;
       break;
+    case has_builtin:
     case none: std::unreachable();
     }
     PTok t = lex_one(text).value();
@@ -1460,14 +1462,12 @@ private:
   }
 
   // The operators of a #if expression that are not macros ([cpp.cond]/1).
-  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute, has_builtin };
+  enum class CondOp { none, defined, has_include, has_include_next, has_embed, has_attribute };
   CondOp condition_operator(u32 name) const {
     std::string_view n = s_->spellings.name(name);
     if (n == "__has_include") return CondOp::has_include;
     if (n == "__has_include_next") return CondOp::has_include_next;
     if (n == "__has_embed") return CondOp::has_embed;
-    // DECISIONS §1.5: `__has_builtin` reports the built-ins ycxx supports on this target.
-    if (n == "__has_builtin") return CondOp::has_builtin;
     if (n == "__has_cpp_attribute" || n == "__has_attribute" || n == "__has_c_attribute" ||
         n == "__has_feature" || n == "__has_extension")
       return CondOp::has_attribute;
@@ -1479,6 +1479,77 @@ private:
     Literal l;
     l.spelling = std::to_string(v);
     return PTok{Tok{Tk::pp_number, u8(at.tok.flags & tok_flag::whitespace), s_->spellings.literal(std::move(l))}, at.loc, false};
+  }
+
+  // A builtin feature query's numeric replacement, in an expansion of kind builtin at the operator.
+  PTok builtin_number(Frame& f, const PTok& at, u64 v) {
+    u32 e = static_cast<u32>(f.out.expansions.size());
+    f.out.expansions.push_back(Expansion{ExpansionKind::builtin, at.tok.payload, at.loc.expansion, at.loc.file,
+                                         at.loc.offset, at.loc.file, at.loc.offset, 0, 0});
+    PTok out = number_token(at, v);
+    out.loc = TokLoc{at.loc.file, e, at.loc.offset};
+    return out;
+  }
+
+  // DECISIONS §1.5: `__has_builtin ( identifier )` in `#if` and ordinary C++ expressions (#1626).
+  PTok has_builtin(Frame& f, const PTok& t) {
+    const bool gcc = s_->config.compatibility == ast::Compatibility::gcc;
+    const bool saved_cond = f.in_condition;
+    const bool saved_embed = f.in_embed_probe;
+    if (gcc) {
+      f.in_condition = false;
+      f.in_embed_probe = false;
+    }
+    struct Restore {
+      Frame& f;
+      bool cond;
+      bool embed;
+      ~Restore() {
+        f.in_condition = cond;
+        f.in_embed_probe = embed;
+      }
+    } restore{f, saved_cond, saved_embed};
+    auto step = [&] { return gcc ? next(f) : read(f); };
+    PTok open = step();
+    if (open.tok.kind != Tk::l_paren) {
+      report(f, open.tok.kind == Tk::eof ? t : open, lex::LexDiag::cond_expected_lparen);
+      return builtin_number(f, t, 0);
+    }
+    std::vector<PTok> operand;
+    PTok close;
+    for (std::size_t depth = 0;;) {
+      PTok a = step();
+      if (a.tok.kind == Tk::eof) {
+        report(f, t, lex::LexDiag::cond_expected_rparen);
+        return builtin_number(f, t, 0);
+      }
+      if (a.tok.kind == Tk::l_paren) ++depth;
+      if (a.tok.kind == Tk::r_paren && depth-- == 0) {
+        close = a;
+        break;
+      }
+      operand.push_back(a);
+    }
+    if (!saved_cond)
+      f.out.continuations.push_back({static_cast<u32>(f.out.tokens.size()), site(f, t), site(f, close)});
+    if (operand.size() != 1 || operand[0].tok.kind != Tk::identifier) {
+      const PTok& bad = operand.empty() ? close : operand[0].tok.kind != Tk::identifier ? operand[0] : operand[1];
+      report(f, bad, lex::LexDiag::cond_expected_rparen);
+      return builtin_number(f, t, 0);
+    }
+    std::string_view name = s_->spellings.name(operand[0].tok.payload);
+    if (name == lex::builtin_offsetof_name) return builtin_number(f, t, 1);
+    const bool variadic = lex::va_builtin(name).has_value();
+    const auto* function = lex::builtin_function(name);
+    const bool ordinary = function && function->advertised && (function->type != 'l' ||
+        ast::computes((*s_->config.target)[ast::Builtin::long_double].format)) &&
+        (function->function != lex::BuiltinFunction::source_location ||
+         s_->config.target->triple == ast::x86_64_linux.triple) &&
+        (function->function != lex::BuiltinFunction::atomic ||
+         s_->config.target->supports(ast::NativeOperation::gnu_atomic32));
+    const auto* trait = lex::type_trait(name);
+    const bool supported = (trait && trait->advertised) || lex::builtin_template(name) || ordinary || variadic;
+    return builtin_number(f, t, supported ? 1 : 0);
   }
 
   // Applies `defined` or a `__has_*` operator whose name `t` was read in a #if expression; its
@@ -1519,26 +1590,6 @@ private:
       operand.push_back(a);
     }
     if (op == CondOp::has_attribute) return number_token(t, 0);
-    if (op == CondOp::has_builtin) {
-      // Its operand is one identifier ([cpp.cond]-style, as GCC and Clang take it).
-      if (operand.size() != 1 || operand[0].tok.kind != Tk::identifier) {
-        report(f, operand.empty() ? t : operand.size() > 1 ? operand[1] : operand[0], lex::LexDiag::cond_expected_rparen);
-        return number_token(t, 0);
-      }
-      if (s_->spellings.name(operand[0].tok.payload) == lex::builtin_offsetof_name) return number_token(t, 1);
-      std::string_view name = s_->spellings.name(operand[0].tok.payload);
-      const bool variadic = lex::va_builtin(name).has_value();
-      const auto* function = lex::builtin_function(name);
-      const bool ordinary = function && function->advertised && (function->type != 'l' ||
-          ast::computes((*s_->config.target)[ast::Builtin::long_double].format)) &&
-          (function->function != lex::BuiltinFunction::source_location ||
-           s_->config.target->triple == ast::x86_64_linux.triple) &&
-          (function->function != lex::BuiltinFunction::atomic ||
-           s_->config.target->supports(ast::NativeOperation::gnu_atomic32));
-      const auto* trait = lex::type_trait(name);
-      const bool supported = (trait && trait->advertised) || lex::builtin_template(name) || ordinary || variadic;
-      return number_token(t, supported ? 1 : 0);
-    }
     // [cpp.cond]/? the header, as for #include: a string literal, `<...>`, or tokens that become
     // one after replacement.
     if (operand.empty() || (operand[0].tok.kind != Tk::string_lit && operand[0].tok.kind != Tk::less))

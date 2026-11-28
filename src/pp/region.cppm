@@ -81,14 +81,15 @@ struct MacroDef {
   // relative to the name, but not where it is, so a region that uses it is reused wherever an
   // equal definition is in scope (its includer binds the location).
   Fp128 fp;
-  // The macros whose replacement the preprocessor computes ([cpp.predefined]): `__LINE__`,
-  // `__FILE__`, `__COUNTER__`, `__DATE__`, `__TIME__`.
-  enum class Dynamic : u8 { none, line, file, counter, date, time } dynamic = Dynamic::none;
+  // The macros whose replacement the preprocessor computes ([cpp.predefined], DECISIONS §1.5):
+  // `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__`, `__TIME__`, `__has_builtin`.
+  enum class Dynamic : u8 { none, line, file, counter, date, time, has_builtin } dynamic = Dynamic::none;
 
   // [cpp.replace.general]/2: the same parameters and replacement list, whitespace separations
   // compared by presence.
   bool same_as(const MacroDef& o) const {
-    if (function_like != o.function_like || variadic != o.variadic || params != o.params) return false;
+    if (dynamic != o.dynamic || function_like != o.function_like || variadic != o.variadic || params != o.params)
+      return false;
     if (body.size() != o.body.size()) return false;
     for (std::size_t i = 0; i < body.size(); ++i) {
       const Tok& a = body[i];

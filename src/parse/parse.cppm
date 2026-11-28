@@ -7179,10 +7179,6 @@ private:
         s_.diag(ps_.pos(), Diag::missing_type_specifier);
         return bad();
       }
-      if (conversion && member_template_) {
-        s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
-        return bad();
-      }
       using enum Parser::NamedExceptionSpec;
       auto exception = class_member;
       if (p_->defaulted_body(k_)) exception = defaulted_assignment;

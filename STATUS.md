@@ -99,8 +99,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   mangled signature. GCC and Clang modes use one type for both. C function names retain their
   C linkage and unmangled symbols in every mode.
   Compiler modes also select the documented wide array bound conversions, constexpr byte
-  comparisons, empty union initializers, abstract result checks, and over-width bit-field layout
-  and diagnostics.
+  comparisons, empty union initializers, abstract result checks, over-width bit-field layout
+  and diagnostics, and `__has_builtin` macro-operand expansion.
   [#236](https://github.com/yrashk/ycxx/issues/236)
 - The C++26 feature map (#282): `tools/feature-map/feature-map` over `tools/feature-map/features.toml`.
   180 features at the grain a user names, citing every leaf clause of the pinned draft's core
@@ -284,7 +284,14 @@ What is true of the code today. Work in progress and its owners are tracked in
   - conditional inclusion (`#if`/`#ifdef`/`#ifndef`/`#elif`/`#elifdef`/`#elifndef`/`#else`/
     `#endif`). Lexer diagnostics on skipped lines are dropped. `#if` expressions are evaluated
     in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
-    `__has_include_next`, `__has_embed`, and the `__has_*` probes answering 0;
+    `__has_include_next`, `__has_embed`, and the remaining `__has_*` probes answering 0;
+  - `__has_builtin(name)` is a built-in dynamic macro (`ExpansionKind::builtin`) that expands to
+    `1` or `0` in ordinary preprocessing tokens, `#if` conditions, and `#embed`/`__has_embed`
+    parameter lists using the target's supported builtin table (`lex::has_builtin`), while
+    participating in `#ifdef`/`defined`, `#undef`, `#define`, and region traces. `spec` and
+    `clang` modes read unexpanded delimiter and operand tokens; `gcc` mode reads macro-expanded
+    tokens.
+    [#1626](https://github.com/yrashk/ycxx/issues/1626)
   - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
     (other pragmas pass through to `-E`), and the null directive. Compiler diagnostics report the
     text of `#error` and `#warning` in the main file and included headers (#172);
@@ -2251,7 +2258,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Out-of-class definitions check the effective specification of the corresponding declaration.
   Omission agrees with `noexcept(false)` on ordinary potentially throwing constructors, and
   bare `noexcept` agrees with `noexcept(true)` (#219).
-- `N::T(…)` and `N::T{…}` are functional casts.
+- `N::T(…)` and `N::T{…}` are functional casts. A statement `N::T(x);` declares x, as `int(x);`
+  does. In a template, a qualified alias-template-id such as `s::value_t<I>` names a type without
+  `typename` even when the alias denotes a dependent member type; only a qualified name whose
+  scope is a dependent class needs `typename` in a block ([stmt.ambig], [temp.res.general]/5,
+  #711). A class member written `N::S(x);` is still rejected (#1722).
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
@@ -4132,7 +4143,9 @@ request it serves.
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
 - The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
   given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
-  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. An
+  autowrap off, and draws each line at its row. A frame sends only the lines that changed
+  (`frame_update`; all of them after a resize), and the inputs already waiting are handled before
+  it, so key repeat on a slow or busy terminal costs one frame, not one per key (#1713). A `SIGWINCH` self-pipe redraws on resize. An
   interrupted terminal wait also checks the size, so a deferred handler cannot stall the redraw
   (#1375). Fatal signals restore the terminal, then re-raise. The tree has columns (time, worker,
   alloc and retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
@@ -4645,7 +4658,8 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
 - Not yet (#340): member class templates (nested classes, #306), conversion function
-  templates (#339), static data member templates (done since: see "Static data member templates";
+  templates (done since: see "Conversion function templates"), static data member templates
+  (done since: see "Static data member templates";
   trailing requires-clauses on member templates came with #1417),
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
@@ -4750,6 +4764,34 @@ static argument tracked in #1301 and #209.
 - Not yet: partial and explicit specializations (#1594); defining one of a class template outside
   the class (#256). Found on the way: #1595 (an undefined specialization's constant use reports an
   internal error).
+
+## Conversion function templates (#340, 2026-11-28)
+
+- **Declared** in a class or class template as `template<…> operator T() …` ([class.conv.fct],
+  [temp.mem]/5-7): a member function template with the conversion function's name, constrained
+  (type-constraints, `requires` before or after the declarator) and ref-qualified ones included.
+- **Selected** in copy-initialization from a class object (`Sema::select_conversion`): for a
+  class target the candidates yield it or a class derived from it ([over.match.copy]/1.2),
+  otherwise a type a standard conversion sequence converts to the target ([over.match.conv]).
+  Explicit conversion functions are no candidates. A template's arguments are deduced from the
+  target (`Templates::deduce_conversion`, [temp.deduct.conv]), its constraints checked after
+  deduction. Candidates rank by the implicit object parameter, then the second standard
+  conversion (/2.2), a non-template over a template, the more specialized template by return
+  type (`Templates::conversion_ordering`, [temp.deduct.partial]/3.2) and the more constrained.
+  A tie is "conversion from 'A' to 'B' is ambiguous". This also makes ordinary conversion
+  functions work in copy-initialization (#339).
+- **Arguments:** `ics()` ranks an argument converted through one as a user-defined conversion
+  sequence for ordinary (non-constructor) candidates ([over.ics.user], [over.best.ics]/4).
+- **Mangled** as Clang and GCC: `cv <type>` in terms of the template's own parameters, no
+  return type (`_ZNKR1RIiEcvS_IT_EIlEEv`, `_ZNK1ScvT_IlEEv`).
+- Tests: `tests/own/conversion-templates/` (10, a PEER test links Clang's definitions).
+  `<iostream>` hello on macOS arm64: errors 778 → 758 at `cf1d4770`; the `algo_results.hpp` and
+  `iterator_adaptors.hpp` conversion templates no longer fail.
+- Not yet: explicit conversion function templates (#1723); conversion functions of base
+  classes, reference binding to a conversion function's result, class template targets with
+  user-declared constructors, constructor arguments through user-defined conversions, and one
+  candidate set for converting constructors and conversion functions (#1724); contextual and
+  operator contexts (#339); the type traits (#1717).
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 

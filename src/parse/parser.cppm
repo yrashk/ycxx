@@ -299,6 +299,31 @@ public:
            (kind(next) == Tk::identifier && s_->class_name(name_of(tok(next))).has_value());
   }
 
+  // A type named before the parenthesized group at `open`, as `T(x);`, `T(x) = 1;`, `T(x)[2];` or
+  // `T(f)(int);`: whether the group is a grouped declarator that a declaration's end or
+  // initializer follows ([stmt.ambig]). `T(x).m` and `T(x) + 1` are expressions.
+  bool grouped_declaration_ahead(u32 open, bool statement) {
+    u32 after = past_parentheses(open);
+    if (!grouped_declarator_ahead(open, after - 1, statement)) return false;
+    while (kind(after) == Tk::l_square) {
+      u32 depth = 1;
+      for (++after; depth != 0 && i_ + after < end_; ++after) {
+        if (kind(after) == Tk::l_square) ++depth;
+        else if (kind(after) == Tk::r_square) --depth;
+      }
+      if (depth != 0) return false;
+    }
+    switch (kind(after)) {
+    case Tk::semi: case Tk::equal: case Tk::comma:
+    case Tk::l_brace: case Tk::colon:
+      return true;
+    case Tk::l_paren:
+      return grouped_statement_suffix(after);
+    default:
+      return false;
+    }
+  }
+
   // In a statement a second parenthesized group can be a direct initializer.
   // Otherwise it must be a parameter clause followed by declarator syntax.
   bool grouped_statement_suffix(u32 open) {
@@ -361,40 +386,25 @@ public:
       if (q) {
         const u32 open = 1 + q->second;
         if (kind(open) == Tk::l_brace) return false;
-        if (kind(open) == Tk::l_paren) {
-          u32 after = past_parentheses(open);
-          if (!grouped_declarator_ahead(open, after - 1, statement)) return false;
-          while (kind(after) == Tk::l_square) {
-            u32 depth = 1;
-            for (++after; depth != 0 && i_ + after < end_; ++after) {
-              if (kind(after) == Tk::l_square) ++depth;
-              else if (kind(after) == Tk::r_square) --depth;
-            }
-            if (depth != 0) return false;
-          }
-          switch (kind(after)) {
-          case Tk::semi: case Tk::equal: case Tk::comma:
-          case Tk::l_brace: case Tk::colon:
-            return true;
-          case Tk::l_paren:
-            return grouped_statement_suffix(after);
-          default:
-            return false;
-          }
-        }
+        if (kind(open) == Tk::l_paren) return grouped_declaration_ahead(open, statement);
       }
     }
     if (starts_decl_specifier(kind()) && !decltype_qualifier_ahead()) return true;
     if (qualified_type_ahead()) {
       bool failed_qualifier = false;
+      bool dependent_member = false;
       const bool saved_deduced = std::exchange(qualified_deduced_ok_, true);
-      auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false, &failed_qualifier);
+      auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false, &failed_qualifier, nullptr,
+                              /*template_argument=*/false, /*conversion=*/false, &dependent_member);
       qualified_deduced_ok_ = saved_deduced;
       if (failed_qualifier) return true;  // let the declaration diagnose the qualifier
+      if (!q || (statement && dependent_member && s_->types().kind(q->first) == sema::TypeKind::dep_name))
+        return false;
+      // `N::T(x);` declares x as `int(x);` does ([stmt.ambig]).
       auto context = statement ? PointerLookahead::statement : PointerLookahead::declaration;
-      return q && !(statement && s_->types().kind(q->first) == sema::TypeKind::dep_name) &&
-             (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
-              function_pointer_declarator_ahead(q->second, context)) &&
+      return (kind(q->second) != Tk::l_paren || member_pointer_star(q->second + 1) ||
+              function_pointer_declarator_ahead(q->second, context) ||
+              (statement && grouped_declaration_ahead(q->second, statement))) &&
              kind(q->second) != Tk::period && kind(q->second) != Tk::l_brace;
     }
     u32 next = 1;  // the token after the type's name: after `X<…>` for a class template
@@ -728,8 +738,10 @@ public:
       const bool saved_deduced = std::exchange(qualified_deduced_ok_, deduced_ok);
       auto q = qualified_type(0, true);
       qualified_deduced_ok_ = saved_deduced;
+      // In a block no constructor is declared, so `N::T(x);` has a grouped declarator ([stmt.ambig]).
       if (q && (in_type_id || kind(q->second) != Tk::l_paren || function_pointer_declarator_ahead(q->second) ||
-                (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)))) {
+                (in_params_ > 0 && function_pointer_declarator_ahead(q->second, PointerLookahead::abstract)) ||
+                (s_->in_function_body && in_params_ == 0 && grouped_declaration_ahead(q->second, true)))) {
         cls = q->first;
         take_qualified(q->second);
         return true;
@@ -2158,11 +2170,15 @@ public:
 
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
+  // `dependent_member`: whether the name is a member of a dependent class, which in a block names a
+  // type only after `typename` ([temp.res.general]/4-5). A namespace's alias template whose target
+  // is a dependent member type is not one ([temp.alias]).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
                                                        bool* failed_qualifier = nullptr,
                                                        bool* terminal_template_id = nullptr,
                                                        bool template_argument = false,
-                                                       bool conversion = false) {
+                                                       bool conversion = false,
+                                                       bool* dependent_member = nullptr) {
     const bool classify_only = !checked && alias_constraints_enabled_ && !s_->templated();
     const TemplateIdLookahead lookahead{*this, in_template_id_lookahead_ || !checked};
     u32 next = 0;
@@ -2178,6 +2194,7 @@ public:
     }
     if (checked && (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures)) return std::nullopt;
     if (!s) return std::nullopt;
+    if (dependent_member) *dependent_member = s->type && s_->types().is_dependent(*s->type);
     // `C::M<args>`, `C::template M<args>`, `Q::template M<args>`: a member alias template's
     // specialization ([temp.mem], [temp.names]/4).
     if ((s->type || kind(next) == Tk::kw_template) && (kind(next) == Tk::identifier || kind(next) == Tk::kw_template)) {
@@ -2268,10 +2285,13 @@ public:
         const bool computed = decltype_qualifier_ahead(first);
         if (k == Tk::r_paren || k == Tk::ellipsis || (starts_decl_specifier(k) && !computed)) return true;
         if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon || computed) {
-          auto q = qualified_type(first);  // `N::S`, `C::E`, `::S`, `decltype(e)::S`
+          bool dependent_member = false;  // `N::S`, `C::E`, `::S`, `decltype(e)::S`
+          auto q = qualified_type(first, /*checked=*/false, /*type_only=*/false, nullptr, nullptr,
+                                  /*template_argument=*/false, /*conversion=*/false, &dependent_member);
           if (!q) return false;
           // A member of a dependent class is no type without `typename` in a block ([temp.res.general]/5).
-          if (s_->in_function_body && s_->types().kind(q->first) == sema::TypeKind::dep_name) return false;
+          if (s_->in_function_body && dependent_member && s_->types().kind(q->first) == sema::TypeKind::dep_name)
+            return false;
           after_type = first + q->second;
         } else if (k == Tk::identifier && next == Tk::less && s_->names_type_template(name_of(tok(first)))) {
           after_type = past_template_args(first + 1);
