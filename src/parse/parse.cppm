@@ -2012,6 +2012,14 @@ private:
   // By class template (or partial specialization) entity: the names its using-declarations take
   // from a dependent base, which its definition looks up in each specialization.
   std::map<u32, std::set<NameId>> dependent_member_usings_;
+  struct DependentUsingKey {
+    QualType qualifier;
+    NameId name;
+    std::optional<QualType> conversion;
+    bool operator==(const DependentUsingKey&) const = default;
+  };
+  // By (member item, class entity): written dependent member using-declarators for duplicate checks.
+  std::map<std::pair<u32, u32>, std::vector<DependentUsingKey>> dependent_member_using_keys_;
   struct AsmLabel {
     u32 item = 0, offset = 0;
     std::string spelling;
