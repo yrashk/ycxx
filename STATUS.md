@@ -4130,7 +4130,9 @@ request it serves.
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
 - The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
   given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
-  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. An
+  autowrap off, and draws each line at its row. A frame sends only the lines that changed
+  (`frame_update`; all of them after a resize), and the inputs already waiting are handled before
+  it, so key repeat on a slow or busy terminal costs one frame, not one per key (#1713). A `SIGWINCH` self-pipe redraws on resize. An
   interrupted terminal wait also checks the size, so a deferred handler cannot stall the redraw
   (#1375). Fatal signals restore the terminal, then re-raise. The tree has columns (time, worker,
   alloc and retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The

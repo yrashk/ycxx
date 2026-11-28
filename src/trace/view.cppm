@@ -384,6 +384,19 @@ struct Frame {
   std::vector<std::string> lines;
   std::optional<std::pair<std::size_t, std::size_t>> cursor;  // row, column
 };
+// What the terminal is sent to show `next` where it shows `shown`: each line that changed, at its
+// own row, then the cursor; every line when nothing is shown yet or the screen has other rows. A
+// line ends in a reset (`fit`), so one drawn alone looks as it does among the others. A key that
+// moves the selection redraws a few lines, not the screen (#1713).
+std::string frame_update(const Frame* shown, const Frame& next) {
+  const bool whole = !shown || shown->lines.size() != next.lines.size();
+  std::string out;
+  for (std::size_t i = 0; i < next.lines.size(); ++i)
+    if (whole || shown->lines[i] != next.lines[i]) out += std::format("\x1b[{};1H{}", i + 1, next.lines[i]);
+  if (next.cursor) out += std::format("\x1b[{};{}H\x1b[?25h", next.cursor->first + 1, next.cursor->second + 1);
+  else out += "\x1b[?25l";
+  return out;
+}
 
 class Browser {
  public:

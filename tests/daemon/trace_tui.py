@@ -9,6 +9,8 @@ under a pseudo-terminal.
 - It turns SGR mouse reports on (1000, 1002, 1006) and autowrap off, and back on `q`.
 - A click on a tab, sent as the terminal would send it, switches the view; a drag moves the
   divider.
+- Keys that arrive together are drawn as one frame, and a frame sends only the lines that changed
+  (#1713).
 - A resize redraws at the new width.
 - Copying (#636): `y` and a drag over rows put the text on the clipboard through OSC 52 and the
   local command (`YCXX_CLIPBOARD`, here a file).
@@ -95,9 +97,15 @@ class Tui:
 
     @staticmethod
     def frame_of(out):
-        # Lines are drawn at their rows (`ESC [ row ; 1 H`); the last frame starts at row 1.
+        # Lines are drawn at their rows (`ESC [ row ; 1 H`), after the first frame only those that
+        # changed (#1713): the screen holds each row's last line. The cursor's place (at column 1
+        # it looks like a row's) and OSC 52 are no lines.
         text = out.decode('utf-8', 'replace')
-        return re.split(r'\x1b\[\d+;1H', text[text.rfind('\x1b[1;1H'):])[1:]
+        text = re.sub(r'\x1b\]52;[^\x07]*\x07', '', text)
+        text = re.sub(r'\x1b\[\d+;\d+H\x1b\[\?25h|\x1b\[\?25l', '', text)
+        parts = re.split(r'\x1b\[(\d+);1H', text)
+        screen = dict(zip((int(r) for r in parts[1::2]), parts[2::2]))
+        return [screen[r] for r in sorted(screen)]
 
     def last_frame(self):
         return Tui.frame_of(self.out)
@@ -189,6 +197,16 @@ def main(ycxx):
         rows = osc52_last(t.out) or ''
         check(t.read_until(lambda o: any('copied 3 rows' in l for l in plain_lines(Tui.frame_of(o))), timeout=5), 'the status line says 3 rows')
         check(rows.startswith('* Build(') and clip.read_text() == rows, f'as the stream prints them: {rows[:60]!r}')
+    # Keys that arrive together (key repeat a terminal was slow to draw) are drawn as one frame,
+    # not one each (#1713); the selection still moves by all of them.
+    t.send(b'g')
+    t.read_until(lambda o: False, timeout=1)
+    mark = len(t.out)
+    t.send(b'j' * 30)
+    t.read_until(lambda o: False, timeout=1)
+    frames = len(re.findall(rb'\x1b\[\?25[lh]', t.out[mark:]))
+    check(1 <= frames < 5, f'30 keys at once draw a frame or a few, not 30: {frames}')
+    t.send(b'g')
     # A resize redraws at once, at the new width. The last frame is read whole first, so what
     # follows the mark can only be a redraw.
     t.read_until(lambda o: False, timeout=1)
@@ -217,9 +235,10 @@ def main(ycxx):
     t = Tui(ycxx, scope, dict(env, YCXX_CLIPBOARD=f'(sleep 6; touch {marker}) & wait'), 'big.cpp')
     check(t.read_until(lambda o: b'ycxx trace' in o), 'the browser draws (a stuck clipboard command)')
     # Live (#939): the first frame is drawn at once, while the build of 300 functions runs.
-    t.read_until(lambda o: o.count(b'\x1b[1;1H') >= 2)  # the first frame whole: the next one has begun
-    second = t.out.find(b'\x1b[1;1H', t.out.find(b'\x1b[1;1H') + 1)
-    first = Tui.frame_of(t.out[:second] if second > 0 else t.out)
+    first_frame = re.compile(rb'\x1b\[1;1H.*?\x1b\[\?25[lh]', re.S)  # the first frame whole: up to its cursor
+    t.read_until(lambda o: first_frame.search(o) is not None)
+    m = first_frame.search(t.out)
+    first = Tui.frame_of(t.out[:m.end()] if m else t.out)
     check(any('● live' in l and 'building big.cpp' in l for l in plain_lines(first)), f'the first frame is drawn while the build runs: {plain_lines(first)[:4]}')
     check(t.read_until(lambda o: b'the build has ended' in o), 'and the build ends')
     began = time.time()
