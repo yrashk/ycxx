@@ -1090,7 +1090,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - On arm64 macOS, `-shared` or `-dynamiclib` with `-nostdlib` writes a signed leaf `MH_DYLIB`.
   The install name is the output basename unless overridden by `-Wl,-install_name,<name>`.
   Source inputs require `-fPIC` or `-fpic`. Strong functions can use direct local and hidden
-  references and immutable data. The platform loader and rule worker can consume the image.
+  references to immutable data and to private zero-initialized writable storage. The latter
+  occupies virtual memory without adding bytes to the signed file. The platform loader and
+  rule worker can consume the image.
   [Design](docs/design/darwin-shared-output.md) · [#393](https://github.com/yrashk/ycxx/issues/393)
 - arm64 Darwin executable links accept explicit leaf `.dylib` paths. The linker
   reads strong function exports and uses the provider's install name and version

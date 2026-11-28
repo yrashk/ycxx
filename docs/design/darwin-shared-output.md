@@ -27,10 +27,11 @@ platform C headers and avoids introducing libycxx runtime references.
 The linker accepts strong, default-visible function exports from executable
 text. Local and hidden definitions can participate in direct position-independent
 branches and page-relative references, including references to immutable string
-data. The linker preserves validated PC-relative DWARF unwind records with
+data and ordinary zero-initialized `__DATA,__bss` storage. The linker preserves
+validated PC-relative DWARF unwind records with
 ordinary `zR` CIEs. It rejects cleanup or personality records, imported symbols,
-weak/coalesced definitions, exported data, writable sections, load-time
-relocations, and initializers.
+weak/coalesced definitions, exported data, initialized writable sections,
+load-time relocations, and initializers.
 
 ## Image and verification
 
@@ -45,7 +46,14 @@ slots. The executable segment range uses the actual `__TEXT` segment and clears
 the main-binary flag. An independent design review checked these choices against
 the existing layout, export and signing paths. [Apple install-name guidance](https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/RunpathDependentLibraries.html) · [Native loader probe](https://github.com/yrashk/ycxx/actions/runs/46044567447)
 
+Private BSS uses a writable, non-executable `__DATA` segment with a page-rounded
+virtual size and zero file size. It follows the signed text in virtual memory.
+`__LINKEDIT` follows BSS in virtual memory and starts directly after text in
+the file. Input BSS contributions keep their alignment up to the Darwin page
+size. The loader supplies the zero-filled pages.
+
 Cross-target tests inspect the image and link-query inputs and compare cold and
 resident bytes. Native arm64 macOS additionally verifies the code signature,
-calls an export through `dlopen`, links and runs a platform executable that uses
-the install name, and invokes `ycxx_rule_plan_v1` in the real worker.
+reads and writes zero-initialized storage through a `dlopen` export, links and
+runs a platform executable that uses the install name, and invokes
+`ycxx_rule_plan_v1` in the real worker.
