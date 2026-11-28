@@ -900,7 +900,7 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     s_.diag(at, Diag::using_namespace_member, *name);
     return false;
   }
-  if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) {
+  auto defer_dependent_using = [&]() -> bool {
     // [namespace.udecl]/8, [basic.scope.scope]/4: a repeated dependent member using-declarator
     // (same canonical qualifier, name, and non-dependent conversion target) is ill-formed in the
     // template definition.
@@ -929,6 +929,9 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
     }
     p_->dependent_member_usings_[std::to_underlying(ce)].insert(*name);
     return true;
+  };
+  if (sc->type && (types.is_dependent(*sc->type) || (conversion && types.is_dependent(*conversion)))) {
+    return defer_dependent_using();
   }
   if (!sc->type || !types.is_class(*sc->type)) {
     s_.diag(at, Diag::using_not_base, sc->type ? *sc->type : s_.builtin(sema::Builtin::void_), types.class_type(ce));
@@ -938,14 +941,21 @@ auto ItemAnalysis::member_using_declarator(EntityId ce) -> bool {
   // A direct base, or a base of one: the class is not complete yet, so its base-clause's.
   std::vector<EntityId> direct;
   for (const sema::BaseRec& x : q_.defining_base_records(ce)) direct.push_back(x.cls);
-  if (const auto own = p_->instantiating_bases_.find(ce); own != p_->instantiating_bases_.end() &&
-                                                           !std::ranges::contains(direct, own->second))
-    direct.push_back(own->second);
+  if (const auto own = p_->instantiating_bases_.find(ce); own != p_->instantiating_bases_.end())
+    for (const sema::BaseRec& x : own->second)
+      if (!std::ranges::contains(direct, x.cls)) direct.push_back(x.cls);
   const bool is_base = std::ranges::any_of(direct, [&](EntityId d) {
     int paths = 0;
     return d == b || s_.base_path(d, b, paths).has_value();
   });
-  if (b == ce || !is_base) {
+  if (b == ce) {
+    s_.diag(at, Diag::using_not_base, *sc->type, types.class_type(ce));
+    return false;
+  }
+  if (!is_base) {
+    // [namespace.udecl]/3, [temp.dep], [temp.inst]: when the class has a dependent base,
+    // whether a concrete class is a base cannot be decided until instantiation.
+    if (has_dependent_base()) return defer_dependent_using();
     s_.diag(at, Diag::using_not_base, *sc->type, types.class_type(ce));
     return false;
   }

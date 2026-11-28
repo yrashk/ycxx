@@ -2695,10 +2695,16 @@ auto Sema::incomplete_class_member(NameId name, u32 begin, u32 end, u32 name_at,
     if (auto m = class_member(current_class, name, begin, end, name_at, address_at, unqualified,
                               /*check_all_bases=*/true, bases)) return *m;
   }
-  // A nondependent base participates in lookup while a class template is being defined.
-  if (unqualified && w_->entities.rec(current_class).templ != EntityId::none)
-    for (EntityId base : q_->defining_bases(current_class))
-      if (auto m = class_member(base, name, begin, end, begin)) return *m;
+  // A nondependent base participates in lookup while a class template (or a class nested in one)
+  // is being defined ([temp.dep.type]/3).
+  if (unqualified && bases.empty() && (templated() || w_->entities.rec(current_class).templ != EntityId::none)) {
+    std::vector<BaseRec> nondep;
+    for (const BaseRec& base : q_->defining_base_records(current_class))
+      if (!base.dependent_in_pattern) nondep.push_back(base);
+    if (!nondep.empty())
+      if (auto m = class_member(current_class, name, begin, end, name_at, address_at, unqualified,
+                                /*check_all_bases=*/true, nondep)) return *m;
+  }
   return std::nullopt;
 }
 

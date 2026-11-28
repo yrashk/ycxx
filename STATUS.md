@@ -5349,8 +5349,9 @@ for calls and for selection against a static function-pointer target.
 - `using B::f;`, `using B::operator();` and `using B::operator T;` in a class's
   member-specification ([namespace.udecl]) name member functions of a base class, direct or
   indirect, of an ordinary class, a class template or a partial specialization
-  (`member_using_declarator` in parse.cppm). A dependent base (`using Fn::operator();`) is named
-  again by each specialization's analysis of the member item. What lookup in the base finds is
+  (`member_using_declarator` in item_analysis_decls.cpp). A dependent base (`using Fn::operator();`)
+  or a concrete base nominated while the derived class has a dependent base (`template<class T> struct D : T { using B::f; };`, #1553)
+  is checked again by each specialization's analysis of the member item. What lookup in the base finds is
   kept in `Program::member_usings_` by (member item, class entity).
 - `Program::introduce_members` puts them in `ClassRec::introduced` once the class's own members are
   known. It leaves out those that one of the class's own member functions hides or overrides: the

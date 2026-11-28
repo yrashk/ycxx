@@ -1698,7 +1698,7 @@ public:
     EntityId spec;
   };
   std::map<u32, MemberOf> member_patterns_;
-  std::map<EntityId, EntityId> instantiating_bases_;  // the direct base of each specialization whose members are being analysed
+  std::map<EntityId, std::vector<sema::BaseRec>> instantiating_bases_;  // the direct bases of each specialization whose members are being analysed
   std::optional<u32> out_of_class_definition(EntityId spec, MemberOf of);
   // A class template specialization's record of its member item `m`, analysed already.
   const ast::ItemSema& class_member_sema(u32 m, EntityId spec) {
@@ -2674,6 +2674,10 @@ public:
   bool explicit_specialization(EntityId c) override { return p_->explicitly_specialized(c, item_); }
   std::span<const sema::BaseRec> defining_base_records(EntityId c) override {
     if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end()) return b->second;
+    return {};
+  }
+  std::span<const sema::BaseRec> instantiating_base_records(EntityId c) override {
+    if (auto b = p_->instantiating_bases_.find(c); b != p_->instantiating_bases_.end()) return b->second;
     return {};
   }
   // The class's definition analyses its member items before their bodies, which ask this.
@@ -4756,7 +4760,10 @@ private:
   const sema::ClassRec* direct_polymorphic_base(EntityId cls) {
     std::vector<EntityId> bases = q_.defining_bases(cls);
     if (inst_)
-      if (const auto own = p_->instantiating_bases_.find(cls); own != p_->instantiating_bases_.end()) bases = {own->second};
+      if (const auto own = p_->instantiating_bases_.find(cls); own != p_->instantiating_bases_.end()) {
+        bases.clear();
+        for (const sema::BaseRec& x : own->second) bases.push_back(x.cls);
+      }
     const auto* base = bases.size() == 1 ? p_->classes_.find(bases.front()) : nullptr;
     return base && base->polymorphic ? base : nullptr;
   }
@@ -4835,6 +4842,13 @@ private:
     ps_.seek(resume);
     d.noexcept_condition = suffix.noexcept_condition;
     d.noexcept_tokens.reset();
+  }
+
+  // Whether the class being defined has a dependent base in its template pattern.
+  bool has_dependent_base() {
+    if (inst_ || s_.template_scopes.empty()) return false;
+    const auto base = p_->class_base_patterns_.find(it_->parent);
+    return base != p_->class_base_patterns_.end() && s_.types().is_dependent(base->second.base.type);
   }
 
   // In a class template's definition, a base or a signature can be dependent: each specialization
@@ -8895,7 +8909,7 @@ const sema::ClassRec* Program::replay_class(EntityId spec, u32 k, u32 point,
     bases.push_back(*base);
     if (!base->dependent_in_pattern) set_bases(spec, bases);
   }
-  if (!bases.empty()) instantiating_bases_.insert_or_assign(spec, bases.front().cls);
+  if (!bases.empty()) instantiating_bases_.insert_or_assign(spec, bases);
   class_args_.emplace(key, args);
   class_patterns_.emplace(key, k);
   class_points_.emplace(key, point);
