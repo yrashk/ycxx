@@ -256,6 +256,11 @@ public:
     // By item: its `name_scopes`, or none (`name_ns` asks for every declaration lookup visits).
     std::vector<const std::vector<std::pair<std::string, std::string>>*> name_scoped;
     std::vector<u32> specializations;   // the items outside classes that declare specializations
+    // `specializations` by each plain identifier they declare, in item order; those that declare
+    // none (an operator, a destructor, a universal-character-name) are in `unnamed_specializations`.
+    // A question about one entity reads only those that can specialize it (#1704).
+    std::unordered_map<std::string_view, std::vector<u32>> specializations_by_name;
+    std::vector<u32> unnamed_specializations;
     // `by_name` by (name, namespace): as declared (`name_ns`), for lookup (`name_eff_ns`), and the
     // item's (`ns_of`); and the qualified declarations, by name. For answering questions (`answer`).
     using Scoped = std::map<std::pair<std::string_view, std::string_view>, std::vector<std::pair<u32, u32>>>;
@@ -405,10 +410,25 @@ public:
       const items::Item& it = items.items[k];
       if (!x.in_class[k] && (it.specialization || std::ranges::any_of(it.names, [](const items::DeclName& n) {
                                return (n.flags & items::name_flag::specialization) != 0;
-                             })))
+                             }))) {
         x.specializations.push_back(k);
+        bool named = false;
+        for (const items::DeclName& n : it.names)
+          if (plain_identifier(n.name)) {
+            std::vector<u32>& bucket = x.specializations_by_name[n.name];
+            if (bucket.empty() || bucket.back() != k) bucket.push_back(k);
+            named = true;
+          }
+        if (!named) x.unnamed_specializations.push_back(k);
+      }
     }
     return out;
+  }
+  // An ASCII identifier: an entity named by one is declared under the same spelling.
+  static bool plain_identifier(std::string_view name) {
+    return !name.empty() && !(name[0] >= '0' && name[0] <= '9') && std::ranges::all_of(name, [](char c) {
+      return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    });
   }
   void set_directive_target(u32 item, std::string target) {
     for (Directive& d : directives_)
@@ -575,7 +595,7 @@ public:
       return r && r->defined;
     }
     ensure_declared(c, item);  // its definition, if an earlier item has it
-    if (templ != EntityId::none) specializations_before(item);
+    if (templ != EntityId::none) specializations_before(c, item);
     auto it = class_items_.find(std::to_underlying(c));
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
     // after its template's definition, unless it is explicitly specialized ([temp.expl.spec]).
@@ -1173,7 +1193,7 @@ public:
   // Whether `e` is explicitly specialized before `item` ([temp.expl.spec]): then it is never
   // instantiated from its template.
   bool explicitly_specialized(EntityId e, u32 item) {
-    specializations_before(item);
+    specializations_before(e, item);
     auto it = explicit_specs_.find(std::to_underlying(e));
     return it != explicit_specs_.end() && it->second < item;
   }
@@ -1184,6 +1204,30 @@ public:
     const std::vector<u32>& specs = ix_->specializations;
     for (; spec_scan_ < specs.size() && specs[spec_scan_] < item; ++spec_scan_)
       if (!std::ranges::contains(running_, specs[spec_scan_])) item_sema(specs[spec_scan_]);
+  }
+  // Those of them that can specialize `e`, or a template `e` specializes: the items that declare
+  // its name, and those that declare no plain identifier. Every other answer about `e` is the same
+  // (§A1). A group's Program then reads only the header specializations it asks about, not all of
+  // them for its first question (#1704).
+  void specializations_before(EntityId e, u32 item) {
+    const std::vector<u32>& specs = ix_->specializations;
+    if (spec_scan_ == specs.size() || specs[spec_scan_] >= item) return;  // all of them are read
+    const std::string_view name = w_->ins.names.spelling(w_->entities.rec(e).name);
+    if (!plain_identifier(name)) return specializations_before(item);
+    auto scan = [&](const std::vector<u32>& candidates, std::size_t& scanned) {
+      for (; scanned < candidates.size() && candidates[scanned] < item; ++scanned)
+        if (!std::ranges::contains(running_, candidates[scanned])) item_sema(candidates[scanned]);
+    };
+    scan(ix_->unnamed_specializations, unnamed_spec_scan_);
+    if (auto named = ix_->specializations_by_name.find(name); named != ix_->specializations_by_name.end())
+      scan(named->second, named_spec_scan_[name]);
+  }
+  // The specializations from item `first` on, for the END checks of a group that begins there
+  // (`analyze_group`): one before it is the earlier groups' to check against their own uses.
+  void specializations_from(u32 first) {
+    const std::vector<u32>& specs = ix_->specializations;
+    for (auto k = std::ranges::lower_bound(specs, first); k != specs.end(); ++k)
+      if (!std::ranges::contains(running_, *k)) item_sema(*k);
   }
   // A partial specialization of a template: its item, and the specialization of its parameters it
   // is the pattern of, whose arguments are the partial specialization's.
@@ -1200,7 +1244,7 @@ public:
   // Whether class `c` is the pattern of a partial specialization defined before `item`, whose
   // members may be defined outside it ([temp.spec.partial.member]).
   bool partial_pattern(EntityId c, u32 item) {
-    specializations_before(item);
+    specializations_before(c, item);
     auto it = partials_.find(std::to_underlying(w_->entities.rec(c).templ));
     return it != partials_.end() &&
            std::ranges::any_of(it->second, [&](const Partial& p) { return p.entity == c && p.defined && p.item < item; });
@@ -1219,7 +1263,7 @@ public:
       u32 item, u32 point, std::span<const ast::TemplateParamSema> params, std::span<const ast::TemplateArg> pattern,
       sema::Bindings args);
   std::optional<Chosen> choose_partial(EntityId spec, u32 point) {
-    specializations_before(point);
+    specializations_before(spec, point);
     const sema::EntityRec rec = w_->entities.rec(spec);
     auto it = partials_.find(std::to_underlying(rec.templ));
     if (it == partials_.end()) return std::nullopt;
@@ -2029,7 +2073,7 @@ public:
 
   // The end of the translation unit (§B6.2): every specialization whose definition a cell
   // requires is instantiated, in order of first demand, and so are those its instance requires.
-  void instantiate_all();
+  void instantiate_all(u32 first = 0);
   void instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point);
   void references(NodeId n, std::vector<EntityId>& out) const;
   void references(ConstId value, std::vector<EntityId>& out) const;
@@ -2113,7 +2157,7 @@ public:
       }
     }
     const bool reported = depth_reported_;
-    instantiate_all();
+    instantiate_all(first);
     depth_reported_at_end_ = !reported && depth_reported_;
   }
   // Whether the instantiation-depth limit was first reached by the END worklist (instantiate_all)
@@ -2423,6 +2467,10 @@ private:
   std::map<u32, u32> explicit_specs_;            // by specialization: the item of its first explicit specialization
   std::map<u32, u32> class_points_;              // by class template specialization: its point of instantiation
   u32 spec_scan_ = 0;  // how many of the index's specializations `specializations_before` has analysed
+  // How many of `Index::specializations_by_name`'s, by name, and of its unnamed ones, the
+  // by-entity `specializations_before` has analysed.
+  std::unordered_map<std::string_view, std::size_t> named_spec_scan_;
+  std::size_t unnamed_spec_scan_ = 0;
   std::map<u32, std::vector<Partial>> partials_;  // by template entity, in order of declaration
   std::map<u32, PartialReplay> partial_replays_; // by item with deferred checks in its template arguments
   std::set<u32> partial_matching_;              // specializations whose arguments are being substituted
@@ -15403,10 +15451,13 @@ void Program::instantiate_variable_demands(std::span<const sema::Demand> demands
   }
 }
 
-void Program::instantiate_all() {
+void Program::instantiate_all(u32 first) {
   // [temp.expl.spec]/7: a specialization is explicitly specialized before its first use that
-  // would instantiate it: before any earlier cell demanded it, or instantiated the class.
-  specializations_before(end());
+  // would instantiate it: before any earlier cell demanded it, or instantiated the class. A group
+  // from `first` checks the specializations from there on; a use before an earlier one is in an
+  // earlier group, which checks it (#1704). An instance asks about its own specializations.
+  if (first == 0) specializations_before(end());
+  else specializations_from(first);
   // The demands of every cell, in item order, then those of each instance as it is made: the END
   // worklist of §B6.2, deterministic.
   std::vector<sema::Demand> work;
