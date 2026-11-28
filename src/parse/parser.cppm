@@ -978,19 +978,19 @@ public:
         bump();
         auto t = s_->class_name(n, true, false);
         if (!t && s_->class_name(n, true)) {  // [dcl.type.elab]/2
-          s_->diag(at + 1, Diag::elaborated_typedef, n);
+          s_->diag(name_at, Diag::elaborated_typedef, n);
           d.ok = false;
           continue;
         }
         if (t && !is(Tk::semi) && (!s_->types().is_class(*t) || s_->is_union_type(*t) == !(k == Tk::kw_union))) {
-          s_->diag(at + 1, Diag::conflicting_declaration, n);
+          s_->diag(name_at, Diag::conflicting_declaration, n);
           d.ok = false;
           continue;
         }
         const std::size_t diags = s_->diag_count();
         if (!t && declare_class) t = declare_class(n, k, name_at);
         if (!t) {
-          if (s_->diag_count() == diags) s_->diag(at + 1, Diag::not_a_type, n);
+          if (s_->diag_count() == diags) s_->diag(name_at, Diag::not_a_type, n);
           d.ok = false;
         } else if (any_type()) {
           s_->diag(at, Diag::conflicting_specifiers, k);
@@ -8059,19 +8059,21 @@ public:
     u32 begin = pos();
     // `class-key identifier ;` declares a class in the block, unless the block has declared it
     // ([dcl.type.elab]/2, [basic.scope.pdecl]/7): a local class.
-    if (body && is_class_key(kind()) && kind(1) == Tk::identifier && kind(2) == Tk::semi && declare_class) {
-      const NameId n = name_of(tok(1));
-      if (auto b = s_->innermost_block_type_binding(n)) {
-        if (!b->second) s_->diag(begin + 1, Diag::elaborated_typedef, n);
-        else if (!s_->types().is_class(b->first) || s_->is_union_type(b->first) == !(kind() == Tk::kw_union))
-          s_->diag(begin + 1, Diag::conflicting_declaration, n);
-      } else {
-        declare_class(n, kind(), begin + 1);
+    if (body && is_class_key(kind()) && declare_class) {
+      const u32 after = past_attributes(1);
+      if (kind(after) == Tk::identifier && kind(after + 1) == Tk::semi) {
+        const NameId n = name_of(tok(after));
+        const u32 name_at = begin + after;
+        if (auto b = s_->innermost_block_type_binding(n)) {
+          if (!b->second) s_->diag(name_at, Diag::elaborated_typedef, n);
+          else if (!s_->types().is_class(b->first) || s_->is_union_type(b->first) == !(kind() == Tk::kw_union))
+            s_->diag(name_at, Diag::conflicting_declaration, n);
+        } else {
+          declare_class(n, kind(), name_at);
+        }
+        i_ += after + 2;
+        return s_->node(ast::ExprStmt{}, begin, pos());
       }
-      bump();
-      bump();
-      bump();
-      return s_->node(ast::ExprStmt{}, begin, pos());
     }
     deduced_class_ok = true;
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);

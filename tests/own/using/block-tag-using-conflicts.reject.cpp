@@ -86,9 +86,27 @@ void typedef_unnamed_struct_conflicts_with_using() {
   using M::x;  //! error
 }
 
+namespace Tpl {
+template <class T>
+struct CT {
+  T a;
+};
+}  // namespace Tpl
+
+void typedef_conflicts_with_imported_class_template() {
+  using Tpl::CT;
+  typedef int CT;  //! error
+}
+
+void typedef_before_imported_class_template() {
+  typedef int CT;
+  using Tpl::CT;  //! error
+}
+
 void elaborated_key_mismatch_and_typedef() {
   struct A;
   union A;  //! error
+  union [[maybe_unused]] A;  //! error
   struct C {
     int a;
   };

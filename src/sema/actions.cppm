@@ -134,7 +134,7 @@ struct PresumedSource {
 // member function of a local class, that class's own enclosing block.
 struct OuterBlock {
   struct Name {
-    enum class Kind : u8 { local, type, using_, namespace_alias };
+    enum class Kind : u8 { local, type, using_, namespace_alias, enumerator };
     Kind kind = Kind::local;
     NameId name{};
     ast::LocalRec local{};
@@ -816,7 +816,7 @@ public:
   }
   bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
     return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
-      return decl.kind == ast::DeclKind::type_alias &&
+      return is_type(decl.kind) &&
              ((decl.flags & decl_flag::template_) || types().canonical(decl.type) != types().canonical(type));
     });
   }
@@ -4472,15 +4472,14 @@ public:
   // The function a local class defined here is local to: the enclosing function, or the innermost
   // lambda's function call operator ([class.local], docs/design/closures.md decision 3).
   EntityId local_scope() const { return lambdas_.empty() ? current_function : lambdas_.back().call; }
-  // The type a block-scope declaration of `name` in the innermost block gives it, if any.
-  std::optional<QualType> innermost_block_type(NameId name) const {
-    for (const BlockType& t : block_types_)
-      if (t.depth + 1 == scopes_.size() && t.name == name) return t.type;
-    return std::nullopt;
-  }
   std::optional<std::pair<QualType, bool>> innermost_block_type_binding(NameId name) const {
     for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
       if (t->depth + 1 == scopes_.size() && t->name == name) return std::pair{t->type, t->is_tag};
+    return std::nullopt;
+  }
+  // The type a block-scope declaration of `name` in the innermost block gives it, if any.
+  std::optional<QualType> innermost_block_type(NameId name) const {
+    if (auto b = innermost_block_type_binding(name)) return b->first;
     return std::nullopt;
   }
   OuterBlock outer_block_here();

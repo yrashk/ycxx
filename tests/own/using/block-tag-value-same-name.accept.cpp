@@ -192,6 +192,89 @@ constexpr int test_typedef_different_name_and_elaborated() {
   y obj{12};
   struct x* p = &obj;
   class x* q = &obj;
+  struct [[maybe_unused]] AttrLocal;
   return (x == 11 && p->a == 12 && q->a == 12) ? 0 : 6;
 }
 static_assert(test_typedef_different_name_and_elaborated() == 0);
+
+struct GlobalFunctor {
+  constexpr int operator()(int v) const { return v + 999; }
+};
+template <typename T>
+constexpr GlobalFunctor gfn{};
+
+template <int N>
+struct GlobalBox {
+  constexpr GlobalBox(int) {}
+  constexpr operator int() const { return 99; }
+};
+
+namespace M3 {
+constexpr double x = 1.0;
+constexpr int GlobalBox = 5;
+template <typename T>
+constexpr int gfn(T v) {
+  return static_cast<int>(v) + 1;
+}
+enum En { e = 7 };
+}  // namespace M3
+
+constexpr int test_init_capture_hides_outer_using() {
+  struct x {
+    char c;
+  };
+  using M3::x;
+  auto lam = [x = 'a']() {
+    auto glam = [](auto d) { return sizeof(x) + sizeof(d) - sizeof(d); };
+    struct L {
+      constexpr int g() const { return static_cast<int>(sizeof(x)); }
+    };
+    return static_cast<int>(glam(1)) + L{}.g();
+  };
+  return lam();
+}
+static_assert(test_init_capture_hides_outer_using() == 2 * static_cast<int>(sizeof(char)));
+
+constexpr int test_block_using_hides_global_var_template() {
+  struct gfn {
+    int a;
+  };
+  using M3::gfn;
+  struct L {
+    struct gfn m;
+    constexpr int g() const { return gfn<int>(3) + m.a; }
+  };
+  return gfn<int>(3) + L{{2}}.g();
+}
+static_assert(test_block_using_hides_global_var_template() == 10);
+
+constexpr int test_outer_block_hides_global_class_template() {
+  struct GlobalBox {
+    int a;
+  };
+  using M3::GlobalBox;
+  struct L {
+    struct GlobalBox m;
+    constexpr int g() const { return ((GlobalBox < 10) > -1) + m.a; }
+  };
+  return L{{7}}.g();
+}
+static_assert(test_outer_block_hides_global_class_template() == 8);
+
+constexpr int test_using_enum_beside_local_tag() {
+  using M3::En;
+  struct e {
+    int a;
+  };
+  {
+    using enum En;
+    struct e obj{3};
+    struct L {
+      struct e m;
+      constexpr int g() const { return e + m.a; }
+    };
+    return e + obj.a + L{{5}}.g();
+  }
+}
+static_assert(test_using_enum_beside_local_tag() == 22);
+

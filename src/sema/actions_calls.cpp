@@ -279,9 +279,16 @@ auto Sema::outer_block_here() -> OuterBlock {
   for (std::size_t d = scopes_.size(); d-- > 0;) {
     const u32 ctx = context_of(d);
     for (auto p = scopes_[d].rbegin(); p != scopes_[d].rend(); ++p) {
-      if (p->first == no_name() || (p->second & capture_bit) || !seen_value.insert(std::to_underlying(p->first)).second) continue;
+      if (p->first == no_name() || !seen_value.insert(std::to_underlying(p->first)).second) continue;
       OuterBlock::Name n;
       n.name = p->first;
+      if (p->second & capture_bit) {
+        const u32 field = p->second & ~capture_bit;
+        if (ctx > 0 && field < lambdas_[ctx - 1].fields.size())
+          n.local = {p->first, lambdas_[ctx - 1].fields[field].type, EntityId::none, NodeId::none, 0};
+        b.names.push_back(std::move(n));
+        continue;
+      }
       n.local = ctx == lambdas_.size() ? locals_[p->second] : lambdas_[ctx].outer_locals[p->second];
       n.local.decl = NodeId::none;
       const auto& values = ctx == lambdas_.size() ? local_values_ : lambdas_[ctx].outer_values;
@@ -329,6 +336,14 @@ auto Sema::outer_block_here() -> OuterBlock {
       if (b.names[idx].type) seen_type.insert(key);
       seen_value.insert(key);
     }
+    for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u) {
+      if (u->first != d) continue;
+      b.using_enums.push_back(u->second);
+      if (const EnumRec* er = enum_rec(u->second))
+        for (const EnumeratorRec& en : er->enumerators)
+          if (seen_value.insert(std::to_underlying(en.name)).second)
+            b.names.push_back({OuterBlock::Name::Kind::enumerator, en.name, {}, std::nullopt, std::nullopt, {}, u->second});
+    }
     for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
       if (t->depth == d && t->is_tag && seen_type.insert(std::to_underlying(t->name)).second) {
         seen_value.insert(std::to_underlying(t->name));
@@ -337,8 +352,6 @@ auto Sema::outer_block_here() -> OuterBlock {
     for (const BlockAlias& a : block_aliases_)
       if (a.depth == d && seen_value.insert(std::to_underlying(a.name)).second)
         b.names.push_back({OuterBlock::Name::Kind::namespace_alias, a.name, {}, std::nullopt, std::nullopt, {}, a.ns});
-    for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
-      if (u->first == d) b.using_enums.push_back(u->second);
     for (const auto& [depth, ns] : block_directives_)
       if (depth == d) b.directives.push_back(ns);
   }
@@ -361,6 +374,9 @@ auto Sema::outer_block_expr(const OuterBlock& b, NameId name, u32 begin, u32 end
       return Ex{NodeId::none, begin, end};
     case OuterBlock::Name::Kind::using_:
       return decls_expr(std::vector<ast::DeclSema>(n.decls), true, name, begin, end, callee, true);
+    case OuterBlock::Name::Kind::enumerator:
+      if (auto r = find_enumerator(n.ns, name, begin, end)) return *r;
+      continue;
     case OuterBlock::Name::Kind::local: break;
     }
     const ast::LocalRec& l = n.local;
@@ -1711,6 +1727,10 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
     for (const BlockUsing& u : block_usings_)
       if (u.depth == d && u.name == name) used.insert(used.end(), u.decls.begin(), u.decls.end());
     if (!used.empty()) return decls_expr(std::move(used), true, name, begin, end, callee, true);
+    // Enumerators a `using enum` brought into this block scope ([enum.udecl]) coexist with tags.
+    for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
+      if (u->first == d)
+        if (auto r = find_enumerator(u->second, name, begin, end)) return *r;
     if (std::ranges::any_of(block_types_, [&](const BlockType& t) { return t.depth == d && t.name == name; })) {
       diag(begin, Diag::type_as_expression, name);  // [expr.prim.id]: a type is not an expression
       return {NodeId::none, begin, end};
@@ -1730,9 +1750,6 @@ auto Sema::name_expr(NameId name, u32 begin, u32 end, bool callee, bool immediat
     diag(begin, Diag::unexpanded_pack, name);
     return {NodeId::none, begin, end};
   }
-  // Enumerators a `using enum` brought into a block scope ([enum.udecl]).
-  for (auto u = using_enums_.rbegin(); u != using_enums_.rend(); ++u)
-    if (auto r = find_enumerator(u->second, name, begin, end)) return *r;
   // A non-type template parameter is a prvalue whose value depends on the argument
   // ([temp.param]/8, [temp.dep.constexpr]).
   if (const ast::TemplateParamSema* p = template_param(name)) {
