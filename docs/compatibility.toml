@@ -1494,6 +1494,43 @@ clang = "Same as spec."
 evidence = ["tests/own/casts/reinterpret-pointer-integral-discarded.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.6 probes for discarded, retained and effectful operands"]
 
 [[divergence]]
+id = "constexpr-reinterpret-identity"
+status = "selectable"
+mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
+reference = "[expr.const], [expr.reinterpret.cast]/2,11, #199"
+prior = "A reinterpret_cast to the operand's own type was not supported."
+spec = "Reject a reached reinterpret_cast to the operand's own type in constant evaluation, including a glvalue cast."
+gcc = "Fold a cast to the operand's own type, cv-qualifiers included, into its operand, so constant evaluation accepts the tested integer, pointer and glvalue casts. A cast that adds cv-qualifiers still fails."
+clang = "Same as spec."
+evidence = ["tests/own/casts/reinterpret-identity-constexpr.reject.cpp", "tests/daemon/compatibility.py", "GCC 16.2 and upstream Clang 23.1.5 constant-evaluation probes for identity, qualification-adding and glvalue casts"]
+
+[[divergence]]
+id = "constexpr-reinterpret-glvalue-address"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.const], [expr.reinterpret.cast]/11, #199, #1702"
+prior = "A glvalue reinterpret_cast was not supported."
+spec = "Reject a reached glvalue reinterpret_cast in constant evaluation even when nothing is accessed through its result."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts a reference bound to the cast of a global and a local cast whose result only has its address taken, and rejects a read through the cast glvalue."
+clang_observed = "Clang 23.1.5 rejects every reached reinterpret_cast."
+evidence = ["tests/own/casts/reinterpret-glvalue-constexpr.reject.cpp"]
+
+[[divergence]]
+id = "reinterpret-object-function-pointer-qualifiers"
+status = "recorded"
+mode_status = { spec = "supported", gcc = "pending", clang = "supported" }
+reference = "[expr.reinterpret.cast]/8, [expr.const.cast]/7, #199, #1702"
+prior = "Conversions between object and function pointers were not supported."
+spec = "Reject converting a pointer to a cv-qualified object type or cv void to a function pointer, which casts away the pointee's qualifiers."
+gcc = "Same as spec while this compatibility behavior is pending."
+clang = "Same as spec."
+gcc_observed = "GCC 16.2 accepts reinterpret_cast<int (*)(int)>(const void*)."
+clang_observed = "Clang 23.1.5 rejects it as casting away qualifiers."
+evidence = ["tests/own/casts/reinterpret-function-pointer-qualifiers.reject.cpp"]
+
+[[divergence]]
 id = "elaborated-injected-base-access"
 status = "selectable"
 mode_status = { spec = "supported", gcc = "supported", clang = "supported" }
@@ -1841,6 +1878,30 @@ gcc_observed = "Strict GCC 16.2.0 x86-64 Linux accepts three probes. The future 
 clang_observed = "Strict Clang 23.1.6 rejects each assignment as outside the object's lifetime on x86-64 Linux and arm64 Darwin."
 limits = "The observations concern ordinary scalar assignment during fixed-bound automatic flat aggregate array initialization. Valid writes to earlier initialized mutable members are shared across peers."
 evidence = ["tests/daemon/compatibility.py", "tests/daemon/flat_record_array/flat-record-array-write-future-direct.cpp", "tests/daemon/flat_record_array/flat-record-array-write-future-helper.cpp", "tests/daemon/flat_record_array/flat-record-array-write-current.cpp", "tests/own/consteval/flat-record-array/flat-record-array-write-earlier.accept.cpp", "https://github.com/yrashk/ycxx/issues/1642"]
+
+[[divergence]]
+id = "builtin-operator-new-constant-evaluation"
+status = "recorded"
+mode_status = { spec = "unavailable", gcc = "unavailable", clang = "unavailable" }
+reference = "[expr.const.core], [allocator.members], [new.delete.single], #1681, #321"
+prior = "__builtin_operator_new and __builtin_operator_delete were undeclared identifiers."
+spec = "A call outside constant evaluation calls the selected replaceable global function. In constant evaluation the draft allows allocation only through new-expressions and std::allocator<T>::allocate, so a direct untyped __builtin_operator_new is not a constant expression."
+gcc = "Accept untyped __builtin_operator_new storage in constant evaluation when std::construct_at begins each object's lifetime and __builtin_operator_delete releases it before the evaluation ends."
+clang = "Same as spec: reject untyped storage from a direct call, accepting the builtins only as the typed allocation of std::allocator<T>::allocate."
+limits = "ycxx has no dynamic allocation in constant evaluation (#321), so a constant evaluation that reaches either builtin fails in every mode. Run-time calls are supported in every mode."
+probe = '''
+constexpr void* operator new(decltype(sizeof 0), void* p) noexcept { return p; }
+namespace std { template <class T, class... A> constexpr T* construct_at(T* p, A... a) { return ::new (static_cast<void*>(p)) T(a...); } }
+constexpr int f() {
+  int* p = static_cast<int*>(__builtin_operator_new(sizeof(int)));
+  std::construct_at(p, 42);
+  int r = *p;
+  __builtin_operator_delete(p);
+  return r;
+}
+static_assert(f() == 42);
+'''
+evidence = ["tests/own/builtins/builtin-operator-new-constant.reject.cpp", "tests/own/builtins/builtin-operator-new.run.cpp", "tests/own/builtins/builtin-operator-new-selection.reject.cpp", "docs/EXTENSIONS.md", "https://github.com/yrashk/ycxx/issues/321", "GCC 16.2.0 accepts the probe and upstream Clang 23.1.5 rejects it (strict C++26, arm64 Darwin); both agree with <memory>'s std::construct_at in place of the probe's"]
 
 [[divergence]]
 id = "has-builtin-macro-operand"

@@ -153,6 +153,11 @@ Mem-initializers can expand packs, as in `value(static_cast<A&&>(args)...)` and 
 Base-class pack expansions such as `Bs(x)...` wait on base-specifier packs.
 [#1400](https://github.com/yrashk/ycxx/issues/1400) [#308](https://github.com/yrashk/ycxx/issues/308)
 
+Class templates deduce their arguments from an initializer: `Box b(3)`, `n::pair p(1, 2.0)`,
+`auto x = Box{4}` and `new Box(5)`. Deduction uses the constructors, the copy deduction candidate
+and the deduction-guides declared at namespace scope, including `explicit` and constrained ones.
+[#316](https://github.com/yrashk/ycxx/issues/316)
+
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. A class template's ordinary member alias can use those fields directly or in a
@@ -225,8 +230,8 @@ and reflection annotations. The standalone C++20 package provides runtime owners
 capability tokens, effect budgets, and scoped handlers for GCC and Clang builds.
 [YCXX Policies package](packages/ycxx-policies/README.md)
 
-Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
-array and function decay. Non-type template parameters can have enumeration types
+Single-expression `auto(x)` and `auto{x}` perform decay-copy of scalars, pointers and classes,
+including array and function decay, also with dependent operands in requires-expressions. Non-type template parameters can have enumeration types
 ([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
 instantiation, and a function template whose signature holds a dependent variable-template-id
 or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). C++26
@@ -886,6 +891,8 @@ written default member initializer are value-initialized.
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
   Named `const_cast` changes cv-qualification on matching ordinary pointer types and scalar
   glvalues while retaining the original address.
+  Named `reinterpret_cast` converts between object and function pointers, between pointers and
+  pointer-width integers, and between object glvalues of different types, in templates too.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
   [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
@@ -967,6 +974,9 @@ written default member initializer are value-initialized.
   character arrays in constant expressions.
   [#248](https://github.com/yrashk/ycxx/issues/248) [#1093](https://github.com/yrashk/ycxx/issues/1093)
   [#1092](https://github.com/yrashk/ycxx/issues/1092) [#1170](https://github.com/yrashk/ycxx/issues/1170)
+  `__builtin_operator_new` and `__builtin_operator_delete`, used by libycxx's `std::allocator`,
+  call the replaceable global `operator new` or `operator delete` their arguments select,
+  including one the program replaces, at run time. [#1681](https://github.com/yrashk/ycxx/issues/1681)
   `__builtin_LINE()` reports the presumed line, including the call site of an omitted ordinary
   function argument. [#327](https://github.com/yrashk/ycxx/issues/327)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,

@@ -256,6 +256,11 @@ public:
     // By item: its `name_scopes`, or none (`name_ns` asks for every declaration lookup visits).
     std::vector<const std::vector<std::pair<std::string, std::string>>*> name_scoped;
     std::vector<u32> specializations;   // the items outside classes that declare specializations
+    // `specializations` by each plain identifier they declare, in item order; those that declare
+    // none (an operator, a destructor, a universal-character-name) are in `unnamed_specializations`.
+    // A question about one entity reads only those that can specialize it (#1704).
+    std::unordered_map<std::string_view, std::vector<u32>> specializations_by_name;
+    std::vector<u32> unnamed_specializations;
     // `by_name` by (name, namespace): as declared (`name_ns`), for lookup (`name_eff_ns`), and the
     // item's (`ns_of`); and the qualified declarations, by name. For answering questions (`answer`).
     using Scoped = std::map<std::pair<std::string_view, std::string_view>, std::vector<std::pair<u32, u32>>>;
@@ -405,10 +410,25 @@ public:
       const items::Item& it = items.items[k];
       if (!x.in_class[k] && (it.specialization || std::ranges::any_of(it.names, [](const items::DeclName& n) {
                                return (n.flags & items::name_flag::specialization) != 0;
-                             })))
+                             }))) {
         x.specializations.push_back(k);
+        bool named = false;
+        for (const items::DeclName& n : it.names)
+          if (plain_identifier(n.name)) {
+            std::vector<u32>& bucket = x.specializations_by_name[n.name];
+            if (bucket.empty() || bucket.back() != k) bucket.push_back(k);
+            named = true;
+          }
+        if (!named) x.unnamed_specializations.push_back(k);
+      }
     }
     return out;
+  }
+  // An ASCII identifier: an entity named by one is declared under the same spelling.
+  static bool plain_identifier(std::string_view name) {
+    return !name.empty() && !(name[0] >= '0' && name[0] <= '9') && std::ranges::all_of(name, [](char c) {
+      return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    });
   }
   void set_directive_target(u32 item, std::string target) {
     for (Directive& d : directives_)
@@ -575,7 +595,7 @@ public:
       return r && r->defined;
     }
     ensure_declared(c, item);  // its definition, if an earlier item has it
-    if (templ != EntityId::none) specializations_before(item);
+    if (templ != EntityId::none) specializations_before(c, item);
     auto it = class_items_.find(std::to_underlying(c));
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
     // after its template's definition, unless it is explicitly specialized ([temp.expl.spec]).
@@ -1173,7 +1193,7 @@ public:
   // Whether `e` is explicitly specialized before `item` ([temp.expl.spec]): then it is never
   // instantiated from its template.
   bool explicitly_specialized(EntityId e, u32 item) {
-    specializations_before(item);
+    specializations_before(e, item);
     auto it = explicit_specs_.find(std::to_underlying(e));
     return it != explicit_specs_.end() && it->second < item;
   }
@@ -1184,6 +1204,30 @@ public:
     const std::vector<u32>& specs = ix_->specializations;
     for (; spec_scan_ < specs.size() && specs[spec_scan_] < item; ++spec_scan_)
       if (!std::ranges::contains(running_, specs[spec_scan_])) item_sema(specs[spec_scan_]);
+  }
+  // Those of them that can specialize `e`, or a template `e` specializes: the items that declare
+  // its name, and those that declare no plain identifier. Every other answer about `e` is the same
+  // (§A1). A group's Program then reads only the header specializations it asks about, not all of
+  // them for its first question (#1704).
+  void specializations_before(EntityId e, u32 item) {
+    const std::vector<u32>& specs = ix_->specializations;
+    if (spec_scan_ == specs.size() || specs[spec_scan_] >= item) return;  // all of them are read
+    const std::string_view name = w_->ins.names.spelling(w_->entities.rec(e).name);
+    if (!plain_identifier(name)) return specializations_before(item);
+    auto scan = [&](const std::vector<u32>& candidates, std::size_t& scanned) {
+      for (; scanned < candidates.size() && candidates[scanned] < item; ++scanned)
+        if (!std::ranges::contains(running_, candidates[scanned])) item_sema(candidates[scanned]);
+    };
+    scan(ix_->unnamed_specializations, unnamed_spec_scan_);
+    if (auto named = ix_->specializations_by_name.find(name); named != ix_->specializations_by_name.end())
+      scan(named->second, named_spec_scan_[name]);
+  }
+  // The specializations from item `first` on, for the END checks of a group that begins there
+  // (`analyze_group`): one before it is the earlier groups' to check against their own uses.
+  void specializations_from(u32 first) {
+    const std::vector<u32>& specs = ix_->specializations;
+    for (auto k = std::ranges::lower_bound(specs, first); k != specs.end(); ++k)
+      if (!std::ranges::contains(running_, *k)) item_sema(*k);
   }
   // A partial specialization of a template: its item, and the specialization of its parameters it
   // is the pattern of, whose arguments are the partial specialization's.
@@ -1200,7 +1244,7 @@ public:
   // Whether class `c` is the pattern of a partial specialization defined before `item`, whose
   // members may be defined outside it ([temp.spec.partial.member]).
   bool partial_pattern(EntityId c, u32 item) {
-    specializations_before(item);
+    specializations_before(c, item);
     auto it = partials_.find(std::to_underlying(w_->entities.rec(c).templ));
     return it != partials_.end() &&
            std::ranges::any_of(it->second, [&](const Partial& p) { return p.entity == c && p.defined && p.item < item; });
@@ -1219,7 +1263,7 @@ public:
       u32 item, u32 point, std::span<const ast::TemplateParamSema> params, std::span<const ast::TemplateArg> pattern,
       sema::Bindings args);
   std::optional<Chosen> choose_partial(EntityId spec, u32 point) {
-    specializations_before(point);
+    specializations_before(spec, point);
     const sema::EntityRec rec = w_->entities.rec(spec);
     auto it = partials_.find(std::to_underlying(rec.templ));
     if (it == partials_.end()) return std::nullopt;
@@ -1650,6 +1694,32 @@ public:
 
   // The function type a definition before `item` deduced for `f` ([dcl.spec.auto.general]/11).
   std::optional<QualType> deduced_type(EntityId f, u32 item);
+  // The deduction-guides for class template `t` declared at namespace scope before `item`
+  // ([temp.deduct.guide]), their items analysed first.
+  std::vector<sema::DeductionGuide> deduction_guides(EntityId t, u32 item) {
+    if (!guide_items_) {
+      guide_items_.emplace();
+      for (u32 k = 0; k < items_->items.size(); ++k)
+        if (!items_->items[k].deduction_guide.empty()) guide_items_->push_back(k);
+    }
+    const std::string_view name = w_->ins.names.spelling(w_->entities.rec(t).name);
+    std::vector<sema::DeductionGuide> r;
+    for (u32 k : *guide_items_) {
+      if (k >= item) break;
+      if (items_->items[k].deduction_guide != name || !in_global_scope(k)) continue;
+      if (std::ranges::find(running_, k) != running_.end()) continue;
+      item_sema(k);
+      if (auto g = deduction_guides_.find(k); g != deduction_guides_.end() && g->second.templ == t)
+        r.push_back(g->second.guide);
+    }
+    return r;
+  }
+  struct DeductionGuide {
+    EntityId templ;
+    sema::DeductionGuide guide;
+  };
+  std::map<u32, DeductionGuide> deduction_guides_;  // by guide item
+  std::optional<std::vector<u32>> guide_items_;      // the items the splitter cut as deduction-guides
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
   std::optional<interp::GlobalVar> global(EntityId v, u32 item, std::optional<MemberDemand> member_demand = {}) {
@@ -2029,7 +2099,7 @@ public:
 
   // The end of the translation unit (§B6.2): every specialization whose definition a cell
   // requires is instantiated, in order of first demand, and so are those its instance requires.
-  void instantiate_all();
+  void instantiate_all(u32 first = 0);
   void instantiate_variable_demands(std::span<const sema::Demand> demands, u32 point);
   void references(NodeId n, std::vector<EntityId>& out) const;
   void references(ConstId value, std::vector<EntityId>& out) const;
@@ -2113,7 +2183,7 @@ public:
       }
     }
     const bool reported = depth_reported_;
-    instantiate_all();
+    instantiate_all(first);
     depth_reported_at_end_ = !reported && depth_reported_;
   }
   // Whether the instantiation-depth limit was first reached by the END worklist (instantiate_all)
@@ -2423,6 +2493,10 @@ private:
   std::map<u32, u32> explicit_specs_;            // by specialization: the item of its first explicit specialization
   std::map<u32, u32> class_points_;              // by class template specialization: its point of instantiation
   u32 spec_scan_ = 0;  // how many of the index's specializations `specializations_before` has analysed
+  // How many of `Index::specializations_by_name`'s, by name, and of its unnamed ones, the
+  // by-entity `specializations_before` has analysed.
+  std::unordered_map<std::string_view, std::size_t> named_spec_scan_;
+  std::size_t unnamed_spec_scan_ = 0;
   std::map<u32, std::vector<Partial>> partials_;  // by template entity, in order of declaration
   std::map<u32, PartialReplay> partial_replays_; // by item with deferred checks in its template arguments
   std::set<u32> partial_matching_;              // specializations whose arguments are being substituted
@@ -2833,6 +2907,7 @@ public:
     return p_->function_ir(f, point(), &diagnosed_failure);
   }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
+  std::vector<sema::DeductionGuide> deduction_guides(EntityId t) override { return p_->deduction_guides(t, point()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
     return p_->generic_instance(spec, known, point());
   }
@@ -4014,6 +4089,7 @@ public:
     return p_->function_ir(f, p_->end(), &diagnosed_failure);
   }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
+  std::vector<sema::DeductionGuide> deduction_guides(EntityId t) override { return p_->deduction_guides(t, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
     return p_->generic_instance(spec, known, p_->end());
   }
@@ -4523,6 +4599,7 @@ private:
         if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
+      if (!it_->deduction_guide.empty()) return deduction_guide();
       if (ps_.is(Tk::kw_template) || Parser::is_class_key(key) ||
           ps_.is(Tk::kw_using) || ps_.is(Tk::kw_concept) || (it_->kind != ItemKind::function && !ps_.starts_declaration())) {
         s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -4530,6 +4607,7 @@ private:
       }
       template_ = true;
     }
+    if (!it_->deduction_guide.empty()) return deduction_guide();
     if (ps_.is(Tk::semi)) {
       if (!annotations.empty()) s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
       ps_.bump();
@@ -4657,7 +4735,9 @@ private:
     }
     s_.defer_type_access = true;
     Parser::TypeAliasChecks return_alias_checks;
+    ps_.deduced_class_ok = !template_ && !explicit_;
     DeclSpec spec = template_ ? ps_.function_template_decl_specifiers(return_alias_checks) : ps_.decl_specifiers();
+    ps_.deduced_class_ok = false;
     spec.attributes.visibility = std::max(spec.attributes.visibility, leading_attributes.visibility);
     spec.attributes.weak |= leading_attributes.weak;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
@@ -5436,6 +5516,87 @@ private:
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
     return true;
+  }
+  // A deduction-guide at namespace scope ([temp.deduct.guide]): `explicit-specifier(opt)
+  // template-name ( parameter-declaration-clause ) -> simple-template-id ;`, after a template-head
+  // and before a requires-clause if it is a template. It declares no name; class template argument
+  // deduction reads it (`Program::deduction_guides`).
+  void deduction_guide() {
+    if (explicit_ || two_heads_) {
+      s_.diag(0, Diag::not_supported, Tk::kw_template);
+      return bad();
+    }
+    sema::Types& types = s_.types();
+    bool is_explicit = false;
+    ConstId explicit_condition = ConstId::none;
+    if (ps_.is(Tk::kw_explicit)) {
+      ps_.bump();
+      // A value-dependent condition waits for deduction ([over.match.funcs.general]/8).
+      auto spec = ps_.explicit_specifier(/*want_atom=*/template_);
+      if (!spec) return bad();
+      is_explicit = spec->value.value_or(false);
+      explicit_condition = spec->atom;
+    }
+    if (!ps_.is(Tk::identifier)) {
+      s_.diag(ps_.pos(), Diag::expected_unqualified_id);
+      return bad();
+    }
+    const NameId name = ps_.name_of(ps_.tok());
+    const u32 name_at = ps_.pos();
+    const EntityId templ = s_.deducible_template(name);
+    if (templ == EntityId::none) {
+      s_.diag(name_at, Diag::deduction_guide_template, name);
+      return bad();
+    }
+    // [temp.deduct.guide]/3: in the class template's own target scope.
+    if (s_.world().entities.rec(templ).scope != ns_entity()) {
+      s_.diag(name_at, Diag::deduction_guide_scope, name);
+      return bad();
+    }
+    ps_.bump();
+    bool ok = true;
+    auto fs = ps_.function_suffix(ok);
+    if (!ok) return bad();
+    if (fs.cv != sema::Cv::none) {
+      s_.diag(name_at, Diag::cv_on_non_member);
+      return bad();
+    }
+    if (!ps_.expect(Tk::arrow)) return bad();
+    const u32 result_at = ps_.pos();
+    auto result = ps_.type_id();
+    if (!result) return bad();
+    // [temp.deduct.guide]/3: the simple-template-id names the class template.
+    if (!types.is_class(*result) || s_.world().entities.rec(types.class_of(*result)).templ != templ) {
+      s_.diag(result_at, Diag::deduction_guide_result, name);
+      return bad();
+    }
+    if (template_) trailing_requires_clause(fs.params);
+    if (!ps_.expect(Tk::semi)) return bad();
+    std::vector<QualType> ps;
+    std::vector<std::uint8_t> defaulted;
+    for (const parse::Param& p : fs.params) {
+      ps.push_back(p.type);
+      defaulted.push_back(p.default_arg != NodeId::none);
+    }
+    ast::Interners& ins = s_.ins();
+    ast::DeclSema sem{};
+    sem.entity = EntityId::none;
+    sem.kind = ast::DeclKind::function;
+    sem.type = types.function(*result, ps, fs.variadic, LangLinkage::cxx);
+    sem.linkage = ast::Linkage::none;
+    sem.storage = ast::Storage::none;
+    sem.access = ast::Access::none;
+    sem.flags = template_ ? sema::decl_flag::template_ : u16(0);
+    sem.attributes = ins.intern_seq(std::span<const NodeId>{});
+    sem.constraint = NodeId::none;
+    sem.constraints = template_ ? associated_constraints() : ConstId::none;
+    sem.contracts = NodeId::none;
+    sem.params = ins.intern_seq(std::span<const ast::ParamSema>{});
+    sem.template_params = template_ ? ins.intern_seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()))
+                                    : ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+    sem.is_explicit = is_explicit;
+    sem.explicit_condition = explicit_condition;
+    p_->deduction_guides_.insert_or_assign(k_, Program::DeductionGuide{templ, {sem, std::move(defaulted)}});
   }
   // A lambda in a constraint's definition belongs to no declaration; its closure type there is a
   // pattern, and each satisfaction has its own (`AtomAnalysis`).
@@ -6824,6 +6985,12 @@ private:
         if (!ps_.expect(Tk::semi)) bad();
         return;
       }
+    }
+    // A member deduction-guide for a member class template ([temp.deduct.guide]/3) declares no
+    // member. Deduction through a qualified template-name does not read it yet (#1706).
+    if (!it_->deduction_guide.empty()) {
+      ps_.skip_to_semi();
+      return;
     }
     // `class-key identifier ;` declares a member class ([class.nest], [dcl.type.elab]/3).
     if (!member_template_ && Parser::is_class_key(ps_.kind()) &&
@@ -9706,6 +9873,12 @@ private:
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
     const bool fn = types.is_function(d.type);
+    // [dcl.type.class.deduct]/3: a deduced class type is no function's return type or parameter.
+    if (fn && types.deduced_class_in(types.rec(d.type).inner) != EntityId::none) {
+      s_.diag(d.name_at, Diag::class_deduction_context,
+              s_.world().entities.rec(types.deduced_class_in(types.rec(d.type).inner)).name);
+      return false;
+    }
     // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
     const auto has_internal_linkage = [&] {
       return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
@@ -9823,7 +9996,8 @@ private:
     bool deleted = fn && deleted_body();
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
-    bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
+    bool has_init = !deleted && (early || early_expr || early_args_ || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) ||
+                                 (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !(effective_extern && !has_init);
     if (!fn) {
       if ((definition || s_.compatibility() == ast::Compatibility::clang) && !s_.require_concrete_object(d.type, d.name_at))
@@ -10246,7 +10420,8 @@ private:
     } else if (!fn && (early || ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // List-initialization; constant initialization when every element is a constant
       // ([basic.start.static]).
-      const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
+      const auto form = early_form_ ? *std::exchange(early_form_, std::nullopt)
+                        : ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
       auto b = early ? std::move(early) : ps_.braced_init_list();
       init = s_.list_init(d.type, *b, form, /*extend_reference=*/true);
       if (init.ok() && !pattern) {
@@ -10265,6 +10440,7 @@ private:
         }
       }
     } else if (!fn && (early_expr || ps_.accept(Tk::equal))) {
+      early_form_.reset();
       {
         Ex e = early_expr ? *early_expr : ps_.assignment_expression();
         init = s_.convert(e, d.type, e.begin);
@@ -10300,16 +10476,24 @@ private:
           }
         }
       }
-    } else if (!fn && ps_.is(Tk::l_paren)) {
+    } else if (!fn && (early_args_ || ps_.is(Tk::l_paren))) {
       // Direct-initialization ([dcl.init.general]): `T x(args)`, constant or dynamic; a pattern's
       // is evaluated in its specializations.
       u32 open = ps_.pos();
-      ps_.bump();
       std::vector<Ex> args;
-      if (!ps_.is(Tk::r_paren))
-        do args.push_back(ps_.assignment_expression());
-        while (ps_.accept(Tk::comma));
-      if (!ps_.expect(Tk::r_paren)) ps_.skip_to_semi();
+      bool closed = true;
+      if (early_args_) {
+        open = early_args_->first;
+        args = std::move(early_args_->second);
+        early_args_.reset();
+      } else {
+        ps_.bump();
+        if (!ps_.is(Tk::r_paren))
+          do args.push_back(ps_.assignment_expression());
+          while (ps_.accept(Tk::comma));
+        closed = ps_.expect(Tk::r_paren);
+      }
+      if (!closed) ps_.skip_to_semi();
       else if (pattern) {}
       else if (types.is_class(d.type)) init = s_.construct(d.type, std::move(args), open, ps_.pos());
       else if (args.size() == 1 && !types.is_array(d.type) && (!reference || ordinary_reference))
@@ -10409,6 +10593,39 @@ private:
   // A variable template's definition (`pattern`) keeps the placeholder while its initializer is
   // dependent: each specialization deduces its own type (`Program::specialization_type`).
   bool deduce_variable(parse::Declarator& d, std::unique_ptr<sema::Braced>& list, std::optional<Ex>& expr, bool pattern = false) {
+    sema::Types& types = s_.types();
+    early_form_.reset();
+    early_args_.reset();
+    // A placeholder for a deduced class type ([dcl.type.class.deduct]): class template argument
+    // deduction from the initializer, which is kept for the initialization below.
+    if (const EntityId templ = types.deduced_class_in(d.type); templ != EntityId::none) {
+      if (types.kind(d.type) != sema::TypeKind::placeholder) {
+        s_.diag(d.name_at, Diag::class_deduction_declarator, d.type, d.name);
+        return false;
+      }
+      if (!ps_.is(Tk::equal) && !ps_.is(Tk::l_brace) && !ps_.is(Tk::l_paren)) {
+        s_.diag(d.name_at, Diag::class_deduction_uninitialized, d.name);
+        return false;
+      }
+      auto in = ps_.deduced_initializer();
+      if (!in.ok) return false;
+      auto t = s_.deduce_class_type(templ, in.args, in.list.get(), in.form, in.open);
+      if (!t) return false;
+      if (pattern && types.is_dependent(*t)) return true;
+      // Every declarator deduces the same type ([dcl.type.class.deduct]/1, [dcl.type.auto.deduct]/2).
+      if (auto_replaced_ && !types.is_dependent(*t) && !types.is_dependent(*auto_replaced_) &&
+          types.canonical(*auto_replaced_) != types.canonical(*t)) {
+        s_.diag(d.name_at, Diag::class_deduction_inconsistent, d.name, *t, *auto_replaced_);
+        return false;
+      }
+      auto_replaced_ = *t;
+      d.type = types.add_cv(*t, sema::Types::cv(d.type));
+      early_form_ = in.form;
+      if (in.list) list = std::move(in.list);
+      else if (in.form == sema::Construction::copy) expr = in.args[0];
+      else early_args_ = std::pair{in.open, std::move(in.args)};
+      return true;
+    }
     Ex e;
     if (ps_.is(Tk::equal) && ps_.kind(1) != Tk::l_brace) {
       ps_.bump();
@@ -10433,7 +10650,6 @@ private:
     QualType r{};
     auto t = s_.deduce_placeholder(d.type, e, e.begin, &r);
     if (!t) return false;
-    sema::Types& types = s_.types();
     if (auto_replaced_ && !types.is_dependent(r) && !types.is_dependent(*auto_replaced_) &&
         types.canonical(*auto_replaced_) != types.canonical(r)) {
       s_.diag(d.name_at, Diag::auto_inconsistent, d.type, r, *auto_replaced_);
@@ -10447,6 +10663,10 @@ private:
     if (!(pattern && types.is_dependent(*t))) d.type = *t;
     return true;
   }
+  // A deduced class type's initializer that `deduce_variable` read: its form, and a parenthesized
+  // list's `(` and arguments ([dcl.type.class.deduct]).
+  std::optional<sema::Construction> early_form_;
+  std::optional<std::pair<u32, std::vector<Ex>>> early_args_;
   // The owner of the closure types of the lambdas in namespace-scope variable `e`'s initializer:
   // of vague linkage when `shared`, a definition that may appear in several units, and `e` has
   // external linkage (docs/design/closures.md, decision 4).
@@ -15403,10 +15623,13 @@ void Program::instantiate_variable_demands(std::span<const sema::Demand> demands
   }
 }
 
-void Program::instantiate_all() {
+void Program::instantiate_all(u32 first) {
   // [temp.expl.spec]/7: a specialization is explicitly specialized before its first use that
-  // would instantiate it: before any earlier cell demanded it, or instantiated the class.
-  specializations_before(end());
+  // would instantiate it: before any earlier cell demanded it, or instantiated the class. A group
+  // from `first` checks the specializations from there on; a use before an earlier one is in an
+  // earlier group, which checks it (#1704). An instance asks about its own specializations.
+  if (first == 0) specializations_before(end());
+  else specializations_from(first);
   // The demands of every cell, in item order, then those of each instance as it is made: the END
   // worklist of §B6.2, deterministic.
   std::vector<sema::Demand> work;

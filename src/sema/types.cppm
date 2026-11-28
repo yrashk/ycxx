@@ -85,6 +85,7 @@ struct TypeRec {
   ast::SeqId<ast::TemplateArg> args{};  // a specialization's or a placeholder's written arguments
   bool alias_type_default = false;  // a deferred alias in a template type parameter default
   bool decltype_auto = false;  // a placeholder's: `decltype(auto)`, not `auto`
+  EntityId deduced_class = EntityId::none;  // a deduced class type placeholder's class template
 };
 
 class Types {
@@ -155,6 +156,28 @@ public:
   // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
     return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
+  }
+  // The placeholder for a deduced class type that names class template `t` ([dcl.type.class.deduct]).
+  QualType deduced_class(EntityId t) { return ins_->intern_type(ast::TAuto{0, EntityId::none, {}, t}); }
+  // The class template of `q`'s placeholder for a deduced class type, cv-qualified or not; none
+  // for any other type.
+  EntityId deduced_class_template(QualType q) const {
+    TypeRec r = rec(q);
+    return r.kind == TypeKind::placeholder ? r.deduced_class : EntityId::none;
+  }
+  // The class template of a placeholder for a deduced class type that `q` holds as the type or
+  // as what it points or refers to, an array's element or a function's return type; none if none.
+  EntityId deduced_class_in(QualType q) const {
+    TypeRec r = rec(q);
+    switch (r.kind) {
+    case TypeKind::placeholder: return r.deduced_class;
+    case TypeKind::pointer:
+    case TypeKind::member_pointer:
+    case TypeKind::reference:
+    case TypeKind::array:
+    case TypeKind::function: return deduced_class_in(r.inner);
+    default: return EntityId::none;
+    }
   }
   // Whether a declared type holds a placeholder still to be deduced ([dcl.type.auto.deduct]): as
   // the type, or as what it points or refers to, an array's element or a function's return type.
@@ -249,6 +272,7 @@ public:
       r.decltype_auto = p.decltype_auto != 0;
       r.entity = p.concept_;
       r.args = p.args;
+      r.deduced_class = p.deduced_class;
     } else if (t.is<ast::TDepSpec>(c)) {
       auto d = t.get<ast::TDepSpec>(c);
       r.kind = TypeKind::dep_spec;
@@ -456,7 +480,10 @@ private:
       return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +
              (inner.empty() ? "" : " " + inner);
     case TypeKind::placeholder:
-      return cvs + (r.decltype_auto ? "decltype(auto)" : "auto") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+      return cvs + (r.deduced_class != EntityId::none ? (class_name ? class_name(r.deduced_class) : "<template>")
+                    : r.decltype_auto                    ? "decltype(auto)"
+                                                         : "auto") +
+             (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::deferred_alias:
       return cvs + (class_name ? class_name(r.entity) : "<alias>") + "<…>" + (inner.empty() ? "" : " " + inner);
     case TypeKind::dep_spec:
@@ -1553,6 +1580,19 @@ struct World {
         ins.names.spelling(entities.rec(tag.entity).name).empty())
       return false;
     return fn.params.size() == 2 || fn.params[1] == types.enum_type(alignment_enum());
+  }
+
+  // [new.delete.single]: the replaceable global allocation and deallocation functions, the usual
+  // ones and their `const std::nothrow_t&` forms. `__builtin_operator_new` and
+  // `__builtin_operator_delete` must select one (docs/EXTENSIONS.md).
+  bool replaceable_allocation_function(std::string_view name, QualType written) {
+    if (matches_allocation_function(name, written)) return true;
+    const TypeRec fn = types.rec(written);
+    if (!matches_tagged_allocation_function(name, written, fn.fn_noexcept)) return false;
+    const EntityRec& tag = entities.rec(types.rec(types.rec(fn.params.back()).inner).entity);
+    if (tag.scope == EntityId::none || ins.names.spelling(tag.name) != "nothrow_t") return false;
+    const EntityRec& ns = entities.rec(tag.scope);
+    return ns.kind == EntityKind::namespace_ && ns.scope == EntityId::none && ins.names.spelling(ns.name) == "std";
   }
 
   // [new.delete.placement]: the written non-allocating library signatures. They are separate

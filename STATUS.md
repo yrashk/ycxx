@@ -697,7 +697,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
       [#992](https://github.com/yrashk/ycxx/issues/992)
     - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
       earlier items that can declare an entity before a side table is read, `settle` completes a
-      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
+      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens. A question
+      about one specialization reads only the explicit and partial specializations that declare
+      its name, and a group's END reads those from its first item on (#1704).
     - A group's analysis is reused between revisions while what it read gives the same answers
       (`GroupTrace`, kept per session): the items it read (`ItemsView`) and their position-free
       content, its by-name questions (`Program::NameProbe`, filtered by the shared
@@ -1662,7 +1664,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   is kept as an atom and read again after deduction, once the template's constraints are
   satisfied. A substitution failure there fails deduction, and an explicit specialization leaves
   copy-initialization ([temp.deduct.general], [over.match.funcs.general]). Conversion functions
-  (#339) and deduction guides (#316) do not take the specifier yet.
+  (#339) do not take the specifier yet; deduction-guides do (#316).
 - Constructor templates take part in overload resolution only when their associated
   constraints are satisfied ([temp.deduct.general]/5, #1398). An atom spelled in a member of a
   class template specialization, such as a member template's constraint, reads the enclosing
@@ -2144,10 +2146,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   still respects the qualifiers of the underlying object. A by-value class parameter object uses
   the definition's declared qualifiers ([dcl.fct]/5) and permits writes to mutable members.
   Pointer-to-member casts and class or array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
-- Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
-  and pointer-width integral types. A too-narrow integer destination is ill-formed, and
-  an evaluated cast is disallowed in a core constant expression. Smaller integer sources
-  and other reinterpret conversions remain in [#199](https://github.com/yrashk/ycxx/issues/199).
+- Named `reinterpret_cast` converts object pointers (including cv `void*`) to pointer-width
+  integral types and back, object pointers to other object pointers, function pointers to
+  other function pointers and to and from object pointers, and integral, enumeration and
+  pointer values to their own type. It converts an object glvalue to a reference to another
+  object type, naming the same object with the requested value category. These work in
+  templates, with dependent or non-dependent operands. Each conversion keeps the address, and
+  casting away constness ([expr.const.cast]/7), a prvalue or bit-field to a reference, or a
+  too-narrow integer destination is ill-formed. A reached cast is disallowed in a core constant
+  expression, and `-fcompat=gcc` folds a cast to the operand's own type, as GCC does.
+  Pointer-to-member, `std::nullptr_t` and enumeration or non-pointer-width integer to pointer
+  conversions, and function references, remain in [#199](https://github.com/yrashk/ycxx/issues/199).
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
@@ -2628,6 +2637,39 @@ repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/
   class templates, explicit and partial specializations, alias templates, packs, concepts,
   qualified names whose nested-name-specifier is a member template, and members found through a
   dependent base.
+
+## Class template argument deduction (#316)
+
+- **Placeholders for a deduced class type** ([dcl.type.class.deduct]): a class template's name
+  without arguments, unqualified or `N::C`, in a variable declaration at block or namespace scope
+  (`C x(args)`, `C x{…}`, `C x = e`, `C x = {…}`), a functional cast (`C(args)`, `C{…}`) and a
+  new-expression (`new C(args)`). The type is a `TAuto` with `deduced_class` set (`Types::deduced_class`),
+  allowed only where the parser's caller sets `Parser::deduced_class_ok`. It is the whole declared
+  type (not `C*` or `C&`), needs an initializer, deduces the same type for every declarator, and
+  is no function's return type.
+- **Deduction** (`Sema::deduce_class_type`, [over.match.class.deduct]): the guides are the
+  constructors of the primary template's pattern (constructor templates with their parameters
+  renumbered after the class's, `constructor_template_guide`), `C()` when C declares no
+  constructor or is not defined, the copy deduction candidate `C(C<T…>)`, and the user's
+  deduction-guides declared before the point. Overload resolution is `resolve` with the
+  tie-breaks of [over.match.best.general]/2.10–2.12 (`Candidate::guide`). Copy-initialization skips
+  explicit guides; copy-list-initialization that selects one is an error. While an argument is
+  type-dependent the type is dependent.
+- **Deduction-guides** ([temp.deduct.guide]) at namespace scope: the splitter marks the item
+  (`Item::deduction_guide`, the template-name) and gives it no name; `ItemAnalysis::deduction_guide`
+  reads `explicit`/`explicit(cond)`, the parameters, the result (a specialization of the
+  template, checked) and a requires-clause, into `Program::deduction_guides_`.
+  `Program::deduction_guides` analyses the guide items before the point on demand.
+- The splitter reads `S s(&i)` as declaring `s`, not `i`: a `(` after a declarator-id that follows
+  a type is never a grouping parenthesis. A template-head's requires-clause ends after a possibly
+  qualified concept-id, so `requires C<T> T f(T)` and `requires C<T> W(T) -> W<T>` keep their names.
+- Tests: `tests/own/deduction-guides` (12), `tests/unit/items` (`deduction_guides`).
+- Not yet: member deduction-guides are accepted and ignored, and deduction through a member
+  class template's qualified name (#1706); aggregate deduction candidates and alias
+  template deduction (C++20, #1707); the initializer-list phase of [over.match.list] for
+  guides (#1708); deduced class types for static data members, non-type template parameters
+  and in `for`/condition declarations (#1709); a value default of a constructor
+  template's parameter is dropped from its guide.
 
 ## Templates, ζ step 3: variable templates and specializations (#88, 2026-11-18)
 
@@ -3123,6 +3165,17 @@ and Darwin arm64 emits BRK. The builtin registry also exposes it through
 the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as above. A
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
+
+## Allocation builtins (#1681)
+
+`__builtin_operator_new(args)` and `__builtin_operator_delete(args)` are lowered in sema to the
+call `::operator new(args)` or `::operator delete(args)` would be: the global overload set (the
+implicit usual declarations plus written ones) and ordinary overload resolution. The selected
+function must be a replaceable one (`World::replaceable_allocation_function`: the usual forms and
+their `std::nothrow_t` forms); anything else is diagnosed. Dependent calls are checked when the
+instantiation is reparsed. The result is an ordinary `ast::Call`, so native code calls the
+symbol and a program's replacement is used. The calls are not elided or merged. Constant
+evaluation of them waits for constexpr dynamic allocation (#321).
 
 ## Function spelling for type ordering (#1361)
 
@@ -5439,7 +5492,12 @@ Each is removed once ycxx compiles itself.
   `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
   - Cause: GCC 16.2 writes a module unit exporting a struct with a `std::vector<bool>` member that
     its importers cannot read ("failed to read compiled module cluster: Bad file data").
-  - Fix: belongs in GCC. Use `std::vector<bool>` when ycxx compiles itself.
+  - Fix: belongs in GCC (unreduced, #1705). Use `std::vector<bool>` when ycxx compiles itself.
+- **No `std::vector<bool>` in `sema::DeductionGuide::defaulted`** (`std::vector<std::uint8_t>`, #316).
+  - Cause: a precaution against the same GCC 16.2 module bug (#1705); `ycxx.sema` exports the
+    struct. `parse::Program::Index` keeps `std::vector<bool>` members without it, so the trigger
+    is narrower.
+  - Fix: belongs in GCC. Use `std::vector<bool>` once #1705 shows it is safe, or when ycxx compiles itself.
 - **The interpreter's byte comparison is defined in its implementation unit** (`src/interp/ops.cpp`).
   - Cause: with stock libstdc++, GCC 16.2 cannot read the `ycxx.interp:machine` partition when
     it contains the body of `Machine::compare_bytes`.
@@ -5580,10 +5638,11 @@ declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
 
-## Scalar and pointer decay-copy expressions (#286)
+## Decay-copy expressions (#286)
 
-- Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
-  including bit-field reads and array and function decay. Grouped declarations
+- Single-expression `auto(x)` and `auto{x}` perform scalar, pointer and class decay-copy,
+  including bit-field reads and array and function decay. A class operand is copied or moved
+  by direct-initialization; a prvalue of the class initializes the result with no copy. Grouped declarations
   still take precedence where the statement can be a declaration.
 - Function-template bodies replay decay-copy of supported dependent operands with the
   template arguments bound. A value-dependent operand with known type gives the conversion
@@ -5591,9 +5650,14 @@ the body. A non-generic lambda body uses its own evaluation context.
 - Concrete decay-copy works in a non-type template argument with `auto{expr}` or with
   `auto(expr)` when the initializer starts with an integer literal. The argument must be
   a converted constant expression. Function and function-pointer type-ids keep precedence.
-- General class objects, member pointers, operands whose type dependence is unresolved, and
-  other direct parenthesized template argument spellings remain open, as do dependent
-  template arguments, requirements, and exception specifications.
+- A dependent operand gives a dependent prvalue in any templated context: requires-expressions
+  and compound requirements (as libycxx's ranges CPOs write them), noexcept operators and
+  specifiers, trailing return types and base specifiers. Substitution analyses the copy, so a
+  deleted copy constructor makes a requirement unsatisfied.
+- In a constraint, a decay-copy is written as a conversion to the `auto` placeholder, which
+  mangles as `cv Da e` and `tl Da e E` as Clang and GCC do (`tests/own/abi/decay-copy-constraints.run.cpp`).
+- Member pointers, other direct parenthesized template argument spellings such as
+  `Tag<auto(n)>`, and dependent template arguments remain open.
 
 ## Comparisons: `<=>`, defaulted `==` and `<=>`, rewritten candidates (#295)
 

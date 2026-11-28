@@ -175,6 +175,9 @@ struct TAuto {
   u8 decltype_auto;
   EntityId concept_ = EntityId::none;
   SeqId<TemplateArg> args{};  // canonical arguments written after the concept name
+  // A placeholder for a deduced class type ([dcl.type.class.deduct]): the class template whose
+  // arguments class template argument deduction gives ([over.match.class.deduct]).
+  EntityId deduced_class = EntityId::none;
 };
 
 // `TT<args>` where TT is a template template parameter, by position ([temp.param], [temp.dep.type]):

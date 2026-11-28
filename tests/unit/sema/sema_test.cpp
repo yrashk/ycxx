@@ -601,6 +601,49 @@ int probe;
   check(feature.pre.diags.empty() && feature.diags().empty(), "__has_builtin(__is_trivially_copyable) remains zero");
 }
 
+// A group's Program (#947) reads the explicit and partial specializations that can specialize
+// what it asks about, not every one before it (#1704): with `<iostream>` each main-file group
+// had analysed all of the headers' specializations at its first question.
+void group_reads_only_related_specializations() {
+  const std::string_view text = R"cpp(
+template <class T> struct Other {};
+template <> struct Other<int> { int other; };
+template <class T> struct Other<T*> { int pointer; };
+template <class T> struct Used {};
+template <> struct Used<int> { int used; };
+template <class T> struct Used<T*> { int pointer; };
+namespace a { template <class T, int N> struct Buffer { T data_[N]; }; }
+namespace c { Used<int> u{}; Used<char*> q{}; int f() { a::Buffer<int, 2> x{}; return u.used + q.pointer + x.data_[0]; } }
+)cpp";
+  struct Group {
+    pp::Preprocessed pre;
+    items::Items its;
+    ast::Interners ins;
+    sema::World w{ins};
+    std::optional<parse::Program> p;
+    ast::u32 first = 0, end = 0;
+    Group(std::string_view text, std::size_t top) : pre(pp::preprocess(text)), its(items::split(pre.region, {})) {
+      p.emplace(w, pre.region, its);
+      if (top >= its.top.size()) return;
+      first = end = its.top[top];
+      while (!its.items[end].members.empty()) end = its.items[end].members.back();
+      p->analyze_group(first, ++end);
+    }
+    bool read(std::size_t top) const { return p->analysed_item(its.top[top]) != nullptr; }
+  };
+  Group buffer(text, 6);
+  check(buffer.its.top.size() == 8 && buffer.end > buffer.first, "eight top-level items");
+  if (buffer.its.top.size() != 8) return;
+  check(buffer.p->diagnostics(buffer.first, buffer.end).empty(), "the class template is valid");
+  check(!buffer.read(1) && !buffer.read(2) && !buffer.read(4) && !buffer.read(5),
+        "naming its own parameter in a class template reads no specialization");
+  Group user(text, 7);
+  check(!user.read(1) && !user.read(2), "a group does not read another template's specializations");
+  check(user.read(4) && user.read(5), "it reads those of the templates it uses");
+  check(user.p->diagnostics(user.first, user.end).empty(),
+        "the group's own items are valid: the explicit and partial specializations are used");
+}
+
 int main() {
   constant_evaluation();
   class_trivial_copyability();
@@ -619,5 +662,6 @@ int main() {
   diagnostics();
   control_flow();
   handler_kinds();
+  group_reads_only_related_specializations();
   return unit::result("unit.sema");
 }

@@ -153,10 +153,12 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
 // `__builtin_nansl("")` is recognized separately from the quiet NaN builtins.
 // A `library` builtin `__builtin_f` is the C library's function `f`, and calls it; its signature is
-// sema's (`sema::string_functions`).
+// sema's (`sema::string_functions`). `__builtin_operator_new(args)` and
+// `__builtin_operator_delete(args)` call the replaceable global `operator new` or `operator delete`
+// that overload resolution selects for `args` ([new.delete]).
 enum class BuiltinFunction : std::uint8_t {
   fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
-  source_line, source_location, ctzg, nansl, ctz, atomic, clzll,
+  source_line, source_location, ctzg, nansl, ctz, atomic, clzll, operator_new, operator_delete,
 };
 
 enum class AtomicBuiltin : std::uint8_t {
@@ -204,6 +206,8 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_strstr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
     BuiltinFunctionInfo{"__builtin_unreachable", BuiltinFunction::unreachable},
+    BuiltinFunctionInfo{"__builtin_operator_new", BuiltinFunction::operator_new},
+    BuiltinFunctionInfo{"__builtin_operator_delete", BuiltinFunction::operator_delete},
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
     BuiltinFunctionInfo{.name = "__builtin_add_overflow", .function = BuiltinFunction::add_overflow, .advertised = false},
     BuiltinFunctionInfo{.name = "__builtin_mul_overflow", .function = BuiltinFunction::mul_overflow, .advertised = false},
