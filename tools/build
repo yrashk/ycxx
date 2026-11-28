@@ -1,11 +1,12 @@
 #!/bin/sh
-# Configure (on first use) and build ycxx, then run the bootstrap smoke test (tests/bootstrap).
+# Configure (on first use) and build ycxx, then run the smoke CTests (-L smoke: tests/bootstrap
+# and examples/embedding). Pass --all-tests to run every CTest (unit + daemon).
 # tools/test's `build` stage and CI call this. The binary is build/bin/ycxx.
 #
-#   tools/build [-j N] [--no-smoke] [--no-tests]
+#   tools/build [-j N] [--no-smoke] [--no-tests] [--all-tests]
 #
 # --no-tests builds only the compiler (build/bin/ycxx): no unit or daemon test binaries, and no
-# smoke test. tools/test needs the full build.
+# smoke test. tools/test needs the full build for unit/daemon stages.
 #
 # Environment: YCXX_BUILD_DIR (default build; relative to the repository), YCXX_BUILD_TYPE
 # (default Dev: -O1 -g1 with assertions and contracts enabled; use Debug for -O0 -g; read when
@@ -19,6 +20,7 @@ dir=${YCXX_BUILD_DIR:-build}
 case $dir in /*) ;; *) dir=$root/$dir ;; esac  # relative to the repository, as tools/test
 jobs=
 smoke=1
+all_tests=0
 target=
 while [ $# -gt 0 ]; do
   case $1 in
@@ -26,7 +28,8 @@ while [ $# -gt 0 ]; do
     -j*) jobs=${1#-j} ;;
     --no-smoke) smoke=0 ;;
     --no-tests) smoke=0; target=ycxxc ;;
-    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --all-tests) smoke=1; all_tests=1 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build: unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -38,5 +41,9 @@ if [ ! -f "$dir/build.ninja" ]; then
 fi
 cmake --build "$dir" ${jobs:+-j "$jobs"} ${target:+--target "$target"}
 if [ "$smoke" = 1 ]; then
-  ctest --test-dir "$dir" --output-on-failure ${jobs:+-j "$jobs"}
+  if [ "$all_tests" = 1 ]; then
+    ctest --test-dir "$dir" --output-on-failure ${jobs:+-j "$jobs"}
+  else
+    ctest --test-dir "$dir" -L smoke --output-on-failure ${jobs:+-j "$jobs"}
+  fi
 fi

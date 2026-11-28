@@ -7,11 +7,11 @@ from . import discover, kinds, report, state, toolchain, transcript
 
 REPO = Path(__file__).resolve().parents[2]
 TESTS = REPO / 'tests'
-STAGES = ('policy', 'build', 'failed', 'affected', 'core', 'wider', 'rest')
+STAGES = ('policy', 'build', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider', 'rest')
 TEST_STAGES = ('failed', 'affected', 'core', 'wider', 'rest')
 TIERS = {
-    'fast': ('policy', 'build', 'failed', 'affected', 'core'),
-    'pr': ('policy', 'build', 'failed', 'affected', 'core', 'wider'),
+    'fast': ('policy', 'build', 'unit', 'failed', 'affected', 'core'),
+    'pr': ('policy', 'build', 'unit', 'failed', 'affected', 'core', 'daemon', 'wider'),
     'main': STAGES,
     'nightly': STAGES,
 }
@@ -25,17 +25,19 @@ build/test-logs/report.html (every test with its transcript, passing ones too; c
 a person or an agent), report.md, report.tsv and report.json. docs/TESTING.md has the details.
 
   tools/test                     every stage, without stopping between them
-  tools/test --fast              what a session runs before pushing (= the PR tier's first stages:
-                                 policy build failed affected core), stopping at the first failing stage
+  tools/test --fast              what a session runs before pushing:
+                                 policy build unit failed affected core, stopping on first failure
   tools/test --tier pr           a CI tier, stopping at the first failing stage
   tools/test core own/smoke      stages and path filters, in any order
 
 stages, in order:
   policy    the driver's self-test, then tools/check-policy if it exists
-  build     tools/build if it exists (#4)
+  build     tools/build if it exists (builds + -L smoke CTests)
+  unit      CTest unit suite (ctest -L unit)
   failed    tests that failed in the last run of this branch (of main for a new branch)
   affected  tests affected by the change since --base
   core      the core oracles: tests/draft and tests/own
+  daemon    CTest daemon suite (ctest -L daemon: compatibility, compare, project_build)
   wider     differential and incremental suites: tests/diff, tests/incremental
   rest      every other suite
 A test runs in the first stage that selects it.
@@ -177,6 +179,16 @@ def build_stage(ui, logs, records, jobs):
         records.append({'name': 'build', 'status': 'skip', 'secs': 0, 'detail': 'no tools/build yet'})
         return True
     return command_stage(ui, 'build', 'build (tools/build)', [str(script), '-j', str(jobs)], logs, records)
+
+
+def ctest_stage(ui, name, label_filter, logs, records, jobs):
+    build_dir = REPO / (os.environ.get('YCXX_BUILD_DIR') or 'build')
+    if not (build_dir / 'CTestTestfile.cmake').is_file():
+        ui.skip(name, f'(no CTest configuration in {build_dir})')
+        records.append({'name': name, 'status': 'skip', 'secs': 0, 'detail': f'no CTest configuration in {build_dir}'})
+        return True
+    cmd = ['ctest', '--test-dir', str(build_dir), '-L', label_filter, '--output-on-failure', '-j', str(jobs)]
+    return command_stage(ui, f'ctest-{name}', f'{name} (ctest -L {label_filter})', cmd, logs, records)
 
 
 # --- running tests ----------------------------------------------------------------------------
@@ -447,6 +459,9 @@ def _main(argv):
                     elif cut.features:
                         ui.fail(f'{cut.name} not found after the build', cut.why_missing)
                         ok = False
+            elif s in ('unit', 'daemon'):
+                ui.section(f'{s} CTests')
+                ok = ctest_stage(ui, s, s, logs, records, args.jobs)
             else:
                 ts = plan[s]
                 ui.section(f'{s}: {len(ts)} tests' + (f' ({notes[s]})' if s in notes else ''))
