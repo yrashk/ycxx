@@ -6,6 +6,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 def run(cmd, cwd, env):
     proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, timeout=40)
@@ -21,7 +24,10 @@ def main():
     if os.path.isabs(install_bindir) or os.path.isabs(install_datadir):
         return 0
 
-    with tempfile.TemporaryDirectory(prefix='ycxx-relocated-prefix-') as tmp:
+    with (
+        tempfile.TemporaryDirectory(prefix='ycxx-relocated-prefix-') as tmp,
+        tempfile.TemporaryDirectory(prefix='yr', dir=runtime_root('yr')) as runtime_tmp,
+    ):
         root = Path(tmp).resolve()
         prefix = root / 'moved-sdk'
         bindir = prefix / install_bindir
@@ -66,8 +72,7 @@ static_assert(YCXX_RELOCATED_STDARG == 1);
 static_assert(sizeof(size_t) == sizeof(void*));
 ''')
 
-        runtime_dir = root / 'runtime'
-        runtime_dir.mkdir(mode=0o700)
+        runtime_dir = Path(runtime_tmp)
         os.chmod(runtime_dir, 0o700)
         base_env = os.environ.copy()
         base_env.update(LC_ALL='C', YCXX_THREADS='2', YCXX_ROOT=str(scope), YCXX_RUNTIME_DIR=str(runtime_dir))
