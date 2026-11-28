@@ -2137,10 +2137,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   still respects the qualifiers of the underlying object. A by-value class parameter object uses
   the definition's declared qualifiers ([dcl.fct]/5) and permits writes to mutable members.
   Pointer-to-member casts and class or array reference casts are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
-- Named `reinterpret_cast` converts between ordinary object pointers (including cv `void*`)
-  and pointer-width integral types. A too-narrow integer destination is ill-formed, and
-  an evaluated cast is disallowed in a core constant expression. Smaller integer sources
-  and other reinterpret conversions remain in [#199](https://github.com/yrashk/ycxx/issues/199).
+- Named `reinterpret_cast` converts object pointers (including cv `void*`) to pointer-width
+  integral types and back, object pointers to other object pointers, function pointers to
+  other function pointers and to and from object pointers, and integral, enumeration and
+  pointer values to their own type. It converts an object glvalue to a reference to another
+  object type, naming the same object with the requested value category. These work in
+  templates, with dependent or non-dependent operands. Each conversion keeps the address, and
+  casting away constness ([expr.const.cast]/7), a prvalue or bit-field to a reference, or a
+  too-narrow integer destination is ill-formed. A reached cast is disallowed in a core constant
+  expression, and `-fcompat=gcc` folds a cast to the operand's own type, as GCC does.
+  Pointer-to-member, `std::nullptr_t` and enumeration or non-pointer-width integer to pointer
+  conversions, and function references, remain in [#199](https://github.com/yrashk/ycxx/issues/199).
 - **sizeof, alignof** of fundamental, pointer, enumeration and array types and of an expression,
   from `ast::Target`; a class's since #194, below.
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names

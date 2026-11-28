@@ -886,6 +886,8 @@ written default member initializer are value-initialized.
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
   Named `const_cast` changes cv-qualification on matching ordinary pointer types and scalar
   glvalues while retaining the original address.
+  Named `reinterpret_cast` converts between object and function pointers, between pointers and
+  pointer-width integers, and between object glvalues of different types, in templates too.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
   [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)

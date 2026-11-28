@@ -232,7 +232,7 @@ export enum class Op : std::uint16_t {
   ptr_member [[=pure({V}, {V}).imms({type, path})]],    // subobject: member, base
   ptr_derived [[=pure({V}, {V}).imms({type, path})]],   // base to derived, undoing `path`
   ptr_cast [[=pure({V}, {V}).imms({type})]],            // static_cast through void*
-  ptr_reinterpret [[=pure({V}, {V}).imms({type}).with({nonconstant})]],
+  ptr_reinterpret [[=pure({V}, {V}).imms({type}).with({nonconstant})]],  // [expr.reinterpret.cast]
   ptr_to_int [[=pure({V}, {V}).with({nonconstant})]],
   int_to_ptr [[=pure({V}, {V}).with({nonconstant})]],
 
