@@ -10,6 +10,14 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
   set(CMAKE_TOOLCHAIN_FILE "${YCXXC_LIBYCXX_SOURCE_DIR}/cmake/ycxx-toolchain.cmake")
 endif()
 
+# Dev build type: -O1 -g1 keeps assertions, C++26 contracts and line-number stack traces active
+# while cutting compiler/test runtime by several times and shrinking debug-info link cost.
+# -Wno-maybe-uninitialized avoids GCC -O1 false positives on std::optional (Release -O3 checks it).
+set(CMAKE_C_FLAGS_DEV "-O1 -g1" CACHE STRING "Flags used by the C compiler during Dev builds")
+set(CMAKE_CXX_FLAGS_DEV "-O1 -g1 -Wno-maybe-uninitialized" CACHE STRING "Flags used by the CXX compiler during Dev builds")
+set(CMAKE_EXE_LINKER_FLAGS_DEV "" CACHE STRING "Linker flags for executables during Dev builds")
+set(CMAKE_SHARED_LINKER_FLAGS_DEV "" CACHE STRING "Linker flags for shared libraries during Dev builds")
+
 project(ycxx VERSION 0.0.1
         DESCRIPTION "An independent C++26 compiler"
         LANGUAGES C CXX)
@@ -35,6 +43,7 @@ set(YCXXC_STDLIB "libycxx" CACHE STRING "C++ standard library used to build ycxx
 set_property(CACHE YCXXC_STDLIB PROPERTY STRINGS libycxx system)
 option(YCXXC_INSTALL "Install the linkable ycxx components and CMake package" OFF)
 option(YCXXC_BUILD_SHARED_LIBS "Build ycxx components as shared libraries" OFF)
+option(YCXXC_FAST_LINKER "Use a fast linker (mold or lld) when available" ON)
 set(YCXXC_COMPONENT_TYPE STATIC)
 if(YCXXC_BUILD_SHARED_LIBS)
   set(YCXXC_COMPONENT_TYPE SHARED)
@@ -86,6 +95,19 @@ target_compile_features(ycxxc_options INTERFACE cxx_std_26)
 target_compile_options(ycxxc_options INTERFACE
   -freflection -fcontracts
   "$<BUILD_INTERFACE:-Wall;-Wextra;-Wpedantic;$<$<BOOL:${YCXXC_WERROR}>:-Werror>>")
+if(YCXXC_FAST_LINKER AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND NOT CMAKE_EXE_LINKER_FLAGS MATCHES "-fuse-ld=")
+  include(CheckLinkerFlag)
+  check_linker_flag(CXX "-fuse-ld=mold" _ycxxc_has_mold)
+  if(_ycxxc_has_mold)
+    target_link_options(ycxxc_options INTERFACE "$<BUILD_INTERFACE:-fuse-ld=mold>")
+  else()
+    check_linker_flag(CXX "-fuse-ld=lld" _ycxxc_has_lld)
+    if(_ycxxc_has_lld)
+      target_link_options(ycxxc_options INTERFACE "$<BUILD_INTERFACE:-fuse-ld=lld>")
+    endif()
+  endif()
+endif()
 if(YCXXC_SANITIZE)
   set(_ycxxc_sanitize -fsanitize=${YCXXC_SANITIZE} -fno-sanitize-recover=all -fno-omit-frame-pointer)
   # GCC warns that ThreadSanitizer does not model atomic_thread_fence (-Wtsan). The engine's

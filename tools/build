@@ -8,7 +8,8 @@
 # smoke test. tools/test needs the full build.
 #
 # Environment: YCXX_BUILD_DIR (default build; relative to the repository), YCXX_BUILD_TYPE
-# (default Debug, read when the directory is first configured), and anything
+# (default Dev: -O1 -g1 with assertions and contracts enabled; use Debug for -O0 -g; read when
+# the directory is first configured), and anything
 # libycxx's toolchain file reads (YCXX_TOOLCHAINS; docs/BUILDING.md). A build directory
 # configured earlier is reused as it is. Submodules are first moved to their pinned commits
 # (tools/sync-submodules).
@@ -33,7 +34,7 @@ done
 
 "$root/tools/sync-submodules"
 if [ ! -f "$dir/build.ninja" ]; then
-  cmake -S "$root" -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE="${YCXX_BUILD_TYPE:-Debug}"
+  cmake -S "$root" -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE="${YCXX_BUILD_TYPE:-Dev}"
 fi
 cmake --build "$dir" ${jobs:+-j "$jobs"} ${target:+--target "$target"}
 if [ "$smoke" = 1 ]; then
